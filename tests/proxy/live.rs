@@ -29,14 +29,17 @@ fn in_front_of_the_real_dbt_lsp() {
 
     let result = session.initialize(&project);
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
-    for capability in ["documentSymbolProvider", "callHierarchyProvider", "hoverProvider"] {
+    let announced =
+        ["documentSymbolProvider", "callHierarchyProvider", "hoverProvider", "referencesProvider", "renameProvider"];
+    for capability in announced {
         assert_eq!(result["capabilities"][capability], json!(true), "{capability}");
     }
     document_features(&mut session, &project);
     lineage(&mut session, &project);
-    let symbols = session.request("workspace/symbol", json!({"query": "page"}));
+    let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
     recorded_observations(&mut session, &result);
+    rename_a_source_table_and_compile(&mut session, &project);
     assert!(session.finish().success());
 }
 
@@ -103,4 +106,60 @@ fn recorded_observations(session: &mut Session, result: &Value) {
     let first = session.wait_for(|m| m["id"] == "first");
     assert_eq!(first["result"]["error"], "Operation cancelled", "{first}");
     session.wait_for(|m| m["id"] == "second");
+}
+
+/// Writes the edits of a `WorkspaceEdit`'s CHANGES to disk.
+fn apply(changes: &serde_json::Map<String, Value>) {
+    for (file, edits) in changes {
+        let path = url::Url::parse(file).unwrap().to_file_path().unwrap();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        let mut edits: Vec<&Value> = edits.as_array().unwrap().iter().collect();
+        edits.sort_by_key(|e| {
+            std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64()))
+        });
+        for edit in edits {
+            let change = json!({"range": edit["range"], "text": edit["newText"]});
+            dbt_lsp_plus::text::apply_change(&mut text, &change, dbt_lsp_plus::text::Encoding::Utf16);
+        }
+        std::fs::write(&path, text).unwrap();
+    }
+}
+
+/// Renames `events.page_views`, which has no `identifier:`, through the
+/// proxy; once dbt has read the files again, the model that selects from it
+/// must still compile to the relation `page_views`.
+fn rename_a_source_table_and_compile(session: &mut Session, project: &Path) {
+    let model = project.join("models/staging/stg_page_views.sql");
+    session.open(&model, None);
+    let compiled = |session: &mut Session| {
+        let compile = json!({"command": "dbt.compileFile", "arguments": [uri(&model)]});
+        let answer = session.request("workspace/executeCommand", compile);
+        let file = answer["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("no compiled file: {answer}"));
+        url::Url::parse(file).unwrap().to_file_path().unwrap()
+    };
+    // A compiled file left from before the rename must not answer for after it.
+    let before = compiled(session);
+    let at =
+        json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 0, "character": 37}, "newName": "visits"});
+    let edit = session.request("textDocument/rename", at);
+    let changes = edit["result"]["changes"].as_object().unwrap_or_else(|| panic!("no edit: {edit}"));
+    apply(changes);
+    let text = std::fs::read_to_string(&model).unwrap();
+    assert_eq!(text, "select * from {{ source('events', 'visits') }}\n");
+    let version = json!({"uri": uri(&model), "version": 2});
+    let whole = json!({"textDocument": version, "contentChanges": [{"text": text}]});
+    session.notify("textDocument/didChange", whole);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&model)}}));
+    let yaml = uri(&project.join("models/staging/_sources.yml"));
+    session.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": yaml, "type": 2}]}));
+    let list = json!({"command": "dbt.listNodes", "arguments": ["source:*"]});
+    let renamed = |result: &Value| {
+        result["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.iter().any(|n| n["unique_id"] == "source.shop.events.visits"))
+    };
+    session.poll(Duration::from_secs(120), ("workspace/executeCommand", list), renamed);
+    std::fs::remove_file(&before).unwrap();
+    let sql = std::fs::read_to_string(compiled(session)).unwrap();
+    assert!(sql.contains("page_views") && !sql.contains("visits"), "the relation changed: {sql}");
 }

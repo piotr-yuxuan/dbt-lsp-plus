@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn workspace_symbols_match_a_subsequence_and_name_the_type() {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
-        let symbols = workspace_symbols(&project, "PGVW", Encoding::Utf16);
+        let symbols = workspace_symbols(&project, "EVPGVW", Encoding::Utf16);
         assert_eq!(symbols.as_array().unwrap().len(), 1);
         assert_eq!(symbols[0]["name"], "events.page_views");
         assert_eq!(symbols[0]["containerName"], "shop");

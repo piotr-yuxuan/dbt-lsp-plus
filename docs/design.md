@@ -49,6 +49,14 @@ owns all state and writes both outputs.
     `callHierarchyProvider`), and whose `positionEncoding` it adopts
     (UTF-16 when absent, as with 2.0.9);
   - the answers to the proxy's own requests, which never reach the client.
+- References and renames stay the server's, but on a source the server
+  answers them with nothing: the proxy answers those requests itself, when
+  the position is on a `source()` argument or on a source's or table's
+  `name:` under `sources:`, in a file the scan holds, and forwards every
+  other one.  It says so under the standard `capabilities.experimental`,
+  merged with the server's: `"dbtLspPlus": {"version": 1, "references":
+  ["source"], "rename": ["source"]}` names, per request, the kinds of target
+  it answers project-wide, and dbt-mode steps aside for exactly those.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
   with a flat list of tokens, so the proxy owns it.  A later server that
@@ -153,6 +161,54 @@ cancelled listing at most three times, and abandons one unanswered after two
 minutes, on time, even when the client is quiet; no test waits the two
 minutes, so only a unit test of the abandonment covers it.
 
+## Sources
+
+- References of a source table, or of a whole source: every `source()`
+  call that names it, in SQL inside Jinja tags, in YAML without them (a
+  relationships test's `to:`), in each package's `dbt_project.yml` (vars,
+  hooks) and in a Python model (`dbt.source()`); the key that configures it
+  under `sources:` in the root `dbt_project.yml`; and its declarations when
+  the client asks.  A call whose argument is an expression, as in
+  `source('raw', 'events' ~ var('suffix'))`, names no table.
+- The proxy answers only on a file the scan holds: on a file not saved yet,
+  or one outside the resource paths, it could not see every occurrence, so
+  the request goes to the server.
+- An open document is named by the URI the client opened it under, and its
+  ranges are those of its open text.
+- A rename keeps the relation in the warehouse.  dbt takes a table's
+  identifier from its name, and a source's schema from its name, unless they
+  are set: `dbt parse` gives `events.page_views`, declared without `schema:`,
+  the schema `events`.  So renaming a table without `identifier:` inserts
+  `identifier: <old>` after its `name:` line, at the key's indentation and
+  with the line's own line break, and renaming a source without `schema:`
+  inserts `schema: <old>`.  The live test renames `events.page_views` and
+  checks that dbt still compiles the model that selects from it to
+  `page_views`.
+- A name inside quotes is replaced inside them, and must not hold that quote
+  or a backslash.  An unquoted YAML value is written plain when it is a plain
+  identifier that YAML reads as a string, else double-quoted: `null`,
+  `true`, `false`, `yes`, `no`, `on`, `off`, `y` and `n`, in any case, are
+  quoted.
+- A rename is refused, never applied in part, when:
+  - the source is declared nowhere, or in several packages;
+  - it is declared in an installed package, or an installed package calls
+    it: `dbt deps` would undo the edit, and a root `overrides:` would keep
+    the old name;
+  - its properties file holds an alias or a merge key anywhere, so that a
+    name, a schema or an identifier may come from elsewhere;
+  - the source already declares the new name;
+  - a line must go into an entry in flow style (`{name: t}`), a JSON file
+    included;
+  - an edited YAML file would no longer parse, as when a flow collection
+    spans lines that look like blocks, or a new name with `: ` goes into a
+    plain `to:` value;
+  - the new name is empty, or breaks the quotes it goes in, or, where a call
+    sits in a YAML value such as a test's `to:`, is no plain identifier:
+    that value may be a plain scalar, where `#`, `: `, `,` or a space at an
+    edge would change it while the file still parses.
+- Without a server, the proxy announces references and rename too, for
+  sources; on anything else they fail as other requests do.
+
 ## Failure modes
 
 | Situation | Behaviour |
@@ -194,6 +250,11 @@ The server is not restarted after a crash.
   whose ids start with `dbt-lsp-plus/` can.
 - Once the server has listed the graph, an unsaved edit of a `ref` in a node
   it listed shows in the call hierarchy only after the next save.
+- In YAML, an apostrophe in a plain scalar, as in `description: It's the
+  customers`, can unmask a later comment: a call commented out after it
+  counts as a reference, and a rename edits it.
+- `selectors.yml` and selectors on the command line name a source as
+  `source:s.t`; a rename leaves them on the old name.
 
 ## Tests
 
@@ -221,23 +282,28 @@ The server is not restarted after a crash.
   - no server, warned once; a server that exits at once, a crash with
     several requests pending, the scanned graph after a crash, a crash
     before `initialize` and during `shutdown`, a server killed when it
-    ignores `exit`, and `exit` without `shutdown`.
+    ignores `exit`, and `exit` without `shutdown`;
+  - references and renames of sources, and every other one left to the
+    server; files the scan does not hold; the client's URI of an open
+    document; the server's UTF-8; without a server; the capability that
+    tells a client which requests the proxy answers itself.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
   The fake also asks for the configuration after `initialized` and answers
   an empty listing with `{"error": "No nodes found"}`, as 2.0.9 was seen to.
+  The live rename also relies on two observations that no fake-backed test
+  needs, so the fake leaves them out: `dbt.compileFile` answers
+  `{"file_uri": ...}` and writes the compiled SQL there, where a file from
+  an earlier compilation may linger; and the server reads a properties file
+  again after `workspace/didChangeWatchedFiles`.
 
 ## What it would take to finish
 
 In the order of the feature list agreed with the dbt-mode session:
 
-1. Source references and rename (A4).  Every `source('s', 't')` call and the
-   YAML `name:` are already in the scan with their ranges.  A rename returns
-   a `WorkspaceEdit`, and inserts `identifier: <old name>` under the table
-   when it has none, so that the source keeps its warehouse table.  About a
-   day, mostly tests of YAML indentation.
+1. Source references and rename (A4): done in plan 002.
 2. Resolved configuration (A5, A20): `dbt parse --profiles-dir <user's>
    --target-path <cache> --log-path <cache>/logs`, debounced on save (about
    half a second on a small project).  Then a command `dbtPlus/nodeInfo` that

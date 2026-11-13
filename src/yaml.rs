@@ -21,14 +21,30 @@ pub enum Node {
 impl Node {
     /// The value under KEY of a mapping.
     pub fn get(&self, key: &str) -> Option<&Node> {
+        self.entry(key).map(|(_, value)| value)
+    }
+
+    /// The key KEY of a mapping, with its value.
+    pub fn entry(&self, key: &str) -> Option<(&Node, &Node)> {
         let Node::Map(entries) = self else { return None };
-        entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, value)| value)
+        entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(k, value)| (k, value))
     }
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Node::Scalar { value, .. } => Some(value),
             _ => None,
+        }
+    }
+
+    /// Whether an alias or a merge key appears anywhere in this node, so that
+    /// a value under it may come from elsewhere in its document.
+    pub fn shares(&self) -> bool {
+        match self {
+            Node::Alias => true,
+            Node::Seq(items) => items.iter().any(Node::shares),
+            Node::Map(entries) => entries.iter().any(|(key, value)| key.as_str() == Some("<<") || value.shares()),
+            Node::Scalar { .. } => false,
         }
     }
 

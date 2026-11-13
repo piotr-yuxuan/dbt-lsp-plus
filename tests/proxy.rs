@@ -213,7 +213,7 @@ fn workspace_symbols_list_every_resource_with_its_package_and_id() {
     let (mut session, _) = Session::fake("workspace-symbols", json!({}));
     session.initialize(&fixture());
     let all = session.request("workspace/symbol", json!({"query": ""}));
-    assert_eq!(all["result"].as_array().unwrap().len(), 21);
+    assert_eq!(all["result"].as_array().unwrap().len(), 22);
     let found = session.request("workspace/symbol", json!({"query": "ctd"}));
     assert_eq!(names(&found["result"]), ["cents_to_dollars"]);
     assert_eq!(found["result"][0]["containerName"], "shop");
@@ -550,6 +550,91 @@ fn a_failed_first_listing_leaves_the_scanned_graph() {
     assert!(session.finish().success());
 }
 
+/// The position of `page_views` in `stg_page_views.sql`, with that file's URI.
+fn on_page_views() -> Value {
+    let path = fixture().join("models/staging/stg_page_views.sql");
+    json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 37}})
+}
+
+#[test]
+fn answers_references_on_a_source_and_forwards_the_others() {
+    let (mut session, log) = Session::fake("source-references", json!({}));
+    session.initialize(&fixture());
+    let mut params = on_page_views();
+    params["context"] = json!({"includeDeclaration": true});
+    let found = session.request("textDocument/references", params);
+    let mut files: Vec<&str> = found["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["uri"].as_str().unwrap().rsplit('/').next().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["_sources.yml", "stg_page_views.sql"]);
+    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    // On a ref, the server answers.
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "context": {"includeDeclaration": true}});
+    let forwarded = session.request("textDocument/references", on_ref.clone());
+    assert_eq!(forwarded["result"]["echo"], "textDocument/references");
+    let mut rename_ref = on_ref;
+    rename_ref["newName"] = json!("orders_v2");
+    let forwarded = session.request("textDocument/rename", rename_ref);
+    assert_eq!(forwarded["result"]["echo"], "textDocument/rename");
+    assert!(methods(&log).contains(&"textDocument/rename".to_owned()));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn renames_a_source_table_and_keeps_its_relation() {
+    let (mut session, log) = Session::fake("source-rename", json!({}));
+    session.initialize(&fixture());
+    let mut params = on_page_views();
+    params["newName"] = json!("visits");
+    let edit = session.request("textDocument/rename", params);
+    let changes = edit["result"]["changes"].as_object().unwrap();
+    let model = &changes[&uri(&fixture().join("models/staging/stg_page_views.sql"))];
+    assert_eq!(
+        model,
+        &json!([{"range": {"start": {"line": 0, "character": 35}, "end": {"line": 0, "character": 45}}, "newText": "visits"}])
+    );
+    let mut yaml: Vec<&str> = changes[&uri(&fixture().join("models/staging/_sources.yml"))]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap())
+        .collect();
+    // LSP leaves the order of edits at different places open.
+    yaml.sort();
+    assert_eq!(yaml, ["\n        identifier: page_views", "visits"]);
+    assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
+    let mut refused = on_page_views();
+    refused["newName"] = json!("it's");
+    let error = session.request("textDocument/rename", refused);
+    assert_eq!(error["error"]["code"], json!(-32803));
+    assert!(error["error"]["message"].as_str().unwrap().contains("cannot hold"), "{error}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_it_still_answers_on_sources() {
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    let result = session.initialize(&fixture());
+    assert_eq!(result["capabilities"]["referencesProvider"], json!(true));
+    assert_eq!(result["capabilities"]["renameProvider"], json!(true));
+    let mut params = on_page_views();
+    params["context"] = json!({"includeDeclaration": false});
+    let found = session.request("textDocument/references", params);
+    assert_eq!(found["result"].as_array().unwrap().len(), 1);
+    let mut params = on_page_views();
+    params["newName"] = json!("visits");
+    let edit = session.request("textDocument/rename", params);
+    assert!(edit["result"]["changes"].as_object().is_some_and(|changes| changes.len() == 2), "{edit}");
+    assert!(session.finish().success());
+}
+
 #[test]
 fn after_a_crash_the_scan_gives_the_graph() {
     let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
@@ -631,7 +716,7 @@ fn without_project_dir_the_client_s_folder_is_the_root() {
     let (mut session, _) = Session::fake_with("no-project-dir-session", json!({}), &[], Some(&elsewhere));
     session.initialize(&fixture());
     let all = session.request("workspace/symbol", json!({"query": ""}));
-    assert_eq!(all["result"].as_array().unwrap().len(), 21);
+    assert_eq!(all["result"].as_array().unwrap().len(), 22);
     assert!(session.finish().success());
 }
 
@@ -739,4 +824,97 @@ fn a_server_that_ignores_exit_is_killed_after_its_grace() {
     let started = Instant::now();
     assert!(session.finish().success());
     assert!(started.elapsed() < Duration::from_secs(4), "the proxy took {:?} to exit", started.elapsed());
+}
+
+#[test]
+fn a_source_request_on_a_file_the_scan_does_not_hold_goes_to_the_server() {
+    let project = copy_fixture("source-unscanned");
+    let call = "select * from {{ source('events', 'page_views') }}";
+    let outside = project.join("integration_tests/i.sql");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, call).unwrap();
+    let (mut session, _) =
+        Session::fake_with("source-unscanned-session", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let unsaved = project.join("models/new_model.sql");
+    session.open(&unsaved, Some(call));
+    for path in [&unsaved, &outside] {
+        let at = json!({"textDocument": {"uri": uri(path)}, "position": {"line": 0, "character": 37}, "newName": "v"});
+        let answer = session.request("textDocument/rename", at);
+        assert_eq!(answer["result"]["echo"], "textDocument/rename", "{answer}");
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_source_request_counts_no_byte_order_mark() {
+    let project = copy_fixture("source-bom");
+    let model = project.join("models/staging/stg_page_views.sql");
+    let text = std::fs::read_to_string(&model).unwrap();
+    std::fs::write(&model, format!("\u{feff}{text}")).unwrap();
+    let (mut session, log) =
+        Session::fake_with("source-bom-session", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    // The first letter of page_views, as an editor that leaves the mark out counts it.
+    let at = json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 0, "character": 35},
+                    "context": {"includeDeclaration": false}});
+    let found = session.request("textDocument/references", at);
+    assert_eq!(found["result"].as_array().map(Vec::len), Some(1), "{found}");
+    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
+    let project = copy_fixture("rename-spelling");
+    let link = project.with_file_name("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    let (mut session, _) =
+        Session::fake_with("rename-spelling-session", json!({}), &[Path::new("--project-dir"), &link], None);
+    session.initialize(&link);
+    // Opened under the resolved spelling, with an unsaved first line.
+    let model = project.join("models/staging/stg_page_views.sql");
+    let text = format!("-- unsaved\n{}", std::fs::read_to_string(&model).unwrap());
+    session.open(&model, Some(&text));
+    let at =
+        json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 1, "character": 37}, "newName": "visits"});
+    let edit = session.request("textDocument/rename", at);
+    let changes = edit["result"]["changes"].as_object().unwrap_or_else(|| panic!("no edit: {edit}"));
+    let range = json!({"start": {"line": 1, "character": 35}, "end": {"line": 1, "character": 45}});
+    assert_eq!(changes[&uri(&model)], json!([{"range": range, "newText": "visits"}]));
+    assert!(!changes.contains_key(&uri(&link.join("models/staging/stg_page_views.sql"))));
+    assert!(changes.contains_key(&uri(&link.join("models/staging/_sources.yml"))));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn tells_which_requests_it_answers_itself() {
+    let answered = json!({"version": 1, "references": ["source"], "rename": ["source"]});
+    let capabilities = json!({"textDocumentSync": 2, "experimental": {"server": 1}});
+    let (mut session, _) = Session::fake("experimental", json!({"capabilities": capabilities}));
+    let result = session.initialize(&fixture());
+    assert_eq!(result["capabilities"]["experimental"], json!({"server": 1, "dbtLspPlus": answered}));
+    assert!(session.finish().success());
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    let result = session.initialize(&fixture());
+    assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn source_positions_follow_the_server_s_encoding() {
+    let capabilities = json!({"textDocumentSync": {"change": 2, "openClose": true}, "positionEncoding": "utf-8"});
+    let (mut session, _) = Session::fake("source-utf-8", json!({"capabilities": capabilities}));
+    session.initialize(&fixture());
+    let model = fixture().join("models/staging/stg_page_views.sql");
+    // é is one character and two UTF-8 bytes: page_views starts at character 43, byte 44.
+    session.open(&model, Some("/* é */ select * from {{ source('events', 'page_views') }}"));
+    let at = json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 0, "character": 45},
+                    "context": {"includeDeclaration": false}});
+    let found = session.request("textDocument/references", at);
+    let range = json!({"start": {"line": 0, "character": 44}, "end": {"line": 0, "character": 54}});
+    assert_eq!(found["result"], json!([{"uri": uri(&model), "range": range}]));
+    assert!(session.finish().success());
 }

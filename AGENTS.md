@@ -32,6 +32,7 @@ src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/project.rs                the resources of a project and its packages
 src/graph.rs                  the dependency graph: scanned, then the server's
+src/sources.rs                references and renames of sources
 src/features.rs               the answers of the added features, as LSP JSON
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
@@ -56,4 +57,14 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     listing and the teardown of the server process, each a resource's end;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
-  - `scan::mask_code`: its second caller comes with the CTE uses of plan 003.
+  - `scan::mask_code`: its second caller comes with the CTE uses of plan 003;
+  - `Proxy::local_method` and `Proxy::on_source`: the routing of a request
+    the proxy may answer itself, and its answer, as for the owned methods;
+  - `sources::replacement`, `sources::kept_relation`, `sources::refusal`
+    and `sources::config_key`: each one rule of a rename (how a name is
+    written where it goes; which lines keep the relation; when it is
+    refused; where `dbt_project.yml` configures a source), with tests of
+    its own;
+  - `sources::argument_naming`: which argument of a call names a target;
+  - `yaml::Node::shares`: a walk of the tree, which needs a function of its
+    own to recurse.
