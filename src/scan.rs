@@ -178,6 +178,24 @@ pub fn tags(text: &str) -> Vec<Range<usize>> {
     jinja_tags(&mask_jinja_comments(text))
 }
 
+/// The string literals inside the Jinja tags of TEXT that a macro may render
+/// as SQL, as `is_positive('orders.amount')` does: all but the arguments of
+/// `ref` and `source`, which name models and sources.
+pub fn jinja_strings(text: &str) -> Vec<Range<usize>> {
+    let named: Vec<Range<usize>> = calls(text)
+        .into_iter()
+        .filter(|call| matches!(call.target, Target::Ref { .. } | Target::Source { .. }))
+        .flat_map(|call| call.arguments)
+        .collect();
+    let mut found = Vec::new();
+    for tag in tags(text) {
+        let strings = spans(&text[tag.clone()], &[("'", "'"), ("\"", "\"")]).into_iter();
+        found.extend(strings.map(|(_, string)| tag.start + string.start..tag.start + string.end));
+    }
+    found.retain(|string| !named.iter().any(|argument| string.start < argument.start && argument.end < string.end));
+    found
+}
+
 /// The comments of TEXT that may span lines: Jinja's `{# #}`, and SQL's
 /// `/* */` outside Jinja and strings.
 pub fn comments(text: &str) -> Vec<Range<usize>> {

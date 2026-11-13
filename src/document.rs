@@ -152,13 +152,12 @@ pub fn rename_cte(
     encoding: Encoding,
 ) -> Option<Result<Value, String>> {
     let (cte, uses) = cte_at(text, offset)?;
-    // A macro may render a string argument as SQL, as in is_positive('orders.amount').
-    let in_jinja =
-        scan::tags(text).into_iter().find(|tag| !scan::whole_words(&text[tag.clone()], &cte.name).is_empty());
-    if let Some(tag) = in_jinja {
+    let mut rendered = scan::jinja_strings(text).into_iter();
+    if let Some(string) = rendered.find(|string| !scan::whole_words(&text[string.clone()], &cte.name).is_empty()) {
+        let string = &text[string];
         return Some(Err(format!(
-            "{} names {} inside Jinja, which a macro may render: rename it by hand",
-            &text[tag], cte.name
+            "the Jinja string {string} names {}, which a macro may render: rename it by hand",
+            cte.name
         )));
     }
     if !IDENTIFIER.is_match(new) {
@@ -298,11 +297,21 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_rename_a_cte_that_jinja_names() {
+    fn refuses_to_rename_a_cte_that_a_jinja_string_names() {
         // is_positive renders its argument, 'orders.amount', as SQL.
         let offset = ORDERS.find("from orders").unwrap() + 6;
         let refused = rename_cte(ORDERS, "file:///o.sql", offset, "o", Encoding::Utf16).unwrap();
-        assert!(refused.unwrap_err().contains("inside Jinja"));
+        assert!(refused.unwrap_err().contains("'orders.amount'"));
+        let star = "with base as (select 1) select {{ star(relation_alias='base') }} from base";
+        assert!(rename_cte(star, "file:///s.sql", 6, "b", Encoding::Utf16).unwrap().is_err());
+        // A function's name, or the model or source of a ref or source, renders no CTE.
+        for text in [
+            "with source as (select * from {{ source('raw', 'source') }}) select * from source",
+            "with orders as (select * from {{ ref('orders') }}) select * from orders",
+        ] {
+            let renamed = rename_cte(text, "file:///t.sql", 6, "base", Encoding::Utf16).unwrap();
+            assert!(renamed.is_ok(), "{text}: {renamed:?}");
+        }
     }
 
     #[test]

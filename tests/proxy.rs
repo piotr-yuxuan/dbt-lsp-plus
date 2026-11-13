@@ -975,11 +975,11 @@ fn renames_a_cte_and_forwards_other_renames() {
     let mut clash = on_customers;
     clash["newName"] = json!("final");
     assert_eq!(session.request("textDocument/rename", clash)["error"]["code"], json!(-32803));
-    // is_positive('orders.amount') names the CTE orders inside Jinja.
+    // The Jinja string 'orders.amount', which is_positive renders as SQL, names the CTE orders.
     let mut in_jinja = on_from_orders();
     in_jinja["newName"] = json!("o");
     let refused = session.request("textDocument/rename", in_jinja);
-    assert!(refused["error"]["message"].as_str().unwrap_or_default().contains("inside Jinja"), "{refused}");
+    assert!(refused["error"]["message"].as_str().unwrap_or_default().contains("Jinja string"), "{refused}");
     assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
     let orders = uri(&fixture().join("models/marts/orders.sql"));
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "newName": "x"});
