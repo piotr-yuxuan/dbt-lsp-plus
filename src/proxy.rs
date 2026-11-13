@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, project, scan, sources};
+use crate::{config, document, features, navigation, project, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -44,10 +44,11 @@ const ADDED: [(&str, &[&str]); 6] = [
     ("selectionRangeProvider", &["textDocument/selectionRange"]),
 ];
 
-/// The requests that the proxy answers itself on a source, and a rename on
-/// a CTE, since dbt lsp 2.0.9 answers them with nothing there; elsewhere
-/// they go to the server.
-const SOURCE_METHODS: [&str; 2] = ["textDocument/references", "textDocument/rename"];
+/// The requests that the proxy answers itself on some targets, since dbt
+/// lsp 2.0.9 answers them with nothing there: references and renames of a
+/// source, a rename of a CTE, a definition that `navigation` finds;
+/// elsewhere they go to the server.
+const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "textDocument/definition"];
 
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
@@ -263,7 +264,8 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"]});
+            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"],
+                                  "definition": ["source", "ref", "doc", "entry", "test"]});
             experimental.insert("dbtLspPlus".into(), answered);
         }
         // The proxy's own command, beside the server's.
@@ -278,9 +280,11 @@ impl<W: Write> Proxy<W> {
     fn initialize_alone(&mut self, id: &Value) {
         let mut capabilities = serde_json::Map::new();
         capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2}));
-        // Alone, the proxy still answers references and renames of sources.
+        // Alone, the proxy still answers references and renames of sources,
+        // and definitions on the targets of `navigation`.
         capabilities.insert("referencesProvider".into(), json!(true));
         capabilities.insert("renameProvider".into(), json!(true));
+        capabilities.insert("definitionProvider".into(), json!(true));
         self.add_capabilities(&mut capabilities);
         let info = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
         self.send_client(
@@ -428,21 +432,46 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The method under which the proxy answers a request itself: an owned
-    /// method, its own command, references and rename on a source, or a
-    /// rename on a CTE of a SQL file.
+    /// method, its own command, references and rename on a source, a rename
+    /// on a CTE of a SQL file, or a definition on a target of `navigation`.
     fn local_method(&self, method: &str, params: &Value) -> Option<&'static str> {
         if let Some(owned) = self.owned.get(method) {
             return Some(owned);
         }
-        if method == "workspace/executeCommand" && params["command"] == config::NODE_INFO {
+        if (method, params["command"].as_str()) == ("workspace/executeCommand", Some(config::NODE_INFO)) {
             return Some(config::NODE_INFO);
         }
-        let method = SOURCE_METHODS.into_iter().find(|source_method| *source_method == method)?;
+        let method = TARGETED.into_iter().find(|targeted| *targeted == method)?;
         let (path, text, offset) = self.document_at(params)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
-        let cte = method == "textDocument/rename" && sql && document::cte_at(&text, offset).is_some();
-        // A CTE lives in its file; a source only the scan sees whole.
-        (cte || self.source_at(params).is_some()).then_some(method)
+        let answered = match method {
+            "textDocument/definition" => navigation::target_at(&path, &text, offset).is_some(),
+            // A CTE lives in its file; a source only the scan sees whole.
+            "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            _ => self.source_at(params).is_some(),
+        };
+        answered.then_some(method)
+    }
+
+    /// The definition of the target at the request's position, by dbt
+    /// 2.0.9's lookup: its location, several, or null.
+    fn on_definition(&self, params: &Value) -> Option<Result<Value, String>> {
+        let (path, text, offset) = self.document_at(params)?;
+        let target = navigation::target_at(&path, &text, offset);
+        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
+        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
+        let locations: Vec<Value> = navigation::resolve(&project, &path, &target)
+            .iter()
+            .map(|found| {
+                let index = LineIndex::new(project.texts.get(&found.path).map_or("", String::as_str));
+                json!({"uri": uri_of(&found.path), "range": index.range(found.range.start, found.range.end, self.encoding)})
+            })
+            .collect();
+        Some(Ok(match &locations[..] {
+            [] => Value::Null,
+            [location] => location.clone(),
+            _ => Value::Array(locations),
+        }))
     }
 
     /// The references or the rename of the source at the request's position.
@@ -614,6 +643,7 @@ impl<W: Write> Proxy<W> {
             }),
             config::NODE_INFO => self.node_info(params),
             "textDocument/references" => self.on_source(method, params),
+            "textDocument/definition" => self.on_definition(params),
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Ok)
@@ -767,7 +797,8 @@ impl<W: Write> Proxy<W> {
 
     /// A request of the client: answered here when the proxy owns its method,
     /// else forwarded; without a server, the lifecycle requests are answered
-    /// as LSP asks and any other fails.
+    /// as LSP asks, a definition with no target gets null, and any other
+    /// fails.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         let pending = self.remember(method, id, params);
         match (self.local_method(method, params), &self.server, method) {
@@ -780,7 +811,10 @@ impl<W: Write> Proxy<W> {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            (None, None, "shutdown") => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+            // Alone, a definition with no target is null, not a failure.
+            (None, None, "shutdown" | "textDocument/definition") => {
+                self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null}))
+            }
             (None, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
         }
     }

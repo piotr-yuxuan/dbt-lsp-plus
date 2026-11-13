@@ -939,7 +939,8 @@ fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
 
 #[test]
 fn tells_which_requests_it_answers_itself() {
-    let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"]});
+    let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"],
+                          "definition": ["source", "ref", "doc", "entry", "test"]});
     let capabilities = json!({"textDocumentSync": 2, "experimental": {"server": 1}});
     let (mut session, _) = Session::fake("experimental", json!({"capabilities": capabilities}));
     let result = session.initialize(&fixture());
@@ -950,6 +951,7 @@ fn tells_which_requests_it_answers_itself() {
     let mut session = Session::start(&command, &[], None);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered);
+    assert_eq!(result["capabilities"]["definitionProvider"], true);
     assert!(session.finish().success());
 }
 
