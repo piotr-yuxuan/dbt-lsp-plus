@@ -1431,8 +1431,18 @@ models:
       - name: customer_id
         data_tests:
           - relationships:
-              to: ref('customers')
-              field: customer_id
+              arguments:
+                to: ref('customers')
+                field: customer_id
+  - name: customers
+    description: \"{{ doc('shop', 'order_status') }}\"
+    data_tests:
+      - relationships:
+          arguments:
+            to: ref('orders', v=2)
+            field: id
+seeds:
+  - name: raw_customers
 exposures:
   - name: weekly
     depends_on:
@@ -1490,12 +1500,20 @@ fn a_definition_in_yaml_leads_where_dbt_looks() {
         ),
         ("'raw', 'orders'", 9, location(&project, "models/staging/_sources.yml", 6, 14, 20)),
         ("model: orders", 9, location(&project, "models/marts/orders.sql", 0, 0, 0)),
+        ("'shop', 'order_status'", 10, location(&project, "models/docs.md", 0, 8, 20)),
+        ("name: raw_customers", 8, location(&project, "seeds/raw_customers.csv", 0, 0, 0)),
         // dbt's own test is in no file of the project.
         ("- unique", 4, Value::Null),
     ];
     for (needle, delta, location) in expected {
         assert_eq!(definition(needle, delta), location, "{needle}");
     }
+    // A source's and a table's `name:` lead to themselves.
+    let sources = project.join("models/staging/_sources.yml");
+    let on_source = session.request("textDocument/definition", position_in(&sources, "name: raw", 7));
+    assert_eq!(on_source["result"], location(&project, "models/staging/_sources.yml", 3, 10, 13));
+    let on_table = session.request("textDocument/definition", position_in(&sources, "name: orders", 8));
+    assert_eq!(on_table["result"], location(&project, "models/staging/_sources.yml", 6, 14, 20));
     assert!(!methods(&log).contains(&"textDocument/definition".to_owned()));
     assert!(session.finish().success());
 }
@@ -1506,8 +1524,11 @@ fn a_definition_without_a_target_reaches_the_server() {
     let (mut session, log) =
         Session::fake_with("definition-forwarded", json!({}), &[Path::new("--project-dir"), &project], None);
     session.initialize(&project);
+    let yml = project.join("models/marts/_models.yml");
     let answers = [
-        position_in(&project.join("models/marts/_models.yml"), "customer_id", 2),
+        position_in(&yml, "customer_id", 2),
+        position_in(&yml, "weekly", 2),
+        position_in(&yml, "ref('orders', v=2)", 6),
         position_in(&project.join("dbt_project.yml"), "summary_upstream", 2),
         position_in(&project.join("models/marts/orders.sql"), "ref('stg_orders')", 6),
     ];
@@ -1515,7 +1536,7 @@ fn a_definition_without_a_target_reaches_the_server() {
         let answer = session.request("textDocument/definition", params.clone());
         assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": params}));
     }
-    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 3);
+    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 5);
     // A source in SQL is the proxy's.
     let on_source = position_in(&project.join("models/staging/stg_customers.sql"), "'customers'", 2);
     let answer = session.request("textDocument/definition", on_source);
@@ -1564,6 +1585,47 @@ fn an_entry_s_name_is_its_node_for_hover_and_node_info() {
     assert_eq!(hover["result"]["contents"]["value"], "model table, \"shop\".\"main\".\"orders\"");
     let argument = json!({"uri": on_name["textDocument"]["uri"], "position": on_name["position"]});
     assert_eq!(node_info(&mut session, argument)["result"]["unique_id"], "model.shop.orders");
+    // A source table's `name:` too.
+    let on_table = position_in(&project.join("models/staging/_sources.yml"), "name: customers", 8);
+    assert_eq!(session.request("textDocument/hover", on_table)["result"]["contents"]["value"], "source, raw_customers");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_markdown_hover_keeps_a_doc_s_line_breaks_and_fences_a_signature() {
+    let project = navigable("hover-markdown");
+    let docs = "{% docs order_status %}\nThe status of an order:\nplaced, shipped or returned.\n{% enddocs %}\n";
+    std::fs::write(project.join("models/docs.md"), docs).unwrap();
+    let null_answer = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
+    let script = json!({"raw_answers": {"textDocument/hover": null_answer}});
+    let (mut session, _) = Session::fake_with("hover-markdown", script, &[Path::new("--project-dir"), &project], None);
+    let capabilities = json!({"textDocument": {"hover": {"contentFormat": ["markdown", "plaintext"]}}});
+    session.request("initialize", json!({"processId": null, "rootUri": uri(&project), "capabilities": capabilities}));
+    session.notify("initialized", json!({}));
+    let yml = project.join("models/marts/_models.yml");
+    let on_doc = session.request("textDocument/hover", position_in(&yml, "order_status", 2));
+    let text = "The status of an order:\nplaced, shipped or returned.";
+    assert_eq!(on_doc["result"]["contents"], json!({"kind": "markdown", "value": text}));
+    let on_test = session.request("textDocument/hover", position_in(&yml, "- is_even", 4));
+    let signature = "```jinja\ntest is_even(model, column_name)\n```\n\nin package `shop`";
+    assert_eq!(on_test["result"]["contents"], json!({"kind": "markdown", "value": signature}));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_definition_names_an_open_document_by_the_uri_it_was_opened_under() {
+    let project = navigable("definition-spelling");
+    let link = project.with_file_name("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    let (mut session, _) =
+        Session::fake_with("definition-spelling", json!({}), &[Path::new("--project-dir"), &link], None);
+    session.initialize(&link);
+    // The model opened under its resolved spelling, the properties through the link.
+    let customers = project.join("models/marts/customers.sql");
+    session.open(&customers, None);
+    let on_ref = position_in(&link.join("models/marts/_models.yml"), "ref('customers')", 6);
+    let found = session.request("textDocument/definition", on_ref);
+    assert_eq!(found["result"]["uri"], uri(&customers));
     assert!(session.finish().success());
 }
 

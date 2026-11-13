@@ -402,7 +402,6 @@ groups:
 version: 2
 data_tests:
   - name: singular_one
-    description: not a generic test
 anchors:
   - &shared [hidden]
 models:
