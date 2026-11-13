@@ -219,12 +219,13 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
 /// a rule in markdown, above a blank line in plain text, as the first item
 /// of an array of marked strings.  A null result becomes the summary alone,
 /// in markdown when MARKDOWN; an error, or contents of a shape LSP does not
-/// define, gives none, so that the answer passes as it came.
-pub fn merge_hover(message: &Value, summary: &str, markdown: bool) -> Option<Value> {
+/// define, gives none, so that the answer passes as it came.  In markdown,
+/// the summary's line breaks are hard when HARD, else as written.
+pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -> Option<Value> {
     let mut merged = message.clone();
     let result = merged.get_mut("result")?;
     // A line break in markdown needs two spaces before it.
-    let marked = summary.replace('\n', "  \n");
+    let marked = if hard { summary.replace('\n', "  \n") } else { summary.to_owned() };
     let kind = result.pointer("/contents/kind").and_then(Value::as_str).map(str::to_owned);
     let kind = kind.or_else(|| result.is_null().then(|| if markdown { "markdown" } else { "plaintext" }.to_owned()));
     let contents = result.get("contents").cloned().unwrap_or(Value::Null);
@@ -426,21 +427,30 @@ mod tests {
         let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
         let contents = |merged: Option<Value>| merged.unwrap()["result"]["contents"].clone();
         let markdown = answer(json!({"contents": {"kind": "markdown", "value": "Server"}, "range": "kept"}));
-        let merged = merge_hover(&markdown, summary, true).unwrap();
+        let merged = merge_hover(&markdown, summary, true, true).unwrap();
         assert_eq!(merged["result"]["contents"]["value"], "model table, x  \ntags a\n\n---\n\nServer");
         assert_eq!(merged["result"]["range"], "kept");
         let plain = answer(json!({"contents": {"kind": "plaintext", "value": "Server"}}));
-        assert_eq!(contents(merge_hover(&plain, summary, true))["value"], "model table, x\ntags a\n\nServer");
+        assert_eq!(contents(merge_hover(&plain, summary, true, true))["value"], "model table, x\ntags a\n\nServer");
         let string = answer(json!({"contents": "Server"}));
-        assert_eq!(contents(merge_hover(&string, summary, true)), "model table, x  \ntags a\n\n---\n\nServer");
+        assert_eq!(contents(merge_hover(&string, summary, true, true)), "model table, x  \ntags a\n\n---\n\nServer");
         let code = answer(json!({"contents": {"language": "sql", "value": "select 1"}}));
-        assert_eq!(contents(merge_hover(&code, summary, true))[1]["language"], "sql");
+        assert_eq!(contents(merge_hover(&code, summary, true, true))[1]["language"], "sql");
         let array = answer(json!({"contents": ["a", "b"]}));
-        assert_eq!(contents(merge_hover(&array, summary, true)), json!(["model table, x  \ntags a", "a", "b"]));
+        assert_eq!(contents(merge_hover(&array, summary, true, true)), json!(["model table, x  \ntags a", "a", "b"]));
         let null = answer(Value::Null);
-        assert_eq!(contents(merge_hover(&null, summary, false)), json!({"kind": "plaintext", "value": summary}));
+        assert_eq!(contents(merge_hover(&null, summary, true, false)), json!({"kind": "plaintext", "value": summary}));
         let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
-        assert_eq!(merge_hover(&error, summary, true), None);
-        assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true), None);
+        assert_eq!(merge_hover(&error, summary, true, true), None);
+        assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
+    }
+
+    #[test]
+    fn keeps_a_markdown_text_s_line_breaks_as_written() {
+        // A paragraph that a docs block wraps in its source stays one.
+        let text = "One sentence\nwrapped.";
+        let null = json!({"jsonrpc": "2.0", "id": 1, "result": null});
+        let merged = merge_hover(&null, text, false, true).unwrap();
+        assert_eq!(merged["result"]["contents"], json!({"kind": "markdown", "value": text}));
     }
 }

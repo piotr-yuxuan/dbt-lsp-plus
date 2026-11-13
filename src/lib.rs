@@ -5,6 +5,7 @@ pub mod config;
 pub mod document;
 pub mod features;
 pub mod graph;
+pub mod navigation;
 pub mod project;
 pub mod properties;
 pub mod proxy;

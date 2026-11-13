@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, project, scan, sources};
+use crate::{config, document, features, navigation, project, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -44,10 +44,11 @@ const ADDED: [(&str, &[&str]); 6] = [
     ("selectionRangeProvider", &["textDocument/selectionRange"]),
 ];
 
-/// The requests that the proxy answers itself on a source, and a rename on
-/// a CTE, since dbt lsp 2.0.9 answers them with nothing there; elsewhere
-/// they go to the server.
-const SOURCE_METHODS: [&str; 2] = ["textDocument/references", "textDocument/rename"];
+/// The requests that the proxy answers itself on some targets, since dbt
+/// lsp 2.0.9 answers them with nothing there: references and renames of a
+/// source, a rename of a CTE, a definition that `navigation` finds;
+/// elsewhere they go to the server.
+const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "textDocument/definition"];
 
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
@@ -90,8 +91,10 @@ enum Pending {
     Listing,
     /// Answered with null if the server dies first, as LSP asks of `shutdown`.
     Shutdown,
-    /// A hover on a `ref` or a `source`, whose answer gets this summary first.
-    Hover(String),
+    /// A hover whose answer gets this text first: a node's summary, whose
+    /// line breaks are hard, or a docs block's text or a test's signature,
+    /// markdown as written.
+    Hover(String, bool),
 }
 
 /// What the proxy knows of the user's `dbt parse`.
@@ -263,7 +266,8 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"]});
+            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"],
+                                  "definition": ["source", "ref", "doc", "entry", "test"]});
             experimental.insert("dbtLspPlus".into(), answered);
         }
         // The proxy's own command, beside the server's.
@@ -278,9 +282,11 @@ impl<W: Write> Proxy<W> {
     fn initialize_alone(&mut self, id: &Value) {
         let mut capabilities = serde_json::Map::new();
         capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2}));
-        // Alone, the proxy still answers references and renames of sources.
+        // Alone, the proxy still answers references and renames of sources,
+        // and definitions on the targets of `navigation`.
         capabilities.insert("referencesProvider".into(), json!(true));
         capabilities.insert("renameProvider".into(), json!(true));
+        capabilities.insert("definitionProvider".into(), json!(true));
         self.add_capabilities(&mut capabilities);
         let info = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
         self.send_client(
@@ -428,8 +434,7 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The method under which the proxy answers a request itself: an owned
-    /// method, its own command, references and rename on a source, or a
-    /// rename on a CTE of a SQL file.
+    /// method, its own command, or a targeted request on one of its targets.
     fn local_method(&self, method: &str, params: &Value) -> Option<&'static str> {
         if let Some(owned) = self.owned.get(method) {
             return Some(owned);
@@ -437,12 +442,45 @@ impl<W: Write> Proxy<W> {
         if method == "workspace/executeCommand" && params["command"] == config::NODE_INFO {
             return Some(config::NODE_INFO);
         }
-        let method = SOURCE_METHODS.into_iter().find(|source_method| *source_method == method)?;
+        self.targeted(method, params)
+    }
+
+    /// A request of `TARGETED` that the proxy answers itself, by what its
+    /// position holds: references and rename on a source, a rename on a CTE
+    /// of a SQL file, or a definition on a target of `navigation`.
+    fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
+        let method = TARGETED.into_iter().find(|targeted| *targeted == method)?;
         let (path, text, offset) = self.document_at(params)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
-        let cte = method == "textDocument/rename" && sql && document::cte_at(&text, offset).is_some();
-        // A CTE lives in its file; a source only the scan sees whole.
-        (cte || self.source_at(params).is_some()).then_some(method)
+        let answered = match method {
+            "textDocument/definition" => navigation::target_at(&path, &text, offset).is_some(),
+            // A CTE lives in its file; a source only the scan sees whole.
+            "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            _ => self.source_at(params).is_some(),
+        };
+        answered.then_some(method)
+    }
+
+    /// The definition of the target at the request's position, by dbt
+    /// 2.0.9's lookup: its location, several, or null.
+    fn on_definition(&self, params: &Value) -> Option<Result<Value, String>> {
+        let (path, text, offset) = self.document_at(params)?;
+        let target = navigation::target_at(&path, &text, offset);
+        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
+        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
+        let locations: Vec<Value> = navigation::resolve(&project, &path, &target)
+            .iter()
+            .map(|found| {
+                let index = LineIndex::new(project.texts.get(&found.path).map_or("", String::as_str));
+                let range = index.range(found.range.start, found.range.end, self.encoding);
+                json!({"uri": uri_of(&found.path), "range": range})
+            })
+            .collect();
+        Some(Ok(match &locations[..] {
+            [] => Value::Null,
+            [location] => location.clone(),
+            _ => Value::Array(locations),
+        }))
     }
 
     /// The references or the rename of the source at the request's position.
@@ -488,8 +526,9 @@ impl<W: Write> Proxy<W> {
         Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
     }
 
-    /// The node of the `ref` or `source` at the position of PARAMS, else,
-    /// when FILE, the one node its document defines.
+    /// The node of the `ref` or `source` at the position of PARAMS, or of the
+    /// entry whose `name:` is there, else, when FILE, the one node its
+    /// document defines.
     fn node_at<'a>(&self, index: &'a config::Index, params: &Value, file: bool) -> Option<&'a Value> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
@@ -500,6 +539,15 @@ impl<W: Write> Proxy<W> {
         let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
         if let Some(call) = calls.into_iter().find(inside) {
             return index.named(&call.target);
+        }
+        // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
+        let entry = navigation::target_at(&path, &text, offset).filter(|target| {
+            matches!(target, navigation::Target::Named { kind: "model" | "seed" | "snapshot" | "analysis", .. })
+                || matches!(target, navigation::Target::Source(sources::Target::Table { .. }))
+        });
+        if let Some(target) = entry {
+            let project = self.project()?;
+            return navigation::resolve(&project, &path, &target).first().and_then(|found| index.node(&found.id));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
         index.of_file(&relative.to_string_lossy())
@@ -614,6 +662,7 @@ impl<W: Write> Proxy<W> {
             }),
             config::NODE_INFO => self.node_info(params),
             "textDocument/references" => self.on_source(method, params),
+            "textDocument/definition" => self.on_definition(params),
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Ok)
@@ -758,8 +807,17 @@ impl<W: Write> Proxy<W> {
             ("textDocument/hover", _) => {
                 let index = self.parsing.index.as_ref();
                 let summary =
-                    index.and_then(|index| self.node_at(index, params, false).map(|node| index.summary(node)));
-                summary.map_or(Pending::Request, Pending::Hover)
+                    index.and_then(|index| self.node_at(index, params, false).map(|node| (index.summary(node), true)));
+                // A doc's or a generic test's block, the project scanned only then.
+                let block = || {
+                    let (path, text, offset) = self.document_at(params)?;
+                    let target = navigation::target_at(&path, &text, offset)
+                        .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
+                    let project = self.project()?;
+                    let found = navigation::resolve(&project, &path, &target);
+                    navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
+                };
+                summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
             }
             _ => Pending::Request,
         }
@@ -767,7 +825,8 @@ impl<W: Write> Proxy<W> {
 
     /// A request of the client: answered here when the proxy owns its method,
     /// else forwarded; without a server, the lifecycle requests are answered
-    /// as LSP asks and any other fails.
+    /// as LSP asks, a definition with no target gets null, and any other
+    /// fails.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         let pending = self.remember(method, id, params);
         match (self.local_method(method, params), &self.server, method) {
@@ -780,7 +839,10 @@ impl<W: Write> Proxy<W> {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            (None, None, "shutdown") => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+            // Alone, a definition with no target is null, not a failure.
+            (None, None, "shutdown" | "textDocument/definition") => {
+                self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null}))
+            }
             (None, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
         }
     }
@@ -799,8 +861,8 @@ impl<W: Write> Proxy<W> {
             if let Some((_, Pending::Listing)) = pending {
                 self.resume();
             }
-            if let Some((_, Pending::Hover(summary))) = &pending
-                && let Some(merged) = features::merge_hover(message, summary, self.markdown)
+            if let Some((_, Pending::Hover(text, hard))) = &pending
+                && let Some(merged) = features::merge_hover(message, text, *hard, self.markdown)
             {
                 return self.send_client(&merged);
             }

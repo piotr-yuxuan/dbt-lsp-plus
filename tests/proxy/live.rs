@@ -18,6 +18,7 @@ use std::time::Duration;
 fn in_front_of_the_real_dbt_lsp() {
     let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
     let project = copy_fixture("live");
+    std::fs::write(project.join("models/marts/_models.yml"), LIVE_MODELS).unwrap();
     let home = project.with_file_name("home");
     std::fs::create_dir_all(&home).unwrap();
     let project_arg = project.to_string_lossy().into_owned();
@@ -45,6 +46,7 @@ fn in_front_of_the_real_dbt_lsp() {
         assert_eq!(result["capabilities"][capability], json!(true), "{capability}");
     }
     document_features(&mut session, &project);
+    navigation(&mut session, &project);
     lineage(&mut session, &project);
     let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
@@ -125,6 +127,44 @@ fn document_features(session: &mut Session, project: &Path) {
     // The server's hover passes through: on ref('stg_orders'), line 4.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
+}
+
+/// A properties file that dbt parse 2.0.9 accepts, for the navigation from
+/// YAML: a generic test's arguments go under `arguments:`.
+const LIVE_MODELS: &str = "\
+version: 2
+models:
+  - name: orders
+    description: \"{{ doc('order_status') }}\"
+    columns:
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('customers')
+                field: customer_id
+";
+
+/// The proxy's definitions and hover in a properties file, where dbt lsp
+/// 2.0.9 answers null.
+fn navigation(session: &mut Session, project: &Path) {
+    let yml = project.join("models/marts/_models.yml");
+    session.open(&yml, None);
+    let at = |needle: &str, delta: usize| {
+        let (line, column) = LIVE_MODELS.lines().enumerate().find_map(|(n, l)| l.find(needle).map(|c| (n, c))).unwrap();
+        json!({"textDocument": {"uri": uri(&yml)}, "position": {"line": line, "character": column + delta}})
+    };
+    let file = |answer: &Value| answer["result"]["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_owned();
+    assert_eq!(file(&session.request("textDocument/definition", at("ref('customers')", 6))), "customers.sql");
+    assert_eq!(file(&session.request("textDocument/definition", at("order_status", 2))), "docs.md");
+    assert_eq!(file(&session.request("textDocument/definition", at("name: orders", 8))), "orders.sql");
+    // The server's null, observed: the proxy's text alone, and a position
+    // without a target forwarded and answered null.
+    let hover = session.request("textDocument/hover", at("order_status", 2));
+    let text = "The status of an order: placed, shipped or returned.";
+    assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
+    let on_column = session.request("textDocument/definition", at("customer_id", 2));
+    assert_eq!(on_column["result"], Value::Null, "{on_column}");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.
