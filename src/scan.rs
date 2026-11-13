@@ -23,6 +23,9 @@ pub struct Symbol {
     pub name: String,
     pub range: Range<usize>,
     pub name_range: Range<usize>,
+    /// What the symbol holds: a block's text between its tags, a CTE's
+    /// inside its parentheses.
+    pub inner: Range<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,26 +62,38 @@ fn blank(out: &mut [u8], range: Range<usize>) {
     out[range].iter_mut().filter(|b| **b != b'\n').for_each(|b| *b = b' ');
 }
 
+/// Each span of TEXT that one of OPENERS opens, (opener, closer), in order,
+/// with the index of its opener.  A span runs to its closer, or to the end
+/// of the text; an opener inside a span does not count.
+fn spans(text: &str, openers: &[(&str, &str)]) -> Vec<(usize, Range<usize>)> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(which) = openers.iter().position(|(open, _)| bytes[at..].starts_with(open.as_bytes())) else {
+            at += 1;
+            continue;
+        };
+        let (open, close) = openers[which];
+        let from = at + open.len();
+        let end = text[from..].find(close).map_or(text.len(), |found| from + found + close.len());
+        found.push((which, at..end));
+        at = end;
+    }
+    found
+}
+
 /// Blanks each span that one of SPANS opens: (opener, closer, blank).  A
 /// span with blank false, such as a string, is skipped whole, so that an
 /// opener inside it does not count.  The text keeps its length, and its
 /// offsets their meaning.
 fn mask(text: &str, spans: &[(&str, &str, bool)]) -> String {
-    let bytes = text.as_bytes();
-    let mut out = bytes.to_vec();
-    let mut at = 0;
-    while at < bytes.len() {
-        let Some((open, close, blanks)) = spans.iter().find(|(open, _, _)| bytes[at..].starts_with(open.as_bytes()))
-        else {
-            at += 1;
-            continue;
-        };
-        let from = at + open.len();
-        let end = text[from..].find(close).map_or(text.len(), |found| from + found + close.len());
-        if *blanks {
-            blank(&mut out, at..end);
+    let openers: Vec<(&str, &str)> = spans.iter().map(|(open, close, _)| (*open, *close)).collect();
+    let mut out = text.as_bytes().to_vec();
+    for (which, range) in self::spans(text, &openers) {
+        if spans[which].2 {
+            blank(&mut out, range);
         }
-        at = end;
     }
     // Every span starts and ends at an ASCII delimiter, so whole characters are blanked.
     String::from_utf8(out).expect("masking blanks whole characters")
@@ -143,14 +158,35 @@ fn jinja_tags(masked: &str) -> Vec<Range<usize>> {
     tags
 }
 
-/// TEXT as SQL's parentheses see it: without Jinja comments and tags, SQL
-/// comments and SQL strings.  Double-quoted identifiers are kept.
-fn mask_code(text: &str) -> String {
+/// TEXT without its Jinja comments and tags: the SQL as Jinja leaves it,
+/// give or take what the tags render.
+fn without_jinja(text: &str) -> String {
     let masked = mask_jinja_comments(text);
     let mut out = masked.clone().into_bytes();
     jinja_tags(&masked).into_iter().for_each(|tag| blank(&mut out, tag));
-    let without_tags = String::from_utf8(out).expect("masking blanks whole characters");
-    mask(&without_tags, &[("--", "\n", true), ("/*", "*/", true), ("'", "'", true), ("\"", "\"", false)])
+    String::from_utf8(out).expect("masking blanks whole characters")
+}
+
+/// TEXT as SQL's parentheses see it: without Jinja comments and tags, SQL
+/// comments and SQL strings.  Double-quoted identifiers are kept.
+fn mask_code(text: &str) -> String {
+    mask(&without_jinja(text), &[("--", "\n", true), ("/*", "*/", true), ("'", "'", true), ("\"", "\"", false)])
+}
+
+/// The Jinja tags of TEXT, `{{ }}` and `{% %}`, outside Jinja comments.
+pub fn tags(text: &str) -> Vec<Range<usize>> {
+    jinja_tags(&mask_jinja_comments(text))
+}
+
+/// The comments of TEXT that may span lines: Jinja's `{# #}`, and SQL's
+/// `/* */` outside Jinja and strings.
+pub fn comments(text: &str) -> Vec<Range<usize>> {
+    let jinja = spans(text, &[("{#", "#}")]).into_iter().map(|(_, range)| range);
+    let sql_openers = [("'", "'"), ("\"", "\""), ("--", "\n"), ("/*", "*/")];
+    let sql = spans(&without_jinja(text), &sql_openers).into_iter().filter(|(which, _)| *which == 3);
+    let mut found: Vec<Range<usize>> = jinja.chain(sql.map(|(_, range)| range)).collect();
+    found.sort_by_key(|range| range.start);
+    found
 }
 
 static BLOCK_TAG: LazyLock<Regex> = LazyLock::new(|| {
@@ -180,6 +216,7 @@ pub fn blocks(text: &str) -> Vec<Symbol> {
             if let Some(at) = open.iter().rposition(|symbol| symbol.kind == kind) {
                 let mut symbol = open.remove(at);
                 symbol.range.end = range.end;
+                symbol.inner.end = range.start;
                 done.push(symbol);
             }
             continue;
@@ -189,7 +226,8 @@ pub fn blocks(text: &str) -> Vec<Symbol> {
         if let (true, Some(name)) = (block_set, BLOCK_NAME.captures(rest.as_str())) {
             let name = name.get(1).unwrap();
             let name_range = range.start + rest.start() + name.start()..range.start + rest.start() + name.end();
-            open.push(Symbol { kind, name: name.as_str().to_owned(), range: range.start..text.len(), name_range });
+            let (range, inner) = (range.start..text.len(), range.end..text.len());
+            open.push(Symbol { kind, name: name.as_str().to_owned(), range, name_range, inner });
         }
     }
     done.extend(open);
@@ -228,9 +266,31 @@ pub fn ctes(text: &str) -> Vec<Symbol> {
             name: text[name.range()].to_owned(),
             range: name.start()..end,
             name_range: name.range(),
+            inner: open + 1..close.unwrap_or(text.len()),
         }
     };
     CTE.captures_iter(&code).map(symbol).collect()
+}
+
+/// Each CTE of TEXT with the places that use it: whole words outside Jinja,
+/// comments and strings, not after a `.`, matched without regard to case
+/// unless the name is quoted.  A column or an alias spelt like a CTE counts.
+pub fn cte_uses(text: &str) -> Vec<(Symbol, Vec<Range<usize>>)> {
+    let code = mask_code(text);
+    let uses = |cte: &Symbol| -> Vec<Range<usize>> {
+        let name = regex::escape(&cte.name);
+        let pattern = if cte.name.starts_with('"') { name } else { format!(r"(?i)\b{name}\b") };
+        let Ok(word) = Regex::new(&pattern) else { return Vec::new() };
+        let found = word.find_iter(&code).map(|found| found.range());
+        found.filter(|range| *range != cte.name_range && !code[..range.start].ends_with('.')).collect()
+    };
+    ctes(text)
+        .into_iter()
+        .map(|cte| {
+            let found = uses(&cte);
+            (cte, found)
+        })
+        .collect()
 }
 
 /// The blocks of TEXT, and its CTEs when it is SQL, ordered by start.
@@ -371,6 +431,21 @@ select * from final
             names(&outline(text, true)),
             [(Kind::Macro, "métrique"), (Kind::Cte, "résultat"), (Kind::Cte, "総計")]
         );
+    }
+
+    #[test]
+    fn knows_what_a_block_or_a_cte_holds() {
+        let text = "{% macro m() %}body{% endmacro %} with c (x) as (select (1)) select 1";
+        let found = outline(text, true);
+        assert_eq!(&text[found[0].inner.clone()], "body");
+        assert_eq!(&text[found[1].inner.clone()], "select (1)");
+    }
+
+    #[test]
+    fn finds_the_comments_that_may_span_lines() {
+        let text = "{# a\n b #} select '/* no */' {{ '/* no */' }} /* yes\n */ -- /* no\n";
+        let found: Vec<&str> = comments(text).into_iter().map(|range| &text[range]).collect();
+        assert_eq!(found, ["{# a\n b #}", "/* yes\n */"]);
     }
 
     #[test]
