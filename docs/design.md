@@ -253,6 +253,21 @@ gives nothing.
   `args.command`, else `args.which`).
 - `source: "dbt-lsp-plus"`, `code: "last-run"`, no `version`.
 
+After the user's own `dbt source freshness`, a second thread watches
+`sources.json` the same way, the manifest read only when there are results
+to place: each table found stale shows at its `name:` under its source, a
+Warning, or an Error past `error_after`, with `code: "stale-source"` and a
+message such as `dbt source freshness: raw.orders last loaded
+2018-01-02T00:00:00Z, 3237 days ago (warn after 1 day)`, the age in days,
+else hours, else minutes.  dbt 2.0.9 writes `sources.json` (schema
+sources/v3) with capitalised statuses (`Warn`, `Error`, `Pass`),
+`max_loaded_at`, `max_loaded_at_time_ago_in_s` and `criteria`
+(`warn_after`, `error_after`, nulls where unset), and no result at all for
+a table whose query failed, which then shows nothing; dbt-core's `runtime
+error` shows as an Error with its `error`.  Each kind is replaced only by
+its own file: the check rewrote `run_results.json`, as `freshness`, in one
+probe where it reported a model's error, and left it alone in another.
+
 The places are found again in the file's text, open or on disk, at each
 publication, its entries and tests read once.  A file the client changes
 or saves after the run loses its failures, as does one whose file is newer
@@ -547,6 +562,11 @@ The server is not restarted after a crash.
   server names one file by two URIs, the proxy keeps the last.
 - The outline shows a versioned model's columns, those of its versions
   included, as the model's.
+- With both `run_results.json` and `sources.json` present, each change of
+  the manifest is parsed once per watcher.  A source written as two
+  blocks of one name puts the second block's stale tables at the first
+  block's name.  A table whose freshness query failed under 2.0.9 shows
+  nothing, and a stale warning shown before goes.
 - An inlay hint's node is looked up as the hover's, an enabled one first,
   then the root project, not the calling file's package as dbt 2.0.9 does
   for a `ref`.  In a Python model or YAML, a `#` comment between a `ref`'s
@@ -611,6 +631,8 @@ The server is not restarted after a crash.
     cache; dbt's output kept off the client's channel; a parse killed at
     `exit`; a node by id or by position; the summary first on a hover of a
     ref, any other hover byte for byte.
+  - stale sources at their names, kept by a build and keeping its
+    failures, cleared by a fresh check and by `sources.json` gone;
   - the last run: failures where written, the server's diagnostics joined
     and its others byte for byte, a new run replacing, a `compile`
     keeping, an edit clearing, a change of URI clearing the old one,

@@ -23,6 +23,7 @@ fn in_front_of_the_real_dbt_lsp() {
     std::fs::create_dir_all(project.join("target")).unwrap();
     std::fs::write(project.join("target/run_results.json"), LIVE_RESULTS).unwrap();
     std::fs::write(project.join("target/manifest.json"), LIVE_MANIFEST).unwrap();
+    std::fs::write(project.join("target/sources.json"), LIVE_FRESHNESS).unwrap();
     let home = project.with_file_name("home");
     std::fs::create_dir_all(&home).unwrap();
     let project_arg = project.to_string_lossy().into_owned();
@@ -173,7 +174,14 @@ const LIVE_MANIFEST: &str = r#"{"nodes": {"test.shop.relationships_orders_custom
   "unique_id": "test.shop.relationships_orders_customer_id.1", "resource_type": "test", "package_name": "shop",
   "name": "relationships_orders_customer_id", "original_file_path": "models/marts/_models.yml",
   "attached_node": "model.shop.orders", "column_name": "customer_id", "test_metadata": {"name": "relationships"}},
-  "model.shop.orders": {"resource_type": "model", "name": "orders", "package_name": "shop"}}}"#;
+  "model.shop.orders": {"resource_type": "model", "name": "orders", "package_name": "shop"}},
+  "sources": {"source.shop.raw.orders": {"unique_id": "source.shop.raw.orders", "resource_type": "source",
+    "source_name": "raw", "name": "orders", "package_name": "shop",
+    "original_file_path": "models/staging/_sources.yml"}}}"#;
+
+const LIVE_FRESHNESS: &str = r#"{"results": [{"unique_id": "source.shop.raw.orders", "status": "Warn",
+  "max_loaded_at": "2018-01-02T00:00:00Z", "max_loaded_at_time_ago_in_s": 279704850.0,
+  "criteria": {"warn_after": {"count": 1, "period": "day"}, "error_after": {"count": null, "period": null}}}]}"#;
 
 /// The last run's failure beside dbt lsp's own diagnostic on the properties
 /// file: dbt lsp 2.0.9 warns of the unknown doc there.
@@ -190,6 +198,18 @@ fn last_run(session: &mut Session, project: &Path) {
     let failed =
         published["params"]["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "last-run").cloned();
     assert_eq!(failed.unwrap()["message"], "dbt build: relationships failed: 3 rows", "{published}");
+    // The last freshness check's stale table, at its name in the sources' file.
+    let sources = uri(&project.join("models/staging/_sources.yml"));
+    let stale = |message: &Value| {
+        let diagnostics = message["params"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == sources.as_str()
+            && diagnostics.iter().any(|d| d["code"] == "stale-source")
+    };
+    let published = session.wait_for(stale);
+    let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
+    let warning = diagnostics.iter().find(|d| d["code"] == "stale-source").cloned();
+    assert_eq!(warning.unwrap()["range"]["start"], json!({"line": 6, "character": 14}), "{published}");
 }
 
 /// The proxy's definitions and hover in a properties file, where dbt lsp

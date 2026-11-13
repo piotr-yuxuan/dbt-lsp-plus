@@ -29,7 +29,8 @@ dbt 2, and adds what it lacks, for every editor and for agents:
   summary;
 - the last run's failures as diagnostics, beside dbt lsp's own: after a
   `dbt build` from anywhere, a model's error at its file, a test's
-  failure at its name in YAML;
+  failure at its name in YAML; after `dbt source freshness`, each stale
+  source table at its name;
 - inlay hints after the server's: the relation dbt builds, after each
   `ref` and `source`;
 - `dbt-lsp-plus.nodeInfo`, a command that gives a node's resolved

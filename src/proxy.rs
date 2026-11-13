@@ -75,10 +75,15 @@ enum Event {
     Server(Frame),
     ServerClosed,
     Parsed(config::Outcome),
-    /// The failures of the last run, when its results were written; none
-    /// for results of a command that builds nothing.
-    Runs(Option<Vec<runs::Failure>>, SystemTime),
+    /// The failures of one kind, `runs::LAST_RUN` or `runs::STALE_SOURCE`,
+    /// when their file was written; none for results of a command that
+    /// builds nothing.
+    Runs(&'static str, Option<Vec<runs::Failure>>, SystemTime),
 }
+
+/// What a watched file and the manifest give: its failures, or none to keep
+/// those known.
+type ReadFailures = fn(&Value, &Value) -> Option<Vec<runs::Failure>>;
 
 /// How often the files of the last run are looked at.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
@@ -403,7 +408,9 @@ impl<W: Write> Proxy<W> {
         // drops the failures instead.  An empty set has no range to move.
         if matches!(method, "textDocument/didChange" | "textDocument/didSave") {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
-            let ranged = self.diagnostics.server.get(&path).is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
+            // A server gone publishes no more: its old set is no reason to wait.
+            let server = self.diagnostics.server.get(&path).filter(|_| self.server.is_some());
+            let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
             if self.diagnostics.failures.remove(&path).is_some() && !ranged {
                 self.publish(&path);
             }
@@ -1008,44 +1015,59 @@ impl<W: Write> Proxy<W> {
     fn watch_runs(&mut self) {
         let (Some(root), Some(events)) = (self.root.clone(), self.parsing.events.clone()) else { return };
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
-        let (results, manifest) = (target.join("run_results.json"), target.join("manifest.json"));
-        thread::spawn(move || {
-            let stamp = |path: &Path| fs::metadata(path).ok().map(|meta| (meta.modified().ok(), meta.len()));
-            let read = |path: &Path| fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-            let mut seen = None;
-            loop {
-                thread::sleep(RUNS_EVERY);
-                let now = (stamp(&results), stamp(&manifest));
-                if seen.as_ref() == Some(&now) {
-                    continue;
+        let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
+        let watched: [(&str, &'static str, ReadFailures); 2] =
+            [("run_results.json", runs::LAST_RUN, runs::failures), ("sources.json", runs::STALE_SOURCE, stale)];
+        for (file, code, read_failures) in watched {
+            let (results, manifest, events) = (target.join(file), target.join("manifest.json"), events.clone());
+            thread::spawn(move || {
+                let stamp = |path: &Path| fs::metadata(path).ok().map(|meta| (meta.modified().ok(), meta.len()));
+                let read =
+                    |path: &Path| fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                let mut seen = None;
+                loop {
+                    thread::sleep(RUNS_EVERY);
+                    let now = (stamp(&results), stamp(&manifest));
+                    if seen.as_ref() == Some(&now) {
+                        continue;
+                    }
+                    let present = seen.replace(now).is_some_and(|(results, _)| results.is_some());
+                    // The manifest, which may be large, only for results to place.
+                    let failures = match read(&results) {
+                        Some(found) => {
+                            let Some(index) = read(&manifest) else { continue };
+                            read_failures(&found, &index)
+                        }
+                        // Results gone, as after `dbt clean`: nothing to show.
+                        None if now.0.is_none() && present => Some(Vec::new()),
+                        // None ever, or a file read while dbt writes it, which
+                        // changes again when dbt has written it.
+                        None => continue,
+                    };
+                    let written = now.0.and_then(|(time, _)| time).unwrap_or(SystemTime::UNIX_EPOCH);
+                    if events.send(Event::Runs(code, failures, written)).is_err() {
+                        return;
+                    }
                 }
-                seen = Some(now);
-                let failures = match (read(&results), read(&manifest)) {
-                    (Some(found), Some(index)) => runs::failures(&found, &index),
-                    // No results, as after `dbt clean`: no last run to show.
-                    (None, _) if now.0.is_none() => Some(Vec::new()),
-                    // A file read while dbt writes it changes again when dbt
-                    // has written it: it is read then, not every second.
-                    _ => continue,
-                };
-                let written = now.0.and_then(|(time, _)| time).unwrap_or(SystemTime::UNIX_EPOCH);
-                if events.send(Event::Runs(failures, written)).is_err() {
-                    return;
-                }
-            }
-        });
+            });
+        }
     }
 
-    /// The failures of the last run, its results written at WRITTEN: by the
-    /// path of each package's file, those of a file changed since left out;
-    /// each file whose failures change is published again.
-    fn on_runs(&mut self, found: Option<Vec<runs::Failure>>, written: SystemTime) {
+    /// The failures of kind CODE, their file written at WRITTEN, in place of
+    /// those of that kind: by the path of each package's file, those of a
+    /// file changed since left out; each file whose failures change is
+    /// published again.
+    fn on_runs(&mut self, code: &str, found: Option<Vec<runs::Failure>>, written: SystemTime) {
         let (Some(found), Some(project)) = (found, self.project()) else { return };
         let edited = |path: &Path| {
             let saved = fs::metadata(path).and_then(|meta| meta.modified()).is_ok_and(|time| time > written);
             saved || self.diagnostics.edited.get(path).is_some_and(|time| *time > written)
         };
-        let mut failures: HashMap<PathBuf, Vec<runs::Failure>> = HashMap::new();
+        // The failures of the other kind stay.
+        let kept = self.diagnostics.failures.iter().map(|(path, failures)| {
+            (path.clone(), failures.iter().filter(|failure| failure.code != code).cloned().collect::<Vec<_>>())
+        });
+        let mut failures: HashMap<PathBuf, Vec<runs::Failure>> = kept.filter(|(_, kept)| !kept.is_empty()).collect();
         for failure in found {
             let Some(path) = project.packages.get(&failure.package).map(|dir| dir.join(&failure.path)) else {
                 continue;
@@ -1082,7 +1104,7 @@ impl<W: Write> Proxy<W> {
         diagnostics.extend(failures.iter().map(|failure| {
             let range = runs::locate(&text, &entries, &tests, &failure.place);
             json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
-                   "source": "dbt-lsp-plus", "code": "last-run", "message": failure.message})
+                   "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
         }));
         let publish = |uri: &str, diagnostics: Vec<Value>| {
             json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
@@ -1163,7 +1185,7 @@ impl<W: Write> Proxy<W> {
             Event::Server(frame) => self.on_server(frame),
             Event::ServerClosed => self.on_server_closed(),
             Event::Parsed(outcome) => self.on_parsed(outcome),
-            Event::Runs(found, written) => self.on_runs(found, written),
+            Event::Runs(code, found, written) => self.on_runs(code, found, written),
         }
         false
     }

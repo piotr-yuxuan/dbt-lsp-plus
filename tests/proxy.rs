@@ -2059,3 +2059,107 @@ fn an_edit_clears_failures_over_an_empty_server_set_and_waits_over_a_full_one() 
     assert_eq!((last_run(&next).len(), next["diagnostics"].as_array().map(Vec::len)), (0, Some(1)));
     assert!(session.finish().success());
 }
+
+/// The results of `dbt source freshness` as 2.0.9 writes them, LOADED
+/// seconds after the last load: `orders` past its warning and `customers`
+/// past its error when STALE, else both fresh.
+fn freshness(stale: bool, loaded: f64) -> Value {
+    let unset = json!({"count": null, "period": null});
+    let day = json!({"count": 1, "period": "day"});
+    let result = |name: &str, status: &str, warn: &Value, error: &Value| {
+        json!({
+        "unique_id": format!("source.shop.raw.{name}"), "status": status, "max_loaded_at": "2018-01-02T00:00:00Z",
+        "max_loaded_at_time_ago_in_s": loaded, "criteria": {"warn_after": warn, "error_after": error}})
+    };
+    let (orders, customers) = if stale { ("Warn", "Error") } else { ("Pass", "Pass") };
+    json!({"results": [result("orders", orders, &day, &unset), result("customers", customers, &unset, &day)]})
+}
+
+#[test]
+fn stale_sources_show_at_their_names_apart_from_the_last_run() {
+    let (project, mut session, _) = run_session("stale", json!({}));
+    let sources = project.join("models/staging/_sources.yml");
+    let model = project.join("models/marts/orders.sql");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let mut manifest = run_manifest();
+    let table = |name: &str| {
+        json!({"unique_id": format!("source.shop.raw.{name}"), "resource_type": "source",
+        "source_name": "raw", "name": name, "package_name": "shop",
+        "original_file_path": "models/staging/_sources.yml"})
+    };
+    manifest["sources"] =
+        json!({"source.shop.raw.orders": table("orders"), "source.shop.raw.customers": table("customers")});
+    std::fs::write(target.join("manifest.json"), manifest.to_string()).unwrap();
+    std::fs::write(target.join("sources.json"), freshness(true, 279_704_850.0).to_string()).unwrap();
+    let stale = |params: &Value| params["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "stale-source");
+    let both = published(&mut session, &sources, stale);
+    let shown: Vec<(&Value, &Value, &Value)> = both["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (&d["severity"], &d["range"]["start"], &d["message"]))
+        .collect();
+    let message = |table: &str, word: &str| {
+        json!(format!(
+            "dbt source freshness: raw.{table} last loaded 2018-01-02T00:00:00Z, 3237 days ago ({word} after 1 day)"
+        ))
+    };
+    let expected = [
+        (&json!(2), &json!({"line": 6, "character": 14}), &message("orders", "warn")),
+        (&json!(1), &json!({"line": 8, "character": 14}), &message("customers", "error")),
+    ];
+    assert_eq!(shown, expected);
+    // A build replaces its own failures only: the stale tables stay.
+    std::fs::write(target.join("run_results.json"), run_results("build", true).to_string()).unwrap();
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    barrier(&mut session);
+    let unstale = |m: &Value| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"] == uri(&sources).as_str()
+            && !stale(&m["params"])
+    };
+    assert!(!session.received.iter().any(unstale), "a build cleared the stale tables");
+    // A fresh check, which may rewrite run_results.json as a command that
+    // builds nothing, clears them and leaves the build's failures.
+    session.received.clear();
+    let checked = json!({"args": {"command": "freshness"}, "results": []});
+    std::fs::write(target.join("run_results.json"), checked.to_string()).unwrap();
+    std::fs::write(target.join("sources.json"), freshness(false, 60.0).to_string()).unwrap();
+    published(&mut session, &sources, |p| !stale(p));
+    std::thread::sleep(Duration::from_millis(2500));
+    barrier(&mut session);
+    let cleared =
+        |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&model).as_str();
+    assert!(!session.received.iter().any(cleared), "a freshness check cleared the build's failures");
+    // An edit of the sources' file drops its stale tables.
+    std::fs::write(target.join("sources.json"), freshness(true, 279_704_850.0).to_string()).unwrap();
+    published(&mut session, &sources, stale);
+    session.open(&sources, None);
+    session.received.clear();
+    let edit = json!({"textDocument": {"uri": uri(&sources), "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "# edited\n"}]});
+    session.notify("textDocument/didChange", edit);
+    published(&mut session, &sources, |p| !stale(p));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn stale_sources_go_with_their_file() {
+    let (project, mut session, _) = run_session("stale-gone", json!({}));
+    let sources = project.join("models/staging/_sources.yml");
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let mut manifest = run_manifest();
+    manifest["sources"] = json!({"source.shop.raw.orders": {"unique_id": "source.shop.raw.orders",
+        "resource_type": "source", "source_name": "raw", "name": "orders", "package_name": "shop",
+        "original_file_path": "models/staging/_sources.yml"}});
+    std::fs::write(target.join("manifest.json"), manifest.to_string()).unwrap();
+    std::fs::write(target.join("sources.json"), freshness(true, 279_704_850.0).to_string()).unwrap();
+    let stale = |params: &Value| params["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "stale-source");
+    published(&mut session, &sources, stale);
+    session.received.clear();
+    std::fs::remove_file(target.join("sources.json")).unwrap();
+    published(&mut session, &sources, |p| !stale(p));
+    assert!(session.finish().success());
+}
