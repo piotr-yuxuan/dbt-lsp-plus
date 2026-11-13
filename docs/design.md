@@ -154,6 +154,23 @@ client is quiet.
 - Without a server, the proxy announces references and rename too, for
   sources; on anything else they fail as other requests do.
 
+## Within a document
+
+The proxy adds three capabilities that need one document alone, and the
+rename of a CTE, which the server answers with null:
+
+- Folding: blocks and CTEs, multi-line Jinja tags (`region`) and multi-line
+  `{# #}` and `/* */` comments (`comment`), by line.  A closer alone at the
+  start of its line stays visible.
+- Highlights: on a CTE, its definition (write) and its uses (read); on a tag
+  of a Jinja block, every tag of the block, `elif` and `else` included.
+- Selection ranges: the word, the Jinja tag, a CTE's or block's content,
+  the CTE or block, and the whole text, each containing the one before.
+- CTE rename, in a SQL file: the definition and every use, whole words
+  outside Jinja, comments and strings, not after a `.`, matched without
+  regard to case unless quoted.  A new name must be a plain identifier and
+  not another CTE's.
+
 ## Failure modes
 
 | Situation | Behaviour |
@@ -182,6 +199,8 @@ The server is not restarted after a crash.
   models, Python models or YAML snapshots.
 - Once the server has listed the graph, an unsaved edit of a `ref` shows in
   the call hierarchy only after the next save.
+- A column or an alias spelt like a CTE counts as one of its uses, for its
+  highlights and its rename.
 
 ## Tests
 
@@ -218,7 +237,8 @@ In the order of the feature list agreed with the dbt-mode session:
    server's own hover.  This is the first feature that needs a request to
    wait for the server, so the event loop must hold a client request until
    the server answers.
-3. Folding ranges (A7) from the outline already computed.
+3. Folding ranges (A7), with highlights, selection ranges and CTE rename:
+   done in plan 003.
 4. A cache of the scan, keyed by path, modification time and size, if a
    real project shows the 40 ms above to grow too much.
 5. YAML outline (A1): models, sources, columns, exposures.

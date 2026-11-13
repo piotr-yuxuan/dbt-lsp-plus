@@ -34,6 +34,7 @@ src/project.rs                the resources of a project and its packages
 src/graph.rs                  the dependency graph: scanned, then the server's
 src/sources.rs                references and renames of sources
 src/features.rs               the answers of the added features, as LSP JSON
+src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
 tests/live.rs                 the binary in front of the real dbt lsp, opt-in
