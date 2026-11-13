@@ -666,6 +666,27 @@ fn a_server_that_exits_at_once_is_reported_once_and_after_initialize() {
     assert!(session.finish().success());
 }
 
+#[test]
+fn no_listing_follows_shutdown() {
+    let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
+    let (mut session, log) = Session::fake("after-shutdown", json!({"answers": {ALL: all}, "hold": [ALL]}));
+    session.initialize(&fixture());
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    until_logged(&log, "the held listing", |_| listings(&log, "*") == 1);
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    session.notify("test/release", json!({}));
+    // The fake compiles for the first didOpen, then around its answer to the
+    // listing: once the second compilation is through, so is that answer.
+    let compiled = std::cell::Cell::new(0);
+    session.wait_for(|m| {
+        compiled.set(compiled.get() + usize::from(m["method"] == "dbt/lspCompileComplete"));
+        compiled.get() == 2
+    });
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+    assert_eq!(listings(&log, "source:*"), 0);
+}
+
 /// The id of the proxy's first listing of `*` that the fake received.
 fn listing_id(log: &Path) -> Value {
     logged(log).into_iter().find(|m| m["params"]["arguments"][0] == "*").expect("a listing")["id"].clone()

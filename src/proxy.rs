@@ -362,8 +362,12 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Sends the listing of selector SLOT, under an id that no pending
-    /// request of the client's carries.
+    /// request of the client's carries; nothing once the client asked for
+    /// shutdown, after which LSP allows only `exit`.
     fn send_list(&mut self, slot: usize) {
+        if self.shutdown {
+            return;
+        }
         let id = loop {
             self.next_id += 1;
             let id = format!("{OWN_ID}{}", self.next_id);
