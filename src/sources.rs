@@ -33,9 +33,13 @@ fn is_yaml(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("yml" | "yaml"))
 }
 
-/// The calls of TEXT, the file at PATH.
+/// The calls of TEXT, the file at PATH.  A Python model's `dbt.source()`
+/// reads as a call in YAML does: outside Jinja, with `#` comments.
 fn file_calls(path: &Path, text: &str) -> Vec<Call> {
-    if is_yaml(path) { scan::yaml_calls(text) } else { scan::calls(text) }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("yml" | "yaml" | "py") => scan::yaml_calls(text),
+        _ => scan::calls(text),
+    }
 }
 
 /// The argument of CALL that names TARGET, if CALL is a `source()` naming it.
@@ -394,6 +398,20 @@ models:
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["dbt_project.yml"].contains("pages: \"{{ source('raw', 'clients') }}\""), "{texts:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn renames_the_calls_of_a_python_model() {
+        let model = "def model(dbt, session):\n    # dbt.source('raw', 'orders')\n    return dbt.source(\"raw\", \"customers\")\n";
+        let files = [("dbt_project.yml", PROJECT), ("models/_sources.yml", SOURCES), ("models/py_model.py", model)];
+        let (dir, project) = scratch_project("python-calls", &files);
+        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["py_model.py"].contains("return dbt.source(\"raw\", \"clients\")"), "{texts:?}");
+        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let found = occurrences(&project, &orders);
+        assert!(!found.iter().any(|o| o.path.ends_with("py_model.py")), "a comment is no call");
         fs::remove_dir_all(&dir).unwrap();
     }
 
