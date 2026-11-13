@@ -1415,3 +1415,171 @@ fn the_summary_alone_follows_the_client_s_first_hover_format() {
         assert!(session.finish().success());
     }
 }
+
+/// A models properties file for plan 006's navigation.
+const MODELS_YML: &str = "\
+version: 2
+models:
+  - name: orders
+    description: \"{{ doc('order_status') }}\"
+    columns:
+      - name: amount
+        data_tests:
+          - is_even
+          - unique
+          - shop_utils.not_negative
+      - name: customer_id
+        data_tests:
+          - relationships:
+              to: ref('customers')
+              field: customer_id
+exposures:
+  - name: weekly
+    depends_on:
+      - source('raw', 'orders')
+unit_tests:
+  - name: t
+    model: orders
+";
+
+/// A copy of the fixture, for test NAME, with `MODELS_YML` and a generic
+/// test in the package `shop_utils`; apart from the session's scratch
+/// directory, which the session empties.
+fn navigable(name: &str) -> PathBuf {
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::write(project.join("models/marts/_models.yml"), MODELS_YML).unwrap();
+    let test = "{% test not_negative(model, column_name) %}\nselect 1\n{% endtest %}\n";
+    std::fs::write(project.join("dbt_packages/shop_utils/macros/not_negative.sql"), test).unwrap();
+    project
+}
+
+/// The position DELTA characters into the first NEEDLE of the ASCII file PATH.
+fn position_in(path: &Path, needle: &str, delta: usize) -> Value {
+    let text = std::fs::read_to_string(path).unwrap();
+    let at = text.find(needle).unwrap() + delta;
+    let line = text[..at].matches('\n').count();
+    let character = at - text[..at].rfind('\n').map_or(0, |n| n + 1);
+    json!({"textDocument": {"uri": uri(path)}, "position": {"line": line, "character": character}})
+}
+
+/// A location in FILE of PROJECT, on LINE from START to END.
+fn location(project: &Path, file: &str, line: u64, start: u64, end: u64) -> Value {
+    let range = json!({"start": {"line": line, "character": start}, "end": {"line": line, "character": end}});
+    json!({"uri": uri(&project.join(file)), "range": range})
+}
+
+#[test]
+fn a_definition_in_yaml_leads_where_dbt_looks() {
+    let project = navigable("definition-yaml");
+    let (mut session, log) =
+        Session::fake_with("definition-yaml", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let yml = project.join("models/marts/_models.yml");
+    let mut definition = |needle: &str, delta: usize| {
+        session.request("textDocument/definition", position_in(&yml, needle, delta))["result"].clone()
+    };
+    let expected = [
+        ("ref('customers')", 6, location(&project, "models/marts/customers.sql", 0, 0, 0)),
+        ("order_status", 2, location(&project, "models/docs.md", 0, 8, 20)),
+        ("name: orders", 8, location(&project, "models/marts/orders.sql", 0, 0, 0)),
+        ("- is_even", 4, location(&project, "tests/generic/is_even.sql", 0, 8, 15)),
+        (
+            "shop_utils.not_negative",
+            12,
+            location(&project, "dbt_packages/shop_utils/macros/not_negative.sql", 0, 8, 20),
+        ),
+        ("'raw', 'orders'", 9, location(&project, "models/staging/_sources.yml", 6, 14, 20)),
+        ("model: orders", 9, location(&project, "models/marts/orders.sql", 0, 0, 0)),
+        // dbt's own test is in no file of the project.
+        ("- unique", 4, Value::Null),
+    ];
+    for (needle, delta, location) in expected {
+        assert_eq!(definition(needle, delta), location, "{needle}");
+    }
+    assert!(!methods(&log).contains(&"textDocument/definition".to_owned()));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_definition_without_a_target_reaches_the_server() {
+    let project = navigable("definition-forwarded");
+    let (mut session, log) =
+        Session::fake_with("definition-forwarded", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let answers = [
+        position_in(&project.join("models/marts/_models.yml"), "customer_id", 2),
+        position_in(&project.join("dbt_project.yml"), "summary_upstream", 2),
+        position_in(&project.join("models/marts/orders.sql"), "ref('stg_orders')", 6),
+    ];
+    for params in answers {
+        let answer = session.request("textDocument/definition", params.clone());
+        assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": params}));
+    }
+    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 3);
+    // A source in SQL is the proxy's.
+    let on_source = position_in(&project.join("models/staging/stg_customers.sql"), "'customers'", 2);
+    let answer = session.request("textDocument/definition", on_source);
+    assert_eq!(answer["result"], location(&project, "models/staging/_sources.yml", 8, 14, 23));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_hover_in_yaml_shows_a_doc_s_text_and_a_test_s_signature() {
+    let project = navigable("hover-yaml");
+    let null_answer = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
+    let (mut session, _) = Session::fake_with(
+        "hover-yaml",
+        json!({"raw_answers": {"textDocument/hover": null_answer}}),
+        &[Path::new("--project-dir"), &project],
+        None,
+    );
+    session.initialize(&project);
+    let yml = project.join("models/marts/_models.yml");
+    let on_doc = session.request("textDocument/hover", position_in(&yml, "order_status", 2));
+    // In the format of a client that names none.
+    let text = "The status of an order: placed, shipped or returned.";
+    assert_eq!(on_doc["result"]["contents"], json!({"kind": "plaintext", "value": text}));
+    let on_test = session.request("textDocument/hover", position_in(&yml, "- is_even", 4));
+    let signature = "```jinja\ntest is_even(model, column_name)\n```\n\nin package `shop`";
+    assert_eq!(on_test["result"]["contents"]["value"], signature);
+    // Elsewhere, the server's null passes.
+    assert_eq!(session.request("textDocument/hover", position_in(&yml, "customer_id", 2))["result"], Value::Null);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn an_entry_s_name_is_its_node_for_hover_and_node_info() {
+    let project = navigable("hover-entry");
+    let null_answer = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
+    let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/hover": null_answer}});
+    let (mut session, _) = Session::fake_with("hover-entry", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    let on_name = position_in(&project.join("models/marts/_models.yml"), "name: orders", 8);
+    let hover = session.request("textDocument/hover", on_name.clone());
+    assert_eq!(hover["result"]["contents"]["value"], "model table, \"shop\".\"main\".\"orders\"");
+    let argument = json!({"uri": on_name["textDocument"]["uri"], "position": on_name["position"]});
+    assert_eq!(node_info(&mut session, argument)["result"]["unique_id"], "model.shop.orders");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_definition_is_the_proxy_s_or_null() {
+    let project = navigable("definition-alone");
+    let project_arg = project.to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project_arg];
+    let mut session = Session::start(&command, &[], None);
+    let result = session.initialize(&project);
+    assert_eq!(result["capabilities"]["definitionProvider"], json!(true));
+    let on_ref = position_in(&project.join("models/marts/_models.yml"), "ref('customers')", 6);
+    let found = session.request("textDocument/definition", on_ref);
+    assert_eq!(found["result"], location(&project, "models/marts/customers.sql", 0, 0, 0));
+    let on_sql_ref = position_in(&project.join("models/marts/orders.sql"), "ref('stg_orders')", 6);
+    let null = session.request("textDocument/definition", on_sql_ref);
+    assert_eq!((null.get("error"), &null["result"]), (None, &Value::Null), "{null}");
+    assert!(session.finish().success());
+}
