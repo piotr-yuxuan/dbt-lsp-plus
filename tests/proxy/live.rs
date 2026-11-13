@@ -60,6 +60,10 @@ fn document_features(session: &mut Session, project: &Path) {
     assert_eq!(names, ["orders", "customers", "final"], "the proxy's outline, not the server's tokens");
     let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&orders)}}));
     assert_eq!(folding["result"].as_array().map(Vec::len), Some(4), "{folding}");
+    // dbt lsp 2.0.9 announces no highlights: the proxy's are the CTE's definition and its three uses.
+    let on_orders = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 17, "character": 10}});
+    let highlights = session.request("textDocument/documentHighlight", on_orders);
+    assert_eq!(highlights["result"].as_array().map(Vec::len), Some(4), "{highlights}");
     // The server's hover passes through: on ref('stg_orders'), line 4.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());

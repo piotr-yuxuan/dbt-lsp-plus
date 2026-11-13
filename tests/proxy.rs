@@ -1000,3 +1000,34 @@ fn leaves_the_folding_and_selection_of_yaml_to_the_client() {
     assert_eq!(selection.get("result"), Some(&Value::Null), "{selection}");
     assert!(session.finish().success());
 }
+
+#[test]
+fn a_yaml_document_holds_no_cte() {
+    let (mut session, log) = Session::fake("yaml-cte", json!({}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/staging/notes.yml");
+    session.open(&path, Some("query: with x as (select 1) select * from x\n"));
+    let at = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 12}, "newName": "y"});
+    let forwarded = session.request("textDocument/rename", at.clone());
+    assert_eq!(forwarded["result"]["echo"], "textDocument/rename", "{forwarded}");
+    assert!(methods(&log).contains(&"textDocument/rename".to_owned()));
+    let highlight = session.request("textDocument/documentHighlight", at);
+    assert_eq!(highlight.get("result"), Some(&Value::Null), "{highlight}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn without_dbt_lsp_the_features_within_a_document_remain() {
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&path)}}));
+    assert_eq!(folding["result"].as_array().map(Vec::len), Some(4), "{folding}");
+    let on_customers =
+        json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 18, "character": 14}, "newName": "c"});
+    let renamed = session.request("textDocument/rename", on_customers);
+    assert_eq!(renamed["result"]["changes"][uri(&path)].as_array().map(Vec::len), Some(3), "{renamed}");
+    assert!(session.finish().success());
+}
