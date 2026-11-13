@@ -494,7 +494,11 @@ impl<W: Write> Proxy<W> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
             |call: &scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
-        if let Some(call) = scan::calls(&text).into_iter().find(inside) {
+        // YAML and a Python model call outside Jinja, as plan 002 reads them.
+        let plain =
+            path.extension().is_some_and(|extension| ["yml", "yaml", "py"].contains(&&*extension.to_string_lossy()));
+        let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
+        if let Some(call) = calls.into_iter().find(inside) {
             return index.named(&call.target);
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
