@@ -17,7 +17,10 @@ dbt 2, and adds what it lacks, for every editor and for agents:
   every `source()` call, in SQL, YAML, `dbt_project.yml` and Python models,
   and the declarations.  A rename keeps the warehouse relation, inserting
   `identifier:` or `schema:` with the old name, and is refused rather than
-  applied in part.
+  applied in part;
+- within a document: folding of Jinja blocks, CTEs, tags and comments;
+  highlights of a CTE's uses and of a block's tags; selection ranges from a
+  word up to the file; the rename of a CTE in its file.
 
 Every other message passes unchanged, byte for byte.  A feature that the
 server announces stays the server's, but for references and renames on a
