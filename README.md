@@ -12,11 +12,18 @@ dbt 2, and adds what it lacks, for every editor and for agents:
 - the call hierarchy: what a model, source or macro is used by, and what it
   uses, macros included, with the place of each call.  The dependencies of
   the nodes are those of `dbt.listNodes` once the server has compiled, so
-  that `ref(var('x'))` resolves; the edges of macros come from the files.
+  that `ref(var('x'))` resolves; the edges of macros come from the files;
+- references and renames of sources, which dbt lsp answers with nothing:
+  every `source()` call, in SQL, YAML, `dbt_project.yml` and Python models,
+  and the declarations.  A rename keeps the warehouse relation, inserting
+  `identifier:` or `schema:` with the old name, and is refused rather than
+  applied in part.
 
 Every other message passes unchanged, byte for byte.  A feature that the
-server announces stays the server's.  Without `dbt lsp`, or after it
-crashed, the proxy keeps serving its own features.
+server announces stays the server's, but for references and renames on a
+source; the initialize result names those under `experimental.dbtLspPlus`.
+Without `dbt lsp`, or after it crashed, the proxy keeps serving its own
+features.
 
 It uses only the server's interface, unlocks nothing that dbt gates behind
 an account, and does not ship dbt.  `docs/design.md` explains how it works
