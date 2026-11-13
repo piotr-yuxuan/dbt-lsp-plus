@@ -397,7 +397,8 @@ models:
             "original_file_path": "models/staging/_sources.yml"})
         };
         manifest["sources"] = json!({"source.shop.raw.orders": source("orders", "shop"),
-            "source.shop.raw.customers": source("customers", "shop"), "source.utils.raw.events": source("events", "utils")});
+            "source.shop.raw.customers": source("customers", "shop"),
+            "source.utils.raw.events": source("events", "utils")});
         let result = |table: &str, package: &str, status: &str, warn: Value, error: Value| {
             json!({
             "unique_id": format!("source.{package}.raw.{table}"), "status": status,
@@ -427,13 +428,15 @@ models:
             (
                 "shop",
                 1,
-                "dbt source freshness: raw.customers last loaded 2018-01-02T00:00:00Z, 3237 days ago (error after 12 hours)",
+                "dbt source freshness: raw.customers last loaded 2018-01-02T00:00:00Z, 3237 days ago \
+                 (error after 12 hours)",
                 STALE_SOURCE,
             ),
             (
                 "utils",
                 1,
-                "dbt source freshness: raw.events runtime error: Database Error in source events\n  column \"_loaded_at\" does not exist",
+                "dbt source freshness: raw.events runtime error: Database Error in source events\n  \
+                 column \"_loaded_at\" does not exist",
                 STALE_SOURCE,
             ),
         ];
