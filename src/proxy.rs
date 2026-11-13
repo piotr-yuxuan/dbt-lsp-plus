@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{features, project, sources};
+use crate::{document, features, project, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -31,17 +31,21 @@ const INTERNAL_ERROR: i64 = -32603;
 
 /// Each capability the proxy adds when the server lacks it, with the
 /// methods it then answers.
-const ADDED: [(&str, &[&str]); 3] = [
+const ADDED: [(&str, &[&str]); 6] = [
     ("documentSymbolProvider", &["textDocument/documentSymbol"]),
     ("workspaceSymbolProvider", &["workspace/symbol"]),
     (
         "callHierarchyProvider",
         &["textDocument/prepareCallHierarchy", "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"],
     ),
+    ("foldingRangeProvider", &["textDocument/foldingRange"]),
+    ("documentHighlightProvider", &["textDocument/documentHighlight"]),
+    ("selectionRangeProvider", &["textDocument/selectionRange"]),
 ];
 
-/// The requests that the proxy answers itself on a source, since dbt lsp
-/// 2.0.9 answers them with nothing there; elsewhere they go to the server.
+/// The requests that the proxy answers itself on a source, and a rename on
+/// a CTE, since dbt lsp 2.0.9 answers them with nothing there; elsewhere
+/// they go to the server.
 const SOURCE_METHODS: [&str; 2] = ["textDocument/references", "textDocument/rename"];
 
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
@@ -283,10 +287,15 @@ impl<W: Write> Proxy<W> {
     /// document that is neither.
     fn outline(&self, params: &Value) -> Option<Value> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
-        let text = self
-            .local_path(Some(uri))
-            .and_then(|path| self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok()));
+        let text = self.text_of(uri).map(|(_, text)| text);
         Some(text.map_or(Value::Null, |text| features::document_symbols(&text, self.encoding, self.hierarchical, uri)))
+    }
+
+    /// The path of the document at URI and its text, open or on disk.
+    fn text_of(&self, uri: &str) -> Option<(PathBuf, String)> {
+        let path = self.local_path(Some(uri))?;
+        let text = self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok())?;
+        Some((path, text))
     }
 
     /// The answer to the call hierarchy's METHOD, on the graph of the files
@@ -309,24 +318,32 @@ impl<W: Write> Proxy<W> {
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
     }
 
-    /// The source named at the position of a request on a document, from
-    /// the document's open text or its file.
-    fn source_at(&self, params: &Value) -> Option<(PathBuf, sources::Target)> {
-        let path = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
-        let text = self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok())?;
+    /// The document of a request, its text, open or on disk, and the offset
+    /// of the request's position in it.
+    fn document_at(&self, params: &Value) -> Option<(PathBuf, String, usize)> {
+        let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
         let offset = LineIndex::new(&text).offset_of(params.get("position")?, self.encoding)?;
+        Some((path, text, offset))
+    }
+
+    /// The source named at the position of a request on a document.
+    fn source_at(&self, params: &Value) -> Option<(PathBuf, sources::Target)> {
+        let (path, text, offset) = self.document_at(params)?;
         sources::target_at(&path, &text, offset).map(|target| (path, target))
     }
 
     /// The method under which the proxy answers a request itself: an owned
-    /// method, or references and rename on a source, which the server
-    /// answers with nothing.
+    /// method, references and rename on a source, or a rename on a CTE of a
+    /// SQL file.
     fn local_method(&self, method: &str, params: &Value) -> Option<&'static str> {
         if let Some(owned) = self.owned.get(method) {
             return Some(owned);
         }
         let method = SOURCE_METHODS.into_iter().find(|source_method| *source_method == method)?;
-        self.source_at(params).map(|_| method)
+        let (path, text, offset) = self.document_at(params)?;
+        let sql = path.extension().is_some_and(|extension| extension == "sql");
+        let cte = method == "textDocument/rename" && sql && document::cte_at(&text, offset).is_some();
+        (cte || sources::target_at(&path, &text, offset).is_some()).then_some(method)
     }
 
     /// The references or the rename of the source at the request's position.
@@ -342,6 +359,34 @@ impl<W: Write> Proxy<W> {
         Some(sources::rename(&project, &target, new, self.encoding))
     }
 
+    /// The rename of the source, else of the CTE, at the request's position.
+    fn on_rename(&self, params: &Value) -> Option<Result<Value, String>> {
+        if self.source_at(params).is_some() {
+            return self.on_source("textDocument/rename", params);
+        }
+        let (_, text, offset) = self.document_at(params)?;
+        let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
+        Some(document::rename_cte(&text, uri, offset, new, self.encoding).unwrap_or(Ok(Value::Null)))
+    }
+
+    /// The folding ranges, highlights or selection ranges of a document;
+    /// null for a document neither open nor on disk.
+    fn on_document(&self, method: &str, params: &Value) -> Option<Value> {
+        let uri = params.pointer("/textDocument/uri")?.as_str()?;
+        let sql = uri.ends_with(".sql");
+        if method == "textDocument/documentHighlight" {
+            let Some((_, text, offset)) = self.document_at(params) else { return Some(Value::Null) };
+            return Some(document::highlights(&text, sql, offset, self.encoding));
+        }
+        let Some((_, text)) = self.text_of(uri) else { return Some(Value::Null) };
+        if method == "textDocument/foldingRange" {
+            return Some(document::folding_ranges(&text, sql));
+        }
+        let index = LineIndex::new(&text);
+        let positions = params.get("positions")?.as_array()?.iter().map(|p| index.offset_of(p, self.encoding));
+        Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
+    }
+
     /// Answers a request that the proxy answers itself.  A refusal fails it
     /// with its reason; a panic while answering fails that request alone,
     /// never the session.
@@ -353,7 +398,11 @@ impl<W: Write> Proxy<W> {
                     .project()
                     .map_or(json!([]), |project| features::workspace_symbols(&project, query, self.encoding)))
             }),
-            "textDocument/references" | "textDocument/rename" => self.on_source(method, params),
+            "textDocument/references" => self.on_source(method, params),
+            "textDocument/rename" => self.on_rename(params),
+            "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
+                self.on_document(method, params).map(Ok)
+            }
             _ => self.hierarchy(method, params).map(Ok),
         }));
         match computed {

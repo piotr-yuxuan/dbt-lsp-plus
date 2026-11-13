@@ -62,7 +62,8 @@ fn forwards_the_client_s_messages_byte_for_byte_and_adds_only_missing_capabiliti
     let (mut session, log) = Session::fake("client-bytes", json!({}));
     let result = session.initialize(&fixture());
     let capabilities = &result["capabilities"];
-    for added in ["documentSymbolProvider", "workspaceSymbolProvider", "callHierarchyProvider"] {
+    let added = ["documentSymbolProvider", "workspaceSymbolProvider", "callHierarchyProvider", "foldingRangeProvider"];
+    for added in added.into_iter().chain(["documentHighlightProvider", "selectionRangeProvider"]) {
         assert_eq!(capabilities[added], json!(true), "{added}");
     }
     assert_eq!(capabilities["hoverProvider"], json!(true));
@@ -528,5 +529,67 @@ fn alone_it_still_answers_on_sources() {
     params["context"] = json!({"includeDeclaration": false});
     let found = session.request("textDocument/references", params);
     assert_eq!(found["result"].as_array().unwrap().len(), 1);
+    assert!(session.finish().success());
+}
+
+/// The position of `orders` in `from orders` in `orders.sql`, with that file's URI.
+fn on_from_orders() -> Value {
+    let path = fixture().join("models/marts/orders.sql");
+    json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 17, "character": 11}})
+}
+
+#[test]
+fn folds_highlights_and_selects_within_a_document() {
+    let (mut session, log) = Session::fake("document-features", json!({}));
+    session.initialize(&fixture());
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": orders}}));
+    let lines: Vec<(u64, u64)> = folding["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["startLine"].as_u64().unwrap(), r["endLine"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(lines, [(0, 1), (3, 4), (7, 8), (11, 18)]);
+    let highlights = session.request("textDocument/documentHighlight", on_from_orders());
+    let kinds: Vec<(u64, u64)> = highlights["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["range"]["start"]["line"].as_u64().unwrap(), h["kind"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(kinds, [(3, 3), (13, 2), (15, 2), (17, 2)]);
+    let at = json!({"textDocument": {"uri": orders}, "positions": [{"line": 17, "character": 11}]});
+    let selection = session.request("textDocument/selectionRange", at);
+    assert_eq!(
+        selection["result"][0]["range"],
+        json!({"start": {"line": 17, "character": 9}, "end": {"line": 17, "character": 15}})
+    );
+    assert_eq!(selection["result"][0]["parent"]["parent"]["range"]["start"], json!({"line": 11, "character": 0}));
+    for method in ["textDocument/foldingRange", "textDocument/documentHighlight", "textDocument/selectionRange"] {
+        assert!(!methods(&log).contains(&method.to_owned()), "{method} reached the server");
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
+fn renames_a_cte_and_forwards_other_renames() {
+    let (mut session, log) = Session::fake("cte-rename", json!({}));
+    session.initialize(&fixture());
+    let mut params = on_from_orders();
+    params["newName"] = json!("o");
+    let edit = session.request("textDocument/rename", params);
+    let edits = edit["result"]["changes"][uri(&fixture().join("models/marts/orders.sql"))].as_array().unwrap().clone();
+    let lines: Vec<u64> = edits.iter().map(|e| e["range"]["start"]["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, [3, 13, 15, 17]);
+    assert!(edits.iter().all(|e| e["newText"] == "o"));
+    let mut clash = on_from_orders();
+    clash["newName"] = json!("final");
+    assert_eq!(session.request("textDocument/rename", clash)["error"]["code"], json!(-32803));
+    assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "newName": "x"});
+    let forwarded = session.request("textDocument/rename", on_ref);
+    assert_eq!(forwarded["result"]["echo"], "textDocument/rename");
     assert!(session.finish().success());
 }
