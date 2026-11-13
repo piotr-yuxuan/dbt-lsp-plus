@@ -1674,9 +1674,12 @@ fn inlay_hints_follow_the_server_s_once_a_parse_has_finished() {
     let relation = json!({"position": {"line": 4, "character": 38}, "label": "\"shop\".\"main\".\"stg_orders\"",
                           "kind": 1, "paddingLeft": true, "tooltip": "model.shop.stg_orders"});
     assert_eq!(hints, json!([{"position": {"line": 0, "character": 0}, "label": "server"}, relation]));
-    // With an index, a hint request after a change starts no parse.
+    // With an index, a hint request after a change and its compilation
+    // starts no parse.
     let parsed = parses(&log).len();
+    session.received.clear();
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
     hints_of(&mut session, &orders);
     parses_stay(&log, parsed);
     assert!(session.finish().success());
@@ -1739,6 +1742,8 @@ fn a_parse_asks_a_client_that_can_refresh_its_hints_and_keeps_its_answer() {
     let id = refresh["id"].as_str().unwrap().to_owned();
     assert!(id.starts_with("dbt-lsp-plus/"), "{refresh}");
     barrier(&mut session);
+    let refreshes = session.received.iter().filter(|m| m["method"] == "workspace/inlayHint/refresh").count();
+    assert_eq!(refreshes, 1, "one per parse");
     assert!(!logged(&log).iter().any(|message| message["id"] == id.as_str()), "the client's answer reached the server");
     assert!(session.finish().success());
     // A client that cannot refresh is not asked.
@@ -1747,5 +1752,26 @@ fn a_parse_asks_a_client_that_can_refresh_its_hints_and_keeps_its_answer() {
     parsed_orders(&mut session);
     barrier(&mut session);
     assert!(!session.received.iter().any(|message| message["method"] == "workspace/inlayHint/refresh"));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn hints_come_from_the_open_text_of_sql_and_yaml() {
+    let (mut session, _) = Session::fake("hints-open", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    // An unsaved line above the ref moves its hint.
+    let orders = fixture().join("models/marts/orders.sql");
+    let edit = json!({"textDocument": {"uri": uri(&orders), "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "-- new\n"}]});
+    session.notify("textDocument/didChange", edit);
+    let hints = hints_of(&mut session, &orders);
+    assert_eq!(hints["result"][0]["position"], json!({"line": 5, "character": 38}), "{hints}");
+    // In YAML, a ref outside Jinja; the server's null becomes the proxy's hint.
+    let yml = fixture().join("models/staging/_sources.yml");
+    let text = "version: 2\nmodels:\n  - name: x\n    data_tests:\n      - relationships:\n          arguments:\n            to: ref('stg_orders')\n";
+    session.open(&yml, Some(text));
+    let hints = hints_of(&mut session, &yml);
+    assert_eq!(hints["result"][0]["position"], json!({"line": 6, "character": 33}), "{hints}");
     assert!(session.finish().success());
 }
