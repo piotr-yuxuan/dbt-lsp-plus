@@ -517,6 +517,19 @@ fn an_empty_first_listing_counts_as_failed_and_leaves_the_scanned_graph() {
 }
 
 #[test]
+fn only_the_first_document_opened_prompts_a_listing() {
+    let (mut session, log) = Session::fake("first-open", json!({}));
+    session.initialize(&fixture());
+    for path in ["models/marts/orders.sql", "models/marts/customers.sql", "models/staging/stg_orders.sql"] {
+        session.open(&fixture().join(path), None);
+    }
+    barrier(&mut session);
+    barrier(&mut session);
+    assert_eq!(listings(&log, "*"), 1);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_failed_first_listing_leaves_the_scanned_graph() {
     let failed = json!({"error": "Compilation failed", "error_kind": "compilation_failed", "nodes": []});
     let (mut session, log) = Session::fake("failed-first", json!({"answers": {ALL: failed}}));

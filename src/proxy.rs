@@ -101,6 +101,8 @@ struct Proxy<W: Write> {
     /// The client's requests that the server has yet to answer.
     forwarded: HashMap<String, (Value, Pending)>,
     documents: HashMap<PathBuf, String>,
+    /// Whether the client opened a document, the first of which prompts a listing.
+    opened: bool,
     next_id: u64,
     /// The proxy's `dbt.listNodes` in flight: its id, its selector's slot, when it was sent.
     listing: Option<(String, usize, Instant)>,
@@ -162,6 +164,7 @@ impl<W: Write> Proxy<W> {
             initialize: None,
             forwarded: HashMap::new(),
             documents: HashMap::new(),
+            opened: false,
             next_id: 0,
             listing: None,
             listed: Vec::new(),
@@ -428,7 +431,8 @@ impl<W: Write> Proxy<W> {
                 self.track(method, params);
                 // The server gets the change before the listing it prompts.
                 self.send_server(&frame.body);
-                if CHANGES.contains(&method) || (method == "textDocument/didOpen" && self.nodes.is_none()) {
+                let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
+                if CHANGES.contains(&method) || first_open {
                     self.list_nodes();
                 }
             }
