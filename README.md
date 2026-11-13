@@ -20,7 +20,8 @@ dbt 2, and adds what it lacks, for every editor and for agents:
   applied in part;
 - within a document: folding of Jinja blocks, CTEs, tags and comments;
   highlights of a CTE's uses and of a block's tags; selection ranges from a
-  word up to the file; the rename of a CTE in its file.
+  word up to the file; the rename of a CTE in its file, refused when a
+  string in a Jinja tag names it, since a macro may render it as SQL.
 
 Every other message passes unchanged, byte for byte.  A feature that the
 server announces stays the server's, but for references and renames on a

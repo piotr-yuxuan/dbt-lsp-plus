@@ -58,7 +58,6 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     listing and the teardown of the server process, each a resource's end;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
-  - `scan::mask_code`: its second caller comes with the CTE uses of plan 003;
   - `Proxy::local_method`, `Proxy::on_source`, `Proxy::on_rename` and
     `Proxy::on_document`: the routing of a request the proxy may answer
     itself, and one answer per kind of request, as for the owned methods;

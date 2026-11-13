@@ -227,14 +227,19 @@ rename of a CTE, which the server answers with null:
 - Selection ranges: the word, the Jinja tag, a CTE's or block's content,
   the CTE or block, and the whole text, each containing the one before.
 - Folding and selection ranges are for SQL and Markdown: on a YAML file the
-  proxy answers null, and the client folds and selects by indentation.
+  proxy answers null, so that a client that falls back on null, as VS Code
+  does, folds and selects by indentation; one that does not gets nothing,
+  as it got before the proxy announced folding.
 - CTE rename, in a SQL file: the definition and every use, whole words
   (whose neighbours are no letter, digit, `_` or `$`) outside Jinja,
   comments and strings, within the innermost block that defines the CTE,
   not after a `.`, matched without regard to case unless quoted.  A new
   name must be a plain identifier and not another CTE's.  A rename is
-  refused when the name appears inside a Jinja tag, strings included: a
-  macro such as `is_positive('orders.amount')` renders its argument as SQL.
+  refused when the name appears in a string inside a Jinja tag, as in
+  `is_positive('orders.amount')`, since a macro may render it as SQL; the
+  arguments of `ref` and `source`, which name models and sources, and the
+  names of functions do not count.  A name a macro builds, as in `'ord' ~
+  'ers'`, cannot be seen.
 - Without a server, all of these still answer.
 
 ## Failure modes
