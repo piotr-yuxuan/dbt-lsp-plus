@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{features, project};
+use crate::{features, project, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -39,6 +39,10 @@ const ADDED: [(&str, &[&str]); 3] = [
         &["textDocument/prepareCallHierarchy", "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"],
     ),
 ];
+
+/// The requests that the proxy answers itself on a source, since dbt lsp
+/// 2.0.9 answers them with nothing there; elsewhere they go to the server.
+const SOURCE_METHODS: [&str; 2] = ["textDocument/references", "textDocument/rename"];
 
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
@@ -200,6 +204,9 @@ impl<W: Write> Proxy<W> {
     fn initialize_alone(&mut self, id: &Value) {
         let mut capabilities = serde_json::Map::new();
         capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2}));
+        // Alone, the proxy still answers references and renames of sources.
+        capabilities.insert("referencesProvider".into(), json!(true));
+        capabilities.insert("renameProvider".into(), json!(true));
         self.add_capabilities(&mut capabilities);
         let info = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
         self.send_client(
@@ -302,18 +309,56 @@ impl<W: Write> Proxy<W> {
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
     }
 
-    /// Answers a request of a feature that the proxy owns.  A panic while
-    /// answering fails that request alone, never the session.
+    /// The source named at the position of a request on a document, from
+    /// the document's open text or its file.
+    fn source_at(&self, params: &Value) -> Option<(PathBuf, sources::Target)> {
+        let path = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
+        let text = self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok())?;
+        let offset = LineIndex::new(&text).offset_of(params.get("position")?, self.encoding)?;
+        sources::target_at(&path, &text, offset).map(|target| (path, target))
+    }
+
+    /// The method under which the proxy answers a request itself: an owned
+    /// method, or references and rename on a source, which the server
+    /// answers with nothing.
+    fn local_method(&self, method: &str, params: &Value) -> Option<&'static str> {
+        if let Some(owned) = self.owned.get(method) {
+            return Some(owned);
+        }
+        let method = SOURCE_METHODS.into_iter().find(|source_method| *source_method == method)?;
+        self.source_at(params).map(|_| method)
+    }
+
+    /// The references or the rename of the source at the request's position.
+    fn on_source(&self, method: &str, params: &Value) -> Option<Result<Value, String>> {
+        let (Some(project), Some((_, target))) = (self.project(), self.source_at(params)) else {
+            return Some(Ok(Value::Null));
+        };
+        if method == "textDocument/references" {
+            let declarations = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
+            return Some(Ok(sources::references(&project, &target, declarations, self.encoding)));
+        }
+        let new = params.get("newName")?.as_str()?;
+        Some(sources::rename(&project, &target, new, self.encoding))
+    }
+
+    /// Answers a request that the proxy answers itself.  A refusal fails it
+    /// with its reason; a panic while answering fails that request alone,
+    /// never the session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value) {
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
-            "textDocument/documentSymbol" => self.outline(params),
+            "textDocument/documentSymbol" => self.outline(params).map(Ok),
             "workspace/symbol" => params.get("query").and_then(Value::as_str).map(|query| {
-                self.project().map_or(json!([]), |project| features::workspace_symbols(&project, query, self.encoding))
+                Ok(self
+                    .project()
+                    .map_or(json!([]), |project| features::workspace_symbols(&project, query, self.encoding)))
             }),
-            _ => self.hierarchy(method, params),
+            "textDocument/references" | "textDocument/rename" => self.on_source(method, params),
+            _ => self.hierarchy(method, params).map(Ok),
         }));
         match computed {
-            Ok(Some(result)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
+            Ok(Some(Ok(result))) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
+            Ok(Some(Err(reason))) => self.reply_error(id, REQUEST_FAILED, &reason),
             Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
             Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
@@ -431,7 +476,7 @@ impl<W: Write> Proxy<W> {
             (_, Some("dbt.listNodes")) => Pending::Listing,
             _ => Pending::Request,
         };
-        match (self.owned.get(method).copied(), &self.server, method) {
+        match (self.local_method(method, params), &self.server, method) {
             (Some(owned), ..) => self.answer(owned, id, params),
             (None, Some(_), _) => {
                 self.forwarded.insert(key(id), (id.clone(), pending));

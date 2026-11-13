@@ -457,3 +457,76 @@ fn a_failed_first_listing_leaves_the_scanned_graph() {
     assert_eq!(details(&incoming["result"], "from"), expected);
     assert!(session.finish().success());
 }
+
+/// The position of `page_views` in `stg_page_views.sql`, with that file's URI.
+fn on_page_views() -> Value {
+    let path = fixture().join("models/staging/stg_page_views.sql");
+    json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 37}})
+}
+
+#[test]
+fn answers_references_on_a_source_and_forwards_the_others() {
+    let (mut session, log) = Session::fake("source-references", json!({}));
+    session.initialize(&fixture());
+    let mut params = on_page_views();
+    params["context"] = json!({"includeDeclaration": true});
+    let found = session.request("textDocument/references", params);
+    let mut files: Vec<&str> = found["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["uri"].as_str().unwrap().rsplit('/').next().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["_sources.yml", "stg_page_views.sql"]);
+    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    // On a ref, the server answers.
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "context": {"includeDeclaration": true}});
+    let forwarded = session.request("textDocument/references", on_ref);
+    assert_eq!(forwarded["result"]["echo"], "textDocument/references");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn renames_a_source_table_and_keeps_its_relation() {
+    let (mut session, log) = Session::fake("source-rename", json!({}));
+    session.initialize(&fixture());
+    let mut params = on_page_views();
+    params["newName"] = json!("visits");
+    let edit = session.request("textDocument/rename", params);
+    let changes = edit["result"]["changes"].as_object().unwrap();
+    let model = &changes[&uri(&fixture().join("models/staging/stg_page_views.sql"))];
+    assert_eq!(
+        model,
+        &json!([{"range": {"start": {"line": 0, "character": 35}, "end": {"line": 0, "character": 45}}, "newText": "visits"}])
+    );
+    let yaml: Vec<&str> = changes[&uri(&fixture().join("models/staging/_sources.yml"))]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap())
+        .collect();
+    assert_eq!(yaml, ["visits", "\n        identifier: page_views"]);
+    assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
+    let mut refused = on_page_views();
+    refused["newName"] = json!("it's");
+    let error = session.request("textDocument/rename", refused);
+    assert_eq!(error["error"]["code"], json!(-32803));
+    assert!(error["error"]["message"].as_str().unwrap().contains("cannot hold"), "{error}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_it_still_answers_on_sources() {
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    let result = session.initialize(&fixture());
+    assert_eq!(result["capabilities"]["referencesProvider"], json!(true));
+    let mut params = on_page_views();
+    params["context"] = json!({"includeDeclaration": false});
+    let found = session.request("textDocument/references", params);
+    assert_eq!(found["result"].as_array().unwrap().len(), 1);
+    assert!(session.finish().success());
+}
