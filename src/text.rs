@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+//! Positions in a text: LSP's line and character, and byte offsets.
+
+use serde_json::{Value, json};
+use std::fs;
+use std::path::Path;
+
+/// The text of the file at PATH, without the byte order mark that editors
+/// leave out of a document's text and so of its positions.
+pub fn read(path: &Path) -> Option<String> {
+    let mut text = fs::read_to_string(path).ok()?;
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
+    }
+    Some(text)
+}
+
+/// The unit in which LSP counts characters, as the server announced it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Encoding {
+    Utf8,
+    Utf16,
+    Utf32,
+}
+
+impl Encoding {
+    /// The encoding that `positionEncoding` names; UTF-16 when absent, as LSP says.
+    pub fn parse(name: Option<&str>) -> Encoding {
+        match name {
+            Some("utf-8") => Encoding::Utf8,
+            Some("utf-32") => Encoding::Utf32,
+            _ => Encoding::Utf16,
+        }
+    }
+
+    fn units(self, c: char) -> usize {
+        match self {
+            Encoding::Utf8 => c.len_utf8(),
+            Encoding::Utf16 => c.len_utf16(),
+            Encoding::Utf32 => 1,
+        }
+    }
+}
+
+/// The start of each line of a text.
+pub struct LineIndex<'a> {
+    text: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    /// A line ends at `\n`, `\r\n` or a lone `\r`, as LSP says.
+    pub fn new(text: &'a str) -> Self {
+        let bytes = text.as_bytes();
+        let ends = |&(at, &byte): &(usize, &u8)| byte == b'\n' || (byte == b'\r' && bytes.get(at + 1) != Some(&b'\n'));
+        let breaks = bytes.iter().enumerate().filter(ends).map(|(at, _)| at + 1);
+        LineIndex { text, starts: std::iter::once(0).chain(breaks).collect() }
+    }
+
+    /// The LSP position of a byte OFFSET.
+    pub fn position(&self, offset: usize, encoding: Encoding) -> Value {
+        // An offset inside a character counts from that character's start, never panics.
+        let mut offset = offset.min(self.text.len());
+        while !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let line = self.starts.partition_point(|&start| start <= offset) - 1;
+        let start = self.starts[line];
+        let character: usize = self.text[start..offset].chars().map(|c| encoding.units(c)).sum();
+        json!({"line": line, "character": character})
+    }
+
+    /// The LSP range from START to END, two byte offsets.
+    pub fn range(&self, start: usize, end: usize, encoding: Encoding) -> Value {
+        json!({"start": self.position(start, encoding), "end": self.position(end, encoding)})
+    }
+
+    /// The byte offset of LINE and CHARACTER; past the end of a line, the end
+    /// of that line, and past the last line, the end of the text.
+    pub fn offset(&self, line: u64, character: u64, encoding: Encoding) -> usize {
+        let Some(&start) = usize::try_from(line).ok().and_then(|line| self.starts.get(line)) else {
+            return self.text.len();
+        };
+        let mut units = 0;
+        for (at, c) in self.text[start..].char_indices() {
+            if units >= character as usize || c == '\n' || c == '\r' {
+                return start + at;
+            }
+            units += encoding.units(c);
+        }
+        self.text.len()
+    }
+
+    /// The byte offset of an LSP position object, if it is one.
+    pub fn offset_of(&self, position: &Value, encoding: Encoding) -> Option<usize> {
+        let line = position.get("line")?.as_u64()?;
+        let character = position.get("character")?.as_u64()?;
+        Some(self.offset(line, character, encoding))
+    }
+}
+
+/// Applies one `TextDocumentContentChangeEvent` to TEXT.  A change without
+/// text is ignored: the document keeps its last known content.
+pub fn apply_change(text: &mut String, change: &Value, encoding: Encoding) {
+    let Some(new_text) = change.get("text").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(range) = change.get("range") else {
+        *text = new_text.to_owned();
+        return;
+    };
+    let index = LineIndex::new(text);
+    let start = range.get("start").and_then(|p| index.offset_of(p, encoding));
+    let end = range.get("end").and_then(|p| index.offset_of(p, encoding));
+    if let (Some(start), Some(end)) = (start, end) {
+        text.replace_range(start..end.max(start), new_text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // "é" is one UTF-16 unit and two UTF-8 bytes; "𝄞" is two UTF-16 units.
+    const TEXT: &str = "select 'é𝄞' as x\r\nfrom t\n";
+
+    #[test]
+    fn counts_characters_in_the_announced_unit() {
+        let index = LineIndex::new(TEXT);
+        let x = TEXT.find(" as").unwrap();
+        assert_eq!(index.position(x, Encoding::Utf16), json!({"line": 0, "character": 12}));
+        assert_eq!(index.position(x, Encoding::Utf8), json!({"line": 0, "character": 15}));
+        assert_eq!(index.position(x, Encoding::Utf32), json!({"line": 0, "character": 11}));
+        assert_eq!(index.offset(0, 12, Encoding::Utf16), x);
+    }
+
+    #[test]
+    fn clamps_positions_past_a_line_or_the_text() {
+        let index = LineIndex::new(TEXT);
+        assert_eq!(index.offset(0, 99, Encoding::Utf16), TEXT.find('\r').unwrap());
+        assert_eq!(index.offset(1, 4, Encoding::Utf16), TEXT.find(" t").unwrap());
+        assert_eq!(index.offset(9, 0, Encoding::Utf16), TEXT.len());
+        assert_eq!(index.position(TEXT.len(), Encoding::Utf16), json!({"line": 2, "character": 0}));
+    }
+
+    #[test]
+    fn a_lone_carriage_return_ends_a_line() {
+        let text = "a\rb\r\nc\nd";
+        let index = LineIndex::new(text);
+        assert_eq!(index.position(2, Encoding::Utf16), json!({"line": 1, "character": 0}));
+        assert_eq!(index.position(5, Encoding::Utf16), json!({"line": 2, "character": 0}));
+        assert_eq!(index.offset(3, 0, Encoding::Utf16), 7);
+    }
+
+    #[test]
+    fn applies_incremental_and_full_changes() {
+        let mut text = TEXT.to_owned();
+        let change = json!({"range": {"start": {"line": 1, "character": 5},
+                                      "end": {"line": 1, "character": 6}},
+                            "text": "orders"});
+        apply_change(&mut text, &change, Encoding::Utf16);
+        assert_eq!(text, "select 'é𝄞' as x\r\nfrom orders\n");
+        // Character 10 falls inside the surrogate pair of "𝄞": it snaps to the
+        // next character boundary rather than splitting the character.
+        let mid_surrogate = json!({"range": {"start": {"line": 0, "character": 10},
+                                             "end": {"line": 0, "character": 11}},
+                                   "text": "-"});
+        apply_change(&mut text, &mid_surrogate, Encoding::Utf16);
+        assert_eq!(text, "select 'é𝄞-' as x\r\nfrom orders\n");
+        let no_text = json!({"range": {"start": {"line": 0, "character": 0},
+                                       "end": {"line": 0, "character": 3}}});
+        apply_change(&mut text, &no_text, Encoding::Utf16);
+        assert!(text.starts_with("select"));
+        apply_change(&mut text, &json!({"text": "new"}), Encoding::Utf16);
+        assert_eq!(text, "new");
+    }
+}
