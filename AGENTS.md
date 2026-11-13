@@ -65,4 +65,6 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     written where it goes; which lines keep the relation; when it is
     refused; where `dbt_project.yml` configures a source), with tests of
     its own;
-  - `sources::argument_naming`: which argument of a call names a target.
+  - `sources::argument_naming`: which argument of a call names a target;
+  - `yaml::Node::shares`: a walk of the tree, which needs a function of its
+    own to recurse.

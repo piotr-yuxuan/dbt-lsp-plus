@@ -194,11 +194,14 @@ minutes, so only a unit test of the abandonment covers it.
   - it is declared in an installed package, or an installed package calls
     it: `dbt deps` would undo the edit, and a root `overrides:` would keep
     the old name;
-  - its properties file shares YAML through anchors or merge keys, so that
-    a name, a schema or an identifier may come from elsewhere;
+  - its properties file holds an alias or a merge key anywhere, so that a
+    name, a schema or an identifier may come from elsewhere;
   - the source already declares the new name;
   - a line must go into an entry in flow style (`{name: t}`), a JSON file
     included;
+  - an edited YAML file would no longer parse, as when a flow collection
+    spans lines that look like blocks, or a new name with `: ` goes into a
+    plain `to:` value;
   - the new name is empty, or breaks the quotes it goes in.
 - Without a server, the proxy announces references and rename too, for
   sources; on anything else they fail as other requests do.
@@ -247,6 +250,8 @@ The server is not restarted after a crash.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the
   customers`, can unmask a later comment: a call commented out after it
   counts as a reference, and a rename edits it.
+- `selectors.yml` and selectors on the command line name a source as
+  `source:s.t`; a rename leaves them on the old name.
 
 ## Tests
 
