@@ -92,6 +92,14 @@ fn node_information(session: &mut Session, project: &Path) {
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
     let kept = value.split_once("\n\n---\n\n").map(|(_, server)| server.trim());
     assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
+    // Inlay hints: dbt lsp 2.0.9 answers [] on a model; the proxy's relations follow.
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 100, "character": 0}});
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let hints = session.request("textDocument/inlayHint", json!({"textDocument": {"uri": orders}, "range": range}));
+    let labels: Vec<&str> = hints["result"].as_array().unwrap().iter().filter_map(|h| h["label"].as_str()).collect();
+    let expected = ["\"shop\".\"main\".\"stg_orders\"", "\"shop\".\"main\".\"stg_customers\""];
+    assert_eq!(labels, expected, "{hints}");
+    assert_eq!(hints["result"][0]["position"], json!({"line": 4, "character": 38}), "{hints}");
 }
 
 /// The proxy's outline and folding of a model, the outline of a properties
