@@ -37,6 +37,17 @@ impl Node {
         }
     }
 
+    /// Whether an alias or a merge key appears anywhere in this node, so that
+    /// a value under it may come from elsewhere in its document.
+    pub fn shares(&self) -> bool {
+        match self {
+            Node::Alias => true,
+            Node::Seq(items) => items.iter().any(Node::shares),
+            Node::Map(entries) => entries.iter().any(|(key, value)| key.as_str() == Some("<<") || value.shares()),
+            Node::Scalar { .. } => false,
+        }
+    }
+
     /// The items of a sequence; nothing for any other node.
     pub fn items(&self) -> &[Node] {
         match self {

@@ -586,9 +586,14 @@ models:
         let merged = "x-raw: &raw\n  schema: raw_data\nsources:\n  - name: crm\n    <<: *raw\n    tables:\n      - name: accounts\n";
         let aliased =
             "sources:\n  - name: eu\n    tables: &tables\n      - name: charges\n  - name: us\n    tables: *tables\n";
+        // The schema, or the identifier, is the name itself through a scalar anchor.
+        let schema = "sources:\n  - name: &n raw\n    schema: *n\n    tables:\n      - name: t\n";
+        let identifier = "sources:\n  - name: s\n    tables:\n      - name: &t t\n        identifier: *t\n";
         for (name, yaml, target) in [
             ("merged", merged, Target::Source { source: "crm".into() }),
             ("aliased", aliased, Target::Table { source: "eu".into(), table: "charges".into() }),
+            ("scalar-schema", schema, Target::Source { source: "raw".into() }),
+            ("scalar-identifier", identifier, Target::Table { source: "s".into(), table: "t".into() }),
         ] {
             let (dir, project) = scratch_project(name, &[("dbt_project.yml", PROJECT), ("models/s.yml", yaml)]);
             let error = rename(&project, &target, "renamed", Encoding::Utf16, &uri).unwrap_err();

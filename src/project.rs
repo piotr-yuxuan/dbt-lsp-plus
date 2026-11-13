@@ -66,9 +66,8 @@ pub struct SourceTable {
     pub table_insertion: Insertion,
     /// Without `identifier:`, dbt takes the table's name for its identifier.
     pub has_identifier: bool,
-    /// Whether its file's sources share YAML through an alias or a merge
-    /// key, so that a name, a schema or an identifier may come from
-    /// elsewhere in the file.
+    /// Whether its file shares YAML through an alias or a merge key, so that
+    /// a name, a schema or an identifier may come from elsewhere in it.
     pub anchored: bool,
 }
 
@@ -195,14 +194,10 @@ fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(St
 pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable> {
     let Some(root) = yaml::parse(text) else { return Vec::new() };
     let index = LineIndex::new(text);
-    let sources = root.get("sources").map_or(&[][..], Node::items);
-    let shares = |node: &Node| matches!(node, Node::Alias) || node.get("<<").is_some();
-    let anchored = sources.iter().any(|source| {
-        let tables = source.get("tables");
-        shares(source) || tables.is_some_and(shares) || tables.map_or(&[][..], Node::items).iter().any(shares)
-    });
+    // An anchor anywhere in the file may hold a name, a schema or an identifier.
+    let anchored = root.shares();
     let mut found = Vec::new();
-    for source in sources {
+    for source in root.get("sources").map_or(&[][..], Node::items) {
         let own = source.entry("name").filter(|_| source.get("overrides").is_none());
         let Some((key, value)) = own else { continue };
         let Some((source_name, source_range, source_insertion)) = placed(text, &index, key, value) else { continue };
