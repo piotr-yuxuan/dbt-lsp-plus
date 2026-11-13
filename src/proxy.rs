@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, navigation, project, scan, sources};
+use crate::{config, document, features, navigation, project, runs, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use url::Url;
 
 /// The prefix of the ids of the requests that the proxy itself sends to the
@@ -75,6 +75,26 @@ enum Event {
     Server(Frame),
     ServerClosed,
     Parsed(config::Outcome),
+    /// The failures of the last run, when its results were written; none
+    /// for results of a command that builds nothing.
+    Runs(Option<Vec<runs::Failure>>, SystemTime),
+}
+
+/// How often the files of the last run are looked at.
+const RUNS_EVERY: Duration = Duration::from_secs(1);
+
+/// What the proxy knows of each file's diagnostics, by its path as the root
+/// maps it.
+#[derive(Default)]
+struct Diagnostics {
+    /// The server's last diagnostics, with the URI it named the file by.
+    server: HashMap<PathBuf, (String, Vec<Value>)>,
+    /// The failures of the last run.
+    failures: HashMap<PathBuf, Vec<runs::Failure>>,
+    /// When the client last changed or saved each document.
+    edited: HashMap<PathBuf, SystemTime>,
+    /// The URI under which the proxy last published.
+    published: HashMap<PathBuf, String>,
 }
 
 struct Server {
@@ -175,6 +195,7 @@ struct Proxy<W: Write> {
     hint_refresh: bool,
     /// The proxy's own requests to the client, whose answers stay here.
     asked: HashSet<String>,
+    diagnostics: Diagnostics,
     parsing: Parsing,
 }
 
@@ -240,6 +261,7 @@ impl<W: Write> Proxy<W> {
             markdown: false,
             hint_refresh: false,
             asked: HashSet::new(),
+            diagnostics: Diagnostics::default(),
             parsing: Parsing::default(),
         };
         if let Some(root) = root {
@@ -311,6 +333,7 @@ impl<W: Write> Proxy<W> {
         capabilities.insert("renameProvider".into(), json!(true));
         capabilities.insert("definitionProvider".into(), json!(true));
         self.add_capabilities(&mut capabilities);
+        self.watch_runs();
         let info = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
         self.send_client(
             &json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": capabilities, "serverInfo": info}}),
@@ -374,6 +397,13 @@ impl<W: Write> Proxy<W> {
     fn track(&mut self, method: &str, params: &Value) {
         let uri = params.pointer("/textDocument/uri").and_then(Value::as_str);
         let Some(path) = self.local_path(uri) else { return };
+        // A file changed since the last run: its failures may no longer hold.
+        if matches!(method, "textDocument/didChange" | "textDocument/didSave") {
+            self.diagnostics.edited.insert(path.clone(), SystemTime::now());
+            if self.diagnostics.failures.remove(&path).is_some() {
+                self.publish(&path);
+            }
+        }
         match method {
             "textDocument/didOpen" => {
                 let text = params.pointer("/textDocument/text").and_then(Value::as_str).unwrap_or_default();
@@ -907,39 +937,150 @@ impl<W: Write> Proxy<W> {
     /// id has the proxy's prefix and answers no request of the client's.
     fn on_server(&mut self, frame: Frame) {
         let Some(message) = &frame.value else { return self.send_client_body(&frame.body) };
-        if let (None, Some(id)) = (message.get("method"), message.get("id")) {
-            let pending = self.forwarded.remove(&key(id));
-            if let (None, Some(own)) = (&pending, id.as_str())
-                && own.starts_with(OWN_ID)
-            {
-                return self.on_own_response(own, message);
-            }
-            if let Some((_, Pending::Listing)) = pending {
-                self.resume();
-            }
-            if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown)) {
-                return self.send_client(&merged);
-            }
-            if self.initialize.as_ref() == Some(id) {
-                self.initialize = None;
-                let mut message = message.clone();
-                let encoding = message.pointer("/result/capabilities/positionEncoding").and_then(Value::as_str);
-                self.encoding = Encoding::parse(encoding);
-                if let Some(capabilities) = message.pointer_mut("/result/capabilities").and_then(Value::as_object_mut) {
-                    self.add_capabilities(capabilities);
+        match (message.get("method").and_then(Value::as_str), message.get("id")) {
+            (None, Some(id)) => self.on_server_response(id, message, &frame.body),
+            // The server has resolved the packages: dbt may parse, for a
+            // request that wanted an index before.
+            (Some("dbt/lspCompileComplete"), _) => {
+                self.parsing.compiled = true;
+                if std::mem::take(&mut self.parsing.wanted) {
+                    self.want_index();
                 }
-                return self.send_client(&message);
+                self.send_client_body(&frame.body);
+            }
+            (Some("textDocument/publishDiagnostics"), None) => self.on_server_diagnostics(message, &frame.body),
+            _ => self.send_client_body(&frame.body),
+        }
+    }
+
+    /// A response of the server, BODY as it came: to a request of the
+    /// client's, forwarded as its pending kind makes it, or to one of the
+    /// proxy's own, kept.
+    fn on_server_response(&mut self, id: &Value, message: &Value, body: &[u8]) {
+        let pending = self.forwarded.remove(&key(id));
+        if let (None, Some(own)) = (&pending, id.as_str())
+            && own.starts_with(OWN_ID)
+        {
+            return self.on_own_response(own, message);
+        }
+        if let Some((_, Pending::Listing)) = pending {
+            self.resume();
+        }
+        if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown)) {
+            return self.send_client(&merged);
+        }
+        if self.initialize.as_ref() == Some(id) {
+            self.initialize = None;
+            let mut message = message.clone();
+            let encoding = message.pointer("/result/capabilities/positionEncoding").and_then(Value::as_str);
+            self.encoding = Encoding::parse(encoding);
+            if let Some(capabilities) = message.pointer_mut("/result/capabilities").and_then(Value::as_object_mut) {
+                self.add_capabilities(capabilities);
+            }
+            self.send_client(&message);
+            return self.watch_runs();
+        }
+        self.send_client_body(body);
+    }
+
+    /// The server's diagnostics of a file, BODY as it came: forwarded as
+    /// they are, unless the last run failed there too.
+    fn on_server_diagnostics(&mut self, message: &Value, body: &[u8]) {
+        let uri = message.pointer("/params/uri").and_then(Value::as_str);
+        let Some(path) = self.local_path(uri) else { return self.send_client_body(body) };
+        let diagnostics = message.pointer("/params/diagnostics").and_then(Value::as_array).cloned().unwrap_or_default();
+        self.diagnostics.server.insert(path.clone(), (uri.unwrap_or_default().to_owned(), diagnostics));
+        if !self.diagnostics.failures.contains_key(&path) {
+            self.diagnostics.published.insert(path, uri.unwrap_or_default().to_owned());
+            return self.send_client_body(body);
+        }
+        self.publish(&path);
+    }
+
+    /// Watches the files of the user's last run, in the target path
+    /// (`DBT_TARGET_PATH`, else `target` under the root), from a thread
+    /// that reads them when their size or time changes and reports their
+    /// failures to the loop.
+    fn watch_runs(&mut self) {
+        let (Some(root), Some(events)) = (self.root.clone(), self.parsing.events.clone()) else { return };
+        let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
+        let (results, manifest) = (target.join("run_results.json"), target.join("manifest.json"));
+        thread::spawn(move || {
+            let stamp = |path: &Path| fs::metadata(path).ok().map(|meta| (meta.modified().ok(), meta.len()));
+            let read = |path: &Path| fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            let mut seen = None;
+            loop {
+                thread::sleep(RUNS_EVERY);
+                let now = (stamp(&results), stamp(&manifest));
+                if now.0.is_none() || now.1.is_none() || seen.as_ref() == Some(&now) {
+                    continue;
+                }
+                // A file read while dbt writes it is read again next time.
+                let (Some(found), Some(index)) = (read(&results), read(&manifest)) else { continue };
+                seen = Some(now);
+                let written = now.0.and_then(|(time, _)| time).unwrap_or(SystemTime::UNIX_EPOCH);
+                if events.send(Event::Runs(runs::failures(&found, &index), written)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// The failures of the last run, its results written at WRITTEN: by the
+    /// path of each package's file, those of a file changed since left out;
+    /// each file whose failures change is published again.
+    fn on_runs(&mut self, found: Option<Vec<runs::Failure>>, written: SystemTime) {
+        let (Some(found), Some(project)) = (found, self.project()) else { return };
+        let edited = |path: &Path| {
+            let saved = fs::metadata(path).and_then(|meta| meta.modified()).is_ok_and(|time| time > written);
+            saved || self.diagnostics.edited.get(path).is_some_and(|time| *time > written)
+        };
+        let mut failures: HashMap<PathBuf, Vec<runs::Failure>> = HashMap::new();
+        for failure in found {
+            let Some(path) = project.packages.get(&failure.package).map(|dir| dir.join(&failure.path)) else {
+                continue;
+            };
+            if !edited(&path) {
+                failures.entry(path).or_default().push(failure);
             }
         }
-        // The server has resolved the packages: dbt may parse, for a request
-        // that wanted an index before.
-        if message.get("method") == Some(&json!("dbt/lspCompileComplete")) {
-            self.parsing.compiled = true;
-            if std::mem::take(&mut self.parsing.wanted) {
-                self.want_index();
-            }
+        let previous = std::mem::replace(&mut self.diagnostics.failures, failures);
+        let mut changed: Vec<PathBuf> = previous.keys().chain(self.diagnostics.failures.keys()).cloned().collect();
+        changed.sort();
+        changed.dedup();
+        changed.retain(|path| previous.get(path) != self.diagnostics.failures.get(path));
+        changed.iter().for_each(|path| self.publish(path));
+    }
+
+    /// Publishes PATH's diagnostics, the server's last and the proxy's own,
+    /// under the server's URI for it, else the client's, else the file's,
+    /// with no version; the URI last published under, if another, gets
+    /// none.  Nothing after `shutdown`.
+    fn publish(&mut self, path: &Path) {
+        if self.shutdown {
+            return;
         }
-        self.send_client_body(&frame.body);
+        let server = self.diagnostics.server.get(path);
+        let uri = server.map(|(uri, _)| uri.clone());
+        let uri = uri.or_else(|| self.uris.get(path).cloned()).unwrap_or_else(|| features::uri(path));
+        let mut diagnostics = server.map(|(_, diagnostics)| diagnostics.clone()).unwrap_or_default();
+        // The failures, placed in the text as it stands.
+        let failures = self.diagnostics.failures.get(path).map_or(&[][..], Vec::as_slice);
+        let text = self.documents.get(path).cloned().or_else(|| text::read(path)).unwrap_or_default();
+        let lines = LineIndex::new(&text);
+        diagnostics.extend(failures.iter().map(|failure| {
+            let range = runs::locate(&text, &failure.place);
+            json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
+                   "source": "dbt-lsp-plus", "code": "last-run", "message": failure.message})
+        }));
+        let publish = |uri: &str, diagnostics: Vec<Value>| {
+            json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                   "params": {"uri": uri, "diagnostics": diagnostics}})
+        };
+        if let Some(old) = self.diagnostics.published.insert(path.to_owned(), uri.clone()).filter(|old| *old != uri) {
+            self.send_client(&publish(&old, Vec::new()));
+        }
+        self.send_client(&publish(&uri, diagnostics));
     }
 
     /// The server is gone: answer what it left unanswered, once each, and
@@ -1011,6 +1152,7 @@ impl<W: Write> Proxy<W> {
             Event::Server(frame) => self.on_server(frame),
             Event::ServerClosed => self.on_server_closed(),
             Event::Parsed(outcome) => self.on_parsed(outcome),
+            Event::Runs(found, written) => self.on_runs(found, written),
         }
         false
     }

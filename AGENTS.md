@@ -67,6 +67,9 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     and the answer it keeps;
   - `runs::place`: where a failed node is written, apart from how it
     failed;
+  - `Proxy::on_server_response`, `Proxy::on_server_diagnostics` and
+    `Proxy::on_runs`: one handler per kind of message or event, so that
+    `on_server` and `handle` stay dispatches;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition` and `Proxy::on_document`: the
     routing of a request the proxy may answer itself (by its method, then
