@@ -964,16 +964,22 @@ fn folds_highlights_and_selects_within_a_document() {
 fn renames_a_cte_and_forwards_other_renames() {
     let (mut session, log) = Session::fake("cte-rename", json!({}));
     session.initialize(&fixture());
-    let mut params = on_from_orders();
-    params["newName"] = json!("o");
-    let edit = session.request("textDocument/rename", params);
-    let edits = edit["result"]["changes"][uri(&fixture().join("models/marts/orders.sql"))].as_array().unwrap().clone();
+    let orders_sql = uri(&fixture().join("models/marts/orders.sql"));
+    let on_customers =
+        json!({"textDocument": {"uri": orders_sql}, "position": {"line": 18, "character": 14}, "newName": "c"});
+    let edit = session.request("textDocument/rename", on_customers.clone());
+    let edits = edit["result"]["changes"][&orders_sql].as_array().unwrap_or_else(|| panic!("no edit: {edit}")).clone();
     let lines: Vec<u64> = edits.iter().map(|e| e["range"]["start"]["line"].as_u64().unwrap()).collect();
-    assert_eq!(lines, [3, 13, 15, 17]);
-    assert!(edits.iter().all(|e| e["newText"] == "o"));
-    let mut clash = on_from_orders();
+    assert_eq!(lines, [7, 14, 18]);
+    assert!(edits.iter().all(|e| e["newText"] == "c"));
+    let mut clash = on_customers;
     clash["newName"] = json!("final");
     assert_eq!(session.request("textDocument/rename", clash)["error"]["code"], json!(-32803));
+    // is_positive('orders.amount') names the CTE orders inside Jinja.
+    let mut in_jinja = on_from_orders();
+    in_jinja["newName"] = json!("o");
+    let refused = session.request("textDocument/rename", in_jinja);
+    assert!(refused["error"]["message"].as_str().unwrap_or_default().contains("inside Jinja"), "{refused}");
     assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
     let orders = uri(&fixture().join("models/marts/orders.sql"));
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "newName": "x"});

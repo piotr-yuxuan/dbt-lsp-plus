@@ -152,6 +152,15 @@ pub fn rename_cte(
     encoding: Encoding,
 ) -> Option<Result<Value, String>> {
     let (cte, uses) = cte_at(text, offset)?;
+    // A macro may render a string argument as SQL, as in is_positive('orders.amount').
+    let in_jinja =
+        scan::tags(text).into_iter().find(|tag| !scan::whole_words(&text[tag.clone()], &cte.name).is_empty());
+    if let Some(tag) = in_jinja {
+        return Some(Err(format!(
+            "{} names {} inside Jinja, which a macro may render: rename it by hand",
+            &text[tag], cte.name
+        )));
+    }
     if !IDENTIFIER.is_match(new) {
         return Some(Err(format!("{new} is not a plain identifier")));
     }
@@ -273,23 +282,29 @@ mod tests {
 
     #[test]
     fn renames_a_cte_and_refuses_a_clash_or_a_bad_name() {
-        let offset = ORDERS.find("from orders").unwrap() + 6;
-        let edit = rename_cte(ORDERS, "file:///o.sql", offset, "o", Encoding::Utf16).unwrap().unwrap();
-        let mut text = ORDERS.to_owned();
-        let mut edits: Vec<&Value> = edit["changes"]["file:///o.sql"].as_array().unwrap().iter().collect();
-        edits.sort_by_key(|e| {
-            std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64()))
-        });
-        for e in edits {
-            crate::text::apply_change(&mut text, &json!({"range": e["range"], "text": e["newText"]}), Encoding::Utf16);
-        }
-        assert!(text.contains("with o as (") && text.contains("o.order_id") && text.contains("from o\n"));
-        assert!(text.contains("{{ ref('stg_orders') }}") && text.contains("is_positive('orders.amount')"));
-        let clash = rename_cte(ORDERS, "file:///o.sql", offset, "Customers", Encoding::Utf16).unwrap();
+        let uri = "file:///o.sql";
+        let offset = ORDERS.find("left join customers").unwrap() + 12;
+        let edit = rename_cte(ORDERS, uri, offset, "c", Encoding::Utf16).unwrap().unwrap();
+        let text = applied(ORDERS, &edit, uri);
+        assert!(text.contains("\nc as (") && text.contains("c.first_name") && text.contains("left join c using"));
+        assert!(text.contains("{{ ref('stg_customers') }}"), "{text}");
+        let clash = rename_cte(ORDERS, uri, offset, "Final", Encoding::Utf16).unwrap();
         assert!(clash.unwrap_err().contains("another CTE"));
-        assert!(rename_cte(ORDERS, "file:///o.sql", offset, "a b", Encoding::Utf16).unwrap().is_err());
-        assert!(rename_cte(ORDERS, "file:///o.sql", 0, "x", Encoding::Utf16).is_none());
+        for bad in ["a b", "1x", "x-y", ""] {
+            assert!(rename_cte(ORDERS, uri, offset, bad, Encoding::Utf16).unwrap().is_err(), "{bad:?}");
+        }
+        assert!(rename_cte(ORDERS, uri, offset, "Customers", Encoding::Utf16).unwrap().is_ok(), "a case of its own");
+        assert!(rename_cte(ORDERS, uri, 0, "x", Encoding::Utf16).is_none());
     }
+
+    #[test]
+    fn refuses_to_rename_a_cte_that_jinja_names() {
+        // is_positive renders its argument, 'orders.amount', as SQL.
+        let offset = ORDERS.find("from orders").unwrap() + 6;
+        let refused = rename_cte(ORDERS, "file:///o.sql", offset, "o", Encoding::Utf16).unwrap();
+        assert!(refused.unwrap_err().contains("inside Jinja"));
+    }
+
     #[test]
     fn a_cte_s_uses_are_its_words_in_code_and_in_its_block() {
         let text =
