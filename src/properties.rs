@@ -73,11 +73,13 @@ pub fn entries(text: &str) -> Vec<Entry> {
             Node::Scalar { line, column, .. } => Some((*line, *column)),
             _ => None,
         });
-        // A `name:` still being typed is empty, and placed at the next token.
+        // A `name:` still being typed is empty, and placed at the next token;
+        // a block scalar's name holds a line break, as written or as read.
         let named = item.get("name").and_then(|name| project::written(text, &index, name));
-        let (Some((line, column)), Some((name, name_range))) =
-            (first, named.filter(|(name, _)| !name.trim().is_empty()))
-        else {
+        let usable = |(name, range): &(String, Range<usize>)| {
+            !name.trim().is_empty() && !name.contains(['\n', '\r']) && !text[range.clone()].contains(['\n', '\r'])
+        };
+        let (Some((line, column)), Some((name, name_range))) = (first, named.filter(usable)) else {
             continue;
         };
         let start = index.offset(line as u64, column as u64, Encoding::Utf32);
@@ -100,7 +102,8 @@ pub fn entries(text: &str) -> Vec<Entry> {
             let last = lines.filter(content).last();
             start..last.map_or(end, |(line_start, line)| line_start + line.trim_end().len())
         };
-        // A block scalar's name runs past its line: no symbol can hold it.
+        // LSP wants the selection inside the range; a name placed elsewhere
+        // by the parser makes no symbol.
         if name_range.start < range.start || range.end < name_range.end {
             continue;
         }
@@ -308,6 +311,11 @@ groups:
                 "models:\n  - name: \"\"\n  - name: '  '\n  - name: |\n      orders\n  - name: kept\n",
                 vec![model.clone()],
             ),
+            // A block scalar's name with another key after it, in each line end
+            // and chomping that keeps a line break.
+            ("models:\n  - name: |\n      orders\n    description: x\n  - name: kept\n", vec![model.clone()]),
+            ("models:\r\n  - name: |\r\n      orders\r\n  - name: kept\r\n", vec![model.clone()]),
+            ("models:\n  - name: |-\n      a\n      b\n    description: x\n  - name: kept\n", vec![model.clone()]),
         ];
         for (text, expected) in texts {
             assert_eq!(named(text), expected, "{text}");
@@ -315,6 +323,14 @@ groups:
                 assert_eq!(&text[entry.range.clone()], "name: kept", "{text}");
             }
         }
+    }
+
+    #[test]
+    fn a_block_scalar_name_on_one_line_is_a_name() {
+        let text = "models:\n  - name: |-\n      orders\n    description: x\n";
+        let found = entries(text);
+        assert_eq!(named(text), [("model", "orders".to_owned())]);
+        assert_eq!(&text[found[0].name_range.clone()], "orders");
     }
 
     #[test]
