@@ -46,6 +46,15 @@ pub struct Entry {
     pub name_range: Range<usize>,
 }
 
+/// A generic test that a properties file names: the package its name
+/// gives, if any, its name, and where the whole name is written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Test {
+    pub package: Option<String>,
+    pub name: String,
+    pub range: Range<usize>,
+}
+
 /// The entries that NODE, of LABEL, holds, in the order of the text, each
 /// with its label; an alias holds none, its anchor being elsewhere.
 fn held<'a>(node: &'a Node, label: &str) -> Vec<(&'a Node, &'static str)> {
@@ -110,6 +119,49 @@ pub fn entries(text: &str) -> Vec<Entry> {
         found.push(Entry { label, name, range, name_range });
         pending.extend(held(item, label).into_iter().rev());
     }
+    found
+}
+
+/// The generic tests that the properties file TEXT names in its
+/// `data_tests:` and `tests:` lists below the top level, at any depth, in
+/// the order of the text: an item (`- unique`), the one key of an item
+/// (`- relationships: {...}`), or an item's `test_name:`.  The top level's
+/// lists describe singular tests; an alias names none.
+pub fn tests(text: &str) -> Vec<Test> {
+    let Some(Node::Map { entries: top, .. }) = yaml::parse(text) else { return Vec::new() };
+    let index = LineIndex::new(text);
+    let mut pending: Vec<&Node> = top.iter().map(|(_, value)| value).collect();
+    let mut found = Vec::new();
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Seq(items) => pending.extend(items),
+            Node::Map { entries, .. } => {
+                for (key, value) in entries {
+                    if matches!(key.as_str(), Some("data_tests" | "tests")) {
+                        let named = value.items().iter().filter_map(|item| match item {
+                            Node::Map { entries, .. } if item.get("test_name").is_none() => match &entries[..] {
+                                [(key, _)] => Some(key),
+                                _ => None,
+                            },
+                            Node::Map { .. } => item.get("test_name"),
+                            _ => Some(item),
+                        });
+                        let written = named.filter_map(|name| project::written(text, &index, name));
+                        found.extend(written.map(|(written, range)| {
+                            let (package, name) = match written.split_once('.') {
+                                Some((package, name)) => (Some(package.to_owned()), name.to_owned()),
+                                None => (None, written),
+                            };
+                            Test { package, name, range }
+                        }));
+                    }
+                    pending.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    found.sort_by_key(|test| test.range.start);
     found
 }
 
@@ -342,6 +394,70 @@ groups:
         assert_eq!(named(text), [("model", "x".to_owned()), ("model", "y".to_owned())]);
         assert_eq!(&text[found[0].range.clone()], "<<: *base\n    name: x\n    columns: *cols");
         assert_eq!(&text[found[1].range.clone()], "name: y");
+    }
+
+    #[test]
+    fn finds_the_generic_tests_named_below_the_top_level() {
+        let text = "\
+version: 2
+data_tests:
+  - name: singular_one
+    description: not a generic test
+anchors:
+  - &shared [hidden]
+models:
+  - name: orders
+    data_tests:
+      - shop_utils.not_negative:
+          column_name: amount
+    columns:
+      - name: id
+        data_tests:
+          - unique
+          - name: custom_name
+            test_name: not_null
+          - relationships:
+              to: ref('customers')
+              field: id
+    versions:
+      - v: 2
+        columns:
+          - name: id
+            tests: [is_even]
+seeds:
+  - name: s
+    tests:
+      - \"accepted_values\":
+          values: [a]
+sources:
+  - name: raw
+    data_tests: [source_level]
+    tables:
+      - name: t
+        tests:
+          - table_level
+        columns:
+          - name: c
+            data_tests: *shared
+";
+        let found = tests(text);
+        let names: Vec<(Option<&str>, &str)> =
+            found.iter().map(|test| (test.package.as_deref(), test.name.as_str())).collect();
+        let expected = [
+            (Some("shop_utils"), "not_negative"),
+            (None, "unique"),
+            (None, "not_null"),
+            (None, "relationships"),
+            (None, "is_even"),
+            (None, "accepted_values"),
+            (None, "source_level"),
+            (None, "table_level"),
+        ];
+        assert_eq!(names, expected);
+        let written: Vec<&str> = found.iter().map(|test| &text[test.range.clone()]).collect();
+        assert_eq!(written[0], "shop_utils.not_negative");
+        assert_eq!(written[2], "not_null");
+        assert_eq!(written[5], "accepted_values");
     }
 
     #[test]
