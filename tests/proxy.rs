@@ -74,7 +74,8 @@ fn forwards_the_client_s_messages_byte_for_byte_and_adds_only_missing_capabiliti
     let (mut session, log) = Session::fake("client-bytes", json!({}));
     let result = session.initialize(&fixture());
     let capabilities = &result["capabilities"];
-    for added in ["documentSymbolProvider", "workspaceSymbolProvider", "callHierarchyProvider"] {
+    let added = ["documentSymbolProvider", "workspaceSymbolProvider", "callHierarchyProvider", "foldingRangeProvider"];
+    for added in added.into_iter().chain(["documentHighlightProvider", "selectionRangeProvider"]) {
         assert_eq!(capabilities[added], json!(true), "{added}");
     }
     assert_eq!(capabilities["hoverProvider"], json!(true));
@@ -889,7 +890,7 @@ fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
 
 #[test]
 fn tells_which_requests_it_answers_itself() {
-    let answered = json!({"version": 1, "references": ["source"], "rename": ["source"]});
+    let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"]});
     let capabilities = json!({"textDocumentSync": 2, "experimental": {"server": 1}});
     let (mut session, _) = Session::fake("experimental", json!({"capabilities": capabilities}));
     let result = session.initialize(&fixture());
@@ -916,5 +917,117 @@ fn source_positions_follow_the_server_s_encoding() {
     let found = session.request("textDocument/references", at);
     let range = json!({"start": {"line": 0, "character": 44}, "end": {"line": 0, "character": 54}});
     assert_eq!(found["result"], json!([{"uri": uri(&model), "range": range}]));
+    assert!(session.finish().success());
+}
+
+/// The position of `orders` in `from orders` in `orders.sql`, with that file's URI.
+fn on_from_orders() -> Value {
+    let path = fixture().join("models/marts/orders.sql");
+    json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 17, "character": 11}})
+}
+
+#[test]
+fn folds_highlights_and_selects_within_a_document() {
+    let (mut session, log) = Session::fake("document-features", json!({}));
+    session.initialize(&fixture());
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": orders}}));
+    let lines: Vec<(u64, u64)> = folding["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["startLine"].as_u64().unwrap(), r["endLine"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(lines, [(0, 1), (3, 4), (7, 8), (11, 18)]);
+    let highlights = session.request("textDocument/documentHighlight", on_from_orders());
+    let kinds: Vec<(u64, u64)> = highlights["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["range"]["start"]["line"].as_u64().unwrap(), h["kind"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(kinds, [(3, 3), (13, 2), (15, 2), (17, 2)]);
+    let at = json!({"textDocument": {"uri": orders}, "positions": [{"line": 17, "character": 11}]});
+    let selection = session.request("textDocument/selectionRange", at);
+    assert_eq!(
+        selection["result"][0]["range"],
+        json!({"start": {"line": 17, "character": 9}, "end": {"line": 17, "character": 15}})
+    );
+    assert_eq!(selection["result"][0]["parent"]["parent"]["range"]["start"], json!({"line": 11, "character": 0}));
+    for method in ["textDocument/foldingRange", "textDocument/documentHighlight", "textDocument/selectionRange"] {
+        assert!(!methods(&log).contains(&method.to_owned()), "{method} reached the server");
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
+fn renames_a_cte_and_forwards_other_renames() {
+    let (mut session, log) = Session::fake("cte-rename", json!({}));
+    session.initialize(&fixture());
+    let orders_sql = uri(&fixture().join("models/marts/orders.sql"));
+    let on_customers =
+        json!({"textDocument": {"uri": orders_sql}, "position": {"line": 18, "character": 14}, "newName": "c"});
+    let edit = session.request("textDocument/rename", on_customers.clone());
+    let edits = edit["result"]["changes"][&orders_sql].as_array().unwrap_or_else(|| panic!("no edit: {edit}")).clone();
+    let lines: Vec<u64> = edits.iter().map(|e| e["range"]["start"]["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, [7, 14, 18]);
+    assert!(edits.iter().all(|e| e["newText"] == "c"));
+    let mut clash = on_customers;
+    clash["newName"] = json!("final");
+    assert_eq!(session.request("textDocument/rename", clash)["error"]["code"], json!(-32803));
+    // The Jinja string 'orders.amount', which is_positive renders as SQL, names the CTE orders.
+    let mut in_jinja = on_from_orders();
+    in_jinja["newName"] = json!("o");
+    let refused = session.request("textDocument/rename", in_jinja);
+    assert!(refused["error"]["message"].as_str().unwrap_or_default().contains("Jinja string"), "{refused}");
+    assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "newName": "x"});
+    let forwarded = session.request("textDocument/rename", on_ref);
+    assert_eq!(forwarded["result"]["echo"], "textDocument/rename");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn leaves_the_folding_and_selection_of_yaml_to_the_client() {
+    let (mut session, _) = Session::fake("yaml-folding", json!({}));
+    session.initialize(&fixture());
+    let yaml = uri(&fixture().join("models/staging/_sources.yml"));
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": yaml}}));
+    assert_eq!(folding.get("result"), Some(&Value::Null), "{folding}");
+    let at = json!({"textDocument": {"uri": yaml}, "positions": [{"line": 2, "character": 4}]});
+    let selection = session.request("textDocument/selectionRange", at);
+    assert_eq!(selection.get("result"), Some(&Value::Null), "{selection}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_yaml_document_holds_no_cte() {
+    let (mut session, log) = Session::fake("yaml-cte", json!({}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/staging/notes.yml");
+    session.open(&path, Some("query: with x as (select 1) select * from x\n"));
+    let at = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 12}, "newName": "y"});
+    let forwarded = session.request("textDocument/rename", at.clone());
+    assert_eq!(forwarded["result"]["echo"], "textDocument/rename", "{forwarded}");
+    assert!(methods(&log).contains(&"textDocument/rename".to_owned()));
+    let highlight = session.request("textDocument/documentHighlight", at);
+    assert_eq!(highlight.get("result"), Some(&Value::Null), "{highlight}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn without_dbt_lsp_the_features_within_a_document_remain() {
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&path)}}));
+    assert_eq!(folding["result"].as_array().map(Vec::len), Some(4), "{folding}");
+    let on_customers =
+        json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 18, "character": 14}, "newName": "c"});
+    let renamed = session.request("textDocument/rename", on_customers);
+    assert_eq!(renamed["result"]["changes"][uri(&path)].as_array().map(Vec::len), Some(3), "{renamed}");
     assert!(session.finish().success());
 }

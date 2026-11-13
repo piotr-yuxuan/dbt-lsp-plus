@@ -57,6 +57,16 @@ impl<'a> LineIndex<'a> {
         LineIndex { text, starts: std::iter::once(0).chain(breaks).collect() }
     }
 
+    /// The line, from 0, of a byte OFFSET.
+    pub fn line(&self, offset: usize) -> usize {
+        self.starts.partition_point(|&start| start <= offset) - 1
+    }
+
+    /// The byte offset at which LINE starts; the end of the text past the last line.
+    pub fn line_start(&self, line: usize) -> usize {
+        self.starts.get(line).copied().unwrap_or(self.text.len())
+    }
+
     /// The LSP position of a byte OFFSET.
     pub fn position(&self, offset: usize, encoding: Encoding) -> Value {
         // An offset inside a character counts from that character's start, never panics.
@@ -64,7 +74,7 @@ impl<'a> LineIndex<'a> {
         while !self.text.is_char_boundary(offset) {
             offset -= 1;
         }
-        let line = self.starts.partition_point(|&start| start <= offset) - 1;
+        let line = self.line(offset);
         let start = self.starts[line];
         let character: usize = self.text[start..offset].chars().map(|c| encoding.units(c)).sum();
         json!({"line": line, "character": character})

@@ -55,8 +55,9 @@ owns all state and writes both outputs.
   `name:` under `sources:`, in a file the scan holds, and forwards every
   other one.  It says so under the standard `capabilities.experimental`,
   merged with the server's: `"dbtLspPlus": {"version": 1, "references":
-  ["source"], "rename": ["source"]}` names, per request, the kinds of target
-  it answers project-wide, and dbt-mode steps aside for exactly those.
+  ["source"], "rename": ["source", "cte"]}` names, per request, the kinds of
+  target it answers itself, a source project-wide and a CTE within its
+  file, and dbt-mode steps aside for exactly those.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
   with a flat list of tokens, so the proxy owns it.  A later server that
@@ -207,7 +208,39 @@ minutes, so only a unit test of the abandonment covers it.
     that value may be a plain scalar, where `#`, `: `, `,` or a space at an
     edge would change it while the file still parses.
 - Without a server, the proxy announces references and rename too, for
-  sources; on anything else they fail as other requests do.
+  sources and CTEs; on anything else they fail as other requests do.
+
+## Within a document
+
+The proxy adds three capabilities that need one document alone, and the
+rename of a CTE, which the server answers with null:
+
+- Folding: every Jinja block (`if`, `for`, `call`, `filter`, `macro` and
+  the others), CTEs and multi-line Jinja tags (`region`), and multi-line
+  `{# #}` comments and, in SQL, `/* */` comments (`comment`), by line.  A
+  closer alone at the start of its line stays visible, its whitespace
+  control (`-}}`) included; a tag or comment left open runs to the end of
+  the text.  Of the ranges that start on one line, the longest comes first,
+  since some clients keep only the first.
+- Highlights: on a CTE, its definition (write) and its uses (read); on a tag
+  of a Jinja block, every tag of the block, `elif` and `else` included.
+- Selection ranges: the word, the Jinja tag, a CTE's or block's content,
+  the CTE or block, and the whole text, each containing the one before.
+- Folding and selection ranges are for SQL and Markdown: on a YAML file the
+  proxy answers null, so that a client that falls back on null, as VS Code
+  does, folds and selects by indentation; one that does not gets nothing,
+  as it got before the proxy announced folding.
+- CTE rename, in a SQL file: the definition and every use, whole words
+  (whose neighbours are no letter, digit, `_` or `$`) outside Jinja,
+  comments and strings, within the innermost block that defines the CTE,
+  not after a `.`, matched without regard to case unless quoted.  A new
+  name must be a plain identifier and not another CTE's.  A rename is
+  refused when the name appears in a string inside a Jinja tag, as in
+  `is_positive('orders.amount')`, since a macro may render it as SQL; the
+  arguments of `ref` and `source`, which name models and sources, and the
+  names of functions do not count.  A name a macro builds, as in `'ord' ~
+  'ers'`, cannot be seen.
+- Without a server, all of these still answer.
 
 ## Failure modes
 
@@ -255,6 +288,8 @@ The server is not restarted after a crash.
   counts as a reference, and a rename edits it.
 - `selectors.yml` and selectors on the command line name a source as
   `source:s.t`; a rename leaves them on the old name.
+- A column or an alias spelt like a CTE counts as one of its uses, for its
+  highlights and its rename.
 
 ## Tests
 
@@ -311,7 +346,8 @@ In the order of the feature list agreed with the dbt-mode session:
    server's own hover.  This is the first feature that needs a request to
    wait for the server, so the event loop must hold a client request until
    the server answers.
-3. Folding ranges (A7) from the outline already computed.
+3. Folding ranges (A7), with highlights, selection ranges and CTE rename:
+   done in plan 003.
 4. A cache of the scan, keyed by path, modification time and size.  The
    review of plan 001 measured about 300 ms per scan on 1,500 models with
    13 MB of YAML properties, every YAML file being parsed whole for its
