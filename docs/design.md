@@ -231,25 +231,31 @@ thread looks at `run_results.json` and `manifest.json` in the target path
 (`DBT_TARGET_PATH` in the proxy's environment, else `target` under the
 root; dbt 2.0.9 refuses `target-path` in `dbt_project.yml`) every second,
 by size and time, and reads them when either changed, off the loop, a file
-that does not read as JSON being read again next time.  Results of a
-command that builds nothing (`compile`, `show`) leave the failures as they
-are; any other run replaces them all, a partial one included, as dbt's file
-does.  Each result's id is looked up in the manifest there; an id it lacks
+that does not read as JSON being read again when dbt changes it.  Only a
+`build`, `run`, `test`, `seed` or `snapshot` replaces the failures, a
+partial one included, as dbt's file does; any other command's results
+(`compile`, `show`) leave them as they are.  Each result's id is looked up in the manifest there; an id it lacks
 gives nothing.
 
 - A node's error: Error at its file's first line, dbt's message.
 - A test that failed: Error, `<test> failed: <n> rows`; warned: Warning;
-  errored: dbt's message.  A generic test at its name under its node's
-  entry in the properties file (a model, seed or snapshot; a source and
-  its table for a test on a source), then its column's (a versioned
-  model's columns are under `versions:`, so its entry holds them), else
-  at the entry's name; a singular test at its file's first line; a unit
-  test at its entry.  A package's node at its file in that package.
+  errored: dbt's message; a unit test that failed or errored: Error.  A
+  generic test at its name under its node's entry in the properties file
+  (a model, seed or snapshot; for a test on a source, the source its
+  `depends_on` names and its table), then its column's (a quoted column's
+  quotes left out; of a versioned model's columns, the one holding the
+  test), a test of the entry itself and not of one it holds; else at the
+  entry's name; a singular test at its file's first line; a unit test at
+  its entry; a function at its file.  A package's node at its file in
+  that package.
 - `source: "dbt-lsp-plus"`, `code: "last-run"`, no `version`.
 
 The places are found again in the file's text, open or on disk, at each
-publication.  A file the client changes or saves after the run loses its
-failures, as does one whose file is newer than the results.  Per file, the
+publication, its entries and tests read once.  A file the client changes
+or saves after the run loses its failures, as does one whose file is newer
+than the results; when the server has diagnostics for it, the proxy
+publishes nothing then, since their ranges are of the text before the
+edit, and the server's next publication goes out without the failures.  Per file, the
 proxy keeps the server's last diagnostics and URI and the URI it last
 published under: the server's notification passes byte for byte for a file
 without failures, else the proxy publishes the server's diagnostics with
@@ -529,7 +535,14 @@ The server is not restarted after a crash.
   highlights and its rename.
 - The last run's target path is the proxy's `DBT_TARGET_PATH`, not the
   shell's where the user ran dbt, and a run's `--target-path` is not seen.
-  A failure stays until a new run, an edit of its file, or a save.
+  A failure stays until a new run, an edit of its file, or a save; on a
+  file the server also reports, until the server's next publication.  Of
+  two tests of one name on one entry, a failure goes to the first.  A
+  local package linked into `dbt_packages` has its failures under the
+  link's path, which an edit of the real file does not clear.  When the
+  server names one file by two URIs, the proxy keeps the last.
+- The outline shows a versioned model's columns, those of its versions
+  included, as the model's.
 - An inlay hint's node is looked up as the hover's, an enabled one first,
   then the root project, not the calling file's package as dbt 2.0.9 does
   for a `ref`.  In a Python model or YAML, a `#` comment between a `ref`'s
