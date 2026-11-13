@@ -22,6 +22,10 @@ pub const NODE_INFO: &str = "dbt-lsp-plus.nodeInfo";
 /// How long a parse may run before it is killed.
 pub const PARSE_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long a cache beside this process's may go unwritten before it is
+/// taken for a dead process's.
+const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
+
 /// The flags of `dbt lsp` that `dbt parse` takes too and that change what it
 /// reads.
 const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "--packages-install-path"];
@@ -62,15 +66,17 @@ pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
     base.join("dbt-lsp-plus").join(format!("{key:016x}")).join(std::process::id().to_string())
 }
 
-/// Removes the caches beside CACHE whose process is gone, as when a signal
-/// killed it before it could remove its own.
+/// Removes the caches beside CACHE that no parse wrote for a day, as a
+/// proxy killed by a signal leaves.  No process is asked whether it lives:
+/// a home shared between hosts holds the caches of processes this host
+/// cannot see, and a parse under way keeps its log fresh.
 pub fn remove_stale(cache: &Path) {
     let own = cache.file_name();
     let siblings = cache.parent().and_then(|parent| fs::read_dir(parent).ok()).into_iter().flatten().flatten();
     for sibling in siblings.filter(|sibling| Some(sibling.file_name().as_os_str()) != own) {
-        let pid = sibling.file_name().to_string_lossy().into_owned();
-        let alive = Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-        if pid.parse::<u32>().is_ok() && !alive {
+        let log = fs::metadata(sibling.path().join("parse.log")).or_else(|_| sibling.metadata());
+        let age = log.and_then(|meta| meta.modified()).ok().and_then(|modified| modified.elapsed().ok());
+        if age.is_some_and(|age| age > STALE_AFTER) {
             let _ = fs::remove_dir_all(sibling.path());
         }
     }
@@ -390,13 +396,16 @@ mod tests {
     }
 
     #[test]
-    fn removes_the_caches_of_dead_processes_only() {
-        let dir = scratch_project("stale-caches", &[("key/4194305/target/manifest.json", "{}"), ("key/x/keep", "")]);
+    fn removes_the_caches_unwritten_for_a_day_only() {
+        let dir = scratch_project("stale-caches", &[("key/old/parse.log", ""), ("key/new/parse.log", "")]);
+        let day_ago = std::time::SystemTime::now() - STALE_AFTER - Duration::from_secs(60);
+        File::options().write(true).open(dir.join("key/old/parse.log")).unwrap().set_modified(day_ago).unwrap();
         let own = dir.join("key").join(std::process::id().to_string());
         fs::create_dir_all(&own).unwrap();
+        File::create(own.join("parse.log")).unwrap().set_modified(day_ago).unwrap();
         remove_stale(&own);
-        // No process can have a pid above the kernel's largest, 4194304.
-        assert!(!dir.join("key/4194305").exists() && own.exists() && dir.join("key/x").exists());
+        assert!(!dir.join("key/old").exists(), "unwritten for a day");
+        assert!(dir.join("key/new").exists() && own.exists(), "recent, or this process's own");
         fs::remove_dir_all(&dir).unwrap();
     }
 
