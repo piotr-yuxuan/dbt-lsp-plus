@@ -325,7 +325,10 @@ impl<W: Write> Proxy<W> {
             let incoming = method == "callHierarchy/incomingCalls";
             return Some(features::calls(&project, &graph, id, incoming, self.encoding));
         }
-        let path = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
+        // A document that is no file, such as an unsaved buffer, holds no resource.
+        let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else {
+            return Some(Value::Null);
+        };
         let text = project.texts.get(&path).map_or("", String::as_str);
         let offset = LineIndex::new(text).offset_of(params.get("position")?, self.encoding)?;
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))

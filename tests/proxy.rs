@@ -321,6 +321,12 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
     assert_eq!(hover["error"]["code"], json!(-32803));
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    // A document that is no file holds no resource.
+    let document = json!({"uri": "untitled:Untitled-1", "languageId": "sql", "version": 1, "text": "select 1"});
+    session.notify("textDocument/didOpen", json!({"textDocument": document}));
+    let untitled = json!({"textDocument": {"uri": "untitled:Untitled-1"}, "position": {"line": 0, "character": 0}});
+    let prepared = session.request("textDocument/prepareCallHierarchy", untitled);
+    assert_eq!(prepared.get("result"), Some(&Value::Null), "{prepared}");
     assert_eq!(show_messages(&session), 1, "the proxy warns once");
     assert!(session.finish().success());
 }
