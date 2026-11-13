@@ -10,10 +10,12 @@ use serde_json::{Value, json};
 use std::ops::Range;
 use std::sync::LazyLock;
 
-/// The folding ranges of TEXT, by line: its blocks and, when it is SQL, its
-/// CTEs (`region`), its multi-line Jinja tags (`region`) and its multi-line
-/// comments (`comment`).  A closer alone at the start of its line stays
-/// visible: the range ends on the line before.
+/// The folding ranges of TEXT, by line: its Jinja blocks, its multi-line
+/// Jinja tags and, when it is SQL, its CTEs (`region`); its multi-line
+/// comments, Jinja's always and SQL's when it is SQL (`comment`).  A closer
+/// alone at the start of its line stays visible: the range ends on the line
+/// before.  The longest of the ranges that start on one line comes first,
+/// since some clients keep only the first.
 pub fn folding_ranges(text: &str, sql: bool) -> Value {
     let index = LineIndex::new(text);
     let fold = |start: usize, closer: usize, kind: &'static str| {
@@ -23,13 +25,22 @@ pub fn folding_ranges(text: &str, sql: bool) -> Value {
         }
         (last > first).then_some((first, last, kind))
     };
+    // Where the closer of SPAN starts, with its whitespace control; a span
+    // left open runs to the end of the text, with no closer.
+    let closer = |span: &Range<usize>| {
+        let written = &text[span.clone()];
+        let closed = written.len() >= 4 && ["}}", "%}", "#}", "*/"].iter().any(|closer| written.ends_with(closer));
+        let end = if closed { span.end - 2 } else { span.end };
+        if closed && text[..end].ends_with(['-', '+']) { end - 1 } else { end }
+    };
     let symbols =
         scan::outline(text, sql).into_iter().map(|symbol| fold(symbol.range.start, symbol.inner.end, "region"));
-    let tags = scan::tags(text).into_iter().map(|tag| fold(tag.start, tag.end.saturating_sub(2), "region"));
-    let comments =
-        scan::comments(text).into_iter().map(|comment| fold(comment.start, comment.end.saturating_sub(2), "comment"));
-    let mut ranges: Vec<(usize, usize, &str)> = symbols.chain(tags).chain(comments).flatten().collect();
-    ranges.sort();
+    let blocks = block_tags(text).into_iter().map(|tags| fold(tags[0].start, tags[tags.len() - 1].start, "region"));
+    let tags = scan::tags(text).into_iter().map(|tag| fold(tag.start, closer(&tag), "region"));
+    let comments = scan::comments(text).into_iter().filter(|comment| sql || text[comment.clone()].starts_with("{#"));
+    let comments = comments.map(|comment| fold(comment.start, closer(&comment), "comment"));
+    let mut ranges: Vec<(usize, usize, &str)> = symbols.chain(blocks).chain(tags).chain(comments).flatten().collect();
+    ranges.sort_by_key(|&(first, last, kind)| (first, std::cmp::Reverse(last), kind));
     ranges.dedup_by_key(|(first, last, _)| (*first, *last));
     let ranges =
         ranges.into_iter().map(|(first, last, kind)| json!({"startLine": first, "endLine": last, "kind": kind}));
@@ -99,6 +110,10 @@ pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize], encoding: Enco
     let mut candidates = scan::tags(text);
     for symbol in scan::outline(text, sql) {
         candidates.extend([symbol.inner, symbol.range]);
+    }
+    for tags in block_tags(text) {
+        let (opening, closing) = (&tags[0], &tags[tags.len() - 1]);
+        candidates.extend([opening.end..closing.start, opening.start..closing.end]);
     }
     candidates.push(0..text.len());
     let chain = |&offset: &usize| {
@@ -261,5 +276,82 @@ mod tests {
         assert!(clash.unwrap_err().contains("another CTE"));
         assert!(rename_cte(ORDERS, "file:///o.sql", offset, "a b", Encoding::Utf16).unwrap().is_err());
         assert!(rename_cte(ORDERS, "file:///o.sql", 0, "x", Encoding::Utf16).is_none());
+    }
+    /// The folds of TEXT as (start line, end line).
+    fn folds(text: &str, sql: bool) -> Vec<(u64, u64)> {
+        let found = folding_ranges(text, sql);
+        found
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["startLine"].as_u64().unwrap(), r["endLine"].as_u64().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn folds_every_jinja_block_and_keeps_a_lone_closer_visible() {
+        let incremental = "select *\nfrom t\n{% if is_incremental() %}\nwhere a > 1\n  and b > 2\n{% endif %}\n";
+        assert_eq!(folds(incremental, true), [(2, 4)]);
+        let loop_ = "select\n{% for c in cols %}\n  {{ c }},\n  {{ c }}_x,\n{%- endfor %}\n1";
+        assert_eq!(folds(loop_, true), [(1, 3)]);
+        // A closer with whitespace control alone on its line stays visible too.
+        assert_eq!(folds("{{-\n  config(\n    a=1\n  )\n-}}\nselect 1", true), [(0, 3)]);
+        assert_eq!(folds("{#-\n a\n b\n-#}\nselect 1", true), [(0, 2)]);
+    }
+
+    #[test]
+    fn folds_a_span_left_open_to_the_end_without_failing() {
+        for text in ["/* draft\nselect 1 -- filtré\n", "{# new\nselect 1 -- 注\n", "{{ config(\n  a='注"] {
+            let found = folds(text, true);
+            assert_eq!(found.first().map(|fold| fold.0), Some(0), "{text:?}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn folds_sql_comments_in_sql_only_and_the_longest_range_first() {
+        assert_eq!(folds("a: 1\n# under models/* every file\nb:\n  - 2\n", false), []);
+        let test = "{% test t(\n    model,\n    column\n) %}\nselect 1\nfrom {{ model }}\n{% endtest %}\n";
+        assert_eq!(folds(test, false), [(0, 5), (0, 3)]);
+    }
+
+    #[test]
+    fn selection_ranges_hold_blocks_each_position_and_no_range_twice() {
+        let text = "{% if a %}\nselect x\n{% endif %}";
+        let at = text.find('x').unwrap();
+        let found = selection_ranges(text, true, &[at, 0], Encoding::Utf16);
+        assert_eq!(found.as_array().unwrap().len(), 2, "one chain per position");
+        let mut lengths = Vec::new();
+        let mut selection = &found[0];
+        while selection.is_object() {
+            let (start, end) = (&selection["range"]["start"], &selection["range"]["end"]);
+            let index = LineIndex::new(text);
+            lengths.push(
+                index.offset_of(end, Encoding::Utf16).unwrap() - index.offset_of(start, Encoding::Utf16).unwrap(),
+            );
+            selection = &selection["parent"];
+        }
+        // x, the block's content, then the block, which is the whole text: given once.
+        assert_eq!(lengths, [1, "\nselect x\n".len(), text.len()]);
+    }
+
+    #[test]
+    fn highlights_the_tags_of_the_block_asked_about() {
+        let text = "{% macro m() %}{% if a %}{% set x = 1 %}{% if b %}{% endif %}{% elif c %}{% else %}{% endif %}{% endmacro %}";
+        let tags = |offset: usize| -> Vec<String> {
+            let found = highlights(text, true, offset, Encoding::Utf16);
+            found
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| {
+                    let start = h["range"]["start"]["character"].as_u64().unwrap() as usize;
+                    let end = h["range"]["end"]["character"].as_u64().unwrap() as usize;
+                    text[start..end].to_owned()
+                })
+                .collect()
+        };
+        assert_eq!(tags(text.find("elif").unwrap()), ["{% if a %}", "{% elif c %}", "{% else %}", "{% endif %}"]);
+        assert_eq!(tags(text.find("if b").unwrap()), ["{% if b %}", "{% endif %}"]);
+        assert_eq!(tags(text.find("endmacro").unwrap()), ["{% macro m() %}", "{% endmacro %}"]);
     }
 }
