@@ -1925,6 +1925,11 @@ fn a_new_run_replaces_the_failures_and_one_that_builds_nothing_keeps_them() {
         {"unique_id": "test.shop.is_even_orders_order_id.a1", "status": "pass", "message": "Pass", "failures": 0}]});
     write_run(&project, &partial, &run_manifest());
     published(&mut session, &model, |p| last_run(p).is_empty());
+    // Results gone, as after `dbt clean`: no failure left.
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    std::fs::remove_file(project.join("target/run_results.json")).unwrap();
+    published(&mut session, &model, |p| last_run(p).is_empty());
     assert!(session.finish().success());
 }
 

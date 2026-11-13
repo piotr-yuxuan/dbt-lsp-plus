@@ -1015,16 +1015,20 @@ impl<W: Write> Proxy<W> {
             loop {
                 thread::sleep(RUNS_EVERY);
                 let now = (stamp(&results), stamp(&manifest));
-                if now.0.is_none() || now.1.is_none() || seen.as_ref() == Some(&now) {
+                if seen.as_ref() == Some(&now) {
                     continue;
                 }
-                // A file read while dbt writes it changes again when dbt has
-                // written it: it is read then, not every second meanwhile.
                 seen = Some(now);
-                let Some(found) = read(&results) else { continue };
-                let Some(index) = read(&manifest) else { continue };
+                let failures = match (read(&results), read(&manifest)) {
+                    (Some(found), Some(index)) => runs::failures(&found, &index),
+                    // No results, as after `dbt clean`: no last run to show.
+                    (None, _) if now.0.is_none() => Some(Vec::new()),
+                    // A file read while dbt writes it changes again when dbt
+                    // has written it: it is read then, not every second.
+                    _ => continue,
+                };
                 let written = now.0.and_then(|(time, _)| time).unwrap_or(SystemTime::UNIX_EPOCH);
-                if events.send(Event::Runs(runs::failures(&found, &index), written)).is_err() {
+                if events.send(Event::Runs(failures, written)).is_err() {
                     return;
                 }
             }
