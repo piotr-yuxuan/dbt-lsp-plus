@@ -162,6 +162,31 @@ fn answers_the_outline_itself_and_follows_unsaved_edits_in_utf_16() {
 }
 
 #[test]
+fn outlines_a_properties_file_from_its_unsaved_text_and_no_other_yaml() {
+    let (mut session, log) = Session::fake("yaml-outline", json!({}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/staging/_sources.yml");
+    // Unsaved: 𝄞 is two UTF-16 units, and the description reads as a CTE.
+    let text = "models:\n  - name: \"𝄞_orders\"\n    description: with x as (select 1)\n    columns:\n      \
+                - name: id\nsources:\n  - name: raw\n    tables:\n      - name: orders\n";
+    session.open(&path, Some(text));
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
+    let model = &outline["result"][0];
+    assert_eq!(names(&outline["result"]), ["𝄞_orders", "raw"]);
+    assert_eq!((&model["detail"], &model["kind"]), (&json!("model"), &json!(5)));
+    assert_eq!(names(&model["children"]), ["id"]);
+    assert_eq!(names(&outline["result"][1]["children"]), ["orders"]);
+    let name = json!({"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 20}});
+    assert_eq!(model["selectionRange"], name);
+    assert_eq!(model["range"]["end"], json!({"line": 4, "character": 16}));
+    let project = fixture().join("dbt_project.yml");
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&project)}}));
+    assert_eq!(outline["result"], json!([]));
+    assert!(!methods(&log).contains(&"textDocument/documentSymbol".to_owned()));
+    assert!(session.finish().success());
+}
+
+#[test]
 fn adopts_the_server_s_position_encoding() {
     let capabilities = json!({"textDocumentSync": {"change": 2, "openClose": true}, "positionEncoding": "utf-8"});
     let (mut session, _) = Session::fake("utf-8", json!({"capabilities": capabilities}));
@@ -188,6 +213,30 @@ fn gives_a_flat_outline_to_a_client_without_hierarchy() {
     assert_eq!((first["name"].as_str(), first.get("containerName")), (Some("orders_snapshot"), None));
     assert_eq!(first["location"]["uri"], uri(&path));
     assert!(first.get("children").is_none());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn gives_a_flat_outline_of_a_properties_file_with_containers() {
+    let (mut session, _) = Session::fake("flat-yaml", json!({}));
+    session.initialize_with(&fixture(), false);
+    let path = fixture().join("models/staging/_sources.yml");
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
+    let flat: Vec<(&str, u64, Option<&str>)> = outline["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["name"].as_str().unwrap(), s["kind"].as_u64().unwrap(), s["containerName"].as_str()))
+        .collect();
+    let expected = [
+        ("raw", 2, None),
+        ("orders", 11, Some("raw")),
+        ("customers", 11, Some("raw")),
+        ("events", 2, None),
+        ("page_views", 11, Some("events")),
+    ];
+    assert_eq!(flat, expected);
+    assert!(outline["result"][0].get("children").is_none());
     assert!(session.finish().success());
 }
 

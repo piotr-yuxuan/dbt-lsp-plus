@@ -92,7 +92,8 @@ fn node_information(session: &mut Session, project: &Path) {
     assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
 }
 
-/// The proxy's outline and folding of a model, and the server's hover through it.
+/// The proxy's outline and folding of a model, the outline of a properties
+/// file, and the server's hover through it.
 fn document_features(session: &mut Session, project: &Path) {
     let orders = project.join("models/marts/orders.sql");
     // dbt lsp 2.0.9 compiles nothing until a document opens or a request comes.
@@ -101,6 +102,20 @@ fn document_features(session: &mut Session, project: &Path) {
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&orders)}}));
     let names: Vec<&str> = outline["result"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["orders", "customers", "final"], "the proxy's outline, not the server's tokens");
+    // dbt lsp 2.0.9 answers [] on a properties file: the proxy's are its sources and their tables.
+    let properties = project.join("models/staging/_sources.yml");
+    session.open(&properties, None);
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&properties)}}));
+    let named = |symbol: &Value| symbol["name"].as_str().unwrap().to_owned();
+    let tables = |symbol: &Value| symbol["children"].as_array().unwrap().iter().map(named).collect::<Vec<_>>();
+    let sources: Vec<(String, Vec<String>)> =
+        outline["result"].as_array().unwrap().iter().map(|source| (named(source), tables(source))).collect();
+    let expected = [("raw", vec!["orders", "customers"]), ("events", vec!["page_views"])];
+    let expected: Vec<(String, Vec<String>)> = expected
+        .iter()
+        .map(|(source, tables)| (source.to_string(), tables.iter().map(|t| t.to_string()).collect()))
+        .collect();
+    assert_eq!(sources, expected, "{outline}");
     let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&orders)}}));
     assert_eq!(folding["result"].as_array().map(Vec::len), Some(4), "{folding}");
     // dbt lsp 2.0.9 announces no highlights: the proxy's are the CTE's definition and its three uses.

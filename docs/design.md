@@ -108,7 +108,7 @@ resolved path.
   - models, seeds, snapshots, analyses and singular tests;
   - macros, generic tests and docs blocks;
   - source tables, from the YAML of every resource path, parsed with the
-    place of each scalar as written;
+    place of each scalar as written and where each mapping ends;
   - the `ref`, `source`, `adapter.dispatch` and macro calls inside the Jinja
     tags of each body.  A tag inside a SQL comment counts, since Jinja
     renders it; a `ref(` in prose does not.
@@ -217,9 +217,25 @@ minutes, so only a unit test of the abandonment covers it.
 
 ## Within a document
 
-The proxy adds three capabilities that need one document alone, and the
+The proxy adds four capabilities that need one document alone, and the
 rename of a CTE, which the server answers with null:
 
+- Outline: in SQL and Markdown, the Jinja blocks and the CTEs, nested by
+  extent.  In a `.yml` or `.yaml` file, where dbt lsp 2.0.9 answers `[]`,
+  the named entries of a properties file: those under `models`, `seeds`,
+  `snapshots`, `analyses`, `macros`, `functions`, `data_tests` (or
+  `tests`), `sources`, `exposures`, `metrics`, `semantic_models`,
+  `saved_queries`, `unit_tests` and `groups`, with the `columns` of a
+  model, seed, snapshot, analysis or source table, a model's `metrics`
+  and the `tables` of a source.  The detail is what the entry declares
+  (`model`, `table`, `semantic model`); the kinds are those agreed with
+  dbt-mode.  An entry runs from its first key to its last content: the
+  blank lines and the comment lines less deep than its first key that end
+  it belong to what follows, while a key commented out and a block
+  scalar's deeper lines stay in; in flow style it ends at its brace.  An
+  entry without a name, such as one whose `name:` is being typed, is no
+  symbol, and aliases are not followed.  Other YAML, such as
+  `dbt_project.yml`, has no entry, nor does YAML that does not parse.
 - Folding: every Jinja block (`if`, `for`, `call`, `filter`, `macro` and
   the others), CTEs and multi-line Jinja tags (`region`), and multi-line
   `{# #}` comments and, in SQL, `/* */` comments (`comment`), by line.  A
@@ -399,6 +415,14 @@ The server is not restarted after a crash.
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
+- The outline of a YAML file that yaml-rust2 does not parse is empty: one
+  in the middle of an edit, but also some that dbt reads, being laxer about
+  indentation inside flow collections and quoted scalars, such as a flow
+  sequence whose `]` sits at its key's column, a quoted description
+  continued at its key's column, or a tab after a colon.  The scan of
+  sources reads no table from such a file either.  The outline shows no
+  tests nested under a resource, model versions, macro arguments, nor a
+  semantic model's entities, dimensions and measures.
 
 ## Tests
 
@@ -413,7 +437,8 @@ The server is not restarted after a crash.
     them;
   - the outline of unsaved edits in UTF-16, after a character that UTF-16
     and UTF-32 count apart, and in the server's UTF-8; flat for a client
-    without hierarchy; a closed document's edits dropped;
+    without hierarchy; a closed document's edits dropped; the outline of a
+    properties file, flat and nested, and none for `dbt_project.yml`;
   - workspace symbols, and the call hierarchy through the proxy's own ids;
     the ids of the client's that the proxy skips or refuses;
   - the root: `--project-dir` first and as spelt, the client's folder or the
@@ -462,7 +487,7 @@ In the order of the feature list agreed with the dbt-mode session:
    review of plan 001 measured about 300 ms per scan on 1,500 models with
    13 MB of YAML properties, every YAML file being parsed whole for its
    `sources:`; the 40 ms above had no YAML.
-5. YAML outline (A1): models, sources, columns, exposures.
+5. YAML outline (A1): done in plan 005.
 6. Restart of a crashed server, replaying `initialize`, `initialized` and
    the open documents.
 7. `packages.yml` local packages outside `packages-install-path`, versioned

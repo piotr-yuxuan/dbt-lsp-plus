@@ -13,7 +13,14 @@ pub enum Node {
         column: usize,
     },
     Seq(Vec<Node>),
-    Map(Vec<(Node, Node)>),
+    /// A mapping, with where the parser saw it end: the line (from 0) and
+    /// column (in characters, from 0) of its `}` in flow style; in block
+    /// style, of the next token, of a lower indentation, or of the end of
+    /// the text, the blank and comment lines before it skipped.
+    Map {
+        entries: Vec<(Node, Node)>,
+        end: (usize, usize),
+    },
     /// An alias: dbt's schema files do not need them resolved.
     Alias,
 }
@@ -26,7 +33,7 @@ impl Node {
 
     /// The key KEY of a mapping, with its value.
     pub fn entry(&self, key: &str) -> Option<(&Node, &Node)> {
-        let Node::Map(entries) = self else { return None };
+        let Node::Map { entries, .. } = self else { return None };
         entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(k, value)| (k, value))
     }
 
@@ -43,7 +50,9 @@ impl Node {
         match self {
             Node::Alias => true,
             Node::Seq(items) => items.iter().any(Node::shares),
-            Node::Map(entries) => entries.iter().any(|(key, value)| key.as_str() == Some("<<") || value.shares()),
+            Node::Map { entries, .. } => {
+                entries.iter().any(|(key, value)| key.as_str() == Some("<<") || value.shares())
+            }
             Node::Scalar { .. } => false,
         }
     }
@@ -92,7 +101,9 @@ impl MarkedEventReceiver for Builder {
             Event::MappingStart(..) => self.stack.push(Frame::Map(Vec::new(), None)),
             Event::SequenceEnd | Event::MappingEnd => match self.stack.pop() {
                 Some(Frame::Seq(items)) => self.attach(Node::Seq(items)),
-                Some(Frame::Map(entries, _)) => self.attach(Node::Map(entries)),
+                Some(Frame::Map(entries, _)) => {
+                    self.attach(Node::Map { entries, end: (mark.line().saturating_sub(1), mark.col()) })
+                }
                 None => {}
             },
             _ => {}
@@ -119,6 +130,27 @@ mod tests {
         assert_eq!(source.get("name"), Some(&Node::Scalar { value: "événements".into(), line: 1, column: 10 }));
         let table = &source.get("tables").unwrap().items()[0];
         assert_eq!(table.get("name"), Some(&Node::Scalar { value: "page_views".into(), line: 3, column: 14 }));
+    }
+
+    fn end(node: &Node) -> (usize, usize) {
+        let Node::Map { end, .. } = node else { panic!("not a mapping: {node:?}") };
+        *end
+    }
+
+    #[test]
+    fn keeps_where_a_mapping_ends() {
+        let text = "models:\n  - name: orders\n    columns:\n      - name: id\n\n  # the next one\n  \
+                    - {name: \"é\", columns: [{name: x}]}\nsources:\n  - name: raw\n";
+        let root = parse(text).unwrap();
+        let models = root.get("models").unwrap().items();
+        // In block style, at the next item, past the blank and comment lines.
+        assert_eq!(end(&models[0]), (6, 2));
+        assert_eq!(end(&models[0].get("columns").unwrap().items()[0]), (6, 2));
+        // In flow style, at the brace, in characters.
+        assert_eq!(end(&models[1]), (6, 36));
+        assert_eq!(end(&models[1].get("columns").unwrap().items()[0]), (6, 34));
+        // At the end of the text.
+        assert_eq!(end(&root.get("sources").unwrap().items()[0]), (9, 0));
     }
 
     #[test]
