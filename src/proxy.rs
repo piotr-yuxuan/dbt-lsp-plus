@@ -408,7 +408,9 @@ impl<W: Write> Proxy<W> {
         // drops the failures instead.  An empty set has no range to move.
         if matches!(method, "textDocument/didChange" | "textDocument/didSave") {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
-            let ranged = self.diagnostics.server.get(&path).is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
+            // A server gone publishes no more: its old set is no reason to wait.
+            let server = self.diagnostics.server.get(&path).filter(|_| self.server.is_some());
+            let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
             if self.diagnostics.failures.remove(&path).is_some() && !ranged {
                 self.publish(&path);
             }
@@ -1029,14 +1031,18 @@ impl<W: Write> Proxy<W> {
                     if seen.as_ref() == Some(&now) {
                         continue;
                     }
-                    seen = Some(now);
-                    let failures = match (read(&results), read(&manifest)) {
-                        (Some(found), Some(index)) => read_failures(&found, &index),
-                        // No results, as after `dbt clean`: no last run to show.
-                        (None, _) if now.0.is_none() => Some(Vec::new()),
-                        // A file read while dbt writes it changes again when dbt
-                        // has written it: it is read then, not every second.
-                        _ => continue,
+                    let present = seen.replace(now).is_some_and(|(results, _)| results.is_some());
+                    // The manifest, which may be large, only for results to place.
+                    let failures = match read(&results) {
+                        Some(found) => {
+                            let Some(index) = read(&manifest) else { continue };
+                            read_failures(&found, &index)
+                        }
+                        // Results gone, as after `dbt clean`: nothing to show.
+                        None if now.0.is_none() && present => Some(Vec::new()),
+                        // None ever, or a file read while dbt writes it, which
+                        // changes again when dbt has written it.
+                        None => continue,
                     };
                     let written = now.0.and_then(|(time, _)| time).unwrap_or(SystemTime::UNIX_EPOCH);
                     if events.send(Event::Runs(code, failures, written)).is_err() {
