@@ -337,9 +337,10 @@ pub fn outline(text: &str, sql: bool) -> Vec<Symbol> {
 }
 
 // Its arguments are literals, then `)` or a keyword argument: `'orders' ~ var('sfx')` names another
-// model.  The call, group 1, ends at its last literal.
-static REF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?)\s*[,)]"#).unwrap());
+// model, and `'pkg', 'm' ~ x` names no model `pkg`.  The call, group 1, ends at its last literal.
+static REF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?)\s*(?:\)|,\s*\w+\s*=)"#).unwrap()
+});
 // Its arguments are two literals: `'events' ~ var('suffix')` names another table.
 static SOURCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\bsource\s*\(\s*['"]([^'"]*)['"]\s*,\s*['"]([^'"]*)['"]\s*\)"#).unwrap());
@@ -425,7 +426,8 @@ mod tests {
 
     #[test]
     fn a_ref_with_an_expression_for_argument_names_no_model() {
-        let text = "{{ ref('orders' ~ var('sfx')) }} {{ ref('dim', v=2) }} {{ ref('pkg', 'm') }}";
+        let text =
+            "{{ ref('orders' ~ var('sfx')) }} {{ ref('dim', v=2) }} {{ ref('pkg', 'm') }} {{ ref('pkg', 'n' ~ x) }}";
         let refs: Vec<Target> =
             calls(text).into_iter().map(|call| call.target).filter(|t| matches!(t, Target::Ref { .. })).collect();
         let named =
