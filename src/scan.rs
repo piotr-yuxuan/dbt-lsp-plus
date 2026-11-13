@@ -424,6 +424,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_ref_with_an_expression_for_argument_names_no_model() {
+        let text = "{{ ref('orders' ~ var('sfx')) }} {{ ref('dim', v=2) }} {{ ref('pkg', 'm') }}";
+        let refs: Vec<Target> =
+            calls(text).into_iter().map(|call| call.target).filter(|t| matches!(t, Target::Ref { .. })).collect();
+        let named =
+            |package: Option<&str>, name: &str| Target::Ref { package: package.map(str::to_owned), name: name.into() };
+        assert_eq!(refs, [named(None, "dim"), named(Some("pkg"), "m")]);
+    }
+
+    #[test]
     fn a_source_with_an_expression_for_argument_names_no_table() {
         let text = "{{ source('raw', 'events' ~ var('suffix')) }} {{ source( 'raw' , \"orders\" ) }}";
         let targets: Vec<Target> = calls(text).into_iter().map(|call| call.target).collect();

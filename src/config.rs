@@ -390,6 +390,17 @@ mod tests {
     }
 
     #[test]
+    fn removes_the_caches_of_dead_processes_only() {
+        let dir = scratch_project("stale-caches", &[("key/4194305/target/manifest.json", "{}"), ("key/x/keep", "")]);
+        let own = dir.join("key").join(std::process::id().to_string());
+        fs::create_dir_all(&own).unwrap();
+        remove_stale(&own);
+        // No process can have a pid above the kernel's largest, 4194304.
+        assert!(!dir.join("key/4194305").exists() && own.exists() && dir.join("key/x").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn packages_are_settled_when_local_or_locked() {
         let dir = scratch_project("settled", &[("packages.yml", "packages:\n  - local: ../utils\n")]);
         assert!(packages_settled(&dir));

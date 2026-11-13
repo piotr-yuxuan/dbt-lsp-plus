@@ -28,6 +28,8 @@
 //!     whose requests wait for the notification `test/release`;
 //!   - `exit_on`, a method on which the server exits with status 3, and
 //!     `hang_on`, one on which it stops, neither reading nor exiting;
+//!   - `hold_compile`, true when it announces no compilation until the
+//!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
 //!     `manifest`, written as `manifest.json` under `--target-path`;
 //!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
@@ -134,11 +136,12 @@ impl Fake {
             _ => json!({"echo": method, "params": params}),
         };
         let answer = once.or_else(|| self.script["answers"].get(key).cloned()).unwrap_or(default);
-        if listing {
+        let compiling = listing && self.script["hold_compile"] != json!(true);
+        if compiling {
             compile_start();
         }
         send(json!({"id": id, "result": answer}));
-        if listing {
+        if compiling {
             compile_complete();
         }
     }
@@ -164,10 +167,15 @@ impl Fake {
                 }
                 false
             }
+            "test/compile" => {
+                compile_start();
+                compile_complete();
+                false
+            }
             "exit" => std::process::exit(0),
             _ => method == "textDocument/didSave",
         };
-        if compiles {
+        if compiles && self.script["hold_compile"] != json!(true) {
             compile_start();
             compile_complete();
         }
@@ -180,8 +188,9 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
         let line = json!({"parse": arguments, "pid": std::process::id()});
         writeln!(log, "{line}").expect("write the log");
     }
-    // dbt writes on both outputs, which must never reach the client.
-    println!("noise on stdout {{}}");
+    // dbt writes on both outputs, which must never reach the client: this
+    // noise is a frame whose body is not JSON, which a client would show.
+    print!("Content-Length: 5\r\n\r\nnoise");
     eprintln!("noise on stderr");
     if let Some(gate) = script["parse_gate"].as_str() {
         let end = Instant::now() + Duration::from_secs(30);

@@ -7,7 +7,7 @@ mod live;
 mod support;
 
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use support::{Session, copy_fixture, fixture, received_by_server, scratch, until_logged, uri};
 
@@ -1039,9 +1039,43 @@ fn manifest() -> Value {
                "package_name": "shop", "original_file_path": path, "access": "protected",
                "relation_name": format!("\"shop\".\"main\".\"{name}\""), "config": {"materialized": materialized}})
     };
+    let customers = json!({"unique_id": "source.shop.raw.customers", "name": "customers", "source_name": "raw",
+                           "resource_type": "source", "package_name": "shop", "relation_name": "raw_customers"});
     json!({"metadata": {"project_name": "shop"}, "nodes": {
         "model.shop.orders": model("orders", "models/marts/orders.sql", "table"),
-        "model.shop.stg_orders": model("stg_orders", "models/staging/stg_orders.sql", "view")}})
+        "model.shop.stg_orders": model("stg_orders", "models/staging/stg_orders.sql", "view")},
+        "sources": {"source.shop.raw.customers": customers}})
+}
+
+/// The scratch directory of the fake session NAME, as it stands.
+fn scratch_of(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(name)
+}
+
+/// The files named NAME under DIR.
+fn files_named(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        for path in std::fs::read_dir(&next).into_iter().flatten().flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|file| file == name) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Asserts that the fake has logged COUNT parses, and no more for half a
+/// second: a parse wrongly started takes a moment to log.
+fn parses_stay(log: &Path, count: usize) {
+    let end = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < end {
+        assert_eq!(parses(log).len(), count);
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// The answer to `dbt-lsp-plus.nodeInfo` with ARGUMENT.
@@ -1079,9 +1113,27 @@ fn node_info_parses_with_the_server_s_dbt_once_it_compiled() {
     let orders = parsed_orders(&mut session);
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     assert_eq!(orders["config"]["materialized"], "table");
-    // dbt's noise on its outputs never reached the client.
+    // dbt's noise never reached the client; its stderr is in the cache's log.
     assert!(session.received.iter().all(|m| !m.is_null()), "a body that is not JSON");
-    assert_eq!(parses(&log).len(), 1);
+    let logs = files_named(&scratch_of("node-info").join("cache"), "parse.log");
+    assert!(std::fs::read_to_string(&logs[0]).unwrap().contains("noise on stderr"), "{logs:?}");
+    // An index with no change since needs no parse.
+    node_info(&mut session, json!("model.shop.orders"));
+    node_info(&mut session, json!("model.shop.stg_orders"));
+    parses_stay(&log, 1);
+    assert!(session.finish().success());
+    assert!(files_named(&scratch_of("node-info").join("cache"), "parse.log").is_empty(), "the cache stayed");
+}
+
+#[test]
+fn node_info_by_id_needs_no_document_opened() {
+    let (mut session, _) = Session::fake("node-info-alone", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    // The proxy's listing makes the server compile, as the first document would.
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let orders = session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(orders["unique_id"], "model.shop.orders");
     assert!(session.finish().success());
 }
 
@@ -1118,6 +1170,14 @@ fn node_info_names_a_node_by_id_or_by_position() {
     assert_eq!(on_ref["result"]["unique_id"], "model.shop.stg_orders");
     let elsewhere = node_info(&mut session, json!({"uri": orders, "position": {"line": 0, "character": 0}}));
     assert_eq!(elsewhere["result"]["unique_id"], "model.shop.orders");
+    // A relationships test calls ref outside Jinja.
+    let yaml = fixture().join("models/marts/_notes.yml");
+    session.open(
+        &yaml,
+        Some("models:\n  - name: orders\n    tests:\n      - relationships:\n          to: ref('stg_orders')\n"),
+    );
+    let in_yaml = node_info(&mut session, json!({"uri": uri(&yaml), "position": {"line": 4, "character": 20}}));
+    assert_eq!(in_yaml["result"]["unique_id"], "model.shop.stg_orders");
     assert!(session.finish().success());
 }
 
@@ -1135,8 +1195,7 @@ fn one_parse_at_a_time_and_one_more_after_a_change_during_it() {
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
     barrier(&mut session);
     node_info(&mut session, json!("model.shop.orders"));
-    barrier(&mut session);
-    assert_eq!(parses(&log).len(), 1, "a parse under way");
+    parses_stay(&log, 1);
     std::fs::write(&gate, "").unwrap();
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
@@ -1159,6 +1218,7 @@ fn no_parse_while_packages_need_the_network() {
     session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
     let refused = node_info(&mut session, json!("model.shop.orders"));
     assert!(refused["error"]["message"].as_str().unwrap().contains("run dbt deps"), "{refused}");
+    node_info(&mut session, json!("model.shop.orders"));
     let logged_once = session.received.iter().filter(|m| m["method"] == "window/logMessage").count();
     assert_eq!(logged_once, 1);
     assert!(parses(&log).is_empty());
@@ -1175,7 +1235,9 @@ fn exit_stops_a_parse_under_way() {
     until_logged(&log, "the parse", |_| parses(&log).len() == 1);
     let pid = parses(&log)[0]["pid"].as_u64().unwrap();
     assert!(session.finish().success());
-    assert!(!Path::new(&format!("/proc/{pid}")).exists(), "the parse {pid} outlived the proxy");
+    let mut alive = std::process::Command::new("kill");
+    alive.args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null());
+    assert!(!alive.status().unwrap().success(), "the parse {pid} outlived the proxy");
 }
 
 #[test]
@@ -1206,4 +1268,99 @@ fn without_dbt_lsp_node_info_says_why_it_has_nothing() {
     let answer = node_info(&mut session, json!("model.shop.orders"));
     assert_eq!(answer["error"]["code"], json!(-32803), "{answer}");
     assert!(session.finish().success());
+}
+
+#[test]
+fn no_parse_after_shutdown_nor_after_a_crash() {
+    let (mut session, log) = Session::fake("parse-shutdown", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let path = fixture().join("models/marts/orders.sql");
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    barrier(&mut session);
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 1);
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+    let script = json!({"manifest": manifest(), "exit_on": "textDocument/definition"});
+    let (mut session, log) = Session::fake("parse-crash", script);
+    session.initialize(&fixture());
+    session.open(&path, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/definition", "params": {}}));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    let alone = node_info(&mut session, json!("model.shop.orders"));
+    assert_eq!(alone["error"]["code"], json!(-32803), "{alone}");
+    parses_stay(&log, 0);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_parse_waits_for_the_server_to_compile_after_a_change() {
+    let (mut session, log) = Session::fake("parse-held", json!({"manifest": manifest(), "hold_compile": true}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 0);
+    session.notify("test/compile", json!({}));
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request.clone(), |result| result.is_object());
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 1);
+    session.notify("test/compile", json!({}));
+    barrier(&mut session);
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after the compilation", |_| parses(&log).len() == 2);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_successful_parse_replaces_the_index_and_a_failed_one_lays_over_it() {
+    let (mut session, _) = Session::fake("parse-replace", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let script = scratch_of("parse-replace").join("script.json");
+    let path = fixture().join("models/marts/orders.sql");
+    let rewrite_and_save = |session: &mut Session, script_text: Value| {
+        std::fs::write(&script, script_text.to_string()).unwrap();
+        session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+        barrier(session);
+    };
+    let only_orders = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.orders": {
+        "unique_id": "model.shop.orders", "name": "orders", "resource_type": "model", "relation_name": "new", "config": {}}}});
+    rewrite_and_save(&mut session, json!({"manifest": only_orders}));
+    let request =
+        |id: &str| ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": [id]}));
+    session.poll(Duration::from_secs(10), request("model.shop.orders"), |node| node["relation"] == "new");
+    assert_eq!(node_info(&mut session, json!("model.shop.stg_orders"))["result"], Value::Null, "replaced");
+    let partial = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.stg_orders": {
+        "unique_id": "model.shop.stg_orders", "name": "stg_orders", "resource_type": "model", "relation_name": "s", "config": {}}}});
+    rewrite_and_save(&mut session, json!({"manifest": partial, "parse_exit": 1}));
+    session.poll(Duration::from_secs(10), request("model.shop.stg_orders"), Value::is_object);
+    assert_eq!(node_info(&mut session, json!("model.shop.orders"))["result"]["relation"], "new", "laid over");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_summary_alone_follows_the_client_s_first_hover_format() {
+    for (formats, kind) in
+        [(json!(["plaintext", "markdown"]), "plaintext"), (json!(["markdown", "plaintext"]), "markdown")]
+    {
+        let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/hover": r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#}});
+        let (mut session, _) = Session::fake(&format!("hover-format-{kind}"), script);
+        let capabilities = json!({"textDocument": {"hover": {"contentFormat": formats}}});
+        let params = json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": capabilities});
+        session.request("initialize", params);
+        session.notify("initialized", json!({}));
+        parsed_orders(&mut session);
+        let customers = uri(&fixture().join("models/staging/stg_customers.sql"));
+        let on_source = json!({"textDocument": {"uri": customers}, "position": {"line": 5, "character": 23}});
+        let hover = session.request("textDocument/hover", on_source);
+        assert_eq!(hover["result"]["contents"], json!({"kind": kind, "value": "source, raw_customers"}), "{formats}");
+        assert!(session.finish().success());
+    }
 }
