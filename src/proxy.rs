@@ -301,7 +301,10 @@ impl<W: Write> Proxy<W> {
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
         let formats = params.pointer("/capabilities/textDocument/hover/contentFormat").and_then(Value::as_array);
-        self.markdown = formats.is_some_and(|formats| formats.iter().any(|format| format == "markdown"));
+        // The client lists its formats in its order of preference.
+        let first =
+            formats.and_then(|formats| formats.iter().find(|format| *format == "markdown" || *format == "plaintext"));
+        self.markdown = first.is_some_and(|format| format == "markdown");
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         let same = |folder: &Path| fs::canonicalize(folder).ok() == self.canonical_root;
