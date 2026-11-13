@@ -386,6 +386,26 @@ So the proxy runs the user's own `dbt parse`.
   ids attached).  A run that fails part of the way lays its entries over the
   last index.
 
+### Inlay hints
+
+dbt lsp 2.0.9 announces inlay hints and answers `[]` on a model, null on a
+macro file and on a properties file.  The proxy forwards each request and
+puts its own hints after the server's (appended to an array, alone in
+place of null; an error passes as it came): after each `ref` or `source`
+whose arguments are literals, right after its closing parenthesis, the
+relation dbt builds for its node, from the last parse's index, or
+`ephemeral` by the node's materialization; none for a disabled node, an
+analysis, an unknown node, or a `ref` that a keyword argument follows,
+whose version the index cannot tell.  Kind Type, padding on the left, the
+node's unique id as tooltip.  Computed from the document's text and the
+index when the request arrives, within `catch_unwind`, with no project
+scan.  A hint request starts a parse only when there is no index yet,
+since clients ask on every edit and scroll; after each parse that gives
+an index, a client that declares `workspace.inlayHint.refreshSupport` is
+asked to refresh, under an id of the proxy's own, whose answer stays
+here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
+`var()` takes its caller's scope and string values are rendered.
+
 ### What the client gets
 
 - `workspace/executeCommand` `dbt-lsp-plus.nodeInfo`, added to the
@@ -462,6 +482,8 @@ The server is not restarted after a crash.
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
+- An inlay hint's node is looked up as the hover's, the root project
+  first, not the calling file's package as dbt 2.0.9 does for a `ref`.
 - `graph::resolve`, behind the call hierarchy, ignores `flags:
   require_ref_searches_node_package_before_root: false`, which navigation
   reads.
@@ -522,6 +544,10 @@ The server is not restarted after a crash.
     cache; dbt's output kept off the client's channel; a parse killed at
     `exit`; a node by id or by position; the summary first on a hover of a
     ref, any other hover byte for byte.
+  - inlay hints: after the server's, alone for its null, its error byte
+    for byte; a first parse from a hint request, none more once an index
+    exists; the refresh asked of a client that can, its answer kept from
+    the server;
   - navigation from YAML: each kind of target and its location, dbt's own
     test null, the server never asked; a column's name, `dbt_project.yml`
     and a SQL `ref` forwarded; a `source()` in SQL; hover on a doc, a test
