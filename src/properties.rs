@@ -139,6 +139,8 @@ seeds:
       - name: id
 snapshots:
   - name: orders_snapshot
+    columns:
+      - name: dbt_valid_from
 analyses:
   - name: order_counts
     columns:
@@ -195,6 +197,7 @@ groups:
             ("seed", "raw_orders"),
             ("column", "id"),
             ("snapshot", "orders_snapshot"),
+            ("column", "dbt_valid_from"),
             ("analysis", "order_counts"),
             ("column", "n"),
             ("macro", "cents_to_dollars"),
@@ -289,19 +292,26 @@ groups:
 
     #[test]
     fn a_name_being_typed_or_out_of_its_entry_makes_no_entry() {
+        let model = ("model", "kept".to_owned());
+        let source = ("source", "kept".to_owned());
         let texts = [
             // Before a sibling, before a blank and a comment line then the
             // next section, at the end of the text: each placed by the parser
             // at the next token.
-            "models:\n  - name:\n    columns:\n      - name:\n  - name: kept\n",
-            "models:\n  - name: kept\n  - name:\n\n# Sources.\nsources:\n  - name: kept\n",
-            "models:\n  - name: kept\n  - name:",
-            "models:\n  - name: \"\"\n  - name: '  '\n  - name: |\n      orders\n  - name: kept\n",
+            ("models:\n  - name:\n    columns:\n      - name:\n  - name: kept\n", vec![model.clone()]),
+            (
+                "models:\n  - name: kept\n  - name:\n\n# Sources.\nsources:\n  - name: kept\n",
+                vec![model.clone(), source],
+            ),
+            ("models:\n  - name: kept\n  - name:", vec![model.clone()]),
+            (
+                "models:\n  - name: \"\"\n  - name: '  '\n  - name: |\n      orders\n  - name: kept\n",
+                vec![model.clone()],
+            ),
         ];
-        for text in texts {
-            let found = entries(text);
-            assert!(found.iter().all(|entry| entry.name == "kept"), "{text}: {found:?}");
-            for entry in &found {
+        for (text, expected) in texts {
+            assert_eq!(named(text), expected, "{text}");
+            for entry in entries(text) {
                 assert_eq!(&text[entry.range.clone()], "name: kept", "{text}");
             }
         }
