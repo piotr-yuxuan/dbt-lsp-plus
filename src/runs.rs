@@ -50,7 +50,8 @@ pub struct Failure {
 /// command's, so that the failures known stay; a result whose node MANIFEST
 /// lacks gives none.
 pub fn failures(results: &Value, manifest: &Value) -> Option<Vec<Failure>> {
-    let command = results.pointer("/args/command").and_then(Value::as_str)?;
+    let command =
+        results.pointer("/args/command").or_else(|| results.pointer("/args/which")).and_then(Value::as_str)?;
     if !BUILDING.contains(&command) {
         return None;
     }
@@ -72,7 +73,8 @@ pub fn failures(results: &Value, manifest: &Value) -> Option<Vec<Failure>> {
             path: node["original_file_path"].as_str()?.to_owned(),
             place: place(manifest, node, resource),
             severity: *severity,
-            message: message.unwrap_or_else(|| format!("{name} failed")),
+            // Named after its command, as a run's result is.
+            message: format!("dbt {command}: {}", message.unwrap_or_else(|| format!("{name} failed"))),
         })
     };
     Some(results["results"].as_array()?.iter().filter_map(failure).collect())
@@ -214,26 +216,44 @@ mod tests {
                 "shop",
                 "models/marts/broken.sql",
                 1,
-                "Database Error in model broken\n  Catalog Error: nowhere",
+                "dbt build: Database Error in model broken\n  Catalog Error: nowhere",
             ),
-            ("test.shop.is_even_orders_order_id.a1", "shop", "models/marts/_models.yml", 1, "is_even failed: 1 rows"),
+            (
+                "test.shop.is_even_orders_order_id.a1",
+                "shop",
+                "models/marts/_models.yml",
+                1,
+                "dbt build: is_even failed: 1 rows",
+            ),
             (
                 "test.shop.source_is_even_raw_orders_id.a4",
                 "shop",
                 "models/staging/_sources.yml",
                 2,
-                "is_even warned: 2 rows",
+                "dbt build: is_even warned: 2 rows",
             ),
-            ("test.shop.always_fails", "shop", "tests/sub/always_fails.sql", 1, "always_fails failed: 1 rows"),
-            ("unit_test.shop.stg_orders.ut", "shop", "models/staging/_unit.yml", 1, "ut failed"),
+            (
+                "test.shop.always_fails",
+                "shop",
+                "tests/sub/always_fails.sql",
+                1,
+                "dbt build: always_fails failed: 1 rows",
+            ),
+            ("unit_test.shop.stg_orders.ut", "shop", "models/staging/_unit.yml", 1, "dbt build: ut failed"),
             (
                 "model.shop_utils.pkg_broken",
                 "shop_utils",
                 "models/pkg_broken.sql",
                 1,
-                "Database Error in model pkg_broken",
+                "dbt build: Database Error in model pkg_broken",
             ),
-            ("test.shop.is_even_vmod_v2_id.ff", "shop", "models/versioned/_vmod.yml", 1, "is_even failed: 3 rows"),
+            (
+                "test.shop.is_even_vmod_v2_id.ff",
+                "shop",
+                "models/versioned/_vmod.yml",
+                1,
+                "dbt build: is_even failed: 3 rows",
+            ),
         ];
         assert_eq!(summary, expected);
         let places: Vec<&Place> = found.iter().map(|f| &f.place).collect();
@@ -301,7 +321,7 @@ models:
             ]),
         );
         let found = failures(&run, &manifest).unwrap();
-        assert_eq!((found[0].message.as_str(), found[0].severity), ("ut failed", 1));
+        assert_eq!((found[0].message.as_str(), found[0].severity), ("dbt build: ut failed", 1));
         let chain =
             vec![("source", "raw".to_owned()), ("table", "orders".to_owned()), ("column", "Customer Id".to_owned())];
         assert_eq!(found[1].place, Place::Entry { chain, test: Some("relationships".into()) });

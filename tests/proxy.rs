@@ -1863,12 +1863,12 @@ fn the_last_run_s_failures_show_where_they_are_written() {
     let error = last_run(&model)[0];
     assert_eq!(
         (&error["severity"], &error["message"], &error["source"]),
-        (&json!(1), &json!("Database Error in model orders"), &json!("dbt-lsp-plus"))
+        (&json!(1), &json!("dbt build: Database Error in model orders"), &json!("dbt-lsp-plus"))
     );
     assert_eq!(error["range"]["start"], json!({"line": 0, "character": 0}));
     let test = published(&mut session, &project.join("models/marts/_models.yml"), |p| !last_run(p).is_empty());
     let failed = last_run(&test)[0];
-    assert_eq!(failed["message"], "is_even failed: 2 rows");
+    assert_eq!(failed["message"], "dbt build: is_even failed: 2 rows");
     assert_eq!(failed["range"], json!({"start": {"line": 6, "character": 12}, "end": {"line": 6, "character": 19}}));
     assert!(test.get("version").is_none());
     assert!(session.finish().success());
@@ -1968,7 +1968,7 @@ fn a_file_newer_than_the_run_gets_no_failure_and_a_package_s_its_own() {
     write_run(&project, &results, &manifest);
     published(&mut session, &project.join("models/marts/_models.yml"), |p| !last_run(p).is_empty());
     let broken = published(&mut session, &package, |p| !last_run(p).is_empty());
-    assert_eq!(last_run(&broken)[0]["message"], "Database Error in model pkg_broken");
+    assert_eq!(last_run(&broken)[0]["message"], "dbt build: Database Error in model pkg_broken");
     barrier(&mut session);
     let on_model =
         |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&model).as_str();

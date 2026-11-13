@@ -189,7 +189,7 @@ fn last_run(session: &mut Session, project: &Path) {
     let published = session.wait_for(both);
     let failed =
         published["params"]["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "last-run").cloned();
-    assert_eq!(failed.unwrap()["message"], "relationships failed: 3 rows", "{published}");
+    assert_eq!(failed.unwrap()["message"], "dbt build: relationships failed: 3 rows", "{published}");
 }
 
 /// The proxy's definitions and hover in a properties file, where dbt lsp
