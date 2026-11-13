@@ -143,9 +143,14 @@ pub fn references(
 
 static PLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[A-Za-z_][A-Za-z0-9_]*\z").unwrap());
 
-/// VALUE as a YAML scalar: plain when it is a plain identifier, else double-quoted.
+/// The plain words that YAML reads as null or a boolean, in YAML 1.1, as dbt
+/// Core's loader does, or in 1.2.
+const NOT_STRINGS: [&str; 9] = ["null", "true", "false", "yes", "no", "on", "off", "y", "n"];
+
+/// VALUE as a YAML scalar: plain when it is a plain identifier that YAML
+/// reads as a string, else double-quoted.
 fn yaml_scalar(value: &str) -> String {
-    if PLAIN.is_match(value) {
+    if PLAIN.is_match(value) && !NOT_STRINGS.contains(&value.to_ascii_lowercase().as_str()) {
         return value.to_owned();
     }
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
@@ -440,6 +445,13 @@ models:
         let views = Target::Table { source: "events".into(), table: "page views".into() };
         let texts = apply(&project, &rename(&project, &views, "visits", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: 'visits'\n        identifier: \"page views\"\n"));
+        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let texts = apply(&project, &rename(&project, &customers, "a: b", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["_sources.yml"].contains("      - name: \"a: b\"\n        identifier: customers\n"));
+        for (new, written) in [("null", "\"null\""), ("On", "\"On\""), ("nothing", "nothing")] {
+            let texts = apply(&project, &rename(&project, &customers, new, Encoding::Utf16, &uri).unwrap());
+            assert!(texts["_sources.yml"].contains(&format!("      - name: {written}\n")), "{new}: {texts:?}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
