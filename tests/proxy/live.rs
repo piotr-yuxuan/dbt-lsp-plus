@@ -100,6 +100,13 @@ fn node_information(session: &mut Session, project: &Path) {
     let expected = ["\"shop\".\"main\".\"stg_orders\"", "\"shop\".\"main\".\"stg_customers\""];
     assert_eq!(labels, expected, "{hints}");
     assert_eq!(hints["result"][0]["position"], json!({"line": 4, "character": 38}), "{hints}");
+    // The server's own answers, observed: null on a macro file and on a
+    // properties file without a ref, where the proxy has nothing to add.
+    for file in ["macros/money.sql", "models/staging/_sources.yml"] {
+        let params = json!({"textDocument": {"uri": uri(&project.join(file))}, "range": range});
+        let hints = session.request("textDocument/inlayHint", params);
+        assert_eq!(hints["result"], Value::Null, "{file}: {hints}");
+    }
 }
 
 /// The proxy's outline and folding of a model, the outline of a properties
