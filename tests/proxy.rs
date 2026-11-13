@@ -9,7 +9,7 @@ mod support;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use support::{Session, fixture, received_by_server, scratch, until_logged, uri};
+use support::{Session, copy_fixture, fixture, received_by_server, scratch, until_logged, uri};
 
 fn names(symbols: &Value) -> Vec<&str> {
     symbols.as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect()
@@ -566,6 +566,26 @@ fn a_closed_document_s_unsaved_edits_leave_the_graph() {
     // On disk, order_summary refs a var: no edge the scan can tell.
     let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": summary}));
     assert_eq!(outgoing["result"], json!([]));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_document_under_a_link_inside_the_project_is_found_where_it_was_opened() {
+    let project = copy_fixture("link-inside");
+    std::fs::create_dir(project.join("elsewhere")).unwrap();
+    std::fs::write(project.join("elsewhere/linked.sql"), "select * from {{ ref('stg_orders') }}").unwrap();
+    std::os::unix::fs::symlink("../elsewhere", project.join("models/link")).unwrap();
+    let (mut session, _) =
+        Session::fake_with("link-inside-session", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let path = project.join("models/link/linked.sql");
+    let symbols = session.request("workspace/symbol", json!({"query": "linked"}));
+    assert_eq!(symbols["result"][0]["location"]["uri"], uri(&path));
+    // An unsaved first line moves the ref to line 1.
+    session.open(&path, Some("-- unsaved\nselect * from {{ ref('stg_orders') }}"));
+    let on_ref = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 1, "character": 25}});
+    let prepared = session.request("textDocument/prepareCallHierarchy", on_ref);
+    assert_eq!(prepared["result"][0]["data"]["uniqueId"], "model.shop.stg_orders", "{prepared}");
     assert!(session.finish().success());
 }
 

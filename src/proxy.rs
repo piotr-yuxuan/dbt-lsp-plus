@@ -250,13 +250,20 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The path of a `file:` URI, mapped onto the root when it reaches the
-    /// same file through another spelling: a link, `..`, a canonical path.
+    /// same file through another spelling of its directory: a link, a
+    /// canonical path.  A path under the root as spelt stays as it is, links
+    /// within the project included, since the scan walks them so.
     fn local_path(&self, uri: Option<&str>) -> Option<PathBuf> {
         let path = uri_path(uri)?;
         let mapped = || {
-            let canonical = fs::canonicalize(&path).ok()?;
+            let root = self.root.as_ref()?;
+            if path.starts_with(root) {
+                return None;
+            }
+            // The directory alone, so that a file not yet saved maps too.
+            let canonical = fs::canonicalize(path.parent()?).ok()?.join(path.file_name()?);
             let rest = canonical.strip_prefix(self.canonical_root.as_ref()?).ok()?;
-            Some(self.root.as_ref()?.join(rest))
+            Some(root.join(rest))
         };
         Some(mapped().unwrap_or(path))
     }
