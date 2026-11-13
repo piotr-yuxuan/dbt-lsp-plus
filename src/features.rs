@@ -170,6 +170,37 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
     Value::Array(answer.collect())
 }
 
+/// The server's answer to a hover, MESSAGE, with SUMMARY put first: before
+/// a rule in markdown, above a blank line in plain text, as the first item
+/// of an array of marked strings.  A null result becomes the summary alone,
+/// in markdown when MARKDOWN; an error, or contents of a shape LSP does not
+/// define, gives none, so that the answer passes as it came.
+pub fn merge_hover(message: &Value, summary: &str, markdown: bool) -> Option<Value> {
+    let mut merged = message.clone();
+    let result = merged.get_mut("result")?;
+    // A line break in markdown needs two spaces before it.
+    let marked = summary.replace('\n', "  \n");
+    let kind = result.pointer("/contents/kind").and_then(Value::as_str).map(str::to_owned);
+    let kind = kind.or_else(|| result.is_null().then(|| if markdown { "markdown" } else { "plaintext" }.to_owned()));
+    let contents = result.get("contents").cloned().unwrap_or(Value::Null);
+    let joined = match (kind.as_deref(), contents) {
+        (Some(kind), contents) => {
+            let (first, rule) = if kind == "markdown" { (marked, "---\n\n") } else { (summary.to_owned(), "") };
+            let rest = contents["value"].as_str().map_or_else(String::new, |value| format!("\n\n{rule}{value}"));
+            json!({"kind": kind, "value": format!("{first}{rest}")})
+        }
+        (None, Value::Array(items)) => json!(std::iter::once(json!(marked)).chain(items).collect::<Vec<_>>()),
+        (None, Value::String(text)) => json!(format!("{marked}\n\n---\n\n{text}")),
+        (None, item @ Value::Object(_)) => json!([marked, item]),
+        _ => return None,
+    };
+    if result.is_null() {
+        *result = json!({});
+    }
+    result["contents"] = joined;
+    Some(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +286,29 @@ mod tests {
         let graph = Graph::scanned(&project);
         let readme = fixture().join("packages.yml");
         assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), Value::Null);
+    }
+
+    #[test]
+    fn puts_the_summary_first_in_every_shape_of_hover() {
+        let summary = "model table, x\ntags a";
+        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
+        let contents = |merged: Option<Value>| merged.unwrap()["result"]["contents"].clone();
+        let markdown = answer(json!({"contents": {"kind": "markdown", "value": "Server"}, "range": "kept"}));
+        let merged = merge_hover(&markdown, summary, true).unwrap();
+        assert_eq!(merged["result"]["contents"]["value"], "model table, x  \ntags a\n\n---\n\nServer");
+        assert_eq!(merged["result"]["range"], "kept");
+        let plain = answer(json!({"contents": {"kind": "plaintext", "value": "Server"}}));
+        assert_eq!(contents(merge_hover(&plain, summary, true))["value"], "model table, x\ntags a\n\nServer");
+        let string = answer(json!({"contents": "Server"}));
+        assert_eq!(contents(merge_hover(&string, summary, true)), "model table, x  \ntags a\n\n---\n\nServer");
+        let code = answer(json!({"contents": {"language": "sql", "value": "select 1"}}));
+        assert_eq!(contents(merge_hover(&code, summary, true))[1]["language"], "sql");
+        let array = answer(json!({"contents": ["a", "b"]}));
+        assert_eq!(contents(merge_hover(&array, summary, true)), json!(["model table, x  \ntags a", "a", "b"]));
+        let null = answer(Value::Null);
+        assert_eq!(contents(merge_hover(&null, summary, false)), json!({"kind": "plaintext", "value": summary}));
+        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
+        assert_eq!(merge_hover(&error, summary, true), None);
+        assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true), None);
     }
 }
