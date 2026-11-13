@@ -535,13 +535,15 @@ impl<W: Write> Proxy<W> {
         if !config::packages_settled(&root) {
             return self.log_parse("packages.yml names packages that are not installed: run dbt deps");
         }
-        let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from);
-        let base = base.or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")));
+        // An empty or relative base would put the cache in the working directory.
+        let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
+        let base = absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")));
         let server = &self.parsing.server;
-        let cache = self
-            .parsing
-            .cache
-            .get_or_insert_with(|| config::cache_dir(&base.unwrap_or_else(std::env::temp_dir), &root, server));
+        let cache = self.parsing.cache.get_or_insert_with(|| {
+            let cache = config::cache_dir(&base.unwrap_or_else(std::env::temp_dir), &root, server);
+            config::remove_stale(&cache);
+            cache
+        });
         let Some(command) = config::parse_command(server, &root, cache) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };

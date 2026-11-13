@@ -62,6 +62,20 @@ pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
     base.join("dbt-lsp-plus").join(format!("{key:016x}")).join(std::process::id().to_string())
 }
 
+/// Removes the caches beside CACHE whose process is gone, as when a signal
+/// killed it before it could remove its own.
+pub fn remove_stale(cache: &Path) {
+    let own = cache.file_name();
+    let siblings = cache.parent().and_then(|parent| fs::read_dir(parent).ok()).into_iter().flatten().flatten();
+    for sibling in siblings.filter(|sibling| Some(sibling.file_name().as_os_str()) != own) {
+        let pid = sibling.file_name().to_string_lossy().into_owned();
+        let alive = Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        if pid.parse::<u32>().is_ok() && !alive {
+            let _ = fs::remove_dir_all(sibling.path());
+        }
+    }
+}
+
 /// Whether dbt can parse the project at ROOT without resolving its packages
 /// over the network, which writes `dbt_packages/` and `package-lock.yml`:
 /// every package is local, or the lock is no older than the file that names
