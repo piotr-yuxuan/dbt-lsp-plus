@@ -52,16 +52,18 @@ const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 /// the kind, the resource types it may name, the prefix of the name in
 /// their ids, and the packages searched in turn.  A `ref`, `doc` or
 /// generic test names its kind; the `name:` of an entry, the entry's label;
-/// a unit test's `model:`, `unit test model`.
+/// a unit test's `model:`, `unit test model`.  An entry describes a
+/// resource of its own package only: dbt 2.0.9 calls one naming another
+/// package's resource unused, where dbt-core 1.12 patches it.
 const LOOKUP: [(&str, &[&str], &str, &[Step]); 9] = [
     ("ref", &["model", "seed", "snapshot"], "", CALLS),
     ("doc", &["doc"], "", &[Step::Root, Step::Own, Step::Any]),
     ("test", &["macro"], "test_", &[Step::Own, Step::Root]),
     ("unit test model", &["model"], "", &[Step::Own]),
-    ("model", &["model"], "", &[Step::Own, Step::Any]),
-    ("seed", &["seed"], "", &[Step::Own, Step::Any]),
-    ("snapshot", &["snapshot"], "", &[Step::Own, Step::Any]),
-    ("analysis", &["analysis"], "", &[Step::Any]),
+    ("model", &["model"], "", &[Step::Own]),
+    ("seed", &["seed"], "", &[Step::Own]),
+    ("snapshot", &["snapshot"], "", &[Step::Own]),
+    ("analysis", &["analysis"], "", &[Step::Own]),
     ("macro", &["macro"], "", &[Step::Own]),
 ];
 
@@ -251,6 +253,11 @@ macros:
   - name: pkg_macro
 analyses:
   - name: a
+    description: \"{{ doc('pkg', 'order_status') }}\"
+seeds:
+  - name: raw
+snapshots:
+  - name: snap
 exposures:
   - name: weekly
     depends_on:
@@ -273,7 +280,10 @@ models:
           to: ref('orders')
 ";
 
-    const SOURCES: &str = "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: orders\n";
+    const SOURCES: &str =
+        "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: orders\n      - name: customers\n";
+
+    const EXTERNAL: &str = "version: 2\nsources:\n  - name: ext\n    tables:\n      - name: events\n";
 
     fn shop(name: &str, root_config: &str) -> PathBuf {
         scratch_project(
@@ -286,6 +296,8 @@ models:
                 ("models/_sources.yml", SOURCES),
                 ("models/docs.md", "{% docs order_status %}\nThe root's.\n{% enddocs %}\n"),
                 ("analyses/a.sql", "select 1"),
+                ("seeds/raw.csv", "id\n1\n"),
+                ("snapshots/snap.sql", "{% snapshot snap %}\nselect 1\n{% endsnapshot %}\n"),
                 (
                     "macros/tests.sql",
                     "{% macro is_even() %}{% endmacro %}\n\
@@ -297,6 +309,8 @@ models:
                 ("dbt_packages/pkg/models/only_pkg.sql", "select 3"),
                 ("dbt_packages/pkg/models/_pkg.yml", PACKAGE_MODELS),
                 ("dbt_packages/pkg/models/_sources.yml", SOURCES),
+                ("dbt_packages/pkg/models/_external.yml", EXTERNAL),
+                ("dbt_packages/pkg/analyses/a.sql", "select 4"),
                 (
                     "dbt_packages/pkg/models/docs.md",
                     "{% docs order_status %}\nThe package's.\n{% enddocs %}\n\
@@ -304,8 +318,12 @@ models:
                 ),
                 (
                     "dbt_packages/pkg/macros/m.sql",
-                    "{% test pkg_test(model) %}\nselect 1\n{% endtest %}\n{% macro pkg_macro() %}{% endmacro %}\n",
+                    "{% test pkg_test(model) %}\nselect 1\n{% endtest %}\n{% macro pkg_macro() %}{% endmacro %}\n\
+                     {% test is_even(model) %}\nselect 1\n{% endtest %}\n",
                 ),
+                ("dbt_packages/other/dbt_project.yml", "name: other\n"),
+                ("dbt_packages/other/models/docs.md", "{% docs pkg_only %}\nThe other's.\n{% enddocs %}\n"),
+                ("dbt_packages/other/models/_external.yml", EXTERNAL),
             ],
         )
     }
@@ -329,6 +347,7 @@ models:
         // A doc's quotes as YAML escapes them in single and double quotes.
         assert_eq!(at(yml, MODELS, "order_status''", 2), named("doc", None, "order_status"));
         assert_eq!(at(yml, MODELS, "pkg_only", 2), named("doc", None, "pkg_only"));
+        assert_eq!(at(yml, MODELS, "'pkg', 'order_status'", 9), named("doc", Some("pkg"), "order_status"));
         let table = sources::Target::Table { source: "raw".into(), table: "orders".into() };
         assert_eq!(at(yml, MODELS, "'raw', 'orders'", 9), Some(Target::Source(table)));
         // A ref naming a version: the scan knows no versions' files.
@@ -341,6 +360,13 @@ models:
         assert_eq!(at(yml, MODELS, "name: orders", 8), named("model", None, "orders"));
         assert_eq!(at(yml, MODELS, "name: test_is_even", 8), named("macro", None, "test_is_even"));
         assert_eq!(at(yml, MODELS, "name: a\n", 6), named("analysis", None, "a"));
+        assert_eq!(at(yml, MODELS, "name: raw\n", 7), named("seed", None, "raw"));
+        assert_eq!(at(yml, MODELS, "name: snap", 7), named("snapshot", None, "snap"));
+    }
+
+    #[test]
+    fn finds_the_tests_and_unit_test_models_of_yaml_from_the_document_alone() {
+        let yml = Path::new(YML);
         assert_eq!(at(yml, MODELS, "- is_even", 4), named("test", None, "is_even"));
         assert_eq!(at(yml, MODELS, "pkg.pkg_test", 6), named("test", Some("pkg"), "pkg_test"));
         assert_eq!(at(yml, MODELS, "model: orders", 9), named("unit test model", None, "orders"));
@@ -396,13 +422,36 @@ models:
             leads(&root, root_yml, table.clone()),
             lead("source.shop.raw.orders", "models/_sources.yml", "orders")
         );
-        assert_eq!(leads(&root, pkg_yml, table.clone())[0].0, "source.pkg.raw.orders");
+        assert_eq!(leads(&root, pkg_yml, table)[0].0, "source.pkg.raw.orders");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_flag_set_to_false_puts_the_root_first() {
+        let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
+        let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
         let flagged =
             shop("navigation-flag", "name: shop\nflags:\n  require_ref_searches_node_package_before_root: false\n");
         assert_eq!(leads(&flagged, pkg_yml, named("ref", None, "orders"))[0].0, "model.shop.orders");
         assert_eq!(leads(&flagged, pkg_yml, table)[0].0, "source.shop.raw.orders");
+        let default =
+            shop("navigation-flag-true", "name: shop\nflags:\n  require_ref_searches_node_package_before_root: true\n");
+        assert_eq!(leads(&default, pkg_yml, named("ref", None, "orders"))[0].0, "model.pkg.orders");
+        for dir in [flagged, default] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_source_leads_to_its_one_entry_and_any_package_to_every_declaration() {
+        let root = shop("navigation-sources", "name: shop\n");
+        let source = Some(Target::Source(sources::Target::Source { source: "raw".into() }));
+        // One entry for the source, however many tables it has.
+        assert_eq!(leads(&root, "models/_models.yml", source), lead("source.shop.raw", "models/_sources.yml", "raw"));
+        let events = Some(Target::Source(sources::Target::Table { source: "ext".into(), table: "events".into() }));
+        let found: Vec<String> = leads(&root, "models/_models.yml", events).into_iter().map(|(id, ..)| id).collect();
+        assert_eq!(found, ["source.other.ext.events", "source.pkg.ext.events"]);
         std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_dir_all(flagged).unwrap();
     }
 
     #[test]
@@ -411,7 +460,9 @@ models:
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
         assert_eq!(found, lead("doc.shop.order_status", "models/docs.md", "order_status"));
-        assert_eq!(leads(&root, "models/_models.yml", named("doc", None, "pkg_only"))[0].0, "doc.pkg.pkg_only");
+        // From the root, any package that has it; from a package, its own.
+        assert_eq!(leads(&root, "models/_models.yml", named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
+        assert_eq!(leads(&root, pkg_yml, named("doc", None, "pkg_only"))[0].0, "doc.pkg.pkg_only");
         assert_eq!(
             leads(&root, "models/_models.yml", named("doc", Some("pkg"), "order_status"))[0].0,
             "doc.pkg.order_status"
@@ -434,6 +485,9 @@ models:
         // Never another installed package's without its name.
         assert_eq!(leads(&root, yml, named("test", None, "pkg_test")), Vec::new());
         assert_eq!(leads(&root, yml, named("test", Some("pkg"), "pkg_test"))[0].0, "macro.pkg.test_pkg_test");
+        // A package's file finds its own package's test first.
+        let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
+        assert_eq!(leads(&root, pkg_yml, named("test", None, "is_even"))[0].0, "macro.pkg.test_is_even");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -455,17 +509,28 @@ models:
     }
 
     #[test]
-    fn an_entry_names_a_resource_by_its_type_s_rule() {
+    fn an_entry_names_a_resource_of_its_own_package() {
         let root = shop("navigation-entries", "name: shop\n");
-        let yml = "models/_models.yml";
-        assert_eq!(leads(&root, yml, named("model", None, "orders"))[0].0, "model.shop.orders");
-        // A model of another package, which root properties may describe.
-        assert_eq!(leads(&root, yml, named("model", None, "only_pkg"))[0].0, "model.pkg.only_pkg");
-        assert_eq!(leads(&root, yml, named("macro", None, "test_is_even"))[0].0, "macro.shop.test_is_even");
-        assert_eq!(leads(&root, yml, named("macro", None, "pkg_macro")), Vec::new());
-        assert_eq!(leads(&root, yml, named("analysis", None, "a"))[0].0, "analysis.shop.a");
-        assert_eq!(leads(&root, yml, named("unit test model", None, "orders"))[0].0, "model.shop.orders");
-        assert_eq!(leads(&root, yml, named("unit test model", None, "only_pkg")), Vec::new());
+        let (yml, pkg_yml) = ("models/_models.yml", "dbt_packages/pkg/models/_pkg.yml");
+        // dbt 2.0.9 lets no entry describe another package's resource.
+        let expected = [
+            (yml, "model", "orders", Some("model.shop.orders")),
+            (pkg_yml, "model", "orders", Some("model.pkg.orders")),
+            (yml, "model", "only_pkg", None),
+            (yml, "seed", "raw", Some("seed.shop.raw")),
+            (yml, "snapshot", "snap", Some("snapshot.shop.snap")),
+            (yml, "macro", "test_is_even", Some("macro.shop.test_is_even")),
+            (yml, "macro", "pkg_macro", None),
+            (yml, "analysis", "a", Some("analysis.shop.a")),
+            (pkg_yml, "analysis", "a", Some("analysis.pkg.a")),
+            (yml, "unit test model", "orders", Some("model.shop.orders")),
+            (yml, "unit test model", "only_pkg", None),
+        ];
+        for (file, kind, name, id) in expected {
+            let found = leads(&root, file, named(kind, None, name));
+            assert_eq!(found.first().map(|(found, ..)| found.as_str()), id, "{kind} {name} from {file}");
+        }
+        assert_eq!(leads(&root, yml, named("seed", None, "raw")), lead("seed.shop.raw", "seeds/raw.csv", ""));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
