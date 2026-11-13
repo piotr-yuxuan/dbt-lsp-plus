@@ -101,14 +101,19 @@ pub struct Graph {
 
 /// The ids of the resources that a call of TARGET from ENTITY names, by
 /// dbt's lookup: a package named in the call, else the entity's own package,
-/// then the packages of SEARCH, the root project first.  A ref, source or
-/// macro names the first that exists; a dispatch names every implementation
-/// (`*__name`) of the first package that has one.
+/// then the packages of SEARCH, the root project first; an unqualified macro
+/// only in the entity's package and the root project, since dbt keeps the
+/// others' macros behind their package's name.  A ref, source or macro names
+/// the first that exists; a dispatch names every implementation (`*__name`)
+/// of the first package that has one.
 fn resolve(known: &BTreeSet<&str>, search: &[&str], entity: &Entity, target: &Target) -> Vec<String> {
     let packages: Vec<&str> = match target {
         Target::Ref { package: Some(package), .. }
         | Target::Macro { package: Some(package), .. }
         | Target::Dispatch { package: Some(package), .. } => vec![package],
+        Target::Macro { package: None, .. } => {
+            vec![entity.package.as_str(), search.first().copied().unwrap_or_default()]
+        }
         _ => std::iter::once(entity.package.as_str()).chain(search.iter().copied()).collect(),
     };
     let candidates = packages.into_iter().map(|p| match target {
@@ -235,6 +240,26 @@ mod tests {
         // The commented ref('raw_customers') of stg_customers is no edge; the dynamic ref is unknown.
         assert!(!edges.contains(&("model.shop.stg_customers", "seed.shop.raw_customers")));
         assert!(!edges.iter().any(|(from, _)| *from == "model.shop.order_summary"));
+    }
+
+    #[test]
+    fn an_unqualified_macro_is_looked_up_in_its_package_and_the_root_only() {
+        let dir = project::scratch_project(
+            "unqualified-macro",
+            &[
+                ("dbt_project.yml", "name: shop\n"),
+                ("models/report.sql", "{{ date_spine() }} {{ utils.date_spine() }}"),
+                ("dbt_packages/utils/dbt_project.yml", "name: utils\n"),
+                ("dbt_packages/utils/macros/spine.sql", "{% macro date_spine() %}{{ helper() }}{% endmacro %}"),
+                ("dbt_packages/utils/macros/helper.sql", "{% macro helper() %}1{% endmacro %}"),
+            ],
+        );
+        let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap());
+        assert!(pairs(&graph).contains(&("macro.utils.date_spine", "macro.utils.helper")));
+        // The unqualified date_spine() is dbt's own, not the package's: one site only.
+        let spine = graph.edges.iter().find(|e| e.to == "macro.utils.date_spine").unwrap();
+        assert_eq!((spine.from.as_str(), spine.sites.len()), ("model.shop.report", 1));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
