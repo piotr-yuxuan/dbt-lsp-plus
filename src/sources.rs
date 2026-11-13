@@ -358,8 +358,14 @@ models:
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         assert_eq!(target_at(model, MODEL, at("customers")), Some(customers.clone()));
         assert_eq!(target_at(model, MODEL, at("join")), None);
+        // Both ends of a name count, as editors put the cursor after a word.
+        let start = MODEL.find("customers").unwrap();
+        for offset in [start, start + "customers".len()] {
+            assert_eq!(target_at(model, MODEL, offset), Some(customers.clone()), "{offset}");
+        }
         let yaml = Path::new("_sources.yml");
-        assert_eq!(target_at(yaml, SOURCES, SOURCES.find("customers").unwrap()), Some(customers));
+        assert_eq!(target_at(yaml, SOURCES, SOURCES.find("customers").unwrap()), Some(customers.clone()));
+        assert_eq!(target_at(Path::new("_sources.yaml"), SOURCES, SOURCES.find("customers").unwrap()), Some(customers));
         assert_eq!(
             target_at(yaml, SOURCES, SOURCES.find("events").unwrap()),
             Some(Target::Source { source: "events".into() })
@@ -529,6 +535,21 @@ models:
         assert!(rename(&project, &k, "u", Encoding::Utf16, &uri).unwrap_err().contains("flow style"), "JSON");
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&flow_dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_name_that_breaks_the_quotes_it_goes_in() {
+        let (dir, project) = shop("quotes");
+        // orders is called as source("raw", "orders"), and named plain in YAML.
+        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        for new in ["a\"b", "a\\b"] {
+            let error = rename(&project, &orders, new, Encoding::Utf16, &uri).unwrap_err();
+            assert!(error.contains("cannot hold \""), "{new}: {error}");
+        }
+        let texts = apply(&project, &rename(&project, &orders, "it's", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["m.sql"].contains("source(\"raw\", \"it's\")"), "{texts:?}");
+        assert!(texts["_sources.yml"].contains("- name: \"it's\""), "{texts:?}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

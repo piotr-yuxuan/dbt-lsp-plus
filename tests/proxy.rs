@@ -575,8 +575,13 @@ fn answers_references_on_a_source_and_forwards_the_others() {
     // On a ref, the server answers.
     let orders = uri(&fixture().join("models/marts/orders.sql"));
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "context": {"includeDeclaration": true}});
-    let forwarded = session.request("textDocument/references", on_ref);
+    let forwarded = session.request("textDocument/references", on_ref.clone());
     assert_eq!(forwarded["result"]["echo"], "textDocument/references");
+    let mut rename_ref = on_ref;
+    rename_ref["newName"] = json!("orders_v2");
+    let forwarded = session.request("textDocument/rename", rename_ref);
+    assert_eq!(forwarded["result"]["echo"], "textDocument/rename");
+    assert!(methods(&log).contains(&"textDocument/rename".to_owned()));
     assert!(session.finish().success());
 }
 
@@ -593,13 +598,15 @@ fn renames_a_source_table_and_keeps_its_relation() {
         model,
         &json!([{"range": {"start": {"line": 0, "character": 35}, "end": {"line": 0, "character": 45}}, "newText": "visits"}])
     );
-    let yaml: Vec<&str> = changes[&uri(&fixture().join("models/staging/_sources.yml"))]
+    let mut yaml: Vec<&str> = changes[&uri(&fixture().join("models/staging/_sources.yml"))]
         .as_array()
         .unwrap()
         .iter()
         .map(|e| e["newText"].as_str().unwrap())
         .collect();
-    assert_eq!(yaml, ["visits", "\n        identifier: page_views"]);
+    // LSP leaves the order of edits at different places open.
+    yaml.sort();
+    assert_eq!(yaml, ["\n        identifier: page_views", "visits"]);
     assert!(!methods(&log).contains(&"textDocument/rename".to_owned()));
     let mut refused = on_page_views();
     refused["newName"] = json!("it's");
@@ -616,10 +623,15 @@ fn alone_it_still_answers_on_sources() {
     let mut session = Session::start(&command, &[], None);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["referencesProvider"], json!(true));
+    assert_eq!(result["capabilities"]["renameProvider"], json!(true));
     let mut params = on_page_views();
     params["context"] = json!({"includeDeclaration": false});
     let found = session.request("textDocument/references", params);
     assert_eq!(found["result"].as_array().unwrap().len(), 1);
+    let mut params = on_page_views();
+    params["newName"] = json!("visits");
+    let edit = session.request("textDocument/rename", params);
+    assert!(edit["result"]["changes"].as_object().is_some_and(|changes| changes.len() == 2), "{edit}");
     assert!(session.finish().success());
 }
 
@@ -888,5 +900,21 @@ fn tells_which_requests_it_answers_itself() {
     let mut session = Session::start(&command, &[], None);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn source_positions_follow_the_server_s_encoding() {
+    let capabilities = json!({"textDocumentSync": {"change": 2, "openClose": true}, "positionEncoding": "utf-8"});
+    let (mut session, _) = Session::fake("source-utf-8", json!({"capabilities": capabilities}));
+    session.initialize(&fixture());
+    let model = fixture().join("models/staging/stg_page_views.sql");
+    // é is one character and two UTF-8 bytes: page_views starts at character 43, byte 44.
+    session.open(&model, Some("/* é */ select * from {{ source('events', 'page_views') }}"));
+    let at = json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 0, "character": 45},
+                    "context": {"includeDeclaration": false}});
+    let found = session.request("textDocument/references", at);
+    let range = json!({"start": {"line": 0, "character": 44}, "end": {"line": 0, "character": 54}});
+    assert_eq!(found["result"], json!([{"uri": uri(&model), "range": range}]));
     assert!(session.finish().success());
 }
