@@ -387,6 +387,17 @@ models:
     }
 
     #[test]
+    fn renames_the_calls_of_dbt_project_yml() {
+        let config = "name: p\nvars:\n  segment:\n    pages: \"{{ source('raw', 'customers') }}\"\n";
+        let files = [("dbt_project.yml", config), ("models/_sources.yml", SOURCES)];
+        let (dir, project) = scratch_project("project-calls", &files);
+        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["dbt_project.yml"].contains("pages: \"{{ source('raw', 'clients') }}\""), "{texts:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn refuses_what_would_break_a_relation_or_a_quote() {
         let (dir, project) = shop("refusals");
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };

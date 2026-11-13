@@ -34,8 +34,8 @@ pub struct Project {
     pub entities: Vec<Entity>,
     /// The source tables, as their properties files declare them.
     pub sources: Vec<SourceTable>,
-    /// The text of each file of the resource paths, as the proxy read it;
-    /// empty for a seed.
+    /// The text of each file of the resource paths, and of each package's
+    /// `dbt_project.yml`, as the proxy read it; empty for a seed.
     pub texts: HashMap<PathBuf, String>,
 }
 
@@ -264,6 +264,10 @@ fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, 
             project.sources.extend(tables);
         }
     }
+    // Its vars and hooks hold calls too.
+    let config = dir.join("dbt_project.yml");
+    let text = open.get(&config).cloned().or_else(|| text::read(&config)).unwrap_or_default();
+    project.texts.insert(config, text);
     project.packages.insert(name, dir.to_owned());
 }
 
