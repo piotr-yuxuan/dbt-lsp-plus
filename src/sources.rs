@@ -30,7 +30,7 @@ pub struct Occurrence {
     pub declaration: bool,
 }
 
-fn is_yaml(path: &Path) -> bool {
+pub fn is_yaml(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("yml" | "yaml"))
 }
 
@@ -74,7 +74,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
 }
 
 /// Whether DECLARED declares TARGET.
-fn declares(declared: &SourceTable, target: &Target) -> bool {
+pub fn declares(declared: &SourceTable, target: &Target) -> bool {
     match target {
         Target::Table { source, table } => declared.source == *source && declared.table == *table,
         Target::Source { source } => declared.source == *source,
