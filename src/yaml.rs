@@ -21,8 +21,13 @@ pub enum Node {
 impl Node {
     /// The value under KEY of a mapping.
     pub fn get(&self, key: &str) -> Option<&Node> {
+        self.entry(key).map(|(_, value)| value)
+    }
+
+    /// The key KEY of a mapping, with its value.
+    pub fn entry(&self, key: &str) -> Option<(&Node, &Node)> {
         let Node::Map(entries) = self else { return None };
-        entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, value)| value)
+        entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(k, value)| (k, value))
     }
 
     pub fn as_str(&self) -> Option<&str> {

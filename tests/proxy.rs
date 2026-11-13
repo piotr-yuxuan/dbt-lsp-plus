@@ -184,7 +184,7 @@ fn workspace_symbols_list_every_resource_with_its_package_and_id() {
     let (mut session, _) = Session::fake("workspace-symbols", json!({}));
     session.initialize(&fixture());
     let all = session.request("workspace/symbol", json!({"query": ""}));
-    assert_eq!(all["result"].as_array().unwrap().len(), 21);
+    assert_eq!(all["result"].as_array().unwrap().len(), 22);
     let found = session.request("workspace/symbol", json!({"query": "ctd"}));
     assert_eq!(names(&found["result"]), ["cents_to_dollars"]);
     assert_eq!(found["result"][0]["containerName"], "shop");

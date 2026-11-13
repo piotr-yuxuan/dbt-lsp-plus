@@ -32,8 +32,54 @@ pub struct Project {
     /// Package name to its directory, the root project included.
     pub packages: HashMap<String, PathBuf>,
     pub entities: Vec<Entity>,
-    /// The text of each file that holds an entity, as the proxy read it.
+    /// The source tables, as their properties files declare them.
+    pub sources: Vec<SourceTable>,
+    /// The text of each file of the resource paths, as the proxy read it;
+    /// empty for a seed.
     pub texts: HashMap<PathBuf, String>,
+}
+
+/// Where a line goes right after a `name:` line: the end of that line, the
+/// indentation of the key, and whether the entry is in block style, the only
+/// style a line can go in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Insertion {
+    pub at: usize,
+    pub indent: usize,
+    pub block: bool,
+}
+
+/// A source table as its properties file declares it: each name as written,
+/// and what a rename must keep.
+#[derive(Clone, Debug)]
+pub struct SourceTable {
+    pub package: String,
+    pub path: PathBuf,
+    pub source: String,
+    pub source_range: Range<usize>,
+    pub source_insertion: Insertion,
+    /// Without `schema:`, dbt takes the source's name for its schema.
+    pub has_schema: bool,
+    pub table: String,
+    pub table_range: Range<usize>,
+    pub table_insertion: Insertion,
+    /// Without `identifier:`, dbt takes the table's name for its identifier.
+    pub has_identifier: bool,
+}
+
+impl From<&SourceTable> for Entity {
+    fn from(table: &SourceTable) -> Entity {
+        Entity {
+            id: format!("source.{}.{}.{}", table.package, table.source, table.table),
+            name: format!("{}.{}", table.source, table.table),
+            resource_type: "source",
+            package: table.package.clone(),
+            path: table.path.clone(),
+            range: table.table_range.clone(),
+            name_range: table.table_range.clone(),
+            calls: Vec::new(),
+        }
+    }
 }
 
 /// A kind of resource directory: its key in `dbt_project.yml` and dbt's
@@ -106,34 +152,51 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec
     found
 }
 
-/// The tables of the `sources:` of a properties file of PACKAGE, each placed
-/// at its name.  A file that is not valid YAML has none.
-fn source_tables(package: &str, path: &Path, text: &str) -> Vec<Entity> {
+/// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
+/// range, inside its quotes, escapes included, and where a line goes after it.
+fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
+    let (Node::Scalar { line: key_line, column: key_column, .. }, Node::Scalar { value, line, column }) = (key, value)
+    else {
+        return None;
+    };
+    let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
+    let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
+    let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
+    let range = match quoted {
+        Some(quoted) => at + 1..at + quoted.end() - 1,
+        None if text[at..].starts_with(value.as_str()) => at..at + value.len(),
+        None => at..line_end,
+    };
+    let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
+    let before_key =
+        text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
+    let block = before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
+    Some((value.clone(), range, Insertion { at: line_end, indent: *key_column, block }))
+}
+
+/// The tables of the `sources:` of a properties file of PACKAGE.  A file
+/// that is not valid YAML has none.
+pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable> {
     let Some(root) = yaml::parse(text) else { return Vec::new() };
     let index = LineIndex::new(text);
     let mut found = Vec::new();
     for source in root.get("sources").map_or(&[][..], Node::items) {
-        let Some(source_name) = source.get("name").and_then(Node::as_str) else { continue };
+        let Some((key, value)) = source.entry("name") else { continue };
+        let Some((source_name, source_range, source_insertion)) = placed(text, &index, key, value) else { continue };
         for table in source.get("tables").map_or(&[][..], Node::items) {
-            let Some(Node::Scalar { value, line, column }) = table.get("name") else { continue };
-            // The name as written: inside its quotes, escapes included, else as long as its value.
-            let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
-            let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
-            let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
-            let range = match quoted {
-                Some(quoted) => at + 1..at + quoted.end() - 1,
-                None if text[at..].starts_with(value.as_str()) => at..at + value.len(),
-                None => at..line_end,
-            };
-            found.push(Entity {
-                id: format!("source.{package}.{source_name}.{value}"),
-                name: format!("{source_name}.{value}"),
-                resource_type: "source",
+            let Some((key, value)) = table.entry("name") else { continue };
+            let Some((table_name, table_range, table_insertion)) = placed(text, &index, key, value) else { continue };
+            found.push(SourceTable {
                 package: package.to_owned(),
                 path: path.to_owned(),
-                range: range.clone(),
-                name_range: range,
-                calls: Vec::new(),
+                source: source_name.clone(),
+                source_range: source_range.clone(),
+                source_insertion: source_insertion.clone(),
+                has_schema: source.get("schema").is_some(),
+                table: table_name,
+                table_range,
+                table_insertion,
+                has_identifier: table.get("identifier").is_some(),
             });
         }
     }
@@ -187,14 +250,16 @@ fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, 
                 "csv" => String::new(),
                 _ => open.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok()).unwrap_or_default(),
             };
-            let found = match extension {
-                "yml" | "yaml" => source_tables(&name, &path, &text),
-                _ => file_entities(&name, layout, &path, &text),
+            let (found, tables) = match extension {
+                "yml" | "yaml" => {
+                    let tables = source_tables(&name, &path, &text);
+                    (tables.iter().map(Entity::from).collect(), tables)
+                }
+                _ => (file_entities(&name, layout, &path, &text), Vec::new()),
             };
-            if !found.is_empty() {
-                project.texts.insert(path, text);
-                project.entities.extend(found);
-            }
+            project.texts.insert(path, text);
+            project.entities.extend(found);
+            project.sources.extend(tables);
         }
     }
     project.packages.insert(name, dir.to_owned());
@@ -209,6 +274,7 @@ pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
         root_package: root_package.clone(),
         packages: HashMap::new(),
         entities: Vec::new(),
+        sources: Vec::new(),
         texts: HashMap::new(),
     };
     scan_package(&mut project, root, root_package, &root_config, open);
@@ -254,6 +320,7 @@ mod tests {
                 "model.shop.orders",
                 "model.shop.stg_customers",
                 "model.shop.stg_orders",
+                "model.shop.stg_page_views",
                 "seed.shop.raw_customers",
                 "seed.shop.raw_orders",
                 "snapshot.shop.orders_snapshot",
@@ -303,11 +370,11 @@ mod tests {
     fn a_quoted_table_name_is_placed_as_written_escapes_included() {
         let text = "sources:\n  - name: raw\n    tables:\n      - name: \"a\\tb\\\"é\"\n      - name: 'it''s'\n";
         let tables = source_tables("shop", Path::new("s.yml"), text);
-        let written: Vec<&str> = tables.iter().map(|t| &text[t.name_range.clone()]).collect();
+        let written: Vec<&str> = tables.iter().map(|t| &text[t.table_range.clone()]).collect();
         assert_eq!(written, ["a\\tb\\\"é", "it''s"]);
-        assert_eq!(tables[0].id, "source.shop.raw.a\tb\"é");
+        assert_eq!(Entity::from(&tables[0]).id, "source.shop.raw.a\tb\"é");
         let index = LineIndex::new(text);
-        let end = index.position(tables[0].name_range.end, Encoding::Utf16);
+        let end = index.position(tables[0].table_range.end, Encoding::Utf16);
         assert_eq!(end, serde_json::json!({"line": 3, "character": 22}));
     }
 
@@ -328,6 +395,25 @@ mod tests {
         let mut ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, ["model.linked.a", "model.linked.b", "source.linked.s.t"]);
+    }
+
+    #[test]
+    fn keeps_what_a_rename_of_a_source_needs() {
+        let project = scan(&fixture(), &HashMap::new()).unwrap();
+        let table = |name: &str| project.sources.iter().find(|t| t.table == name).unwrap();
+        let (orders, views) = (table("orders"), table("page_views"));
+        assert!(orders.has_identifier && orders.has_schema);
+        assert!(!views.has_identifier && !views.has_schema);
+        let text = &project.texts[&orders.path];
+        assert_eq!((&text[orders.source_range.clone()], &text[views.source_range.clone()]), ("raw", "events"));
+        // `      - name: orders`: the key `name` is at column 8.
+        assert_eq!(orders.table_insertion.indent, 8);
+        assert_eq!(&text[orders.table_insertion.at..orders.table_insertion.at + 1], "\n");
+        assert!(text[..orders.table_insertion.at].ends_with("- name: orders"));
+        assert!(orders.table_insertion.block);
+        assert_eq!(views.source_insertion.indent, 4);
+        let flow = source_tables("p", Path::new("f.yml"), "sources:\n  - {name: s, tables: [{name: t}]}\n");
+        assert!(!flow[0].table_insertion.block && !flow[0].source_insertion.block);
     }
 
     #[test]
