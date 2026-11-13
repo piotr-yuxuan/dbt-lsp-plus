@@ -4,10 +4,12 @@
 
 use crate::graph::{Edge, Graph, Item};
 use crate::project::Project;
+use crate::properties;
 use crate::scan::{self, Kind, Symbol};
 use crate::text::{Encoding, LineIndex};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 use url::Url;
 
@@ -39,18 +41,42 @@ fn outline_kind(kind: Kind) -> (u32, &'static str) {
     }
 }
 
+/// LSP's `SymbolKind` of an entry of a properties file, by its label;
+/// any other entry, a model, snapshot, analysis or semantic model, is 5,
+/// Class.
+const ENTRY_KINDS: [(&str, u32); 10] = [
+    ("seed", 23),       // Struct
+    ("macro", 12),      // Function
+    ("source", 2),      // Module
+    ("table", 11),      // Interface, as a source table is a workspace symbol
+    ("column", 8),      // Field
+    ("exposure", 19),   // Object
+    ("metric", 16),     // Number
+    ("saved query", 6), // Method
+    ("unit test", 24),  // Event
+    ("group", 3),       // Namespace
+];
+
+/// A symbol of an outline: a block or CTE, or an entry of a properties file.
+struct Outlined {
+    name: String,
+    kind: u32,
+    detail: &'static str,
+    range: Range<usize>,
+    name_range: Range<usize>,
+}
+
 pub fn uri(path: &Path) -> String {
     Url::from_file_path(path).map(String::from).unwrap_or_default()
 }
 
 /// Closes the innermost open symbol of STACK into its parent, or into ROOTS.
-fn close(stack: &mut Vec<(Symbol, Vec<Value>)>, roots: &mut Vec<Value>, index: &LineIndex, encoding: Encoding) {
+fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, index: &LineIndex, encoding: Encoding) {
     let Some((symbol, children)) = stack.pop() else { return };
-    let (kind, detail) = outline_kind(symbol.kind);
     let value = json!({
         "name": symbol.name,
-        "detail": detail,
-        "kind": kind,
+        "detail": symbol.detail,
+        "kind": symbol.kind,
         "range": index.range(symbol.range.start, symbol.range.end, encoding),
         "selectionRange": index.range(symbol.name_range.start, symbol.name_range.end, encoding),
         "children": children,
@@ -61,23 +87,40 @@ fn close(stack: &mut Vec<(Symbol, Vec<Value>)>, roots: &mut Vec<Value>, index: &
     }
 }
 
-/// The outline of TEXT: `DocumentSymbol`s nested by extent, or, for a
+/// The outline of TEXT: the entries of a properties file for YAML, else
+/// its blocks and CTEs; `DocumentSymbol`s nested by extent, or, for a
 /// client without hierarchical support, `SymbolInformation`s at URI.
 pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri: &str) -> Value {
     let index = LineIndex::new(text);
-    let contains =
-        |outer: &Symbol, inner: &Symbol| outer.range.start <= inner.range.start && inner.range.end <= outer.range.end;
-    let mut stack: Vec<(Symbol, Vec<Value>)> = Vec::new();
+    let contains = |outer: &Outlined, inner: &Outlined| {
+        outer.range.start <= inner.range.start && inner.range.end <= outer.range.end
+    };
+    let symbols: Vec<Outlined> = if uri.ends_with(".yml") || uri.ends_with(".yaml") {
+        let outlined = |entry: properties::Entry| Outlined {
+            kind: ENTRY_KINDS.iter().find(|(label, _)| *label == entry.label).map_or(5, |(_, kind)| *kind),
+            detail: entry.label,
+            name: entry.name,
+            range: entry.range,
+            name_range: entry.name_range,
+        };
+        properties::entries(text).into_iter().map(outlined).collect()
+    } else {
+        let outlined = |symbol: Symbol| {
+            let (kind, detail) = outline_kind(symbol.kind);
+            Outlined { name: symbol.name, kind, detail, range: symbol.range, name_range: symbol.name_range }
+        };
+        scan::outline(text, !uri.ends_with(".md")).into_iter().map(outlined).collect()
+    };
+    let mut stack: Vec<(Outlined, Vec<Value>)> = Vec::new();
     let mut roots = Vec::new();
     let mut flat = Vec::new();
-    for symbol in scan::outline(text, !uri.ends_with(".md")) {
+    for symbol in symbols {
         while stack.last().is_some_and(|(open, _)| !contains(open, &symbol)) {
             close(&mut stack, &mut roots, &index, encoding);
         }
         let container = stack.last().map(|(open, _)| open.name.clone());
-        let (kind, _) = outline_kind(symbol.kind);
         let location = json!({"uri": uri, "range": index.range(symbol.range.start, symbol.range.end, encoding)});
-        let mut information = json!({"name": symbol.name, "kind": kind, "location": location});
+        let mut information = json!({"name": symbol.name, "kind": symbol.kind, "location": location});
         if let Some(container) = container {
             information["containerName"] = json!(container);
         }
@@ -238,6 +281,77 @@ mod tests {
             symbols.as_array().unwrap().iter().map(|s| (&s["name"], s.get("containerName"))).collect();
         assert_eq!(flat, [(&json!("s"), None), (&json!("a"), Some(&json!("s"))), (&json!("b"), Some(&json!("s")))]);
         assert_eq!(symbols[1]["location"]["uri"], "file:///s.sql");
+    }
+
+    const PROPERTIES: &str = "models:\n  - name: orders\n    description: 'with x as (select 1) {% macro hidden() %}'\n    \
+        columns:\n      - name: id\nseeds:\n  - name: s\nsnapshots:\n  - name: sn\nanalyses:\n  - name: a\n\
+        macros:\n  - name: m\nsources:\n  - name: raw\n    tables:\n      - name: t\nexposures:\n  - name: e\n\
+        metrics:\n  - name: me\nsemantic_models:\n  - name: sm\nsaved_queries:\n  - name: q\nunit_tests:\n  \
+        - name: u\ngroups:\n  - name: g\n";
+
+    #[test]
+    fn outlines_a_properties_file_with_the_agreed_kinds_and_no_sql() {
+        let symbols = document_symbols(PROPERTIES, Encoding::Utf16, false, "file:///p.yml");
+        let flat: Vec<(&str, u64, Option<&str>)> = symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s["kind"].as_u64().unwrap(), s["containerName"].as_str()))
+            .collect();
+        let expected = [
+            ("orders", 5, None),
+            ("id", 8, Some("orders")),
+            ("s", 23, None),
+            ("sn", 5, None),
+            ("a", 5, None),
+            ("m", 12, None),
+            ("raw", 2, None),
+            ("t", 11, Some("raw")),
+            ("e", 19, None),
+            ("me", 16, None),
+            ("sm", 5, None),
+            ("q", 6, None),
+            ("u", 24, None),
+            ("g", 3, None),
+        ];
+        assert_eq!(flat, expected);
+    }
+
+    #[test]
+    fn nests_the_entries_of_a_properties_file_with_their_labels() {
+        let symbols = document_symbols(PROPERTIES, Encoding::Utf16, true, "file:///p.yaml");
+        let top: Vec<(&str, &str)> = symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s["detail"].as_str().unwrap()))
+            .collect();
+        let expected = [
+            ("orders", "model"),
+            ("s", "seed"),
+            ("sn", "snapshot"),
+            ("a", "analysis"),
+            ("m", "macro"),
+            ("raw", "source"),
+            ("e", "exposure"),
+            ("me", "metric"),
+            ("sm", "semantic model"),
+            ("q", "saved query"),
+            ("u", "unit test"),
+            ("g", "group"),
+        ];
+        assert_eq!(top, expected);
+        let column = &symbols[0]["children"][0];
+        assert_eq!((&column["name"], &column["detail"], &column["kind"]), (&json!("id"), &json!("column"), &json!(8)));
+        assert_eq!(symbols[5]["children"][0]["detail"], "table");
+        assert_eq!(
+            symbols[0]["range"],
+            json!({"start": {"line": 1, "character": 4}, "end": {"line": 4, "character": 16}})
+        );
+        assert_eq!(
+            symbols[0]["selectionRange"],
+            json!({"start": {"line": 1, "character": 10}, "end": {"line": 1, "character": 16}})
+        );
     }
 
     #[test]
