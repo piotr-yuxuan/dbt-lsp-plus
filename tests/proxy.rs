@@ -532,6 +532,28 @@ fn a_failed_first_listing_leaves_the_scanned_graph() {
 }
 
 #[test]
+fn after_a_crash_the_scan_gives_the_graph() {
+    let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
+    let script = json!({"answers": {ALL: {"error": null, "nodes": [summary_node]}}, "exit_on": "textDocument/hover"});
+    let (mut session, _) = Session::fake("crash-then-scan", script);
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/order_summary.sql");
+    session.open(&path, None);
+    let summary = item("models/marts/order_summary.sql", "model.shop.order_summary");
+    let lists_orders = |calls: &Value| calls.as_array().is_some_and(|calls| !calls.is_empty());
+    session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", json!({"item": summary})), lists_orders);
+    let position = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 0}});
+    assert_eq!(session.request("textDocument/hover", position)["error"]["code"], json!(-32803));
+    let change = json!({"textDocument": {"uri": uri(&path), "version": 2},
+                        "contentChanges": [{"text": "select * from {{ ref('stg_customers') }}"}]});
+    session.notify("textDocument/didChange", change);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": summary}));
+    assert_eq!(details(&outgoing["result"], "to"), ["model.shop.stg_customers"]);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_closed_document_s_unsaved_edits_leave_the_graph() {
     let (mut session, _) = Session::fake("closed", json!({}));
     session.initialize(&fixture());

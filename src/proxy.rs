@@ -475,7 +475,7 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The server is gone: answer what it left unanswered, once each, and
-    /// carry on alone.
+    /// carry on alone, on the scanned graph.
     fn on_server_closed(&mut self) {
         let Some(mut server) = self.server.take() else { return };
         let status = server.child.try_wait().ok().flatten();
@@ -496,6 +496,7 @@ impl<W: Write> Proxy<W> {
         self.listing = None;
         self.listed.clear();
         self.relist = false;
+        self.nodes = None;
         self.absent = Some(why.clone());
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
