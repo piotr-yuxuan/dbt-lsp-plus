@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: main
+    tables:
+      - name: orders
+        identifier: raw_orders
+      - name: customers
+        identifier: raw_customers
+
+  - name: "events"
+    tables:
+      - name: "page_views"
