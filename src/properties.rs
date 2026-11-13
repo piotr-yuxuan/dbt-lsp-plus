@@ -61,11 +61,19 @@ pub fn entries(text: &str) -> Vec<Entry> {
     let mut found = Vec::new();
     while let Some((item, label)) = pending.pop() {
         let Node::Map { entries, end } = item else { continue };
-        let Some((Node::Scalar { line, column, .. }, _)) = entries.first() else { continue };
-        let Some((name, name_range)) = item.get("name").and_then(|name| project::written(text, &index, name)) else {
+        // The first key that has a place: an alias or a complex key has none.
+        let first = entries.iter().find_map(|(key, _)| match key {
+            Node::Scalar { line, column, .. } => Some((*line, *column)),
+            _ => None,
+        });
+        // A `name:` still being typed is empty, and placed at the next token.
+        let named = item.get("name").and_then(|name| project::written(text, &index, name));
+        let (Some((line, column)), Some((name, name_range))) =
+            (first, named.filter(|(name, _)| !name.trim().is_empty()))
+        else {
             continue;
         };
-        let start = index.offset(*line as u64, *column as u64, Encoding::Utf32);
+        let start = index.offset(line as u64, column as u64, Encoding::Utf32);
         let end = index.offset(end.0 as u64, end.1 as u64, Encoding::Utf32);
         let range = if text[end..].starts_with('}') {
             start..end + 1
@@ -79,11 +87,15 @@ pub fn entries(text: &str) -> Vec<Entry> {
             });
             let content = |(_, line): &(usize, &str)| {
                 let indent = line.len() - line.trim_start().len();
-                !line.trim().is_empty() && !(line.trim_start().starts_with('#') && indent <= *column)
+                !line.trim().is_empty() && !(line.trim_start().starts_with('#') && indent <= column)
             };
             let last = lines.filter(content).last();
             start..last.map_or(end, |(line_start, line)| line_start + line.trim_end().len())
         };
+        // A block scalar's name runs past its line: no symbol can hold it.
+        if name_range.start < range.start || range.end < name_range.end {
+            continue;
+        }
         found.push(Entry { label, name, range, name_range });
         if let Some((_, key, child)) = CHILDREN.iter().find(|(parent, ..)| *parent == label) {
             let held = item.get(key).map_or(&[][..], Node::items);
@@ -239,6 +251,37 @@ groups:
     fn an_entry_without_a_scalar_name_is_skipped_with_what_it_holds() {
         let text = "models:\n  - name: [a, b]\n    columns:\n      - name: x\n  - description: none\n  - kept\n";
         assert_eq!(named(text), Vec::new());
+    }
+
+    #[test]
+    fn a_name_being_typed_or_out_of_its_entry_makes_no_entry() {
+        let texts = [
+            // Before a sibling, before a blank and a comment line then the
+            // next section, at the end of the text: each placed by the parser
+            // at the next token.
+            "models:\n  - name:\n    columns:\n      - name:\n  - name: kept\n",
+            "models:\n  - name: kept\n  - name:\n\n# Sources.\nsources:\n  - name: kept\n",
+            "models:\n  - name: kept\n  - name:",
+            "models:\n  - name: \"\"\n  - name: '  '\n  - name: |\n      orders\n  - name: kept\n",
+        ];
+        for text in texts {
+            let found = entries(text);
+            assert!(found.iter().all(|entry| entry.name == "kept"), "{text}: {found:?}");
+            for entry in &found {
+                assert_eq!(&text[entry.range.clone()], "name: kept", "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_entry_starts_at_its_first_placed_key_and_an_alias_holds_nothing() {
+        let text = "anchors:\n  - &cols\n    - name: id\n  - &base\n    description: shared\nmodels:\n  \
+                    - <<: *base\n    name: x\n    columns: *cols\n  - *base\n  - ? [complex]\n    : value\n    \
+                    name: y\n";
+        let found = entries(text);
+        assert_eq!(named(text), [("model", "x".to_owned()), ("model", "y".to_owned())]);
+        assert_eq!(&text[found[0].range.clone()], "<<: *base\n    name: x\n    columns: *cols");
+        assert_eq!(&text[found[1].range.clone()], "name: y");
     }
 
     #[test]
