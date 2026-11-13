@@ -605,6 +605,19 @@ fn without_project_dir_nor_a_project_folder_the_working_directory_is_the_root() 
     assert!(session.finish().success());
 }
 
+#[test]
+fn the_project_dir_keeps_its_spelling_when_the_client_names_a_folder_above_it() {
+    let link = scratch("spelt-project-dir").join("repo");
+    std::os::unix::fs::symlink(fixture().parent().unwrap(), &link).unwrap();
+    let project = link.join("shop");
+    let (mut session, _) =
+        Session::fake_with("spelt-session", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&link);
+    let found = session.request("workspace/symbol", json!({"query": "stg_orders"}));
+    assert_eq!(found["result"][0]["location"]["uri"], uri(&project.join("models/staging/stg_orders.sql")));
+    assert!(session.finish().success());
+}
+
 /// The id of the proxy's first listing of `*` that the fake received.
 fn listing_id(log: &Path) -> Value {
     logged(log).into_iter().find(|m| m["params"]["arguments"][0] == "*").expect("a listing")["id"].clone()

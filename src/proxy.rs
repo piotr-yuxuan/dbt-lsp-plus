@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -123,14 +123,29 @@ fn key(id: &Value) -> String {
 }
 
 /// The `--project-dir` of COMMAND, as `--project-dir X` or
-/// `--project-dir=X`, with its links resolved.
+/// `--project-dir=X`, made absolute as spelt, so that the paths the proxy
+/// returns read as the user wrote them: each `..` drops the component before
+/// it.  Resolved only when that names another directory, through a link
+/// before a `..`.
 fn project_dir(command: &[String]) -> Option<PathBuf> {
     let value = command.iter().enumerate().find_map(|(at, arg)| match arg.strip_prefix("--project-dir") {
         Some("") => command.get(at + 1).cloned(),
         Some(rest) => rest.strip_prefix('=').map(str::to_owned),
         None => None,
     })?;
-    fs::canonicalize(&value).or_else(|_| std::path::absolute(&value)).ok()
+    let spelt = std::path::absolute(&value).ok()?.components().fold(PathBuf::new(), |mut path, component| {
+        match component {
+            Component::ParentDir => {
+                path.pop();
+            }
+            other => path.push(other),
+        }
+        path
+    });
+    match fs::canonicalize(&value) {
+        Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
+        _ => Some(spelt),
+    }
 }
 
 impl<W: Write> Proxy<W> {
@@ -601,12 +616,28 @@ mod tests {
 
     #[test]
     fn reads_the_project_dir_in_both_forms() {
-        let here = fs::canonicalize(".").unwrap();
+        let here = std::env::current_dir().unwrap();
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir", "."])), Some(here.clone()));
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=."])), Some(here.clone()));
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=src/.."])), Some(here));
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-directory", "x"])), None);
         assert_eq!(project_dir(&args(&["dbt", "lsp"])), None);
+    }
+
+    #[test]
+    fn keeps_the_project_dir_as_spelt_unless_a_link_before_dot_dot_moves_it() {
+        let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-project-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a"), dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a/b"), dir.join("deep")).unwrap();
+        let dir_of = |spelling: &str| project_dir(&args(&["dbt", "lsp", "--project-dir", spelling]));
+        let spelt = dir.join("link");
+        assert_eq!(dir_of(spelt.to_str().unwrap()), Some(spelt.clone()));
+        assert_eq!(dir_of(dir.join("link/b/..").to_str().unwrap()), Some(spelt));
+        // deep/.. is a/b/.. to the system, a; read lexically, it would be DIR.
+        assert_eq!(dir_of(dir.join("deep/..").to_str().unwrap()), Some(fs::canonicalize(dir.join("a")).unwrap()));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
