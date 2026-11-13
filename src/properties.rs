@@ -60,8 +60,13 @@ pub struct Test {
 fn held<'a>(node: &'a Node, label: &str) -> Vec<(&'a Node, &'static str)> {
     let Node::Map { entries, .. } = node else { return Vec::new() };
     let lists = entries.iter().filter_map(|(key, value)| {
+        // A model's version has no name: its columns count as the model's.
+        if label == "model" && key.as_str() == Some("versions") {
+            let columns = value.items().iter().filter_map(|version| version.get("columns")).flat_map(Node::items);
+            return Some(columns.map(|item| (item, "column")).collect::<Vec<_>>());
+        }
         let (.., child) = HELD.iter().find(|(parent, held, _)| *parent == label && key.as_str() == Some(held))?;
-        Some(value.items().iter().map(|item| (item, *child)))
+        Some(value.items().iter().map(|item| (item, *child)).collect())
     });
     lists.flatten().collect()
 }

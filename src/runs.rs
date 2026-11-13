@@ -2,7 +2,7 @@
 //! The failures of the user's last dbt run, from the `run_results.json` and
 //! `manifest.json` it wrote, and where each is written.  Pure.
 
-use crate::properties;
+use crate::properties::{Entry, Test};
 use serde_json::Value;
 use std::ops::Range;
 
@@ -15,8 +15,12 @@ const BUILDING: [&str; 5] = ["build", "run", "test", "seed", "snapshot"];
 type Shown = (&'static str, &'static str, u8, Option<&'static str>);
 
 /// The failures shown, as LSP's severities: 1 an error, 2 a warning.
-const SHOWN: [Shown; 3] =
-    [("", "error", 1, None), ("test", "fail", 1, Some("failed")), ("test", "warn", 2, Some("warned"))];
+const SHOWN: [Shown; 4] = [
+    ("", "error", 1, None),
+    ("test", "fail", 1, Some("failed")),
+    ("test", "warn", 2, Some("warned")),
+    ("unit_test", "fail", 1, None),
+];
 
 /// Where a failure is written in its file.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,7 +56,8 @@ pub fn failures(results: &Value, manifest: &Value) -> Option<Vec<Failure>> {
     }
     let failure = |result: &Value| {
         let id = result["unique_id"].as_str()?;
-        let node = manifest["nodes"].get(id).or_else(|| manifest["unit_tests"].get(id))?;
+        let kinds = ["nodes", "unit_tests", "functions"];
+        let node = kinds.iter().find_map(|kind| manifest[kind].get(id))?;
         let resource = node["resource_type"].as_str().unwrap_or_default();
         let shown = |(kind, status, ..): &&Shown| (kind.is_empty() || *kind == resource) && result["status"] == *status;
         let (.., severity, verb) = SHOWN.iter().find(shown)?;
@@ -83,8 +88,11 @@ fn place(manifest: &Value, node: &Value, resource: &str) -> Place {
         return Place::Entry { chain: vec![("unit test", name(node, "name"))], test: None };
     }
     let Some(test) = node.pointer("/test_metadata/name").and_then(Value::as_str) else { return Place::File };
-    // A test on a source is attached to nothing: it depends on the source.
-    let owner = node["attached_node"].as_str().or_else(|| node.pointer("/depends_on/nodes/0").and_then(Value::as_str));
+    // A test on a source is attached to nothing: it depends on the source,
+    // after the nodes a relationships test refers to.
+    let depends = node.pointer("/depends_on/nodes").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let source = || depends.iter().filter_map(Value::as_str).find(|id| id.starts_with("source."));
+    let owner = node["attached_node"].as_str().or_else(source);
     let owner = owner.and_then(|id| manifest["nodes"].get(id).or_else(|| manifest["sources"].get(id)));
     let mut chain = match owner {
         Some(owner) if owner["resource_type"] == "source" => {
@@ -96,34 +104,38 @@ fn place(manifest: &Value, node: &Value, resource: &str) -> Place {
         }
         None => Vec::new(),
     };
+    // The adapter quotes a column written with `quote: true`.
     if let Some(column) = node["column_name"].as_str() {
-        chain.push(("column", column.to_owned()));
+        chain.push(("column", column.trim_matches(['"', '`']).to_owned()));
     }
     Place::Entry { chain, test: Some(test.to_owned()) }
 }
 
-/// The range of PLACE in TEXT: the first line; or, in a properties file,
-/// the test named under the deepest entry of the chain found, else that
-/// entry's name, else the first line.
-pub fn locate(text: &str, place: &Place) -> Range<usize> {
+/// The range of PLACE in TEXT, a properties file's ENTRIES and TESTS read
+/// once for all its places: the first line; or the test named under the
+/// deepest entry of the chain found, a test of that entry itself and not of
+/// one it holds, else that entry's name, else the first line.  Of entries
+/// of one name, a versioned model's columns, the one holding the test.
+pub fn locate(text: &str, entries: &[Entry], tests: &[Test], place: &Place) -> Range<usize> {
     let first_line = 0..text.find(['\n', '\r']).unwrap_or(text.len());
     let Place::Entry { chain, test } = place else { return first_line };
-    let entries = properties::entries(text);
+    let inside = |outer: &Range<usize>, inner: &Range<usize>| outer.start <= inner.start && inner.end <= outer.end;
+    let holds =
+        |entry: &&&Entry| tests.iter().any(|t| Some(&t.name) == test.as_ref() && inside(&entry.range, &t.range));
     let mut within = 0..text.len();
     let mut deepest = None;
     for (label, name) in chain {
-        let inside = |range: &Range<usize>| within.start <= range.start && range.end <= within.end;
-        let Some(entry) = entries.iter().find(|e| e.label == *label && e.name == *name && inside(&e.range)) else {
-            break;
-        };
+        let named = entries.iter().filter(|e| e.label == *label && e.name == *name && inside(&within, &e.range));
+        let named: Vec<&Entry> = named.collect();
+        let Some(entry) = named.iter().find(holds).or(named.first()) else { break };
         within = entry.range.clone();
         deepest = Some(entry.name_range.clone());
     }
-    let tests = properties::tests(text);
-    let named = test.as_ref().and_then(|test| {
-        tests.iter().find(|t| t.name == *test && within.start <= t.range.start && t.range.end <= within.end)
-    });
-    named.map(|test| test.range.clone()).or(deepest).unwrap_or(first_line)
+    let held = |range: &Range<usize>| {
+        entries.iter().any(|e| e.range != within && inside(&within, &e.range) && inside(&e.range, range))
+    };
+    let own = tests.iter().find(|t| Some(&t.name) == test.as_ref() && inside(&within, &t.range) && !held(&t.range));
+    own.map(|test| test.range.clone()).or(deepest).unwrap_or(first_line)
 }
 
 #[cfg(test)]
@@ -188,7 +200,7 @@ mod tests {
                 result("unit_test.shop.stg_orders.ut", "error", "Error", json!(null)),
                 result("model.shop_utils.pkg_broken", "error", "Database Error in model pkg_broken", json!(null)),
                 result("test.shop.gone.ff", "fail", "Error", json!(1)),
-                result("test.shop.is_even_vmod_v2_id.ff", "pass", "Pass", json!(0))
+                result("test.shop.is_even_vmod_v2_id.ff", "fail", "Error", json!(3))
             ]),
         );
         let found = failures(&built, &manifest()).unwrap();
@@ -221,6 +233,7 @@ mod tests {
                 1,
                 "Database Error in model pkg_broken",
             ),
+            ("test.shop.is_even_vmod_v2_id.ff", "shop", "models/versioned/_vmod.yml", 1, "is_even failed: 3 rows"),
         ];
         assert_eq!(summary, expected);
         let places: Vec<&Place> = found.iter().map(|f| &f.place).collect();
@@ -233,6 +246,66 @@ mod tests {
         assert_eq!(places[2], &column(vec![("source", "raw"), ("table", "orders"), ("column", "id")]));
         assert_eq!(places[3], &Place::File);
         assert_eq!(places[4], &Place::Entry { chain: vec![("unit test", "ut".into())], test: None });
+        // A versioned model's name, not its version's.
+        assert_eq!(places[6], &column(vec![("model", "vmod"), ("column", "id")]));
+    }
+
+    #[test]
+    fn a_test_is_its_entry_s_own_and_a_version_s_column_counts() {
+        let text = "\
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests: [unique]
+    data_tests:
+      - unique:
+          column_name: amount * 0
+  - name: vmod
+    versions:
+      - v: 2
+        columns:
+          - name: id
+            data_tests: [not_null]
+          - name: amount
+            data_tests: [not_null]
+";
+        let place = |chain: Vec<(&'static str, &str)>, test: &str| Place::Entry {
+            chain: chain.into_iter().map(|(label, name)| (label, name.to_owned())).collect(),
+            test: Some(test.to_owned()),
+        };
+        let line = |range: Range<usize>| text[..range.start].matches('\n').count();
+        // A model's own test, not its column's of the same name.
+        assert_eq!(line(located(text, &place(vec![("model", "orders")], "unique"))), 6);
+        // The column of a version, by its name.
+        assert_eq!(line(located(text, &place(vec![("model", "vmod"), ("column", "amount")], "not_null"))), 15);
+    }
+
+    #[test]
+    fn a_failing_unit_test_a_test_on_a_source_column_and_a_function_show() {
+        let mut manifest = manifest();
+        // dbt 2.0.9 puts a relationships test's target before the source it tests.
+        manifest["nodes"]["test.shop.relationships_raw_orders.b"] = json!({
+            "unique_id": "test.shop.relationships_raw_orders.b", "resource_type": "test", "package_name": "shop",
+            "original_file_path": "models/staging/_sources.yml", "attached_node": null,
+            "depends_on": {"nodes": ["model.shop.orders", "source.shop.raw.orders"]},
+            "column_name": "\"Customer Id\"", "test_metadata": {"name": "relationships"}});
+        manifest["functions"] = json!({"function.shop.f": {"unique_id": "function.shop.f", "resource_type": "function",
+            "name": "f", "package_name": "shop", "original_file_path": "functions/f.sql"}});
+        let run = results(
+            "build",
+            json!([
+                result("unit_test.shop.stg_orders.ut", "fail", "Error", json!(null)),
+                result("test.shop.relationships_raw_orders.b", "fail", "Error", json!(1)),
+                result("function.shop.f", "error", "Compilation Error in function f", json!(null))
+            ]),
+        );
+        let found = failures(&run, &manifest).unwrap();
+        assert_eq!((found[0].message.as_str(), found[0].severity), ("ut failed", 1));
+        let chain =
+            vec![("source", "raw".to_owned()), ("table", "orders".to_owned()), ("column", "Customer Id".to_owned())];
+        assert_eq!(found[1].place, Place::Entry { chain, test: Some("relationships".into()) });
+        assert_eq!((found[2].path.as_str(), &found[2].place), ("functions/f.sql", &Place::File));
     }
 
     #[test]
@@ -242,6 +315,11 @@ mod tests {
         }
         assert_eq!(failures(&json!({"results": []}), &manifest()), None);
         assert_eq!(failures(&results("test", json!([])), &manifest()), Some(Vec::new()));
+    }
+
+    /// The range of PLACE in TEXT, its entries and tests read here.
+    fn located(text: &str, place: &Place) -> Range<usize> {
+        locate(text, &crate::properties::entries(text), &crate::properties::tests(text), place)
     }
 
     #[test]
@@ -270,15 +348,15 @@ models:
             test: test.map(str::to_owned),
         };
         let line = |range: Range<usize>| text[..range.start].matches('\n').count();
-        let on_orders = locate(text, &place(vec![("model", "orders"), ("column", "order_id")], Some("is_even")));
+        let on_orders = located(text, &place(vec![("model", "orders"), ("column", "order_id")], Some("is_even")));
         assert_eq!((line(on_orders.clone()), &text[on_orders]), (10, "is_even"));
         // A versioned model's column is under `versions:`: the model's entry holds it.
-        let on_vmod = locate(text, &place(vec![("model", "vmod"), ("column", "id")], Some("is_even")));
+        let on_vmod = located(text, &place(vec![("model", "vmod"), ("column", "id")], Some("is_even")));
         assert_eq!(line(on_vmod), 16);
         // A test no longer there: the entry's name; no entry: the first line.
-        let gone = locate(text, &place(vec![("model", "orders")], Some("accepted_values")));
+        let gone = located(text, &place(vec![("model", "orders")], Some("accepted_values")));
         assert_eq!((line(gone.clone()), &text[gone]), (5, "orders"));
-        assert_eq!(locate(text, &place(vec![("model", "nowhere")], None)), 0..7);
-        assert_eq!(locate("select 1\nfrom x", &Place::File), 0..8);
+        assert_eq!(located(text, &place(vec![("model", "nowhere")], None)), 0..7);
+        assert_eq!(located("select 1\nfrom x", &Place::File), 0..8);
     }
 }

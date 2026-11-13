@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, navigation, project, runs, scan, sources};
+use crate::{config, document, features, navigation, project, properties, runs, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1068,8 +1068,9 @@ impl<W: Write> Proxy<W> {
         let failures = self.diagnostics.failures.get(path).map_or(&[][..], Vec::as_slice);
         let text = self.documents.get(path).cloned().or_else(|| text::read(path)).unwrap_or_default();
         let lines = LineIndex::new(&text);
+        let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
-            let range = runs::locate(&text, &failure.place);
+            let range = runs::locate(&text, &entries, &tests, &failure.place);
             json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": "last-run", "message": failure.message})
         }));
