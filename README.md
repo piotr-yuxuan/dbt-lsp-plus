@@ -10,9 +10,9 @@ dbt 2, and adds what it lacks, for every editor and for agents:
   macro, generic test, source table and docs block, installed packages
   included;
 - the call hierarchy: what a model, source or macro is used by, and what it
-  uses, macros included, with the place of each call.  The edges between
-  nodes are those of `dbt.listNodes` once the server has compiled, so that
-  `ref(var('x'))` resolves; the edges to macros come from the files.
+  uses, macros included, with the place of each call.  The dependencies of
+  the nodes are those of `dbt.listNodes` once the server has compiled, so
+  that `ref(var('x'))` resolves; the edges of macros come from the files.
 
 Every other message passes unchanged, byte for byte.  A feature that the
 server announces stays the server's.  Without `dbt lsp`, or after it
@@ -48,6 +48,9 @@ DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
 
 The last command runs the opt-in live test against a real dbt 2 (tested
 with 2.0.9), on a copy of `tests/fixtures/shop` with a scratch home.
+
+The crate also builds `fake-dbt-lsp`, the scripted server of the tests; to
+install the proxy alone, run `cargo install --path . --bin dbt-lsp-plus`.
 
 ## Licence
 

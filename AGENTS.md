@@ -49,3 +49,11 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
 - What `dbt lsp` does is observed, not documented: record each new
   observation in `docs/design.md`, make the fake server behave the same,
   and let the live test check it.
+- No single-use private helper, but for these, each with its reason:
+  - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
+    so that `answer` stays a dispatch;
+  - `Proxy::expire_listing` and `Proxy::stop_server`: the deadline of a
+    listing and the teardown of the server process, each a resource's end;
+  - `project_dir`: the parsing of the server command, at the boundary;
+  - `graph::resolve`: dbt's lookup rule, in one place;
+  - `scan::mask_code`: its second caller comes with the CTE uses of plan 003.
