@@ -24,7 +24,9 @@
 //!     for the first such request only;
 //!   - `raw_answers`, likewise, each a body written as it is, `$ID` replaced
 //!     by the request's id; `raw_on_initialized`, bodies sent as they are
-//!     after `initialized`;
+//!     after `initialized`, and `raw_on_compile`, after each compilation
+//!     that a `didSave` makes, such as diagnostics, which 2.0.9 publishes
+//!     with no version;
 //!   - `silent`, keys whose requests are never answered, and `hold`, keys
 //!     whose requests wait for the notification `test/release`;
 //!   - `exit_on`, a method on which the server exits with status 3, and
@@ -184,6 +186,14 @@ impl Fake {
         if compiles && self.script["hold_compile"] != json!(true) {
             compile_start();
             compile_complete();
+            if method == "textDocument/didSave" {
+                self.script["raw_on_compile"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .for_each(send_raw);
+            }
         }
     }
 }
