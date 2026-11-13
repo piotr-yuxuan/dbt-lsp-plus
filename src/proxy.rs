@@ -300,7 +300,7 @@ impl<W: Write> Proxy<W> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let text = self
             .local_path(Some(uri))
-            .and_then(|path| self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok()));
+            .and_then(|path| self.documents.get(&path).cloned().or_else(|| text::read(&path)));
         Some(text.map_or(Value::Null, |text| features::document_symbols(&text, self.encoding, self.hierarchical, uri)))
     }
 

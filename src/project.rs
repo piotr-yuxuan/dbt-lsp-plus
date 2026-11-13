@@ -3,7 +3,7 @@
 //! their files: what dbt itself would parse, without dbt.
 
 use crate::scan::{self, Call, Kind};
-use crate::text::{Encoding, LineIndex};
+use crate::text::{self, Encoding, LineIndex};
 use crate::yaml::{self, Node};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -168,7 +168,7 @@ fn files(dir: &Path) -> Vec<PathBuf> {
 
 /// The name and configuration in a package's `dbt_project.yml`.
 fn package_config(dir: &Path) -> Option<(String, Node)> {
-    let config = yaml::parse(&fs::read_to_string(dir.join("dbt_project.yml")).ok()?)?;
+    let config = yaml::parse(&text::read(&dir.join("dbt_project.yml"))?)?;
     let name = config.get("name")?.as_str()?.to_owned();
     Some((name, config))
 }
@@ -185,7 +185,7 @@ fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, 
             let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
             let text = match extension {
                 "csv" => String::new(),
-                _ => open.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok()).unwrap_or_default(),
+                _ => open.get(&path).cloned().or_else(|| text::read(&path)).unwrap_or_default(),
             };
             let found = match extension {
                 "yml" | "yaml" => source_tables(&name, &path, &text),
@@ -369,6 +369,20 @@ mod tests {
         );
         let project = scan(&dir, &HashMap::new()).unwrap();
         assert_eq!(sorted_ids(&project), ["macro.p.m", "model.p.a", "model.q.b"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_byte_order_mark_counts_in_no_position() {
+        let macro_text = "{% macro bommed() %}1{% endmacro %}";
+        let dir = scratch_project(
+            "bom",
+            &[("dbt_project.yml", "\u{feff}name: bom\n"), ("macros/bom.sql", &format!("\u{feff}{macro_text}"))],
+        );
+        let project = scan(&dir, &HashMap::new()).unwrap();
+        let bommed = project.entities.iter().find(|e| e.id == "macro.bom.bommed").unwrap();
+        assert_eq!(project.texts[&bommed.path], macro_text);
+        assert_eq!(bommed.name_range, 9..15);
         fs::remove_dir_all(&dir).unwrap();
     }
 
