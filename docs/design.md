@@ -44,7 +44,8 @@ owns all state and writes both outputs.
 
 - Client to server: every frame is forwarded as it arrived, its bytes
   untouched, a body that is not JSON included.  The exceptions are the
-  requests of an owned method, which the proxy answers itself.
+  requests of an owned method, which the proxy answers itself, and the
+  client's answers to the proxy's own requests (`workspace/inlayHint/refresh`).
 - Server to client: every frame is forwarded as it arrived, except:
   - the answer to `initialize`, to which the proxy adds the capabilities
     the server lacks (`documentSymbolProvider`, `workspaceSymbolProvider`,
@@ -52,7 +53,9 @@ owns all state and writes both outputs.
     (UTF-16 when absent, as with 2.0.9), and its `experimental.dbtLspPlus`
     and its command `dbt-lsp-plus.nodeInfo`;
   - the answer to a hover on a `ref` or a `source`, which gets a summary
-    first (see "Node information and hover");
+    first (see "Node information and hover"), and to an inlay hint
+    request, which gets the proxy's hints after the server's (see "Inlay
+    hints");
   - the answers to the proxy's own requests, which never reach the client.
 - References and renames stay the server's, but on a source the server
   answers them with nothing: the proxy answers those requests itself, when
@@ -363,9 +366,11 @@ So the proxy runs the user's own `dbt parse`.
   or when the client closes.  Only the direct child is killed: a launcher's
   grandchild may outlive it.
 - When: lazily.  A change of the client's marks the index stale; a
-  `nodeInfo` or a hover that finds it stale starts a parse, and is answered
-  from the last index meanwhile.  A parse starts only when the server has
-  compiled since the change, so that dbt has resolved the packages itself,
+  `nodeInfo` or a hover that finds it stale, or an inlay hint request that
+  finds no index, starts a parse, and is answered from the last index
+  meanwhile.  A parse starts only when the server has compiled since the
+  change, so that dbt has resolved the packages itself, and such a request
+  made before that compilation starts it once it comes,
   when every package is local or `package-lock.yml` is no older than the
   file naming the packages (an empty or comment-only file names none), with
   a server and before `shutdown`; one at a time.  When nothing has compiled
@@ -399,8 +404,10 @@ analysis, an unknown node, or a `ref` that a keyword argument follows,
 whose version the index cannot tell.  Kind Type, padding on the left, the
 node's unique id as tooltip.  Computed from the document's text and the
 index when the request arrives, within `catch_unwind`, with no project
-scan.  A hint request starts a parse only when there is no index yet,
-since clients ask on every edit and scroll; after each parse that gives
+scan, each call's node found by its name.  A hint request starts a parse
+only when there is no index yet, since clients ask on every edit and
+scroll, and one made before dbt lsp's first compilation starts it once
+that comes; after each parse that gives
 an index, a client that declares `workspace.inlayHint.refreshSupport` is
 asked to refresh, under an id of the proxy's own, whose answer stays
 here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
@@ -417,7 +424,8 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   has finished; after that, the last index answers, and a later failure is
   only logged.  A position names the call under it in SQL inside Jinja, and
   in YAML or a Python model outside it.
-- A hover is the one method that is forwarded and augmented: on a `ref` or
+- A hover, with inlay hints (see "Inlay hints"), is a method that is
+  forwarded and augmented: on a `ref` or
   `source` argument, or an entry's `name:` in YAML, resolved from the
   document's text when the request arrives, the server's answer gets the
   node's summary first, then a rule;
@@ -482,8 +490,10 @@ The server is not restarted after a crash.
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
-- An inlay hint's node is looked up as the hover's, the root project
-  first, not the calling file's package as dbt 2.0.9 does for a `ref`.
+- An inlay hint's node is looked up as the hover's, an enabled one first,
+  then the root project, not the calling file's package as dbt 2.0.9 does
+  for a `ref`.  In a Python model or YAML, a `#` comment between a `ref`'s
+  last argument and its `)` hides its hint.
 - `graph::resolve`, behind the call hierarchy, ignores `flags:
   require_ref_searches_node_package_before_root: false`, which navigation
   reads.
