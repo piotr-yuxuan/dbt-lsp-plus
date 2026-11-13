@@ -82,7 +82,7 @@ pub fn entries(text: &str) -> Vec<Entry> {
             // the blank lines before it, and the comments less deep than the
             // entry's first key, belong to what follows; a key commented out
             // stays in its entry.
-            let lines = text[start..end].split_inclusive('\n').scan(start, |at, line| {
+            let lines = text[start..end].split_inclusive(['\n', '\r']).scan(start, |at, line| {
                 let line_start = std::mem::replace(at, *at + line.len());
                 Some((line_start, line))
             });
@@ -261,6 +261,14 @@ groups:
         let found = entries(text);
         assert!(text[found[0].range.clone()].ends_with("    #   - unique"));
         assert_eq!(&text[found[1].range.clone()], "name: id");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_ends_a_line_too() {
+        let text = "models:\r  - name: a\r    description: x\r  # Next.\r\r  - name: b\r";
+        let found = entries(text);
+        assert_eq!(&text[found[0].range.clone()], "name: a\r    description: x");
+        assert_eq!(&text[found[1].range.clone()], "name: b");
     }
 
     #[test]
