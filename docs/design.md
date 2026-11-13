@@ -49,6 +49,10 @@ owns all state and writes both outputs.
     `callHierarchyProvider`), and whose `positionEncoding` it adopts
     (UTF-16 when absent, as with 2.0.9);
   - the answers to the proxy's own requests, which never reach the client.
+- References and renames stay the server's, but on a source the server
+  answers them with nothing: the proxy answers those requests itself, when
+  the position is on a `source()` argument or on a source's or table's
+  `name:` under `sources:`, and forwards every other one.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
   with a flat list of tokens, so the proxy owns it.  A later server that
@@ -129,6 +133,27 @@ sends the second selector then, retries a cancelled listing at most three
 times, and abandons one unanswered after two minutes, on time, even when the
 client is quiet.
 
+## Sources
+
+- References of a source table, or of a whole source: every `source()`
+  call that names it, in SQL inside Jinja tags and in YAML without them (a
+  relationships test's `to:`), and its declarations when the client asks.
+- A rename keeps the relation in the warehouse.  dbt takes a table's
+  identifier from its name, and a source's schema from its name, unless they
+  are set.  So renaming a table without `identifier:` inserts `identifier:
+  <old>` after its `name:` line, at the key's indentation, and renaming a
+  source without `schema:` inserts `schema: <old>`.  The live test renames
+  `events.page_views` and checks that dbt still compiles the model that
+  selects from it to `page_views`.
+- A name inside quotes is replaced inside them, and must not hold that quote
+  or a backslash.  An unquoted YAML value is written plain when it is a plain
+  identifier, else double-quoted.
+- A rename is refused, never applied in part, when the source is declared
+  nowhere, or in several packages, or in flow style (`{name: t}`), where no
+  line can go.
+- Without a server, the proxy announces references and rename too, for
+  sources; on anything else they fail as other requests do.
+
 ## Failure modes
 
 | Situation | Behaviour |
@@ -185,11 +210,7 @@ The server is not restarted after a crash.
 
 In the order of the feature list agreed with the dbt-mode session:
 
-1. Source references and rename (A4).  Every `source('s', 't')` call and the
-   YAML `name:` are already in the scan with their ranges.  A rename returns
-   a `WorkspaceEdit`, and inserts `identifier: <old name>` under the table
-   when it has none, so that the source keeps its warehouse table.  About a
-   day, mostly tests of YAML indentation.
+1. Source references and rename (A4): done in plan 002.
 2. Resolved configuration (A5, A20): `dbt parse --profiles-dir <user's>
    --target-path <cache> --log-path <cache>/logs`, debounced on save (about
    half a second on a small project).  Then a command `dbtPlus/nodeInfo` that

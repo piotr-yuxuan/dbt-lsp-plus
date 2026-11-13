@@ -32,6 +32,7 @@ src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/project.rs                the resources of a project and its packages
 src/graph.rs                  the dependency graph: scanned, then the server's
+src/sources.rs                references and renames of sources
 src/features.rs               the answers of the added features, as LSP JSON
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
