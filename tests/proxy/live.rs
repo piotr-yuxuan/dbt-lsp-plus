@@ -129,7 +129,8 @@ fn document_features(session: &mut Session, project: &Path) {
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
 }
 
-/// A properties file that dbt parse accepts, for the navigation from YAML.
+/// A properties file that dbt parse 2.0.9 accepts, for the navigation from
+/// YAML: a generic test's arguments go under `arguments:`.
 const LIVE_MODELS: &str = "\
 version: 2
 models:
@@ -139,8 +140,9 @@ models:
       - name: customer_id
         data_tests:
           - relationships:
-              to: ref('customers')
-              field: customer_id
+              arguments:
+                to: ref('customers')
+                field: customer_id
 ";
 
 /// The proxy's definitions and hover in a properties file, where dbt lsp
@@ -156,9 +158,13 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(file(&session.request("textDocument/definition", at("ref('customers')", 6))), "customers.sql");
     assert_eq!(file(&session.request("textDocument/definition", at("order_status", 2))), "docs.md");
     assert_eq!(file(&session.request("textDocument/definition", at("name: orders", 8))), "orders.sql");
+    // The server's null, observed: the proxy's text alone, and a position
+    // without a target forwarded and answered null.
     let hover = session.request("textDocument/hover", at("order_status", 2));
-    let text = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
-    assert!(text.starts_with("The status of an order"), "{hover}");
+    let text = "The status of an order: placed, shipped or returned.";
+    assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
+    let on_column = session.request("textDocument/definition", at("customer_id", 2));
+    assert_eq!(on_column["result"], Value::Null, "{on_column}");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.
