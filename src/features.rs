@@ -273,7 +273,7 @@ pub fn inlay_hints(
             _ => return None,
         };
         // The range first: a node's lookup costs more.
-        if after < range.start || range.end < after {
+        if !(range.start..=range.end).contains(&after) {
             return None;
         }
         let built = |node: &&Value| node["disabled"] != true && node["resource_type"] != "analysis";
