@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The failures of the user's last dbt run, from the `run_results.json` and
-//! `manifest.json` it wrote, and where each is written.  Pure.
+//! `manifest.json` it wrote, and the stale sources of its last freshness
+//! check, from `sources.json`; and where each is written.  Pure.
 
 use crate::properties::{Entry, Test};
 use serde_json::Value;
 use std::ops::Range;
+
+/// The code of a failure of the last run.
+pub const LAST_RUN: &str = "last-run";
+/// The code of a source the last freshness check found stale.
+pub const STALE_SOURCE: &str = "stale-source";
 
 /// The commands whose results tell how the project last built: `compile`
 /// and `show` write results too, of nothing built.
@@ -43,6 +49,8 @@ pub struct Failure {
     /// LSP's: 1 an error, 2 a warning.
     pub severity: u8,
     pub message: String,
+    /// `LAST_RUN` or `STALE_SOURCE`.
+    pub code: &'static str,
 }
 
 /// The failures of RESULTS, placed by MANIFEST: an error of any node, and a
@@ -75,9 +83,48 @@ pub fn failures(results: &Value, manifest: &Value) -> Option<Vec<Failure>> {
             severity: *severity,
             // Named after its command, as a run's result is.
             message: format!("dbt {command}: {}", message.unwrap_or_else(|| format!("{name} failed"))),
+            code: LAST_RUN,
         })
     };
     Some(results["results"].as_array()?.iter().filter_map(failure).collect())
+}
+
+/// The source tables that SOURCES, the results of `dbt source freshness`,
+/// find stale, placed by MANIFEST at their `name:`: a warning, an error
+/// past `error_after` or when the check itself failed; a table MANIFEST
+/// lacks gives none.
+pub fn stale(sources: &Value, manifest: &Value) -> Vec<Failure> {
+    let stale = |result: &Value| {
+        let id = result["unique_id"].as_str()?;
+        let source = manifest["sources"].get(id)?;
+        let status = result["status"].as_str()?.to_lowercase();
+        let (severity, criterion, word) = match status.as_str() {
+            "pass" => return None,
+            "warn" => (2, "warn_after", "warn"),
+            _ => (1, "error_after", "error"),
+        };
+        let name = |key: &str| source[key].as_str().unwrap_or_default().to_owned();
+        let table = format!("{}.{}", name("source_name"), name("name"));
+        let days = result["max_loaded_at_time_ago_in_s"].as_f64().map(|seconds| (seconds / 86_400.0).floor());
+        let loaded =
+            result["max_loaded_at"].as_str().zip(days).map(|(at, days)| format!(" last loaded {at}, {days} days ago"));
+        let criterion = &result["criteria"][criterion];
+        let plural = |count: u64| if count == 1 { "" } else { "s" };
+        let after = criterion["period"].as_str().zip(criterion["count"].as_u64());
+        let after = after.map(|(period, count)| format!(" ({word} after {count} {period}{})", plural(count)));
+        // A check that failed has neither: its status says so.
+        let detail = loaded.map(|loaded| loaded + &after.unwrap_or_default()).unwrap_or_else(|| format!(" {status}"));
+        Some(Failure {
+            id: id.to_owned(),
+            package: name("package_name"),
+            path: name("original_file_path"),
+            place: Place::Entry { chain: vec![("source", name("source_name")), ("table", name("name"))], test: None },
+            severity,
+            message: format!("dbt source freshness: {table}{detail}"),
+            code: STALE_SOURCE,
+        })
+    };
+    sources["results"].as_array().map_or(&[][..], Vec::as_slice).iter().filter_map(stale).collect()
 }
 
 /// Where NODE, of RESOURCE type, is written in its file: a unit test at its
@@ -326,6 +373,55 @@ models:
             vec![("source", "raw".to_owned()), ("table", "orders".to_owned()), ("column", "Customer Id".to_owned())];
         assert_eq!(found[1].place, Place::Entry { chain, test: Some("relationships".into()) });
         assert_eq!((found[2].path.as_str(), &found[2].place), ("functions/f.sql", &Place::File));
+    }
+
+    #[test]
+    fn a_freshness_check_gives_its_stale_tables_at_their_names() {
+        let mut manifest = manifest();
+        let source = |table: &str, package: &str| {
+            json!({"unique_id": format!("source.{package}.raw.{table}"),
+            "resource_type": "source", "source_name": "raw", "name": table, "package_name": package,
+            "original_file_path": "models/staging/_sources.yml"})
+        };
+        manifest["sources"] = json!({"source.shop.raw.orders": source("orders", "shop"),
+            "source.shop.raw.customers": source("customers", "shop"), "source.utils.raw.events": source("events", "utils")});
+        let result = |table: &str, package: &str, status: &str, warn: Value, error: Value| {
+            json!({
+            "unique_id": format!("source.{package}.raw.{table}"), "status": status,
+            "max_loaded_at": "2018-01-02T00:00:00Z", "max_loaded_at_time_ago_in_s": 279_704_850.0,
+            "criteria": {"warn_after": warn, "error_after": error}})
+        };
+        let unset = json!({"count": null, "period": null});
+        // As dbt 2.0.9 writes sources.json: capitalised statuses.
+        let checked = json!({"results": [
+            result("orders", "shop", "Warn", json!({"count": 1, "period": "day"}), unset.clone()),
+            result("customers", "shop", "Error", unset.clone(), json!({"count": 12, "period": "hour"})),
+            result("events", "utils", "Pass", unset.clone(), unset.clone()),
+            result("gone", "shop", "Error", unset.clone(), unset.clone()),
+            json!({"unique_id": "source.utils.raw.events", "status": "runtime error"})]});
+        let found = stale(&checked, &manifest);
+        let summary: Vec<(&str, u8, &str, &str)> =
+            found.iter().map(|f| (f.package.as_str(), f.severity, f.message.as_str(), f.code)).collect();
+        let expected = [
+            (
+                "shop",
+                2,
+                "dbt source freshness: raw.orders last loaded 2018-01-02T00:00:00Z, 3237 days ago (warn after 1 day)",
+                STALE_SOURCE,
+            ),
+            (
+                "shop",
+                1,
+                "dbt source freshness: raw.customers last loaded 2018-01-02T00:00:00Z, 3237 days ago (error after 12 hours)",
+                STALE_SOURCE,
+            ),
+            ("utils", 1, "dbt source freshness: raw.events runtime error", STALE_SOURCE),
+        ];
+        assert_eq!(summary, expected);
+        let table =
+            |name: &str| Place::Entry { chain: vec![("source", "raw".into()), ("table", name.into())], test: None };
+        assert_eq!(found[0].place, table("orders"));
+        assert_eq!(found[0].path, "models/staging/_sources.yml");
     }
 
     #[test]
