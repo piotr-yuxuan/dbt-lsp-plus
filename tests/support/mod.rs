@@ -2,8 +2,6 @@
 //! A client of dbt-lsp-plus for the tests: it starts the proxy in front of a
 //! server command and speaks LSP to it.
 
-#![allow(dead_code)]
-
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
 use std::io::BufReader;
@@ -25,6 +23,14 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// A copy of the fixture, as `shop` in a fresh directory for test NAME.
+pub fn copy_fixture(name: &str) -> PathBuf {
+    let project = scratch(name).join("shop");
+    let status = Command::new("cp").arg("-R").arg(fixture()).arg(&project).status().expect("run cp");
+    assert!(status.success(), "copy the fixture to {project:?}");
+    project
+}
+
 pub fn uri(path: &Path) -> String {
     url::Url::from_file_path(path).unwrap().to_string()
 }
@@ -35,7 +41,8 @@ pub struct Session {
     inbox: Receiver<(Vec<u8>, Value)>,
     next_id: i64,
     pub timeout: Duration,
-    /// Every message the client received, in order, parsed.
+    /// Every message the client received, in order, parsed; null for a body
+    /// that is not JSON.
     pub received: Vec<Value>,
     /// The same, as their bodies arrived.
     pub received_raw: Vec<Vec<u8>>,
@@ -62,7 +69,7 @@ impl Session {
         let (sender, inbox) = mpsc::channel();
         thread::spawn(move || {
             while let Ok(Some(frame)) = rpc::read_frame(&mut stdout) {
-                if sender.send((frame.body, frame.value.expect("the proxy sends JSON"))).is_err() {
+                if sender.send((frame.body, frame.value.unwrap_or(Value::Null))).is_err() {
                     return;
                 }
             }
@@ -79,21 +86,22 @@ impl Session {
         }
     }
 
-    /// Starts the proxy in front of the fake server, with SCRIPT and the
-    /// --project-dir PROJECT; returns the session and the fake's log.
-    pub fn fake_in(name: &str, script: Value, project: &Path) -> (Session, PathBuf) {
-        let dir = scratch(name);
-        let (script_path, log) = (dir.join("script.json"), dir.join("log.jsonl"));
+    /// Starts the proxy in front of the fake server, `lsp ARGUMENTS...` with
+    /// SCRIPT, in DIR when given; returns the session and the fake's log.
+    pub fn fake_with(name: &str, script: Value, arguments: &[&Path], dir: Option<&Path>) -> (Session, PathBuf) {
+        let scratch = scratch(name);
+        let (script_path, log) = (scratch.join("script.json"), scratch.join("log.jsonl"));
         std::fs::write(&script_path, script.to_string()).unwrap();
-        let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir"].map(String::from);
-        let server = [&server[..], &[project.to_string_lossy().into_owned()]].concat();
+        let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp"].map(String::from);
+        let arguments = arguments.iter().map(|argument| argument.to_string_lossy().into_owned());
+        let server: Vec<String> = fake.into_iter().chain(arguments).collect();
         let env = [("FAKE_DBT_LSP_SCRIPT", script_path.as_path()), ("FAKE_DBT_LSP_LOG", log.as_path())];
-        (Session::start(&server, &env, None), log)
+        (Session::start(&server, &env, dir), log)
     }
 
-    /// The same, on the fixture.
+    /// The same, with the fixture as --project-dir.
     pub fn fake(name: &str, script: Value) -> (Session, PathBuf) {
-        Session::fake_in(name, script, &fixture())
+        Session::fake_with(name, script, &[Path::new("--project-dir"), &fixture()], None)
     }
 
     pub fn send(&mut self, message: &Value) {

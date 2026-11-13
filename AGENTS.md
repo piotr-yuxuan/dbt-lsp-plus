@@ -20,7 +20,7 @@ and, before a merge, the live test with `DBT_LSP_PLUS_TEST_DBT` naming a
 dbt 2 executable:
 
 ```
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test live -- --ignored
+DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
 ```
 
 ## Layout
@@ -36,7 +36,7 @@ src/sources.rs                references and renames of sources
 src/features.rs               the answers of the added features, as LSP JSON
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
-tests/live.rs                 the binary in front of the real dbt lsp, opt-in
+tests/proxy/live.rs           the binary in front of the real dbt lsp, opt-in
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 ```
@@ -50,3 +50,11 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
 - What `dbt lsp` does is observed, not documented: record each new
   observation in `docs/design.md`, make the fake server behave the same,
   and let the live test check it.
+- No single-use private helper, but for these, each with its reason:
+  - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
+    so that `answer` stays a dispatch;
+  - `Proxy::expire_listing` and `Proxy::stop_server`: the deadline of a
+    listing and the teardown of the server process, each a resource's end;
+  - `project_dir`: the parsing of the server command, at the boundary;
+  - `graph::resolve`: dbt's lookup rule, in one place;
+  - `scan::mask_code`: its second caller comes with the CTE uses of plan 003.

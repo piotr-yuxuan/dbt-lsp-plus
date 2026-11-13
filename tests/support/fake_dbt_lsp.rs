@@ -26,7 +26,8 @@
 //!     after `initialized`;
 //!   - `silent`, keys whose requests are never answered, and `hold`, keys
 //!     whose requests wait for the notification `test/release`;
-//!   - `exit_on`, a method on which the server exits with status 3;
+//!   - `exit_on`, a method on which the server exits with status 3, and
+//!     `hang_on`, one on which it stops, neither reading nor exiting;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
 //!   appended as one line.
 
@@ -185,6 +186,11 @@ fn main() {
         let (Some(method), id) = (message["method"].as_str(), message.get("id")) else { continue };
         if fake.script["exit_on"].as_str() == Some(method) {
             std::process::exit(3);
+        }
+        if fake.script["hang_on"].as_str() == Some(method) {
+            loop {
+                std::thread::park();
+            }
         }
         match (method, id) {
             ("initialize", Some(id)) => {

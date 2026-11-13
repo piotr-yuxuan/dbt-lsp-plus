@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -26,6 +26,7 @@ pub const OWN_ID: &str = "dbt-lsp-plus/";
 /// How long the server has to exit after `exit` before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 const REQUEST_FAILED: i64 = -32803;
+const INVALID_REQUEST: i64 = -32600;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
@@ -100,11 +101,15 @@ struct Proxy<W: Write> {
     hierarchical: bool,
     /// The methods that the proxy answers, fixed by the server's capabilities.
     owned: HashSet<&'static str>,
+    /// Whether the client sent `initialize`, before which LSP lets the proxy send nothing.
+    initialized: bool,
     /// The id of the client's `initialize` while the server has not answered it.
     initialize: Option<Value>,
     /// The client's requests that the server has yet to answer.
     forwarded: HashMap<String, (Value, Pending)>,
     documents: HashMap<PathBuf, String>,
+    /// Whether the client opened a document, the first of which prompts a listing.
+    opened: bool,
     next_id: u64,
     /// The proxy's `dbt.listNodes` in flight: its id, its selector's slot, when it was sent.
     listing: Option<(String, usize, Instant)>,
@@ -127,14 +132,29 @@ fn key(id: &Value) -> String {
 }
 
 /// The `--project-dir` of COMMAND, as `--project-dir X` or
-/// `--project-dir=X`, with its links resolved.
+/// `--project-dir=X`, made absolute as spelt, so that the paths the proxy
+/// returns read as the user wrote them: each `..` drops the component before
+/// it.  Resolved only when that names another directory, through a link
+/// before a `..`.
 fn project_dir(command: &[String]) -> Option<PathBuf> {
     let value = command.iter().enumerate().find_map(|(at, arg)| match arg.strip_prefix("--project-dir") {
         Some("") => command.get(at + 1).cloned(),
         Some(rest) => rest.strip_prefix('=').map(str::to_owned),
         None => None,
     })?;
-    fs::canonicalize(&value).or_else(|_| std::path::absolute(&value)).ok()
+    let spelt = std::path::absolute(&value).ok()?.components().fold(PathBuf::new(), |mut path, component| {
+        match component {
+            Component::ParentDir => {
+                path.pop();
+            }
+            other => path.push(other),
+        }
+        path
+    });
+    match fs::canonicalize(&value) {
+        Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
+        _ => Some(spelt),
+    }
 }
 
 impl<W: Write> Proxy<W> {
@@ -148,9 +168,11 @@ impl<W: Write> Proxy<W> {
             encoding: Encoding::Utf16,
             hierarchical: false,
             owned: HashSet::new(),
+            initialized: false,
             initialize: None,
             forwarded: HashMap::new(),
             documents: HashMap::new(),
+            opened: false,
             next_id: 0,
             listing: None,
             listed: Vec::new(),
@@ -242,13 +264,20 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The path of a `file:` URI, mapped onto the root when it reaches the
-    /// same file through another spelling: a link, `..`, a canonical path.
+    /// same file through another spelling of its directory: a link, a
+    /// canonical path.  A path under the root as spelt stays as it is, links
+    /// within the project included, since the scan walks them so.
     fn local_path(&self, uri: Option<&str>) -> Option<PathBuf> {
         let path = uri_path(uri)?;
         let mapped = || {
-            let canonical = fs::canonicalize(&path).ok()?;
+            let root = self.root.as_ref()?;
+            if path.starts_with(root) {
+                return None;
+            }
+            // The directory alone, so that a file not yet saved maps too.
+            let canonical = fs::canonicalize(path.parent()?).ok()?.join(path.file_name()?);
             let rest = canonical.strip_prefix(self.canonical_root.as_ref()?).ok()?;
-            Some(self.root.as_ref()?.join(rest))
+            Some(root.join(rest))
         };
         Some(mapped().unwrap_or(path))
     }
@@ -285,7 +314,7 @@ impl<W: Write> Proxy<W> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let text = self
             .local_path(Some(uri))
-            .and_then(|path| self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok()));
+            .and_then(|path| self.documents.get(&path).cloned().or_else(|| text::read(&path)));
         Some(text.map_or(Value::Null, |text| features::document_symbols(&text, self.encoding, self.hierarchical, uri)))
     }
 
@@ -303,7 +332,10 @@ impl<W: Write> Proxy<W> {
             let incoming = method == "callHierarchy/incomingCalls";
             return Some(features::calls(&project, &graph, id, incoming, self.encoding));
         }
-        let path = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
+        // A document that is no file, such as an unsaved buffer, holds no resource.
+        let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else {
+            return Some(Value::Null);
+        };
         let text = project.texts.get(&path).map_or("", String::as_str);
         let offset = LineIndex::new(text).offset_of(params.get("position")?, self.encoding)?;
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
@@ -379,8 +411,12 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Sends the listing of selector SLOT, under an id that no pending
-    /// request of the client's carries.
+    /// request of the client's carries; nothing once the client asked for
+    /// shutdown, after which LSP allows only `exit`.
     fn send_list(&mut self, slot: usize) {
+        if self.shutdown {
+            return;
+        }
         let id = loop {
             self.next_id += 1;
             let id = format!("{OWN_ID}{}", self.next_id);
@@ -446,12 +482,17 @@ impl<W: Write> Proxy<W> {
         let Some(message) = &frame.value else { return self.send_server(&frame.body) };
         let params = message.get("params").unwrap_or(&Value::Null);
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
+            // The server would get two requests under one id.
+            (Some(_), Some(id)) if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) => {
+                self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id")
+            }
             (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
             (Some(method), None) => {
                 self.track(method, params);
                 // The server gets the change before the listing it prompts.
                 self.send_server(&frame.body);
-                if CHANGES.contains(&method) || (method == "textDocument/didOpen" && self.nodes.is_none()) {
+                let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
+                if CHANGES.contains(&method) || first_open {
                     self.list_nodes();
                 }
             }
@@ -466,6 +507,7 @@ impl<W: Write> Proxy<W> {
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
                 self.on_initialize(params);
+                self.initialized = true;
                 self.initialize = Some(id.clone());
                 Pending::Request
             }
@@ -520,7 +562,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The server is gone: answer what it left unanswered, once each, and
-    /// carry on alone.
+    /// carry on alone, on the scanned graph.  Before the client's
+    /// `initialize`, only remember why, for its answer.
     fn on_server_closed(&mut self) {
         let Some(mut server) = self.server.take() else { return };
         let status = server.child.try_wait().ok().flatten();
@@ -541,11 +584,12 @@ impl<W: Write> Proxy<W> {
         self.listing = None;
         self.listed.clear();
         self.relist = false;
+        self.nodes = None;
         self.absent = Some(why.clone());
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
         }
-        if !self.shutdown {
+        if self.initialized && !self.shutdown {
             let text = format!("{why}: dbt-lsp-plus keeps its outline, symbols and call hierarchy.");
             self.send_client(
                 &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),
@@ -645,12 +689,28 @@ mod tests {
 
     #[test]
     fn reads_the_project_dir_in_both_forms() {
-        let here = fs::canonicalize(".").unwrap();
+        let here = std::env::current_dir().unwrap();
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir", "."])), Some(here.clone()));
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=."])), Some(here.clone()));
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=src/.."])), Some(here));
         assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-directory", "x"])), None);
         assert_eq!(project_dir(&args(&["dbt", "lsp"])), None);
+    }
+
+    #[test]
+    fn keeps_the_project_dir_as_spelt_unless_a_link_before_dot_dot_moves_it() {
+        let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-project-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a"), dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a/b"), dir.join("deep")).unwrap();
+        let dir_of = |spelling: &str| project_dir(&args(&["dbt", "lsp", "--project-dir", spelling]));
+        let spelt = dir.join("link");
+        assert_eq!(dir_of(spelt.to_str().unwrap()), Some(spelt.clone()));
+        assert_eq!(dir_of(dir.join("link/b/..").to_str().unwrap()), Some(spelt));
+        // deep/.. is a/b/.. to the system, a; read lexically, it would be DIR.
+        assert_eq!(dir_of(dir.join("deep/..").to_str().unwrap()), Some(fs::canonicalize(dir.join("a")).unwrap()));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

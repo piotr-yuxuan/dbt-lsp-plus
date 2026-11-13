@@ -60,20 +60,31 @@ owns all state and writes both outputs.
 - Request ids: the client's ids and the server's ids pass unchanged.  The
   proxy's own requests carry string ids `dbt-lsp-plus/N`, never one that a
   pending request of the client's carries; an answer is the proxy's own only
-  when its id has that prefix and answers no request of the client's.
+  when its id has that prefix and answers no request of the client's.  A
+  request of the client's under the id of the proxy's listing in flight is
+  refused with -32600, since the server would get two requests under one id.
 - A panic while the proxy answers a request fails that request with -32603;
-  the session goes on.
+  the session goes on.  No input is known to cause one, so no test does.
 
 ## Root
 
 The project directory is the server command's `--project-dir` (`--project-dir
 X` or `--project-dir=X`), so that the proxy reads the project the server
 runs on; else the client's first workspace folder or `rootUri`, when it holds
-a `dbt_project.yml`; else the working directory.  When the client's folder
-is the same directory as `--project-dir` under another spelling (a symbolic
-link), the client's spelling wins, so that the URIs the proxy returns are
-the ones the client opened.  A document reached through another spelling is
-mapped onto the root by its resolved path.
+a `dbt_project.yml`; else the working directory.
+
+The URIs the proxy returns are built on the root, so the root keeps the
+spelling the user or the client gave it:
+- `--project-dir` is made absolute as spelt, links unresolved, each `..`
+  dropping the component before it; it is resolved only when that would name
+  another directory, through a link before a `..`;
+- when the client's folder is the same directory under another spelling (a
+  symbolic link), the client's spelling wins.
+
+A document under the root as spelt keeps its path, links within the project
+included, since the scan walks them so.  A document reached through another
+spelling of its directory is mapped onto the root by that directory's
+resolved path.
 
 ## State
 
@@ -101,12 +112,22 @@ mapped onto the root by its resolved path.
   There is no cache yet.  A workspace symbol or call hierarchy request
   rescans everything, about 40 ms on 2,000 synthetic models of 40 lines
   each, in a release build.
-- The graph: edges between nodes come from `dbt.listNodes` once the server
-  has answered, since only dbt resolves `ref(var('x'))`; until then, from the
-  scan.  The server lists no macros, so the edges to macros always come from
-  the scan; a dispatch names every `*__name` implementation of its package.
-  A listing that fails keeps the graph it had.  An empty `*` listing counts
-  as a failure, since the scan found resources; an empty `source:*` does not.
+- The graph: once the server has listed the graph, the dependencies of each
+  node it listed are its own, since only dbt resolves `ref(var('x'))`; until
+  then, and for the nodes it did not list, they come from the scan.  The
+  server lists no macros, so the edges to and from macros always come from
+  the scan.  The scan looks a ref or a source up in the caller's package,
+  the root project, then any package (dbt tries the root project first), and
+  an unqualified macro in the caller's package and the root project only, as
+  dbt does: another package's macros need its name.  A dispatch names every
+  `*__name` implementation of its package.  A listing that fails keeps the
+  graph it had.  An empty `*` listing counts as a failure, since the scan
+  found resources; an empty `source:*` does not.  After a crash, the scan
+  gives the whole graph again.
+- A source that `overrides` a package's source is that package's source:
+  dbt patches it, so the proxy places its tables in the package.
+- Text read from disk loses its byte order mark, as an editor's document
+  does, so that positions on its first line match.
 
 ### What `dbt.listNodes` does, observed on 2.0.9
 
@@ -123,15 +144,18 @@ mapped onto the root by its resolved path.
 
 So the proxy lists `*` and then `source:*`, one after the other.  It lists
 on the client's signals only:
-- the first `didOpen`;
+- the first `didOpen`, and no later one, even when that listing failed:
+  each listing compiles the whole project, and an editor that restores a
+  session opens many documents; the next change lists again;
 - `didSave`;
 - `workspace/didChangeWatchedFiles`, and files created, renamed or deleted.
 
 The server gets the client's change before the listing it prompts.  The
 proxy never lists while a `dbt.listNodes` of the client's is pending, nor
-sends the second selector then, retries a cancelled listing at most three
-times, and abandons one unanswered after two minutes, on time, even when the
-client is quiet.
+sends the second selector then, nor anything after `shutdown`.  It retries a
+cancelled listing at most three times, and abandons one unanswered after two
+minutes, on time, even when the client is quiet; no test waits the two
+minutes, so only a unit test of the abandonment covers it.
 
 ## Sources
 
@@ -159,8 +183,8 @@ client is quiet.
 | Situation | Behaviour |
 |-----------|-----------|
 | `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, and fails every other request with -32803 |
-| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, a pending `shutdown` gets null, and an error message is shown unless `shutdown` came first.  The proxy goes on alone, as above |
-| `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start |
+| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, a pending `shutdown` gets null, and an error message is shown unless `shutdown` came first.  The proxy goes on alone, as above, on the scanned graph |
+| `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A YAML file is not valid | Its sources are left out |
 | A body is not JSON | Forwarded unchanged |
@@ -174,14 +198,27 @@ The server is not restarted after a crash.
 - `docs-paths` is ignored: docs blocks are read from every resource path.
 - JSON-RPC batches are forwarded as they are; a batched `exit` does not stop
   the proxy.  LSP clients do not send batches.
-- A backslash-escaped quote in SQL, dollar-quoted strings and `#` comments
-  can mislead the CTE scan.
-- SQL files under `tests/fixtures` count as singular tests.
+- A backslash-escaped quote in SQL, dollar-quoted strings, and `#` or `//`
+  comments holding a quote can mislead the CTE scan.  So can a named window:
+  in `window w1 as (...), w2 as (...)`, `w2` reads as a CTE.
+- A backslash-escaped quote inside a Jinja string, as in `'it\'s'`, ends the
+  string for the scan; an odd number of them hides the blocks after it.
+- SQL files under `tests/fixtures`, and those under `tests/generic` without a
+  test block, count as singular tests.
+- A dispatch names the implementations of its namespace only: the root
+  project's own, which dbt tries first, and a `dispatch:` search order in
+  `dbt_project.yml` are not followed.
+- Custom materializations are in the outline but not in workspace symbols.
 - A new file not saved yet is not part of the project, nor are local packages
   declared in `packages.yml` outside `packages-install-path`, nor versioned
   models, Python models or YAML snapshots.
-- Once the server has listed the graph, an unsaved edit of a `ref` shows in
-  the call hierarchy only after the next save.
+- A file that the project reaches through a link, opened by its real path
+  outside the project, is not matched to its resource.
+- A client that reuses the id of a listing the proxy abandoned after two
+  minutes gets the server's late answer to that listing.  Only a client
+  whose ids start with `dbt-lsp-plus/` can.
+- Once the server has listed the graph, an unsaved edit of a `ref` in a node
+  it listed shows in the call hierarchy only after the next save.
 
 ## Tests
 
@@ -190,21 +227,32 @@ The server is not restarted after a crash.
   and the shape of each answer.
 - Integration tests run the binary in front of `fake-dbt-lsp`, a scripted
   server that behaves as 2.0.9 was seen to.  They cover:
-  - byte-for-byte forwarding both ways, the server's requests and the
-    client's answers included, and a body that is not JSON;
-  - the capabilities added, and a feature left to a server that announces it;
-  - the outline of unsaved edits in UTF-16 and in the server's UTF-8, flat
-    for a client without hierarchy;
-  - workspace symbols, and the call hierarchy through the proxy's own ids; a
-    client id with the proxy's prefix;
-  - the root: `--project-dir` first, the client's spelling through a link;
-  - listings: no loop, at most three retries, none while the client's is
-    pending, a failed one keeping the graph;
-  - no server, a crash with several requests pending, a crash before
-    `initialize` and during `shutdown`, and `exit` without `shutdown`.
+  - byte-for-byte forwarding both ways: requests, notifications and answers
+    of each side, and a body that is not JSON;
+  - the capabilities added, and features left to a server that announces
+    them;
+  - the outline of unsaved edits in UTF-16, after a character that UTF-16
+    and UTF-32 count apart, and in the server's UTF-8; flat for a client
+    without hierarchy; a closed document's edits dropped;
+  - workspace symbols, and the call hierarchy through the proxy's own ids;
+    the ids of the client's that the proxy skips or refuses;
+  - the root: `--project-dir` first and as spelt, the client's folder or the
+    working directory without it, the client's spelling through a link, a
+    link inside the project, a document opened through another spelling;
+  - listings: on the first `didOpen` only, after the change that prompts
+    them, no loop, at most three retries, none while the client's is pending
+    nor after `shutdown`, an empty `*` and failed or cancelled listings
+    keeping the graph;
+  - no server, warned once; a server that exits at once, a crash with
+    several requests pending, the scanned graph after a crash, a crash
+    before `initialize` and during `shutdown`, a server killed when it
+    ignores `exit`, and `exit` without `shutdown`.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
-  from an empty environment with a scratch home, in the copy:
-  `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test live -- --ignored`.
+  from an empty environment with a scratch home, in the copy, and checks
+  what this note records of `dbt.listNodes` and of `positionEncoding`:
+  `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
+  The fake also asks for the configuration after `initialized` and answers
+  an empty listing with `{"error": "No nodes found"}`, as 2.0.9 was seen to.
 
 ## What it would take to finish
 
@@ -219,8 +267,10 @@ In the order of the feature list agreed with the dbt-mode session:
    wait for the server, so the event loop must hold a client request until
    the server answers.
 3. Folding ranges (A7) from the outline already computed.
-4. A cache of the scan, keyed by path, modification time and size, if a
-   real project shows the 40 ms above to grow too much.
+4. A cache of the scan, keyed by path, modification time and size.  The
+   review of plan 001 measured about 300 ms per scan on 1,500 models with
+   13 MB of YAML properties, every YAML file being parsed whole for its
+   `sources:`; the 40 ms above had no YAML.
 5. YAML outline (A1): models, sources, columns, exposures.
 6. Restart of a crashed server, replaying `initialize`, `initialized` and
    the open documents.
