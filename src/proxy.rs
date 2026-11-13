@@ -434,15 +434,21 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The method under which the proxy answers a request itself: an owned
-    /// method, its own command, references and rename on a source, a rename
-    /// on a CTE of a SQL file, or a definition on a target of `navigation`.
+    /// method, its own command, or a targeted request on one of its targets.
     fn local_method(&self, method: &str, params: &Value) -> Option<&'static str> {
         if let Some(owned) = self.owned.get(method) {
             return Some(owned);
         }
-        if (method, params["command"].as_str()) == ("workspace/executeCommand", Some(config::NODE_INFO)) {
+        if method == "workspace/executeCommand" && params["command"] == config::NODE_INFO {
             return Some(config::NODE_INFO);
         }
+        self.targeted(method, params)
+    }
+
+    /// A request of `TARGETED` that the proxy answers itself, by what its
+    /// position holds: references and rename on a source, a rename on a CTE
+    /// of a SQL file, or a definition on a target of `navigation`.
+    fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
         let method = TARGETED.into_iter().find(|targeted| *targeted == method)?;
         let (path, text, offset) = self.document_at(params)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
