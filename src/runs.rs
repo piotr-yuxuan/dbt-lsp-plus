@@ -91,8 +91,9 @@ pub fn failures(results: &Value, manifest: &Value) -> Option<Vec<Failure>> {
 
 /// The source tables that SOURCES, the results of `dbt source freshness`,
 /// find stale, placed by MANIFEST at their `name:`: a warning, an error
-/// past `error_after` or when the check itself failed; a table MANIFEST
-/// lacks gives none.
+/// past `error_after` or when dbt reports its query failed (dbt-core's
+/// `runtime error`; dbt 2.0.9 writes no result for such a table); a table
+/// MANIFEST lacks gives none.
 pub fn stale(sources: &Value, manifest: &Value) -> Vec<Failure> {
     let stale = |result: &Value| {
         let id = result["unique_id"].as_str()?;
@@ -105,15 +106,27 @@ pub fn stale(sources: &Value, manifest: &Value) -> Vec<Failure> {
         };
         let name = |key: &str| source[key].as_str().unwrap_or_default().to_owned();
         let table = format!("{}.{}", name("source_name"), name("name"));
-        let days = result["max_loaded_at_time_ago_in_s"].as_f64().map(|seconds| (seconds / 86_400.0).floor());
-        let loaded =
-            result["max_loaded_at"].as_str().zip(days).map(|(at, days)| format!(" last loaded {at}, {days} days ago"));
-        let criterion = &result["criteria"][criterion];
         let plural = |count: u64| if count == 1 { "" } else { "s" };
+        // The age in days, else hours, else minutes: a source due every few
+        // hours is stale long before a day.
+        let ago = result["max_loaded_at_time_ago_in_s"].as_f64().map(|seconds| {
+            let unit =
+                [(86_400.0, "day"), (3_600.0, "hour"), (60.0, "minute")].into_iter().find(|(s, _)| seconds >= *s);
+            let (length, unit) = unit.unwrap_or((60.0, "minute"));
+            let count = (seconds / length).floor() as u64;
+            format!("{count} {unit}{}", plural(count))
+        });
+        let loaded = result["max_loaded_at"].as_str().zip(ago).map(|(at, ago)| format!(" last loaded {at}, {ago} ago"));
+        let criterion = &result["criteria"][criterion];
         let after = criterion["period"].as_str().zip(criterion["count"].as_u64());
         let after = after.map(|(period, count)| format!(" ({word} after {count} {period}{})", plural(count)));
-        // A check that failed has neither: its status says so.
-        let detail = loaded.map(|loaded| loaded + &after.unwrap_or_default()).unwrap_or_else(|| format!(" {status}"));
+        // A check that failed has neither: its status says so, with dbt's error.
+        let failed = || {
+            let error =
+                result["error"].as_str().or(result["message"].as_str()).map(|error| format!(": {}", error.trim()));
+            format!(" {status}{}", error.unwrap_or_default())
+        };
+        let detail = loaded.map(|loaded| loaded + &after.unwrap_or_default()).unwrap_or_else(failed);
         Some(Failure {
             id: id.to_owned(),
             package: name("package_name"),
@@ -398,7 +411,9 @@ models:
             result("customers", "shop", "Error", unset.clone(), json!({"count": 12, "period": "hour"})),
             result("events", "utils", "Pass", unset.clone(), unset.clone()),
             result("gone", "shop", "Error", unset.clone(), unset.clone()),
-            json!({"unique_id": "source.utils.raw.events", "status": "runtime error"})]});
+            // dbt-core's shape of a failed query; 2.0.9 writes no result for it.
+            json!({"unique_id": "source.utils.raw.events", "status": "runtime error",
+                   "error": "Database Error in source events\n  column \"_loaded_at\" does not exist\n"})]});
         let found = stale(&checked, &manifest);
         let summary: Vec<(&str, u8, &str, &str)> =
             found.iter().map(|f| (f.package.as_str(), f.severity, f.message.as_str(), f.code)).collect();
@@ -415,7 +430,12 @@ models:
                 "dbt source freshness: raw.customers last loaded 2018-01-02T00:00:00Z, 3237 days ago (error after 12 hours)",
                 STALE_SOURCE,
             ),
-            ("utils", 1, "dbt source freshness: raw.events runtime error", STALE_SOURCE),
+            (
+                "utils",
+                1,
+                "dbt source freshness: raw.events runtime error: Database Error in source events\n  column \"_loaded_at\" does not exist",
+                STALE_SOURCE,
+            ),
         ];
         assert_eq!(summary, expected);
         let table =
@@ -425,8 +445,25 @@ models:
     }
 
     #[test]
+    fn a_stale_age_is_told_in_the_unit_it_counts_in() {
+        let mut manifest = manifest();
+        manifest["sources"] = json!({"source.shop.raw.orders": {"unique_id": "source.shop.raw.orders",
+            "source_name": "raw", "name": "orders", "package_name": "shop", "original_file_path": "x.yml"}});
+        let check = |seconds: f64| {
+            let result = json!({"unique_id": "source.shop.raw.orders", "status": "Warn", "max_loaded_at": "t",
+                "max_loaded_at_time_ago_in_s": seconds, "criteria": {"warn_after": {"count": 6, "period": "hour"}}});
+            stale(&json!({"results": [result]}), &manifest)[0].message.clone()
+        };
+        assert_eq!(check(25_200.0), "dbt source freshness: raw.orders last loaded t, 7 hours ago (warn after 6 hours)");
+        assert_eq!(check(90.0), "dbt source freshness: raw.orders last loaded t, 1 minute ago (warn after 6 hours)");
+        assert_eq!(check(30.0), "dbt source freshness: raw.orders last loaded t, 0 minutes ago (warn after 6 hours)");
+        // dbt 2.0.9's file when every check failed: nothing to show.
+        assert_eq!(stale(&json!({"results": []}), &manifest), Vec::new());
+    }
+
+    #[test]
     fn a_command_that_builds_nothing_says_nothing_of_the_last_build() {
-        for command in ["compile", "show", "parse"] {
+        for command in ["compile", "show", "parse", "freshness"] {
             assert_eq!(failures(&results(command, json!([])), &manifest()), None, "{command}");
         }
         assert_eq!(failures(&json!({"results": []}), &manifest()), None);
