@@ -50,6 +50,8 @@ pub enum Target {
 pub struct Call {
     pub target: Target,
     pub range: Range<usize>,
+    /// The content of each string argument of a `ref` or a `source`, quotes excluded.
+    pub arguments: Vec<Range<usize>>,
 }
 
 /// Replaces with spaces the bytes of RANGE in OUT, newlines kept.
@@ -258,6 +260,26 @@ static MACRO_CALL: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// The `ref` and `source` calls of TEXT, which starts at offset AT of its file.
+fn refs_and_sources(text: &str, at: usize) -> Vec<Call> {
+    let shift = |found: regex::Match| at + found.start()..at + found.end();
+    let mut found = Vec::new();
+    for call in REF.captures_iter(text) {
+        let arguments = [call.get(1), call.get(2)].into_iter().flatten().map(shift).collect();
+        let (package, name) = match call.get(2) {
+            Some(name) => (Some(call[1].to_owned()), name.as_str().to_owned()),
+            None => (None, call[1].to_owned()),
+        };
+        found.push(Call { target: Target::Ref { package, name }, range: shift(call.get(0).unwrap()), arguments });
+    }
+    for call in SOURCE.captures_iter(text) {
+        let target = Target::Source { source: call[1].to_owned(), table: call[2].to_owned() };
+        let arguments = vec![shift(call.get(1).unwrap()), shift(call.get(2).unwrap())];
+        found.push(Call { target, range: shift(call.get(0).unwrap()), arguments });
+    }
+    found
+}
+
 /// The `ref`, `source`, `adapter.dispatch` and possible macro calls inside
 /// the Jinja tags of TEXT, a tag inside a SQL comment included, since Jinja
 /// renders it.  A possible macro call is a `name(` or `package.name(` outside
@@ -268,24 +290,12 @@ pub fn calls(text: &str) -> Vec<Call> {
     let mut found = Vec::new();
     for range in jinja_tags(&masked) {
         let (tag, at) = (&masked[range.clone()], range.start);
-        for call in REF.captures_iter(tag) {
-            let (package, name) = match call.get(2) {
-                Some(name) => (Some(call[1].to_owned()), name.as_str().to_owned()),
-                None => (None, call[1].to_owned()),
-            };
-            found.push(Call {
-                target: Target::Ref { package, name },
-                range: at + call.get(0).unwrap().start()..at + call.get(0).unwrap().end(),
-            });
-        }
-        for call in SOURCE.captures_iter(tag) {
-            let target = Target::Source { source: call[1].to_owned(), table: call[2].to_owned() };
-            found.push(Call { target, range: at + call.get(0).unwrap().start()..at + call.get(0).unwrap().end() });
-        }
+        found.extend(refs_and_sources(tag, at));
         for call in DISPATCH.captures_iter(tag) {
             let target =
                 Target::Dispatch { package: call.get(2).map(|p| p.as_str().to_owned()), name: call[1].to_owned() };
-            found.push(Call { target, range: at + call.get(0).unwrap().start()..at + call.get(0).unwrap().end() });
+            let range = at + call.get(0).unwrap().start()..at + call.get(0).unwrap().end();
+            found.push(Call { target, range, arguments: Vec::new() });
         }
         let code = mask(tag, &[("'", "'", true), ("\"", "\"", true)]);
         for call in MACRO_CALL.captures_iter(&code).filter(|call| call.get(1).is_none()) {
@@ -296,9 +306,19 @@ pub fn calls(text: &str) -> Vec<Call> {
             }
             let target =
                 Target::Macro { package: call.get(2).map(|p| p.as_str().to_owned()), name: name.as_str().to_owned() };
-            found.push(Call { target, range: at + start..at + name.end() });
+            found.push(Call { target, range: at + start..at + name.end(), arguments: Vec::new() });
         }
     }
+    found.sort_by_key(|call| call.range.start);
+    found
+}
+
+/// The `ref` and `source` calls of a YAML properties file, which dbt reads
+/// without Jinja delimiters, as in a relationships test's `to:`.  Comments
+/// are left out.
+pub fn yaml_calls(text: &str) -> Vec<Call> {
+    let masked = mask(text, &[("'", "'", false), ("\"", "\"", false), ("#", "\n", true)]);
+    let mut found = refs_and_sources(&masked, 0);
     found.sort_by_key(|call| call.range.start);
     found
 }
@@ -459,6 +479,25 @@ select * from final
             .find(|c| matches!(&c.target, Target::Macro { package: Some(p), .. } if p == "shop_utils"))
             .unwrap();
         assert_eq!(&text[package_call.range], "shop_utils.is_positive");
+    }
+
+    #[test]
+    fn keeps_the_place_of_each_string_argument() {
+        let text = "{{ source('raw', \"orders\") }} {{ ref('pkg', 'm') }}";
+        let found = calls(text);
+        let arguments: Vec<Vec<&str>> =
+            found.iter().map(|call| call.arguments.iter().map(|a| &text[a.clone()]).collect()).collect();
+        assert_eq!(arguments, [vec!["raw", "orders"], vec![], vec!["pkg", "m"], vec![]]);
+    }
+
+    #[test]
+    fn finds_the_calls_of_yaml_without_delimiters_nor_comments() {
+        let text =
+            "      - relationships:\n          to: source('raw', 'customers')  # not ref('x')\n          field: id\n";
+        let found = yaml_calls(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].target, Target::Source { source: "raw".into(), table: "customers".into() });
+        assert_eq!(&text[found[0].arguments[1].clone()], "customers");
     }
 
     #[test]
