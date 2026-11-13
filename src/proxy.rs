@@ -556,11 +556,12 @@ impl<W: Write> Proxy<W> {
     /// Logs WHY a parse failed or could not start, out of the user's way,
     /// once until the reason changes.
     fn log_parse(&mut self, why: &str) {
-        if self.parsing.failure.as_deref() != Some(why) {
-            self.parsing.failure = Some(why.to_owned());
+        // After `shutdown`, LSP lets the server send nothing but answers.
+        if self.parsing.failure.as_deref() != Some(why) && !self.shutdown {
             let params = json!({"type": 2, "message": format!("dbt-lsp-plus: {why}")});
             self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
         }
+        self.parsing.failure = Some(why.to_owned());
     }
 
     /// A parse's outcome: its index replaces the last, or, from a parse that
