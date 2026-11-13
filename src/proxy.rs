@@ -91,8 +91,10 @@ enum Pending {
     Listing,
     /// Answered with null if the server dies first, as LSP asks of `shutdown`.
     Shutdown,
-    /// A hover on a `ref` or a `source`, whose answer gets this summary first.
-    Hover(String),
+    /// A hover whose answer gets this text first: a node's summary, whose
+    /// line breaks are hard, or a docs block's text or a test's signature,
+    /// markdown as written.
+    Hover(String, bool),
 }
 
 /// What the proxy knows of the user's `dbt parse`.
@@ -517,8 +519,9 @@ impl<W: Write> Proxy<W> {
         Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
     }
 
-    /// The node of the `ref` or `source` at the position of PARAMS, else,
-    /// when FILE, the one node its document defines.
+    /// The node of the `ref` or `source` at the position of PARAMS, or of the
+    /// entry whose `name:` is there, else, when FILE, the one node its
+    /// document defines.
     fn node_at<'a>(&self, index: &'a config::Index, params: &Value, file: bool) -> Option<&'a Value> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
@@ -529,6 +532,15 @@ impl<W: Write> Proxy<W> {
         let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
         if let Some(call) = calls.into_iter().find(inside) {
             return index.named(&call.target);
+        }
+        // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
+        let entry = navigation::target_at(&path, &text, offset).filter(|target| {
+            matches!(target, navigation::Target::Named { kind: "model" | "seed" | "snapshot" | "analysis", .. })
+                || matches!(target, navigation::Target::Source(sources::Target::Table { .. }))
+        });
+        if let Some(target) = entry {
+            let project = self.project()?;
+            return navigation::resolve(&project, &path, &target).first().and_then(|found| index.node(&found.id));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
         index.of_file(&relative.to_string_lossy())
@@ -788,8 +800,17 @@ impl<W: Write> Proxy<W> {
             ("textDocument/hover", _) => {
                 let index = self.parsing.index.as_ref();
                 let summary =
-                    index.and_then(|index| self.node_at(index, params, false).map(|node| index.summary(node)));
-                summary.map_or(Pending::Request, Pending::Hover)
+                    index.and_then(|index| self.node_at(index, params, false).map(|node| (index.summary(node), true)));
+                // A doc's or a generic test's block, the project scanned only then.
+                let block = || {
+                    let (path, text, offset) = self.document_at(params)?;
+                    let target = navigation::target_at(&path, &text, offset)
+                        .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
+                    let project = self.project()?;
+                    let found = navigation::resolve(&project, &path, &target);
+                    navigation::hover(&project, &target, found.first()?).map(|text| (text, false))
+                };
+                summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
             }
             _ => Pending::Request,
         }
@@ -833,8 +854,8 @@ impl<W: Write> Proxy<W> {
             if let Some((_, Pending::Listing)) = pending {
                 self.resume();
             }
-            if let Some((_, Pending::Hover(summary))) = &pending
-                && let Some(merged) = features::merge_hover(message, summary, self.markdown)
+            if let Some((_, Pending::Hover(text, hard))) = &pending
+                && let Some(merged) = features::merge_hover(message, text, *hard, self.markdown)
             {
                 return self.send_client(&merged);
             }
