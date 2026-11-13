@@ -14,5 +14,12 @@ serde_json = "1.0.154"
 url = "2.5.8"
 yaml-rust2 = "0.13.0"
 
+# A scripted stand-in for dbt lsp, for the integration tests.
+[[bin]]
+name = "fake-dbt-lsp"
+path = "tests/support/fake_dbt_lsp.rs"
+test = false
+doc = false
+
 [lints.clippy]
 cognitive_complexity = "warn"

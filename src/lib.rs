@@ -4,6 +4,7 @@
 pub mod features;
 pub mod graph;
 pub mod project;
+pub mod proxy;
 pub mod rpc;
 pub mod scan;
 pub mod text;
