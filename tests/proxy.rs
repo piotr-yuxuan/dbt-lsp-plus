@@ -890,7 +890,7 @@ fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
 
 #[test]
 fn tells_which_requests_it_answers_itself() {
-    let answered = json!({"version": 1, "references": ["source"], "rename": ["source"]});
+    let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"]});
     let capabilities = json!({"textDocumentSync": 2, "experimental": {"server": 1}});
     let (mut session, _) = Session::fake("experimental", json!({"capabilities": capabilities}));
     let result = session.initialize(&fixture());

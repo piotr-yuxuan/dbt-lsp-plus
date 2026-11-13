@@ -55,8 +55,9 @@ owns all state and writes both outputs.
   `name:` under `sources:`, in a file the scan holds, and forwards every
   other one.  It says so under the standard `capabilities.experimental`,
   merged with the server's: `"dbtLspPlus": {"version": 1, "references":
-  ["source"], "rename": ["source"]}` names, per request, the kinds of target
-  it answers project-wide, and dbt-mode steps aside for exactly those.
+  ["source"], "rename": ["source", "cte"]}` names, per request, the kinds of
+  target it answers itself, a source project-wide and a CTE within its
+  file, and dbt-mode steps aside for exactly those.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
   with a flat list of tokens, so the proxy owns it.  A later server that

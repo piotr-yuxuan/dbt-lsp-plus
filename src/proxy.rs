@@ -236,7 +236,7 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            let answered = json!({"version": 1, "references": ["source"], "rename": ["source"]});
+            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"]});
             experimental.insert("dbtLspPlus".into(), answered);
         }
     }
