@@ -29,7 +29,9 @@ fn in_front_of_the_real_dbt_lsp() {
 
     let result = session.initialize(&project);
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
-    for capability in ["documentSymbolProvider", "callHierarchyProvider", "hoverProvider"] {
+    let announced =
+        ["documentSymbolProvider", "callHierarchyProvider", "hoverProvider", "referencesProvider", "renameProvider"];
+    for capability in announced {
         assert_eq!(result["capabilities"][capability], json!(true), "{capability}");
     }
     document_features(&mut session, &project);
