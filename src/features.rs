@@ -287,7 +287,7 @@ mod tests {
 
     const PROPERTIES: &str = "models:\n  - name: orders\n    description: 'with x as (select 1) {% macro hidden() %}'\n    \
         columns:\n      - name: id\n    metrics:\n      - name: n\nseeds:\n  - name: s\nsnapshots:\n  - name: sn\n\
-        analyses:\n  - name: a\nmacros:\n  - name: m\nfunctions:\n  - name: f\ndata_tests:\n  - name: dt\nsources:\n  - name: raw\n    tables:\n      - name: t\nexposures:\n  - name: e\n\
+        analyses:\n  - name: a\nmacros:\n  - name: m\nfunctions:\n  - name: f\ndata_tests:\n  - name: dt\nsources:\n  - name: raw\n    tables:\n      - name: t\n        columns:\n          - name: c\nexposures:\n  - name: e\n\
         metrics:\n  - name: me\nsemantic_models:\n  - name: sm\nsaved_queries:\n  - name: q\nunit_tests:\n  \
         - name: u\ngroups:\n  - name: g\n";
 
@@ -312,6 +312,7 @@ mod tests {
             ("dt", 24, None),
             ("raw", 2, None),
             ("t", 11, Some("raw")),
+            ("c", 8, Some("t")),
             ("e", 19, None),
             ("me", 16, None),
             ("sm", 5, None),
@@ -359,6 +360,16 @@ mod tests {
             symbols[0]["selectionRange"],
             json!({"start": {"line": 1, "character": 10}, "end": {"line": 1, "character": 16}})
         );
+    }
+
+    #[test]
+    fn yaml_that_does_not_parse_is_never_read_as_sql() {
+        let text =
+            "models:\n  - name: o\n    description: with x as (select 1) {% macro m() %}{% endmacro %}\n  - name: [";
+        for hierarchical in [true, false] {
+            assert_eq!(document_symbols(text, Encoding::Utf16, hierarchical, "file:///p.yml"), json!([]));
+        }
+        assert_ne!(document_symbols(text, Encoding::Utf16, true, "file:///p.sql"), json!([]));
     }
 
     #[test]
