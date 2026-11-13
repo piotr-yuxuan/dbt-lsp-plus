@@ -34,6 +34,7 @@ src/properties.rs             the named entries of a YAML properties file
 src/project.rs                the resources of a project and its packages
 src/graph.rs                  the dependency graph: scanned, then the server's
 src/sources.rs                references and renames of sources
+src/navigation.rs             the targets of definitions in YAML, dbt's lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/document.rs               folding, highlights, selection ranges, CTE rename

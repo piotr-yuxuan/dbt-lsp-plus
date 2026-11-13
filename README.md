@@ -21,6 +21,12 @@ dbt 2, and adds what it lacks, for every editor and for agents:
   and the declarations.  A rename keeps the warehouse relation, inserting
   `identifier:` or `schema:` with the old name, and is refused rather than
   applied in part;
+- go to definition from a properties file, where dbt lsp answers nothing: a
+  `ref` to its model, a `source` to its table's entry, a `doc` to its docs
+  block, a model's `name:` to its file, a generic test's name to its test
+  block, by dbt 2.0.9's lookup across packages; and from a `source()` in
+  SQL; hover there shows the docs text, the test's signature, the node's
+  summary;
 - `dbt-lsp-plus.nodeInfo`, a command that gives a node's resolved
   configuration and relation from the user's own `dbt parse`, and a summary
   of the node first in the server's hover on a `ref` or a `source`;

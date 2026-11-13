@@ -58,11 +58,13 @@ owns all state and writes both outputs.
   answers them with nothing: the proxy answers those requests itself, when
   the position is on a `source()` argument or on a source's or table's
   `name:` under `sources:`, in a file the scan holds, and forwards every
-  other one.  It says so under the standard `capabilities.experimental`,
-  merged with the server's: `"dbtLspPlus": {"version": 1, "references":
-  ["source"], "rename": ["source", "cte"]}` names, per request, the kinds of
-  target it answers itself, a source project-wide and a CTE within its
-  file, and dbt-mode steps aside for exactly those.
+  other one.  Definitions likewise, where the document shows a target that
+  the server answers with null (see "Navigation from YAML").  It says so
+  under the standard `capabilities.experimental`, merged with the
+  server's: `"dbtLspPlus": {"version": 1, "references": ["source"],
+  "rename": ["source", "cte"], "definition": ["source", "ref", "doc",
+  "entry", "test"]}` names, per request, the kinds of target it answers
+  itself, and dbt-mode steps aside for exactly those.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
   with a flat list of tokens, so the proxy owns it.  A later server that
@@ -127,7 +129,7 @@ resolved path.
   then, and for the nodes it did not list, they come from the scan.  The
   server lists no macros, so the edges to and from macros always come from
   the scan.  The scan looks a ref or a source up in the caller's package,
-  the root project, then any package (dbt tries the root project first), and
+  the root project, then any package, as dbt 2.0.9 does by default, and
   an unqualified macro in the caller's package and the root project only, as
   dbt does: another package's macros need its name.  A dispatch names every
   `*__name` implementation of its package.  A listing that fails keeps the
@@ -214,6 +216,47 @@ minutes, so only a unit test of the abandonment covers it.
     edge would change it while the file still parses.
 - Without a server, the proxy announces references and rename too, for
   sources and CTEs; on anything else they fail as other requests do.
+
+## Navigation from YAML
+
+dbt lsp 2.0.9 answers null to definition and hover at every position of a
+properties file, and to definition on a `source()` or `doc()` argument in
+SQL.  The proxy answers a definition itself where the document alone shows
+one of these targets, and forwards every other one, YAML included:
+
+- `source`: a `source()` argument in any file, or a source's or table's
+  `name:`, leads to the table's or source's `name:`;
+- `ref`: a `ref()` argument in a YAML file (in SQL the server answers), or
+  a unit test's `model:`, leads to the model's, seed's or snapshot's file;
+  a `ref` that names a version is forwarded, since the scan knows no
+  versions' files;
+- `doc`: a `doc()` argument in a YAML file, its quotes as YAML escapes them,
+  leads to the docs block; dbt has no `doc` in SQL;
+- `entry`: the `name:` of a model, seed, snapshot, analysis or macro entry
+  leads to its file or block;
+- `test`: a generic test's name in a `data_tests:` or `tests:` list below
+  the top level (an item, the one key of an item, or `test_name:`) leads
+  to its test block; dbt's own tests have none, and get null.
+
+Lookup follows dbt 2.0.9, probed with `dbt parse`: a package the name gives
+is the only one searched; else a `ref` or a `source` tries the file's own
+package (the installed package whose directory holds it), then the root,
+then any, the root first under `flags:
+require_ref_searches_node_package_before_root: false`; a `doc` tries the
+root, then the file's package, then any, flag or not.  As dbt-core 1.12.6's
+parser reads them: a generic test, the file's package then the root; a
+unit test's model, the file's package; an entry, a model, seed or snapshot
+of the file's package else any, an analysis of any, a macro of the file's
+package.  The first package that has something gives one location, or every
+declaration of a source.  A location is the name of a block or of a
+`name:`, or the start of a model's file, as dbt lsp answers a `ref`.
+
+Hover there extends the hover summary (see "Node information and hover"):
+on a `doc`, the docs block's markdown as written; on a generic test, its
+opening tag in a code block and its package; on an entry's `name:`, its
+node's summary, which `nodeInfo` with that position gives whole.  Without a
+server, the proxy announces `definitionProvider`, answers the same targets,
+and gives null elsewhere rather than a failure.
 
 ## Within a document
 
@@ -352,8 +395,9 @@ So the proxy runs the user's own `dbt parse`.
   only logged.  A position names the call under it in SQL inside Jinja, and
   in YAML or a Python model outside it.
 - A hover is the one method that is forwarded and augmented: on a `ref` or
-  `source` argument, resolved from the document's text when the request
-  arrives, the server's answer gets the node's summary first, then a rule;
+  `source` argument, or an entry's `name:` in YAML, resolved from the
+  document's text when the request arrives, the server's answer gets the
+  node's summary first, then a rule;
   plain text gets a blank line instead, an array of marked strings the
   summary as its first item, a null answer the summary alone.  Elsewhere,
   or without an index, the answer passes byte for byte.  The summary is one
@@ -415,6 +459,12 @@ The server is not restarted after a crash.
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
+- `graph::resolve`, behind the call hierarchy, ignores `flags:
+  require_ref_searches_node_package_before_root: false`, which navigation
+  reads.
+- A versioned model's `ref` (`v=2`) and its versions' files are not
+  navigated; a generic test's arguments (`column_name:`, `to:` aside) and
+  a `config:` block lead nowhere.
 - The outline of a YAML file that yaml-rust2 does not parse is empty: one
   in the middle of an edit, but also some that dbt reads, being laxer about
   indentation inside flow collections and quoted scalars, such as a flow
@@ -462,6 +512,10 @@ The server is not restarted after a crash.
     cache; dbt's output kept off the client's channel; a parse killed at
     `exit`; a node by id or by position; the summary first on a hover of a
     ref, any other hover byte for byte.
+  - navigation from YAML: each kind of target and its location, dbt's own
+    test null, the server never asked; a column's name, `dbt_project.yml`
+    and a SQL `ref` forwarded; a `source()` in SQL; hover on a doc, a test
+    and an entry's name; nodeInfo on an entry's name; without a server.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
