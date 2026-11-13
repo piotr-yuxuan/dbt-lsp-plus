@@ -1,0 +1,13 @@
+/target/
+
+# Plans and notes, and one linked worktree per plan
+/docs/work/
+/.worktree/
+
+# What dbt writes when the fixture runs in place
+/tests/fixtures/shop/target/
+/tests/fixtures/shop/logs/
+/tests/fixtures/shop/.user.yml
+
+# A binary commits its lock file, whatever a global ignore says.
+!/Cargo.lock
