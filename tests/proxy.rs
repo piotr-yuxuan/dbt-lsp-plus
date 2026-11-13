@@ -1031,3 +1031,160 @@ fn without_dbt_lsp_the_features_within_a_document_remain() {
     assert_eq!(renamed["result"]["changes"][uri(&path)].as_array().map(Vec::len), Some(3), "{renamed}");
     assert!(session.finish().success());
 }
+
+/// A manifest of the fixture as `dbt parse` writes it, in part.
+fn manifest() -> Value {
+    let model = |name: &str, path: &str, materialized: &str| {
+        json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
+               "package_name": "shop", "original_file_path": path, "access": "protected",
+               "relation_name": format!("\"shop\".\"main\".\"{name}\""), "config": {"materialized": materialized}})
+    };
+    json!({"metadata": {"project_name": "shop"}, "nodes": {
+        "model.shop.orders": model("orders", "models/marts/orders.sql", "table"),
+        "model.shop.stg_orders": model("stg_orders", "models/staging/stg_orders.sql", "view")}})
+}
+
+/// The answer to `dbt-lsp-plus.nodeInfo` with ARGUMENT.
+fn node_info(session: &mut Session, argument: Value) -> Value {
+    session.request("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": [argument]}))
+}
+
+/// What the fake logged of each parse, beside LOG: its arguments and pid.
+fn parses(log: &Path) -> Vec<Value> {
+    logged(&log.with_extension("jsonl.parses"))
+}
+
+/// Opens orders.sql, which makes the fake compile, then asks for the node
+/// orders until a parse has given it; returns its information.
+fn parsed_orders(session: &mut Session) -> Value {
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object())
+}
+
+#[test]
+fn node_info_parses_with_the_server_s_dbt_once_it_compiled() {
+    let (mut session, log) = Session::fake("node-info", json!({"manifest": manifest()}));
+    let result = session.initialize(&fixture());
+    let commands = &result["capabilities"]["executeCommandProvider"]["commands"];
+    assert!(
+        commands.as_array().unwrap().iter().any(|c| c == "dbt-lsp-plus.nodeInfo") && commands[0] == "dbt.listNodes"
+    );
+    // Nothing compiled yet: dbt may not have resolved the packages.
+    let early = node_info(&mut session, json!("model.shop.orders"));
+    assert_eq!(early["error"]["code"], json!(-32803), "{early}");
+    assert!(early["error"]["message"].as_str().unwrap().contains("has not compiled"), "{early}");
+    let orders = parsed_orders(&mut session);
+    assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
+    assert_eq!(orders["config"]["materialized"], "table");
+    // dbt's noise on its outputs never reached the client.
+    assert!(session.received.iter().all(|m| !m.is_null()), "a body that is not JSON");
+    assert_eq!(parses(&log).len(), 1);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_parse_takes_the_server_s_reading_flags_and_keeps_its_output_in_the_cache() {
+    let flags = [
+        Path::new("--project-dir"),
+        &fixture(),
+        Path::new("--target"),
+        Path::new("dev"),
+        Path::new("--log-level"),
+        Path::new("info"),
+    ];
+    let (mut session, log) = Session::fake_with("parse-flags", json!({"manifest": manifest()}), &flags, None);
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let argv: Vec<String> = serde_json::from_value(parses(&log)[0]["parse"].clone()).unwrap();
+    let at = |flag: &str| argv.iter().position(|a| a == flag).map(|i| argv[i + 1].clone());
+    assert_eq!(at("--project-dir").as_deref(), Some(fixture().to_str().unwrap()));
+    assert_eq!(at("--target").as_deref(), Some("dev"));
+    assert!(at("--target-path").unwrap().contains("parse-flags/cache/dbt-lsp-plus/"), "{argv:?}");
+    assert!(!argv.contains(&"--log-level".to_owned()) && argv.contains(&"--no-send-anonymous-usage-stats".to_owned()));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn node_info_names_a_node_by_id_or_by_position() {
+    let (mut session, _) = Session::fake("node-info-at", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    assert_eq!(node_info(&mut session, json!("model.shop.nowhere"))["result"], Value::Null);
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = node_info(&mut session, json!({"uri": orders, "position": {"line": 4, "character": 28}}));
+    assert_eq!(on_ref["result"]["unique_id"], "model.shop.stg_orders");
+    let elsewhere = node_info(&mut session, json!({"uri": orders, "position": {"line": 0, "character": 0}}));
+    assert_eq!(elsewhere["result"]["unique_id"], "model.shop.orders");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn one_parse_at_a_time_and_one_more_after_a_change_during_it() {
+    let gate = scratch("parse-gate-file").join("open");
+    let script = json!({"manifest": manifest(), "parse_gate": gate});
+    let (mut session, log) = Session::fake("parse-once", script);
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the first parse", |_| parses(&log).len() == 1);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    barrier(&mut session);
+    node_info(&mut session, json!("model.shop.orders"));
+    barrier(&mut session);
+    assert_eq!(parses(&log).len(), 1, "a parse under way");
+    std::fs::write(&gate, "").unwrap();
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    // The change during the first parse makes the next request parse again.
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the second parse", |_| parses(&log).len() == 2);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn no_parse_while_packages_need_the_network() {
+    let project = copy_fixture("unsettled-packages");
+    std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
+        .unwrap();
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("unsettled-session", json!({"manifest": manifest()}), &flags, None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let refused = node_info(&mut session, json!("model.shop.orders"));
+    assert!(refused["error"]["message"].as_str().unwrap().contains("run dbt deps"), "{refused}");
+    let logged_once = session.received.iter().filter(|m| m["method"] == "window/logMessage").count();
+    assert_eq!(logged_once, 1);
+    assert!(parses(&log).is_empty());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn exit_stops_a_parse_under_way() {
+    let (mut session, log) = Session::fake("parse-hangs", json!({"manifest": manifest(), "parse_hang": true}));
+    session.initialize(&fixture());
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse", |_| parses(&log).len() == 1);
+    let pid = parses(&log)[0]["pid"].as_u64().unwrap();
+    assert!(session.finish().success());
+    assert!(!Path::new(&format!("/proc/{pid}")).exists(), "the parse {pid} outlived the proxy");
+}
+
+#[test]
+fn without_dbt_lsp_node_info_says_why_it_has_nothing() {
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    session.initialize(&fixture());
+    let answer = node_info(&mut session, json!("model.shop.orders"));
+    assert_eq!(answer["error"]["code"], json!(-32803), "{answer}");
+    assert!(session.finish().success());
+}
