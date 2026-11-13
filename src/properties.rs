@@ -79,15 +79,16 @@ pub fn entries(text: &str) -> Vec<Entry> {
             start..end + 1
         } else {
             // In block style, the parser ends a mapping at the next token:
-            // the blank lines before it, and the comments no deeper than the
-            // entry's first key, belong to what follows.
+            // the blank lines before it, and the comments less deep than the
+            // entry's first key, belong to what follows; a key commented out
+            // stays in its entry.
             let lines = text[start..end].split_inclusive('\n').scan(start, |at, line| {
                 let line_start = std::mem::replace(at, *at + line.len());
                 Some((line_start, line))
             });
             let content = |(_, line): &(usize, &str)| {
                 let indent = line.len() - line.trim_start().len();
-                !line.trim().is_empty() && !(line.trim_start().starts_with('#') && indent <= column)
+                !line.trim().is_empty() && !(line.trim_start().starts_with('#') && indent < column)
             };
             let last = lines.filter(content).last();
             start..last.map_or(end, |(line_start, line)| line_start + line.trim_end().len())
@@ -251,6 +252,15 @@ groups:
     fn an_entry_without_a_scalar_name_is_skipped_with_what_it_holds() {
         let text = "models:\n  - name: [a, b]\n    columns:\n      - name: x\n  - description: none\n  - kept\n";
         assert_eq!(named(text), Vec::new());
+    }
+
+    #[test]
+    fn a_key_commented_out_stays_in_its_entry() {
+        let text = "models:\n  - name: orders\n    columns:\n      - name: id\n    # tests:\n    #   - unique\n  \
+                    # The next model.\n  - name: customers\n";
+        let found = entries(text);
+        assert!(text[found[0].range.clone()].ends_with("    #   - unique"));
+        assert_eq!(&text[found[1].range.clone()], "name: id");
     }
 
     #[test]
