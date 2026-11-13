@@ -224,6 +224,17 @@ impl<W: Write> Proxy<W> {
                 self.owned.extend(methods);
             }
         }
+        // Which requests the proxy answers itself, project-wide, on which kinds
+        // of target, beside the server's own experimental capabilities: a
+        // client such as dbt-mode steps aside for exactly those.
+        let experimental = capabilities.entry("experimental").or_insert(Value::Null);
+        if experimental.is_null() {
+            *experimental = json!({});
+        }
+        if let Some(experimental) = experimental.as_object_mut() {
+            let answered = json!({"version": 1, "references": ["source"], "rename": ["source"]});
+            experimental.insert("dbtLspPlus".into(), answered);
+        }
     }
 
     /// Answers `initialize` without a server: the proxy's own features only.
