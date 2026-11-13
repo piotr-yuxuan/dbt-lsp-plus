@@ -10,6 +10,7 @@ pub mod project;
 pub mod properties;
 pub mod proxy;
 pub mod rpc;
+pub mod runs;
 pub mod scan;
 pub mod sources;
 pub mod text;

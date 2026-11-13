@@ -19,6 +19,10 @@ fn in_front_of_the_real_dbt_lsp() {
     let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
     let project = copy_fixture("live");
     std::fs::write(project.join("models/marts/_models.yml"), LIVE_MODELS).unwrap();
+    // The files of a build whose relationships test failed, as dbt 2.0.9 writes them.
+    std::fs::create_dir_all(project.join("target")).unwrap();
+    std::fs::write(project.join("target/run_results.json"), LIVE_RESULTS).unwrap();
+    std::fs::write(project.join("target/manifest.json"), LIVE_MANIFEST).unwrap();
     let home = project.with_file_name("home");
     std::fs::create_dir_all(&home).unwrap();
     let project_arg = project.to_string_lossy().into_owned();
@@ -47,6 +51,7 @@ fn in_front_of_the_real_dbt_lsp() {
     }
     document_features(&mut session, &project);
     navigation(&mut session, &project);
+    last_run(&mut session, &project);
     lineage(&mut session, &project);
     let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
@@ -153,12 +158,39 @@ models:
     description: \"{{ doc('order_status') }}\"
     columns:
       - name: customer_id
+        description: \"{{ doc('no_such_doc') }}\"
         data_tests:
           - relationships:
               arguments:
                 to: ref('customers')
                 field: customer_id
 ";
+
+const LIVE_RESULTS: &str = r#"{"args": {"command": "build"}, "results": [
+  {"unique_id": "test.shop.relationships_orders_customer_id.1", "status": "fail", "message": "Error", "failures": 3}]}"#;
+
+const LIVE_MANIFEST: &str = r#"{"nodes": {"test.shop.relationships_orders_customer_id.1": {
+  "unique_id": "test.shop.relationships_orders_customer_id.1", "resource_type": "test", "package_name": "shop",
+  "name": "relationships_orders_customer_id", "original_file_path": "models/marts/_models.yml",
+  "attached_node": "model.shop.orders", "column_name": "customer_id", "test_metadata": {"name": "relationships"}},
+  "model.shop.orders": {"resource_type": "model", "name": "orders", "package_name": "shop"}}}"#;
+
+/// The last run's failure beside dbt lsp's own diagnostic on the properties
+/// file: dbt lsp 2.0.9 warns of the unknown doc there.
+fn last_run(session: &mut Session, project: &Path) {
+    let models = uri(&project.join("models/marts/_models.yml"));
+    let both = |message: &Value| {
+        let diagnostics = message["params"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == models.as_str()
+            && diagnostics.iter().any(|d| d["source"] == "dbt")
+            && diagnostics.iter().any(|d| d["code"] == "last-run")
+    };
+    let published = session.wait_for(both);
+    let failed =
+        published["params"]["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "last-run").cloned();
+    assert_eq!(failed.unwrap()["message"], "dbt build: relationships failed: 3 rows", "{published}");
+}
 
 /// The proxy's definitions and hover in a properties file, where dbt lsp
 /// 2.0.9 answers null.

@@ -1796,3 +1796,266 @@ fn hints_come_from_the_open_text_of_sql_and_yaml() {
     assert_eq!(hints["result"][0]["position"], json!({"line": 6, "character": 33}), "{hints}");
     assert!(session.finish().success());
 }
+
+/// Writes the files of a run, RESULTS and MANIFEST, into PROJECT's target.
+fn write_run(project: &Path, results: &Value, manifest: &Value) {
+    let target = project.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("run_results.json"), results.to_string()).unwrap();
+    std::fs::write(target.join("manifest.json"), manifest.to_string()).unwrap();
+}
+
+/// A manifest of the fixture's model `orders` and of a generic test on its
+/// column `order_id`, written in `models/marts/_models.yml`.
+fn run_manifest() -> Value {
+    json!({"nodes": {
+        "model.shop.orders": {"unique_id": "model.shop.orders", "resource_type": "model", "name": "orders",
+                              "package_name": "shop", "original_file_path": "models/marts/orders.sql"},
+        "test.shop.is_even_orders_order_id.a1": {"unique_id": "test.shop.is_even_orders_order_id.a1",
+            "resource_type": "test", "name": "is_even_orders_order_id", "package_name": "shop",
+            "original_file_path": "models/marts/_models.yml", "attached_node": "model.shop.orders",
+            "column_name": "order_id", "test_metadata": {"name": "is_even"}}}})
+}
+
+/// The results of a run of COMMAND: the model `orders` erroring and its
+/// test failing when FAILING, else both passing.
+fn run_results(command: &str, failing: bool) -> Value {
+    let (model, test) = if failing { ("error", "fail") } else { ("success", "pass") };
+    json!({"args": {"command": command}, "results": [
+        {"unique_id": "model.shop.orders", "status": model, "message": "Database Error in model orders",
+         "failures": null},
+        {"unique_id": "test.shop.is_even_orders_order_id.a1", "status": test, "message": "Error", "failures": 2}]})
+}
+
+const RUN_MODELS: &str = "version: 2\nmodels:\n  - name: orders\n    columns:\n      - name: order_id\n        \
+                          data_tests:\n          - is_even\n";
+
+/// A copy of the fixture for test NAME with `RUN_MODELS`, and a session in
+/// front of the fake with SCRIPT.
+fn run_session(name: &str, script: Value) -> (PathBuf, Session, PathBuf) {
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
+    let (mut session, log) = Session::fake_with(name, script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    (project, session, log)
+}
+
+/// The next diagnostics published for PATH that PREDICATE accepts.
+fn published(session: &mut Session, path: &Path, predicate: impl Fn(&Value) -> bool) -> Value {
+    let uri = uri(path);
+    let message = session.wait_for(|m| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"] == uri.as_str()
+            && predicate(&m["params"])
+    });
+    message["params"].clone()
+}
+
+fn last_run(params: &Value) -> Vec<&Value> {
+    params["diagnostics"].as_array().unwrap().iter().filter(|d| d["code"] == "last-run").collect()
+}
+
+#[test]
+fn the_last_run_s_failures_show_where_they_are_written() {
+    let (project, mut session, _) = run_session("runs", json!({}));
+    write_run(&project, &run_results("build", true), &run_manifest());
+    let model = published(&mut session, &project.join("models/marts/orders.sql"), |p| !last_run(p).is_empty());
+    let error = last_run(&model)[0];
+    assert_eq!(
+        (&error["severity"], &error["message"], &error["source"]),
+        (&json!(1), &json!("dbt build: Database Error in model orders"), &json!("dbt-lsp-plus"))
+    );
+    assert_eq!(error["range"]["start"], json!({"line": 0, "character": 0}));
+    let test = published(&mut session, &project.join("models/marts/_models.yml"), |p| !last_run(p).is_empty());
+    let failed = last_run(&test)[0];
+    assert_eq!(failed["message"], "dbt build: is_even failed: 2 rows");
+    assert_eq!(failed["range"], json!({"start": {"line": 6, "character": 12}, "end": {"line": 6, "character": 19}}));
+    assert!(test.get("version").is_none());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_last_run_s_failures_join_the_server_s_and_leave_its_others_as_they_are() {
+    let project = copy_fixture("runs-merged-project");
+    let models = project.join("models/marts/_models.yml");
+    let staging = project.join("models/staging/stg_orders.sql");
+    let on_models = json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+        "uri": uri(&models), "diagnostics": [{"range": {"start": {"line": 0, "character": 0},
+        "end": {"line": 0, "character": 0}}, "severity": 2, "source": "dbt", "message": "from dbt"}]}});
+    // Keys out of order and spaces, which no serialiser of the proxy's writes.
+    let on_staging = format!(
+        concat!(
+            r#"{{"params": {{"diagnostics": [ ], "uri": "{}"}}, "#,
+            r#""method": "textDocument/publishDiagnostics" , "jsonrpc": "2.0"}}"#
+        ),
+        uri(&staging)
+    );
+    let script = json!({"raw_on_compile": [on_models.to_string(), on_staging]});
+    std::fs::write(&models, RUN_MODELS).unwrap();
+    let (mut session, _) = Session::fake_with("runs-merged", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    // The server publishes first, the run comes after.
+    session.notify("test/compile", json!({}));
+    published(&mut session, &models, |p| p["diagnostics"].as_array().unwrap().len() == 1);
+    write_run(&project, &run_results("build", true), &run_manifest());
+    let merged = published(&mut session, &models, |p| p["diagnostics"].as_array().unwrap().len() == 2);
+    assert_eq!(merged["diagnostics"][0]["message"], "from dbt");
+    assert_eq!(merged["diagnostics"][1]["code"], "last-run");
+    // A file without failures gets the server's notification byte for byte.
+    session.notify("test/compile", json!({}));
+    published(&mut session, &staging, |_| true);
+    assert!(session.received_raw.iter().any(|raw| raw == on_staging.as_bytes()), "the server's bytes changed");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_new_run_replaces_the_failures_and_one_that_builds_nothing_keeps_them() {
+    let (project, mut session, _) = run_session("runs-replaced", json!({}));
+    let model = project.join("models/marts/orders.sql");
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    // A compile writes results of nothing built: the failures stay.
+    write_run(&project, &json!({"args": {"command": "compile"}, "results": []}), &run_manifest());
+    std::thread::sleep(Duration::from_millis(2500));
+    barrier(&mut session);
+    let cleared = |m: &Value| m["method"] == "textDocument/publishDiagnostics" && last_run(&m["params"]).is_empty();
+    assert!(!session.received.iter().any(cleared), "a compile cleared the failures");
+    // A partial run, of the test alone, replaces them all: the model's too.
+    let partial = json!({"args": {"command": "test"}, "results": [
+        {"unique_id": "test.shop.is_even_orders_order_id.a1", "status": "pass", "message": "Pass", "failures": 0}]});
+    write_run(&project, &partial, &run_manifest());
+    published(&mut session, &model, |p| last_run(p).is_empty());
+    // Results gone, as after `dbt clean`: no failure left.
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    std::fs::remove_file(project.join("target/run_results.json")).unwrap();
+    published(&mut session, &model, |p| last_run(p).is_empty());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn an_edit_or_a_save_of_a_file_clears_its_failures_and_an_open_keeps_them() {
+    let (project, mut session, _) = run_session("runs-edited", json!({}));
+    let (model, models) = (project.join("models/marts/orders.sql"), project.join("models/marts/_models.yml"));
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    published(&mut session, &models, |p| !last_run(p).is_empty());
+    session.open(&model, None);
+    barrier(&mut session);
+    let cleared = |m: &&Value| m["method"] == "textDocument/publishDiagnostics" && last_run(&m["params"]).is_empty();
+    assert!(!session.received.iter().any(|m| cleared(&m)), "opening the file cleared its failures");
+    let edit = json!({"textDocument": {"uri": uri(&model), "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "-- fixed\n"}]});
+    session.notify("textDocument/didChange", edit);
+    published(&mut session, &model, |p| last_run(p).is_empty());
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&models)}}));
+    published(&mut session, &models, |p| last_run(p).is_empty());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_file_newer_than_the_run_gets_no_failure_and_a_package_s_its_own() {
+    let (project, mut session, _) = run_session("runs-stale", json!({}));
+    let model = project.join("models/marts/orders.sql");
+    let package = project.join("dbt_packages/shop_utils/models/pkg_broken.sql");
+    std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+    std::fs::write(&package, "select * from nowhere\n").unwrap();
+    let mut manifest = run_manifest();
+    manifest["nodes"]["model.shop_utils.pkg_broken"] = json!({"unique_id": "model.shop_utils.pkg_broken",
+        "resource_type": "model", "name": "pkg_broken", "package_name": "shop_utils",
+        "original_file_path": "models/pkg_broken.sql"});
+    let mut results = run_results("build", true);
+    results["results"].as_array_mut().unwrap().push(json!({"unique_id": "model.shop_utils.pkg_broken",
+        "status": "error", "message": "Database Error in model pkg_broken"}));
+    // The model saved after the run: its failure no longer holds.
+    let later = std::time::SystemTime::now() + Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&model).unwrap().set_modified(later).unwrap();
+    write_run(&project, &results, &manifest);
+    published(&mut session, &project.join("models/marts/_models.yml"), |p| !last_run(p).is_empty());
+    let broken = published(&mut session, &package, |p| !last_run(p).is_empty());
+    assert_eq!(last_run(&broken)[0]["message"], "dbt build: Database Error in model pkg_broken");
+    barrier(&mut session);
+    let on_model =
+        |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&model).as_str();
+    assert!(!session.received.iter().any(on_model), "a failure on a file newer than the run");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn no_failure_is_published_after_shutdown() {
+    let (project, mut session, _) = run_session("runs-shutdown", json!({}));
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    write_run(&project, &run_results("build", true), &run_manifest());
+    std::thread::sleep(Duration::from_millis(2500));
+    barrier(&mut session);
+    assert!(!session.received.iter().any(|m| m["method"] == "textDocument/publishDiagnostics"));
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+}
+
+#[test]
+fn a_change_of_uri_clears_the_one_published_before() {
+    let project = copy_fixture("runs-spelling-project");
+    std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
+    let link = project.with_file_name("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    // The server names the file by its resolved path, the proxy by the root's spelling.
+    let resolved = project.join("models/marts/_models.yml");
+    let spelt = link.join("models/marts/_models.yml");
+    let server = json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                        "params": {"uri": uri(&resolved), "diagnostics": []}});
+    let script = json!({"raw_on_compile": [server.to_string()]});
+    let (mut session, _) = Session::fake_with("runs-spelling", script, &[Path::new("--project-dir"), &link], None);
+    session.initialize(&link);
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &spelt, |p| !last_run(p).is_empty());
+    session.notify("test/compile", json!({}));
+    published(&mut session, &spelt, |p| p["diagnostics"] == json!([]));
+    published(&mut session, &resolved, |p| !last_run(p).is_empty());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn an_edit_clears_failures_over_an_empty_server_set_and_waits_over_a_full_one() {
+    let project = copy_fixture("runs-server-sets-project");
+    let (model, models) = (project.join("models/marts/orders.sql"), project.join("models/marts/_models.yml"));
+    std::fs::write(&models, RUN_MODELS).unwrap();
+    let publication = |path: &Path, diagnostics: Value| {
+        json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+               "params": {"uri": uri(path), "diagnostics": diagnostics}})
+        .to_string()
+    };
+    let warning = json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                          "severity": 2, "source": "dbt", "message": "from dbt"}]);
+    let script = json!({"raw_on_compile": [publication(&model, json!([])), publication(&models, warning)]});
+    let (mut session, _) =
+        Session::fake_with("runs-server-sets", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    session.notify("test/compile", json!({}));
+    published(&mut session, &models, |p| p["diagnostics"].as_array().unwrap().len() == 1);
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    published(&mut session, &models, |p| !last_run(p).is_empty());
+    // Over the server's empty set, an edit clears the failure at once.
+    let edit = |path: &Path| {
+        json!({"textDocument": {"uri": uri(path), "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "# fixed\n"}]})
+    };
+    session.open(&model, None);
+    session.received.clear();
+    session.notify("textDocument/didChange", edit(&model));
+    published(&mut session, &model, |p| last_run(p).is_empty());
+    // Over its warning, whose range the edit moved, the proxy waits for the
+    // server's next publication, which then goes out without the failure.
+    session.open(&models, None);
+    session.received.clear();
+    session.notify("textDocument/didChange", edit(&models));
+    barrier(&mut session);
+    let on_models =
+        |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&models).as_str();
+    assert!(!session.received.iter().any(on_models), "the server's old ranges published again");
+    session.notify("test/compile", json!({}));
+    let next = published(&mut session, &models, |_| true);
+    assert_eq!((last_run(&next).len(), next["diagnostics"].as_array().map(Vec::len)), (0, Some(1)));
+    assert!(session.finish().success());
+}

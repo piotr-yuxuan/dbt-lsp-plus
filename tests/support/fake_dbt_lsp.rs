@@ -24,7 +24,9 @@
 //!     for the first such request only;
 //!   - `raw_answers`, likewise, each a body written as it is, `$ID` replaced
 //!     by the request's id; `raw_on_initialized`, bodies sent as they are
-//!     after `initialized`;
+//!     after `initialized`, and `raw_on_compile`, after the compilation
+//!     that the notification `test/compile` makes, such as diagnostics,
+//!     which 2.0.9 publishes with no version;
 //!   - `silent`, keys whose requests are never answered, and `hold`, keys
 //!     whose requests wait for the notification `test/release`;
 //!   - `exit_on`, a method on which the server exits with status 3, and
@@ -86,6 +88,20 @@ fn compile_complete() {
     send(json!({"method": "dbt/lspCompileComplete", "params": {"cause": "didSave", "errors": []}}));
 }
 
+/// What 2.0.9 answers to METHOD with PARAMS, a listing when LISTING, when
+/// the script says nothing of it.
+fn answered_as_2_0_9(method: &str, listing: bool, params: Value) -> Value {
+    let model = params.pointer("/textDocument/uri").and_then(Value::as_str).is_some_and(|uri| uri.ends_with(".sql"));
+    match (method, listing) {
+        ("shutdown", _) => Value::Null,
+        (_, true) => json!({"error": "No nodes found", "grain": "unknown", "nodes": []}),
+        // Inlay hints: none on a model, null on any other file.
+        ("textDocument/inlayHint", _) if model => json!([]),
+        ("textDocument/inlayHint", _) => Value::Null,
+        _ => json!({"echo": method, "params": params}),
+    }
+}
+
 /// The key under which the script holds the answer to METHOD with PARAMS.
 fn answer_key(method: &str, params: &Value) -> String {
     if method != "workspace/executeCommand" {
@@ -131,17 +147,8 @@ impl Fake {
         }
         let once = self.script.get_mut("answers_once").and_then(Value::as_object_mut).and_then(|a| a.remove(key));
         let listing = key.starts_with(LISTING);
-        let model =
-            params.pointer("/textDocument/uri").and_then(Value::as_str).is_some_and(|uri| uri.ends_with(".sql"));
-        let default = match (method, listing) {
-            ("shutdown", _) => Value::Null,
-            (_, true) => json!({"error": "No nodes found", "grain": "unknown", "nodes": []}),
-            // As 2.0.9: none on a model, null on any other file.
-            ("textDocument/inlayHint", _) if model => json!([]),
-            ("textDocument/inlayHint", _) => Value::Null,
-            _ => json!({"echo": method, "params": params}),
-        };
-        let answer = once.or_else(|| self.script["answers"].get(key).cloned()).unwrap_or(default);
+        let answer = once.or_else(|| self.script["answers"].get(key).cloned());
+        let answer = answer.unwrap_or_else(|| answered_as_2_0_9(method, listing, params));
         let compiling = listing && self.script["hold_compile"] != json!(true);
         if compiling {
             compile_start();
@@ -176,6 +183,12 @@ impl Fake {
             "test/compile" => {
                 compile_start();
                 compile_complete();
+                self.script["raw_on_compile"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .for_each(send_raw);
                 false
             }
             "exit" => std::process::exit(0),

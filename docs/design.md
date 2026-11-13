@@ -56,6 +56,8 @@ owns all state and writes both outputs.
     first (see "Node information and hover"), and to an inlay hint
     request, which gets the proxy's hints after the server's (see "Inlay
     hints");
+  - the server's diagnostics of a file where the user's last run failed,
+    which get the proxy's appended (see "The last run as diagnostics");
   - the answers to the proxy's own requests, which never reach the client.
 - References and renames stay the server's, but on a source the server
   answers them with nothing: the proxy answers those requests itself, when
@@ -219,6 +221,51 @@ minutes, so only a unit test of the abandonment covers it.
     edge would change it while the file still parses.
 - Without a server, the proxy announces references and rename too, for
   sources and CTEs; on anything else they fail as other requests do.
+
+## The last run as diagnostics
+
+After the user's own `dbt build`, `run`, `test`, `seed` or `snapshot`, from
+an editor, a terminal or an agent's shell, each node that errored and each
+test that failed or warned shows as a diagnostic where it is written.  A
+thread looks at `run_results.json` and `manifest.json` in the target path
+(`DBT_TARGET_PATH` in the proxy's environment, else `target` under the
+root; dbt 2.0.9 refuses `target-path` in `dbt_project.yml`) every second,
+by size and time, and reads them when either changed, off the loop, a file
+that does not read as JSON being read again when dbt changes it.  Only a
+`build`, `run`, `test`, `seed` or `snapshot` replaces the failures, a
+partial one included, as dbt's file does; any other command's results
+(`compile`, `show`) leave them as they are.  Results that are gone, as
+after `dbt clean`, leave no failure.  Each result's id is looked up in the manifest there; an id it lacks
+gives nothing.
+
+- A node's error: Error at its file's first line, dbt's message.
+- A test that failed: Error, `<test> failed: <n> rows`; warned: Warning;
+  errored: dbt's message; a unit test that failed or errored: Error.  A
+  generic test at its name under its node's entry in the properties file
+  (a model, seed or snapshot; for a test on a source, the source its
+  `depends_on` names and its table), then its column's (a quoted column's
+  quotes left out; of a versioned model's columns, the one holding the
+  test), a test of the entry itself and not of one it holds; else at the
+  entry's name; a singular test at its file's first line; a unit test at
+  its entry; a function at its file.  A package's node at its file in
+  that package.
+- Each message starts with the run's command, `dbt build: ` (its
+  `args.command`, else `args.which`).
+- `source: "dbt-lsp-plus"`, `code: "last-run"`, no `version`.
+
+The places are found again in the file's text, open or on disk, at each
+publication, its entries and tests read once.  A file the client changes
+or saves after the run loses its failures, as does one whose file is newer
+than the results; when the server has diagnostics for it (not an empty
+set), the proxy publishes nothing then, since their ranges are of the text
+before the edit, and the server's next publication goes out without the
+failures.  Per file, the
+proxy keeps the server's last diagnostics and URI and the URI it last
+published under: the server's notification passes byte for byte for a file
+without failures, else the proxy publishes the server's diagnostics with
+its own appended, under the server's URI, else the client's, else the
+file's, first clearing a URI it published under before.  Nothing after
+`shutdown`.
 
 ## Navigation from YAML
 
@@ -490,6 +537,16 @@ The server is not restarted after a crash.
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
+- The last run's target path is the proxy's `DBT_TARGET_PATH`, not the
+  shell's where the user ran dbt, and a run's `--target-path` is not seen.
+  A failure stays until a new run, an edit of its file, or a save; on a
+  file the server also reports, until the server's next publication.  Of
+  two tests of one name on one entry, a failure goes to the first.  A
+  local package linked into `dbt_packages` has its failures under the
+  link's path, which an edit of the real file does not clear.  When the
+  server names one file by two URIs, the proxy keeps the last.
+- The outline shows a versioned model's columns, those of its versions
+  included, as the model's.
 - An inlay hint's node is looked up as the hover's, an enabled one first,
   then the root project, not the calling file's package as dbt 2.0.9 does
   for a `ref`.  In a Python model or YAML, a `#` comment between a `ref`'s
@@ -554,6 +611,10 @@ The server is not restarted after a crash.
     cache; dbt's output kept off the client's channel; a parse killed at
     `exit`; a node by id or by position; the summary first on a hover of a
     ref, any other hover byte for byte.
+  - the last run: failures where written, the server's diagnostics joined
+    and its others byte for byte, a new run replacing, a `compile`
+    keeping, an edit clearing, a change of URI clearing the old one,
+    nothing after `shutdown`;
   - inlay hints: after the server's, alone for its null, its error byte
     for byte; a first parse from a hint request, none more once an index
     exists; the refresh asked of a client that can, its answer kept from

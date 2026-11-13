@@ -27,6 +27,9 @@ dbt 2, and adds what it lacks, for every editor and for agents:
   block, by dbt 2.0.9's lookup across packages; and from a `source()` in
   SQL; hover there shows the docs text, the test's signature, the node's
   summary;
+- the last run's failures as diagnostics, beside dbt lsp's own: after a
+  `dbt build` from anywhere, a model's error at its file, a test's
+  failure at its name in YAML;
 - inlay hints after the server's: the relation dbt builds, after each
   `ref` and `source`;
 - `dbt-lsp-plus.nodeInfo`, a command that gives a node's resolved
