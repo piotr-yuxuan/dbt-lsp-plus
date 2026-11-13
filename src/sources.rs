@@ -4,9 +4,10 @@
 //! Jinja tags and in YAML without them, and declared under `sources:` in a
 //! properties file.  Every function here is pure.
 
-use crate::project::{Insertion, Project, SourceTable};
+use crate::project::{self, Insertion, Project, SourceTable};
 use crate::scan::{self, Call};
 use crate::text::{Encoding, LineIndex};
+use crate::yaml;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,6 +81,23 @@ fn declares(declared: &SourceTable, target: &Target) -> bool {
     }
 }
 
+/// The key that configures TARGET under `sources:` in the root
+/// `dbt_project.yml`, by package, source and table, which a rename must
+/// carry for the configuration to keep applying.
+fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
+    let path = project.packages.get(&project.root_package)?.join("dbt_project.yml");
+    let text = project.texts.get(&path)?;
+    let config = yaml::parse(text)?;
+    let (parents, key): (&[&str], &str) = match target {
+        Target::Source { source } => (&[&project.root_package], source),
+        Target::Table { source, table } => (&[&project.root_package, source], table),
+    };
+    let parent = parents.iter().try_fold(config.get("sources")?, |node, name| node.get(name))?;
+    let (key, _) = parent.entry(key)?;
+    let (_, range) = project::written(text, &LineIndex::new(text), key)?;
+    Some(Occurrence { path, range, declaration: false })
+}
+
 /// Every place of PROJECT that names TARGET, ordered by file and offset.
 pub fn occurrences(project: &Project, target: &Target) -> Vec<Occurrence> {
     let mut found = Vec::new();
@@ -95,6 +113,7 @@ pub fn occurrences(project: &Project, target: &Target) -> Vec<Occurrence> {
         };
         found.push(Occurrence { path: declared.path.clone(), range, declaration: true });
     }
+    found.extend(config_key(project, target));
     found.sort_by(|a, b| (&a.path, a.range.start).cmp(&(&b.path, b.range.start)));
     found.dedup();
     found
@@ -432,6 +451,21 @@ models:
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["dbt_project.yml"].contains("pages: \"{{ source('raw', 'clients') }}\""), "{texts:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn renames_the_source_configs_of_dbt_project_yml() {
+        let config =
+            "name: p\nsources:\n  p:\n    raw:\n      +enabled: true\n      customers:\n        +enabled: false\n";
+        let files = [("dbt_project.yml", config), ("models/_sources.yml", SOURCES)];
+        let (dir, project) = scratch_project("project-configs", &files);
+        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["dbt_project.yml"].contains("\n      clients:\n        +enabled: false"), "{texts:?}");
+        let raw = Target::Source { source: "raw".into() };
+        let texts = apply(&project, &rename(&project, &raw, "landing", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["dbt_project.yml"].contains("\n    landing:\n      +enabled: true"), "{texts:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

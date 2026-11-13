@@ -156,13 +156,11 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec
     found
 }
 
-/// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
-/// range, inside its quotes, escapes included, and where a line goes after it.
-fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
-    let (Node::Scalar { line: key_line, column: key_column, .. }, Node::Scalar { value, line, column }) = (key, value)
-    else {
-        return None;
-    };
+/// The value of the scalar NODE of TEXT and its range as written: inside
+/// its quotes, escapes included, else as long as its value, else to the end
+/// of its line.
+pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Range<usize>)> {
+    let Node::Scalar { value, line, column } = node else { return None };
     let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
     let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
     let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
@@ -171,11 +169,20 @@ fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(St
         None if text[at..].starts_with(value.as_str()) => at..at + value.len(),
         None => at..line_end,
     };
+    Some((value.clone(), range))
+}
+
+/// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
+/// range, and where a line goes after it.
+fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
+    let Node::Scalar { line: key_line, column: key_column, .. } = key else { return None };
+    let (value, range) = written(text, index, value)?;
+    let line_end = text[range.end..].find(['\n', '\r']).map_or(text.len(), |end| range.end + end);
     let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
     let before_key =
         text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
     let block = before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
-    Some((value.clone(), range, Insertion { at: line_end, indent: *key_column, block }))
+    Some((value, range, Insertion { at: line_end, indent: *key_column, block }))
 }
 
 /// The tables of the `sources:` of a properties file of PACKAGE.  A file
