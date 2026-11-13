@@ -1540,8 +1540,8 @@ fn a_hover_in_yaml_shows_a_doc_s_text_and_a_test_s_signature() {
     let text = "The status of an order: placed, shipped or returned.";
     assert_eq!(on_doc["result"]["contents"], json!({"kind": "plaintext", "value": text}));
     let on_test = session.request("textDocument/hover", position_in(&yml, "- is_even", 4));
-    let signature = "```jinja\ntest is_even(model, column_name)\n```\n\nin package `shop`";
-    assert_eq!(on_test["result"]["contents"]["value"], signature);
+    let signature = "test is_even(model, column_name)\n\nin package shop";
+    assert_eq!(on_test["result"]["contents"], json!({"kind": "plaintext", "value": signature}));
     // Elsewhere, the server's null passes.
     assert_eq!(session.request("textDocument/hover", position_in(&yml, "customer_id", 2))["result"], Value::Null);
     assert!(session.finish().success());

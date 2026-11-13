@@ -191,17 +191,22 @@ pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
 
 /// What a hover on a `doc` or a generic test, TARGET, shows of FOUND, the
 /// block it leads to in PROJECT: a docs block's text between its tags, as
-/// written; a test's opening tag in a code block, and its package.
-pub fn hover(project: &Project, target: &Target, found: &Found) -> Option<String> {
+/// written, if any; a test's opening tag and its package, in a code block
+/// and code spans when MARKDOWN.
+pub fn hover(project: &Project, target: &Target, found: &Found, markdown: bool) -> Option<String> {
     let Target::Named { kind: kind @ ("doc" | "test"), .. } = target else { return None };
     let text = project.texts.get(&found.path)?;
     let block = scan::blocks(text).into_iter().find(|block| block.name_range == found.range)?;
     if *kind == "doc" {
-        return Some(text[block.inner].trim().to_owned());
+        return Some(text[block.inner].trim().to_owned()).filter(|docs| !docs.is_empty());
     }
     let tag = text[block.range.start..block.inner.start].trim_start_matches("{%").trim_end_matches("%}");
-    let package = found.id.split('.').nth(1).unwrap_or_default();
-    Some(format!("```jinja\n{}\n```\n\nin package `{package}`", tag.trim_matches(['-', '+', ' ', '\t', '\n'])))
+    let (tag, package) =
+        (tag.trim_matches(['-', '+', ' ', '\t', '\n']), found.id.split('.').nth(1).unwrap_or_default());
+    Some(match markdown {
+        true => format!("```jinja\n{tag}\n```\n\nin package `{package}`"),
+        false => format!("{tag}\n\nin package {package}"),
+    })
 }
 
 /// Of CANDIDATES, each with its package, those of the first of STEPS (a
@@ -294,7 +299,10 @@ models:
                 ("models/customers.sql", "select * from {{ source('raw', 'orders') }} -- {{ doc('order_status') }}"),
                 ("models/_models.yml", MODELS),
                 ("models/_sources.yml", SOURCES),
-                ("models/docs.md", "{% docs order_status %}\nThe root's.\n{% enddocs %}\n"),
+                (
+                    "models/docs.md",
+                    "{% docs order_status %}\nThe root's.\n{% enddocs %}\n{% docs empty %}{% enddocs %}\n",
+                ),
                 ("analyses/a.sql", "select 1"),
                 ("seeds/raw.csv", "id\n1\n"),
                 ("snapshots/snap.sql", "{% snapshot snap %}\nselect 1\n{% endsnapshot %}\n"),
@@ -496,15 +504,19 @@ models:
         let root = shop("navigation-hover", "name: shop\n");
         let project = project::scan(&root, &HashMap::new()).unwrap();
         let path = root.join("models/_models.yml");
-        let shown = |target: Option<Target>| {
+        let shown = |target: Option<Target>, markdown| {
             let target = target.unwrap();
             let found = resolve(&project, &path, &target);
-            hover(&project, &target, &found[0])
+            hover(&project, &target, &found[0], markdown)
         };
-        assert_eq!(shown(named("doc", None, "order_status")).as_deref(), Some("The root's."));
+        assert_eq!(shown(named("doc", None, "order_status"), true).as_deref(), Some("The root's."));
+        // An empty docs block shows nothing, so that the server's answer passes.
+        assert_eq!(shown(named("doc", None, "empty"), true), None);
         let signature = "```jinja\ntest is_even(model, column_name)\n```\n\nin package `shop`";
-        assert_eq!(shown(named("test", None, "is_even")).as_deref(), Some(signature));
-        assert_eq!(shown(named("ref", None, "orders")), None);
+        assert_eq!(shown(named("test", None, "is_even"), true).as_deref(), Some(signature));
+        let plain = "test is_even(model, column_name)\n\nin package shop";
+        assert_eq!(shown(named("test", None, "is_even"), false).as_deref(), Some(plain));
+        assert_eq!(shown(named("ref", None, "orders"), true), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 

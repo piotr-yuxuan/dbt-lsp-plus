@@ -809,7 +809,7 @@ impl<W: Write> Proxy<W> {
                         .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
                     let project = self.project()?;
                     let found = navigation::resolve(&project, &path, &target);
-                    navigation::hover(&project, &target, found.first()?).map(|text| (text, false))
+                    navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
                 summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
             }
