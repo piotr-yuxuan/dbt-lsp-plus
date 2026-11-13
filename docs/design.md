@@ -234,7 +234,8 @@ by size and time, and reads them when either changed, off the loop, a file
 that does not read as JSON being read again when dbt changes it.  Only a
 `build`, `run`, `test`, `seed` or `snapshot` replaces the failures, a
 partial one included, as dbt's file does; any other command's results
-(`compile`, `show`) leave them as they are.  Each result's id is looked up in the manifest there; an id it lacks
+(`compile`, `show`) leave them as they are.  Results that are gone, as
+after `dbt clean`, leave no failure.  Each result's id is looked up in the manifest there; an id it lacks
 gives nothing.
 
 - A node's error: Error at its file's first line, dbt's message.
@@ -248,14 +249,17 @@ gives nothing.
   entry's name; a singular test at its file's first line; a unit test at
   its entry; a function at its file.  A package's node at its file in
   that package.
+- Each message starts with the run's command, `dbt build: ` (its
+  `args.command`, else `args.which`).
 - `source: "dbt-lsp-plus"`, `code: "last-run"`, no `version`.
 
 The places are found again in the file's text, open or on disk, at each
 publication, its entries and tests read once.  A file the client changes
 or saves after the run loses its failures, as does one whose file is newer
-than the results; when the server has diagnostics for it, the proxy
-publishes nothing then, since their ranges are of the text before the
-edit, and the server's next publication goes out without the failures.  Per file, the
+than the results; when the server has diagnostics for it (not an empty
+set), the proxy publishes nothing then, since their ranges are of the text
+before the edit, and the server's next publication goes out without the
+failures.  Per file, the
 proxy keeps the server's last diagnostics and URI and the URI it last
 published under: the server's notification passes byte for byte for a file
 without failures, else the proxy publishes the server's diagnostics with
