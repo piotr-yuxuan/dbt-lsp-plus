@@ -1161,7 +1161,10 @@ fn node_info_parses_with_the_server_s_dbt_once_it_compiled() {
     let early = node_info(&mut session, json!("model.shop.orders"));
     assert_eq!(early["error"]["code"], json!(-32803), "{early}");
     assert!(early["error"]["message"].as_str().unwrap().contains("waiting for dbt lsp to compile"), "{early}");
-    let orders = parsed_orders(&mut session);
+    // The compilation its listing makes then starts the parse it wanted.
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let orders = session.poll(Duration::from_secs(10), request, |result| result.is_object());
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     assert_eq!(orders["config"]["materialized"], "table");
     // dbt's noise never reached the client; its stderr is in the cache's log.
@@ -1328,7 +1331,8 @@ fn no_parse_after_shutdown_nor_after_a_crash() {
     parsed_orders(&mut session);
     let path = fixture().join("models/marts/orders.sql");
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
-    barrier(&mut session);
+    // An answer of the proxy's own, which asks for no index, as a hover would.
+    session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
     node_info(&mut session, json!("model.shop.orders"));
     parses_stay(&log, 1);
@@ -1700,6 +1704,26 @@ fn the_server_s_null_or_error_for_hints_passes_unless_the_proxy_has_some() {
     let failed = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
     let expected = error.replace("$ID", &failed["id"].to_string());
     assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "{failed}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn hints_asked_before_the_first_compilation_come_by_a_refresh() {
+    let script = json!({"manifest": manifest(), "hold_compile": true});
+    let (mut session, log) = Session::fake("hints-early", script);
+    let capabilities = json!({"workspace": {"inlayHint": {"refreshSupport": true}}});
+    session.request("initialize", json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": capabilities}));
+    session.notify("initialized", json!({}));
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    // On open, before dbt lsp has compiled, as clients ask.
+    hints_of(&mut session, &orders);
+    parses_stay(&log, 0);
+    session.notify("test/compile", json!({}));
+    session.wait_for(|message| message["method"] == "workspace/inlayHint/refresh");
+    assert_eq!(parses(&log).len(), 1);
+    let hints = hints_of(&mut session, &orders);
+    assert!(hints["result"].as_array().is_some_and(|hints| hints.iter().any(|h| h["kind"] == 1)), "{hints}");
     assert!(session.finish().success());
 }
 

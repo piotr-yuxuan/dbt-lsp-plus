@@ -125,6 +125,9 @@ struct Parsing {
     /// Whether the server compiled since the last change: dbt has then
     /// resolved the packages itself.
     compiled: bool,
+    /// Whether a request wanted an index before the server had compiled:
+    /// the server's compilation then starts the parse.
+    wanted: bool,
     /// Why the last parse failed, or none could start, as logged.
     failure: Option<String>,
     cache: Option<PathBuf>,
@@ -605,6 +608,7 @@ impl<W: Write> Proxy<W> {
         if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
             self.list_nodes();
         }
+        self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
         let ready = !parsing.fresh && parsing.compiled && parsing.running.is_none() && self.server.is_some();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
@@ -927,9 +931,13 @@ impl<W: Write> Proxy<W> {
                 return self.send_client(&message);
             }
         }
-        // The server has resolved the packages: dbt may parse.
+        // The server has resolved the packages: dbt may parse, for a request
+        // that wanted an index before.
         if message.get("method") == Some(&json!("dbt/lspCompileComplete")) {
             self.parsing.compiled = true;
+            if std::mem::take(&mut self.parsing.wanted) {
+                self.want_index();
+            }
         }
         self.send_client_body(&frame.body);
     }
