@@ -336,8 +336,10 @@ pub fn outline(text: &str, sql: bool) -> Vec<Symbol> {
     symbols
 }
 
+// Its arguments are literals, then `)` or a keyword argument: `'orders' ~ var('sfx')` names another
+// model.  The call, group 1, ends at its last literal.
 static REF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?"#).unwrap());
+    LazyLock::new(|| Regex::new(r#"(\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?)\s*[,)]"#).unwrap());
 // Its arguments are two literals: `'events' ~ var('suffix')` names another table.
 static SOURCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\bsource\s*\(\s*['"]([^'"]*)['"]\s*,\s*['"]([^'"]*)['"]\s*\)"#).unwrap());
@@ -359,12 +361,12 @@ fn refs_and_sources(text: &str, at: usize) -> Vec<Call> {
     let shift = |found: regex::Match| at + found.start()..at + found.end();
     let mut found = Vec::new();
     for call in REF.captures_iter(text) {
-        let arguments = [call.get(1), call.get(2)].into_iter().flatten().map(shift).collect();
-        let (package, name) = match call.get(2) {
-            Some(name) => (Some(call[1].to_owned()), name.as_str().to_owned()),
-            None => (None, call[1].to_owned()),
+        let arguments = [call.get(2), call.get(3)].into_iter().flatten().map(shift).collect();
+        let (package, name) = match call.get(3) {
+            Some(name) => (Some(call[2].to_owned()), name.as_str().to_owned()),
+            None => (None, call[2].to_owned()),
         };
-        found.push(Call { target: Target::Ref { package, name }, range: shift(call.get(0).unwrap()), arguments });
+        found.push(Call { target: Target::Ref { package, name }, range: shift(call.get(1).unwrap()), arguments });
     }
     for call in SOURCE.captures_iter(text) {
         let target = Target::Source { source: call[1].to_owned(), table: call[2].to_owned() };
