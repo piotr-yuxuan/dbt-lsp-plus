@@ -2,6 +2,7 @@
 //! The answers of the features the proxy adds, as LSP JSON.  Pure: the
 //! texts, the project and the graph are inputs.
 
+use crate::config::Index;
 use crate::graph::{Edge, Graph, Item};
 use crate::project::Project;
 use crate::properties;
@@ -247,6 +248,58 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
     Some(merged)
 }
 
+/// The relation hints of TEXT, whose calls are CALLS: after each `ref` or
+/// `source` whose node INDEX knows, right after its closing parenthesis,
+/// the relation dbt builds, or `ephemeral`; none for a disabled node, an
+/// analysis, or a `ref` that a keyword argument follows, whose version the
+/// index cannot tell.  Only those within RANGE, a range of byte offsets.
+pub fn inlay_hints(
+    text: &str,
+    calls: Vec<scan::Call>,
+    index: &Index,
+    range: Range<usize>,
+    encoding: Encoding,
+) -> Vec<Value> {
+    let lines = LineIndex::new(text);
+    let hint = |call: scan::Call| {
+        // A source's match ends after its parenthesis, a ref's before it.
+        let after = match call.target {
+            scan::Target::Source { .. } => call.range.end,
+            scan::Target::Ref { .. } => {
+                let rest = &text[call.range.end..];
+                let skipped = rest.len() - rest.trim_start().len();
+                rest[skipped..].starts_with(')').then_some(call.range.end + skipped + 1)?
+            }
+            _ => return None,
+        };
+        let built = |node: &&Value| node["disabled"] != true && node["resource_type"] != "analysis";
+        let node = index.named(&call.target).filter(built)?;
+        let label = match node["config"]["materialized"].as_str() {
+            Some("ephemeral") => "ephemeral",
+            _ => node["relation"].as_str()?,
+        };
+        let hint = json!({"position": lines.position(after, encoding), "label": label, "kind": 1,
+                          "paddingLeft": true, "tooltip": node["unique_id"]});
+        (range.start <= after && after <= range.end).then_some(hint)
+    };
+    calls.into_iter().filter_map(hint).collect()
+}
+
+/// The server's answer to an inlay hint request, MESSAGE, with HINTS after
+/// its own: appended to an array, alone in place of null; an error, or a
+/// result of another shape, gives none, so that the answer passes as it
+/// came.
+pub fn merge_hints(message: &Value, hints: &[Value]) -> Option<Value> {
+    let mut merged = message.clone();
+    let result = merged.get_mut("result")?;
+    match result {
+        Value::Array(own) => own.extend_from_slice(hints),
+        Value::Null => *result = Value::Array(hints.to_vec()),
+        _ => return None,
+    }
+    Some(merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +496,95 @@ mod tests {
         let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
         assert_eq!(merge_hover(&error, summary, true, true), None);
         assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
+    }
+
+    fn index() -> Index {
+        let model = |name: &str, materialized: &str, relation: Value| {
+            json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
+                   "package_name": "shop", "relation_name": relation, "config": {"materialized": materialized}})
+        };
+        let raw = json!({"unique_id": "source.shop.raw.orders", "name": "orders", "source_name": "raw",
+                         "resource_type": "source", "package_name": "shop", "relation_name": "\"raw_orders\"",
+                         "config": {}});
+        let analysis = json!({"unique_id": "analysis.shop.counts", "name": "counts", "resource_type": "analysis",
+                              "package_name": "shop", "relation_name": "\"counts\"", "config": {}});
+        let off = json!({"unique_id": "model.shop.off", "name": "off", "resource_type": "model",
+                         "package_name": "shop", "relation_name": "\"off\"", "config": {"materialized": "table"}});
+        Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
+            "model.shop.orders": model("orders", "table", json!("\"shop\".\"main\".\"orders\"")),
+            "model.shop.eph": model("eph", "ephemeral", Value::Null),
+            "analysis.shop.counts": analysis},
+            "sources": {"source.shop.raw.orders": raw},
+            "disabled": {"model.shop.off": [off]}}))
+    }
+
+    /// The labels of TEXT's hints with the text up to each, all of TEXT asked.
+    fn hinted(text: &str) -> Vec<(String, String)> {
+        let hints = inlay_hints(text, scan::calls(text), &index(), 0..text.len(), Encoding::Utf16);
+        let lines = LineIndex::new(text);
+        let before = |hint: &Value| text[..lines.offset_of(&hint["position"], Encoding::Utf16).unwrap()].to_owned();
+        hints.iter().map(|hint| (hint["label"].as_str().unwrap().to_owned(), before(hint))).collect()
+    }
+
+    #[test]
+    fn a_relation_hint_follows_the_closing_parenthesis_of_each_call() {
+        let orders = "\"shop\".\"main\".\"orders\"".to_owned();
+        let shapes = [
+            "{{ ref('orders') }}",
+            "{{ ref( 'orders' ) }}",
+            "{{ ref(\n    'orders'\n) }}",
+            "{{- ref('orders') -}}",
+            "{{ ref('shop', 'orders') }}",
+        ];
+        for text in shapes {
+            let end = text.rfind(')').unwrap() + 1;
+            assert_eq!(hinted(text), [(orders.clone(), text[..end].to_owned())], "{text}");
+        }
+        let source = "select * from {{ source('raw', 'orders') }}";
+        assert_eq!(hinted(source), [("\"raw_orders\"".to_owned(), source[..source.len() - 3].to_owned())]);
+    }
+
+    #[test]
+    fn a_relation_hint_is_dbt_s_or_none() {
+        assert_eq!(hinted("{{ ref('eph') }}"), [("ephemeral".to_owned(), "{{ ref('eph')".to_owned())]);
+        // A version the index cannot tell, a disabled node, an analysis, an unknown node.
+        for text in [
+            "{{ ref('orders', v=2) }}",
+            "{{ ref('orders', version=2) }}",
+            "{{ ref('off') }}",
+            "{{ ref('counts') }}",
+            "{{ ref('nowhere') }}",
+        ] {
+            assert_eq!(hinted(text), Vec::new(), "{text}");
+        }
+        let hints =
+            inlay_hints("{{ ref('orders') }}", scan::calls("{{ ref('orders') }}"), &index(), 0..3, Encoding::Utf16);
+        assert_eq!(hints, Vec::<Value>::new());
+    }
+
+    #[test]
+    fn a_relation_hint_has_its_kind_tooltip_and_place_in_utf_16() {
+        // 𝄞 is two UTF-16 units before the call on its line.
+        let text = "select '𝄞' as x, * from {{ ref('orders') }}";
+        let hints = inlay_hints(text, scan::calls(text), &index(), 0..text.len(), Encoding::Utf16);
+        let expected = json!([{"position": {"line": 0, "character": 41}, "label": "\"shop\".\"main\".\"orders\"",
+                               "kind": 1, "paddingLeft": true, "tooltip": "model.shop.orders"}]);
+        assert_eq!(Value::Array(hints), expected);
+    }
+
+    #[test]
+    fn hints_follow_the_server_s_own() {
+        let hint = json!({"label": "x"});
+        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
+        let merged = merge_hints(&answer(json!([{"label": "server"}])), std::slice::from_ref(&hint));
+        assert_eq!(merged, Some(answer(json!([{"label": "server"}, {"label": "x"}]))));
+        assert_eq!(
+            merge_hints(&answer(Value::Null), std::slice::from_ref(&hint)),
+            Some(answer(json!([{"label": "x"}])))
+        );
+        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
+        assert_eq!(merge_hints(&error, std::slice::from_ref(&hint)), None);
+        assert_eq!(merge_hints(&answer(json!({"odd": 1})), std::slice::from_ref(&hint)), None);
     }
 
     #[test]
