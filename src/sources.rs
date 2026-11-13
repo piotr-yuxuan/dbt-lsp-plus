@@ -198,6 +198,9 @@ fn refusal(
     if let Some(package) = packages.iter().find(|package| **package != project.root_package) {
         return Some(format!("this source is declared in the installed package {package}: rename it there"));
     }
+    if let Some(table) = declared.iter().find(|declared| declared.anchored) {
+        return Some(format!("{} shares YAML through anchors or merge keys: rename it by hand", table.path.display()));
+    }
     if let Some((path, package)) = found.iter().find_map(|o| installed(&o.path).map(|package| (&o.path, package))) {
         return Some(format!("{} names it in the installed package {package}: rename it there", path.display()));
     }
@@ -489,6 +492,22 @@ models:
         let error = rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap_err();
         assert!(error.contains("m.sql names it in the installed package q"), "{error}");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_source_whose_yaml_is_shared_through_anchors() {
+        let merged = "x-raw: &raw\n  schema: raw_data\nsources:\n  - name: crm\n    <<: *raw\n    tables:\n      - name: accounts\n";
+        let aliased =
+            "sources:\n  - name: eu\n    tables: &tables\n      - name: charges\n  - name: us\n    tables: *tables\n";
+        for (name, yaml, target) in [
+            ("merged", merged, Target::Source { source: "crm".into() }),
+            ("aliased", aliased, Target::Table { source: "eu".into(), table: "charges".into() }),
+        ] {
+            let (dir, project) = scratch_project(name, &[("dbt_project.yml", PROJECT), ("models/s.yml", yaml)]);
+            let error = rename(&project, &target, "renamed", Encoding::Utf16, &uri).unwrap_err();
+            assert!(error.contains("anchors or merge keys"), "{name}: {error}");
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
