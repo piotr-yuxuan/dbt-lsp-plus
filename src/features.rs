@@ -44,9 +44,11 @@ fn outline_kind(kind: Kind) -> (u32, &'static str) {
 /// LSP's `SymbolKind` of an entry of a properties file, by its label;
 /// any other entry, a model, snapshot, analysis or semantic model, is 5,
 /// Class.
-const ENTRY_KINDS: [(&str, u32); 10] = [
+const ENTRY_KINDS: [(&str, u32); 12] = [
     ("seed", 23),       // Struct
     ("macro", 12),      // Function
+    ("function", 12),   // Function
+    ("data test", 24),  // Event, as a test is a workspace symbol
     ("source", 2),      // Module
     ("table", 11),      // Interface, as a source table is a workspace symbol
     ("column", 8),      // Field
@@ -284,8 +286,8 @@ mod tests {
     }
 
     const PROPERTIES: &str = "models:\n  - name: orders\n    description: 'with x as (select 1) {% macro hidden() %}'\n    \
-        columns:\n      - name: id\nseeds:\n  - name: s\nsnapshots:\n  - name: sn\nanalyses:\n  - name: a\n\
-        macros:\n  - name: m\nsources:\n  - name: raw\n    tables:\n      - name: t\nexposures:\n  - name: e\n\
+        columns:\n      - name: id\n    metrics:\n      - name: n\nseeds:\n  - name: s\nsnapshots:\n  - name: sn\n\
+        analyses:\n  - name: a\nmacros:\n  - name: m\nfunctions:\n  - name: f\ndata_tests:\n  - name: dt\nsources:\n  - name: raw\n    tables:\n      - name: t\nexposures:\n  - name: e\n\
         metrics:\n  - name: me\nsemantic_models:\n  - name: sm\nsaved_queries:\n  - name: q\nunit_tests:\n  \
         - name: u\ngroups:\n  - name: g\n";
 
@@ -301,10 +303,13 @@ mod tests {
         let expected = [
             ("orders", 5, None),
             ("id", 8, Some("orders")),
+            ("n", 16, Some("orders")),
             ("s", 23, None),
             ("sn", 5, None),
             ("a", 5, None),
             ("m", 12, None),
+            ("f", 12, None),
+            ("dt", 24, None),
             ("raw", 2, None),
             ("t", 11, Some("raw")),
             ("e", 19, None),
@@ -332,6 +337,8 @@ mod tests {
             ("sn", "snapshot"),
             ("a", "analysis"),
             ("m", "macro"),
+            ("f", "function"),
+            ("dt", "data test"),
             ("raw", "source"),
             ("e", "exposure"),
             ("me", "metric"),
@@ -343,10 +350,10 @@ mod tests {
         assert_eq!(top, expected);
         let column = &symbols[0]["children"][0];
         assert_eq!((&column["name"], &column["detail"], &column["kind"]), (&json!("id"), &json!("column"), &json!(8)));
-        assert_eq!(symbols[5]["children"][0]["detail"], "table");
+        assert_eq!(symbols[7]["children"][0]["detail"], "table");
         assert_eq!(
             symbols[0]["range"],
-            json!({"start": {"line": 1, "character": 4}, "end": {"line": 4, "character": 16}})
+            json!({"start": {"line": 1, "character": 4}, "end": {"line": 6, "character": 15}})
         );
         assert_eq!(
             symbols[0]["selectionRange"],

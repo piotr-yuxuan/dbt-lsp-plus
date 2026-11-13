@@ -7,27 +7,26 @@ use crate::text::{Encoding, LineIndex};
 use crate::yaml::{self, Node};
 use std::ops::Range;
 
-/// The top-level keys whose sequences hold named entries, with the label
-/// of such an entry.
-const SECTIONS: [(&str, &str); 12] = [
-    ("models", "model"),
-    ("seeds", "seed"),
-    ("snapshots", "snapshot"),
-    ("analyses", "analysis"),
-    ("macros", "macro"),
-    ("sources", "source"),
-    ("exposures", "exposure"),
-    ("metrics", "metric"),
-    ("semantic_models", "semantic model"),
-    ("saved_queries", "saved query"),
-    ("unit_tests", "unit test"),
-    ("groups", "group"),
-];
-
-/// The named entries that an entry holds: the entry's label, the key of
-/// their sequence, and their label.
-const CHILDREN: [(&str, &str, &str); 6] = [
+/// Where named entries are: the label of what holds them (none for the
+/// top of the file), the key of their sequence, and their label.
+const HELD: [(&str, &str, &str); 22] = [
+    ("", "models", "model"),
+    ("", "seeds", "seed"),
+    ("", "snapshots", "snapshot"),
+    ("", "analyses", "analysis"),
+    ("", "macros", "macro"),
+    ("", "functions", "function"),
+    ("", "data_tests", "data test"),
+    ("", "tests", "data test"),
+    ("", "sources", "source"),
+    ("", "exposures", "exposure"),
+    ("", "metrics", "metric"),
+    ("", "semantic_models", "semantic model"),
+    ("", "saved_queries", "saved query"),
+    ("", "unit_tests", "unit test"),
+    ("", "groups", "group"),
     ("model", "columns", "column"),
+    ("model", "metrics", "metric"),
     ("seed", "columns", "column"),
     ("snapshot", "columns", "column"),
     ("analysis", "columns", "column"),
@@ -47,16 +46,24 @@ pub struct Entry {
     pub name_range: Range<usize>,
 }
 
+/// The entries that NODE, of LABEL, holds, in the order of the text, each
+/// with its label; an alias holds none, its anchor being elsewhere.
+fn held<'a>(node: &'a Node, label: &str) -> Vec<(&'a Node, &'static str)> {
+    let Node::Map { entries, .. } = node else { return Vec::new() };
+    let lists = entries.iter().filter_map(|(key, value)| {
+        let (.., child) = HELD.iter().find(|(parent, held, _)| *parent == label && key.as_str() == Some(held))?;
+        Some(value.items().iter().map(|item| (item, *child)))
+    });
+    lists.flatten().collect()
+}
+
 /// The named entries of the properties file TEXT, in the order of the
 /// text, each before those it holds; none when TEXT is not valid YAML.
 pub fn entries(text: &str) -> Vec<Entry> {
-    let Some(Node::Map { entries: top, .. }) = yaml::parse(text) else { return Vec::new() };
+    let Some(root) = yaml::parse(text) else { return Vec::new() };
     let index = LineIndex::new(text);
-    let sections = top.iter().filter_map(|(key, value)| {
-        let (_, label) = SECTIONS.iter().find(|(section, _)| key.as_str() == Some(section))?;
-        Some(value.items().iter().map(|item| (item, *label)))
-    });
-    let mut pending: Vec<(&Node, &str)> = sections.flatten().collect();
+    // Popped from the end: what comes first in the text pops first.
+    let mut pending = held(&root, "");
     pending.reverse();
     let mut found = Vec::new();
     while let Some((item, label)) = pending.pop() {
@@ -98,10 +105,7 @@ pub fn entries(text: &str) -> Vec<Entry> {
             continue;
         }
         found.push(Entry { label, name, range, name_range });
-        if let Some((_, key, child)) = CHILDREN.iter().find(|(parent, ..)| *parent == label) {
-            let held = item.get(key).map_or(&[][..], Node::items);
-            pending.extend(held.iter().rev().map(|held| (held, *child)));
-        }
+        pending.extend(held(item, label).into_iter().rev());
     }
     found
 }
@@ -115,6 +119,8 @@ version: 2
 
 models:
   - name: orders
+    metrics:
+      - name: order_count
     columns:
       - name: order_id
         data_tests: [unique]
@@ -141,6 +147,12 @@ macros:
   - name: cents_to_dollars
     arguments:
       - name: column_name
+functions:
+  - name: is_positive_int
+data_tests:
+  - name: assert_positive
+tests:
+  - name: old_style
 sources:
   - name: raw
     tables:
@@ -176,6 +188,7 @@ groups:
     fn finds_each_section_s_entries_in_order_and_what_they_hold() {
         let expected = [
             ("model", "orders"),
+            ("metric", "order_count"),
             ("column", "order_id"),
             ("column", "montant_€"),
             ("model", "customers"),
@@ -185,6 +198,9 @@ groups:
             ("analysis", "order_counts"),
             ("column", "n"),
             ("macro", "cents_to_dollars"),
+            ("function", "is_positive_int"),
+            ("data test", "assert_positive"),
+            ("data test", "old_style"),
             ("source", "raw"),
             ("table", "orders"),
             ("column", "id"),
