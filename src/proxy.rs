@@ -26,6 +26,7 @@ pub const OWN_ID: &str = "dbt-lsp-plus/";
 /// How long the server has to exit after `exit` before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 const REQUEST_FAILED: i64 = -32803;
+const INVALID_REQUEST: i64 = -32600;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
@@ -433,6 +434,10 @@ impl<W: Write> Proxy<W> {
         let Some(message) = &frame.value else { return self.send_server(&frame.body) };
         let params = message.get("params").unwrap_or(&Value::Null);
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
+            // The server would get two requests under one id.
+            (Some(_), Some(id)) if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) => {
+                self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id")
+            }
             (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
             (Some(method), None) => {
                 self.track(method, params);

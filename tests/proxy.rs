@@ -710,6 +710,23 @@ fn the_proxy_never_reuses_the_id_of_a_pending_request_of_the_client_s() {
 }
 
 #[test]
+fn a_request_under_the_id_of_the_proxy_s_listing_in_flight_is_refused() {
+    let (mut session, log) = Session::fake("id-in-flight", json!({"hold": [ALL]}));
+    session.initialize(&fixture());
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    until_logged(&log, "the held listing", |_| listings(&log, "*") == 1);
+    let id = listing_id(&log);
+    session.send(&json!({"jsonrpc": "2.0", "id": id, "method": "textDocument/hover", "params": {}}));
+    let answer = session.wait_for(|m| m["id"] == id);
+    assert_eq!(answer["error"]["code"], json!(-32600), "{answer}");
+    session.notify("test/release", json!({}));
+    barrier(&mut session);
+    assert_eq!(logged(&log).iter().filter(|m| m["id"] == id).count(), 1, "the server got the id once");
+    assert_eq!(session.received.iter().filter(|m| m["id"] == id).count(), 1, "the listing's answer is the proxy's");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_server_that_ignores_exit_is_killed_after_its_grace() {
     let (mut session, _) = Session::fake("hangs", json!({"hang_on": "exit"}));
     session.initialize(&fixture());
