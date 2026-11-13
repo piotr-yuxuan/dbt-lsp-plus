@@ -88,6 +88,8 @@ fn node_information(session: &mut Session, project: &Path) {
     let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
+    let kept = value.split_once("\n\n---\n\n").map(|(_, server)| server.trim());
+    assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
 }
 
 /// The proxy's outline and folding of a model, and the server's hover through it.
