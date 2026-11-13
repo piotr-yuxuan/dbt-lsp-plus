@@ -227,7 +227,8 @@ fn workspace_symbols_list_every_resource_with_its_package_and_id() {
 fn call_hierarchy_follows_the_server_graph_through_the_proxy_s_own_requests() {
     let all = json!({"error": null, "nodes": [
         node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]),
-        node("model.shop.orders", "models/marts/orders.sql", &["model.shop.stg_orders", "model.shop.stg_customers"]),
+        // The scan also finds orders -> stg_customers.
+        node("model.shop.orders", "models/marts/orders.sql", &["model.shop.stg_orders"]),
         node("model.shop.stg_customers", "models/staging/stg_customers.sql", &["source.shop.raw.customers"])]});
     let sources =
         json!({"error": null, "nodes": [node("source.shop.raw.customers", "models/staging/_sources.yml", &[])]});
@@ -240,14 +241,17 @@ fn call_hierarchy_follows_the_server_graph_through_the_proxy_s_own_requests() {
         |calls: &Value| calls.as_array().unwrap().iter().any(|c| c["from"]["detail"] == "model.shop.order_summary");
     let incoming =
         session.poll(Duration::from_secs(10), ("callHierarchy/incomingCalls", json!({"item": orders})), summary);
-    assert_eq!(
-        details(&incoming, "from"),
-        ["model.shop.order_summary"],
-        "the server's graph replaces the scanned node edges"
-    );
+    // The nodes the server did not list keep their scanned edges.
+    let callers = [
+        "analysis.shop.order_counts",
+        "model.shop.customers",
+        "model.shop.order_summary",
+        "test.shop.assert_positive_amount",
+    ];
+    assert_eq!(details(&incoming, "from"), callers);
+    // The server's dependencies of orders replace the scanned ones; its macros stay.
     let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": orders}));
-    let callees = ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"];
-    assert_eq!(details(&outgoing["result"], "to"), callees);
+    assert_eq!(details(&outgoing["result"], "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
     let stg_orders = call(&outgoing["result"], "to", "model.shop.stg_orders");
     assert_eq!(stg_orders["fromRanges"][0]["start"], json!({"line": 4, "character": 21}));
     assert_eq!(stg_orders["to"]["data"], json!({"uniqueId": "model.shop.stg_orders", "resourceType": "model"}));
