@@ -1179,6 +1179,25 @@ fn exit_stops_a_parse_under_way() {
 }
 
 #[test]
+fn a_hover_on_a_ref_gets_the_summary_first_and_any_other_passes_byte_for_byte() {
+    let answer = r#"{"jsonrpc":"2.0","id":$ID,"result":{"contents":{"kind":"markdown","value":"Server text"}}}"#;
+    let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/hover": answer}});
+    let (mut session, _) = Session::fake("hover-summary", script);
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_ref);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"\n\n---\n\nServer text");
+    let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
+    let plain = session.request("textDocument/hover", elsewhere);
+    let expected = answer.replace("$ID", &plain["id"].to_string());
+    assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "the answer's bytes changed");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn without_dbt_lsp_node_info_says_why_it_has_nothing() {
     let project = fixture().to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];

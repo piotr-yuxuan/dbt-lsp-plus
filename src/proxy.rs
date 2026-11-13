@@ -82,7 +82,7 @@ struct Server {
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Pending {
     Request,
     /// A `dbt.listNodes`: the proxy lists only when none is pending, since a
@@ -90,6 +90,8 @@ enum Pending {
     Listing,
     /// Answered with null if the server dies first, as LSP asks of `shutdown`.
     Shutdown,
+    /// A hover on a `ref` or a `source`, whose answer gets this summary first.
+    Hover(String),
 }
 
 /// What the proxy knows of the user's `dbt parse`.
@@ -147,6 +149,8 @@ struct Proxy<W: Write> {
     relist: bool,
     nodes: Option<Vec<ServerNode>>,
     shutdown: bool,
+    /// Whether the client reads markdown in a hover.
+    markdown: bool,
     parsing: Parsing,
 }
 
@@ -209,6 +213,7 @@ impl<W: Write> Proxy<W> {
             relist: false,
             nodes: None,
             shutdown: false,
+            markdown: false,
             parsing: Parsing::default(),
         };
         if let Some(root) = root {
@@ -295,6 +300,8 @@ impl<W: Write> Proxy<W> {
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
+        let formats = params.pointer("/capabilities/textDocument/hover/contentFormat").and_then(Value::as_array);
+        self.markdown = formats.is_some_and(|formats| formats.iter().any(|format| format == "markdown"));
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         let same = |folder: &Path| fs::canonicalize(folder).ok() == self.canonical_root;
@@ -712,11 +719,11 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// A request of the client: answered here when the proxy owns its method,
-    /// else forwarded; without a server, the lifecycle requests are answered
-    /// as LSP asks and any other fails.
-    fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
-        let pending = match (method, params["command"].as_str()) {
+    /// What the proxy keeps of the client's request METHOD, and the lifecycle
+    /// it starts: the client's `initialize` and `shutdown`, a listing that the
+    /// proxy must not cancel, the summary that a hover's answer gets.
+    fn remember(&mut self, method: &str, id: &Value, params: &Value) -> Pending {
+        match (method, params["command"].as_str()) {
             ("initialize", _) => {
                 self.on_initialize(params);
                 self.initialized = true;
@@ -728,8 +735,22 @@ impl<W: Write> Proxy<W> {
                 Pending::Shutdown
             }
             (_, Some("dbt.listNodes")) => Pending::Listing,
+            ("textDocument/hover", _) => {
+                self.want_index();
+                let index = self.parsing.index.as_ref();
+                let summary =
+                    index.and_then(|index| self.node_at(index, params, false).map(|node| index.summary(node)));
+                summary.map_or(Pending::Request, Pending::Hover)
+            }
             _ => Pending::Request,
-        };
+        }
+    }
+
+    /// A request of the client: answered here when the proxy owns its method,
+    /// else forwarded; without a server, the lifecycle requests are answered
+    /// as LSP asks and any other fails.
+    fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
+        let pending = self.remember(method, id, params);
         match (self.local_method(method, params), &self.server, method) {
             (Some(owned), ..) => self.answer(owned, id, params),
             (None, Some(_), _) => {
@@ -758,6 +779,11 @@ impl<W: Write> Proxy<W> {
             }
             if let Some((_, Pending::Listing)) = pending {
                 self.resume();
+            }
+            if let Some((_, Pending::Hover(summary))) = &pending
+                && let Some(merged) = features::merge_hover(message, summary, self.markdown)
+            {
+                return self.send_client(&merged);
             }
             if self.initialize.as_ref() == Some(id) {
                 self.initialize = None;
