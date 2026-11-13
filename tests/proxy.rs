@@ -2014,3 +2014,48 @@ fn a_change_of_uri_clears_the_one_published_before() {
     published(&mut session, &resolved, |p| !last_run(p).is_empty());
     assert!(session.finish().success());
 }
+
+#[test]
+fn an_edit_clears_failures_over_an_empty_server_set_and_waits_over_a_full_one() {
+    let project = copy_fixture("runs-server-sets-project");
+    let (model, models) = (project.join("models/marts/orders.sql"), project.join("models/marts/_models.yml"));
+    std::fs::write(&models, RUN_MODELS).unwrap();
+    let publication = |path: &Path, diagnostics: Value| {
+        json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+               "params": {"uri": uri(path), "diagnostics": diagnostics}})
+        .to_string()
+    };
+    let warning = json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                          "severity": 2, "source": "dbt", "message": "from dbt"}]);
+    let script = json!({"raw_on_compile": [publication(&model, json!([])), publication(&models, warning)]});
+    let (mut session, _) =
+        Session::fake_with("runs-server-sets", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    session.notify("test/compile", json!({}));
+    published(&mut session, &models, |p| p["diagnostics"].as_array().unwrap().len() == 1);
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &model, |p| !last_run(p).is_empty());
+    published(&mut session, &models, |p| !last_run(p).is_empty());
+    // Over the server's empty set, an edit clears the failure at once.
+    let edit = |path: &Path| {
+        json!({"textDocument": {"uri": uri(path), "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "# fixed\n"}]})
+    };
+    session.open(&model, None);
+    session.received.clear();
+    session.notify("textDocument/didChange", edit(&model));
+    published(&mut session, &model, |p| last_run(p).is_empty());
+    // Over its warning, whose range the edit moved, the proxy waits for the
+    // server's next publication, which then goes out without the failure.
+    session.open(&models, None);
+    session.received.clear();
+    session.notify("textDocument/didChange", edit(&models));
+    barrier(&mut session);
+    let on_models =
+        |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&models).as_str();
+    assert!(!session.received.iter().any(on_models), "the server's old ranges published again");
+    session.notify("test/compile", json!({}));
+    let next = published(&mut session, &models, |_| true);
+    assert_eq!((last_run(&next).len(), next["diagnostics"].as_array().map(Vec::len)), (0, Some(1)));
+    assert!(session.finish().success());
+}

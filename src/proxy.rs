@@ -400,10 +400,11 @@ impl<W: Write> Proxy<W> {
         // A file changed since the last run: its failures may no longer hold.
         // Where the server has diagnostics, their ranges are of the text
         // before the edit, which the client has moved: its next publication
-        // drops the failures instead.
+        // drops the failures instead.  An empty set has no range to move.
         if matches!(method, "textDocument/didChange" | "textDocument/didSave") {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
-            if self.diagnostics.failures.remove(&path).is_some() && !self.diagnostics.server.contains_key(&path) {
+            let ranged = self.diagnostics.server.get(&path).is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
+            if self.diagnostics.failures.remove(&path).is_some() && !ranged {
                 self.publish(&path);
             }
         }
