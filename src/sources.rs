@@ -205,14 +205,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop")
     }
 
-    /// A scratch project: TEXTS by path, under target/test-tmp/NAME.
+    /// A scratch project of FILES, by path, in the system's temporary
+    /// directory, and its scan.
     fn scratch_project(name: &str, files: &[(&str, &str)]) -> (PathBuf, Project) {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp").join(name);
-        let _ = fs::remove_dir_all(&dir);
-        for (path, text) in files {
-            fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
-            fs::write(dir.join(path), text).unwrap();
-        }
+        let dir = project::scratch_project(&format!("sources-{name}"), files);
         let project = project::scan(&dir, &HashMap::new()).unwrap();
         (dir, project)
     }
@@ -317,11 +313,12 @@ models:
             in_sql["range"],
             json!({"start": {"line": 0, "character": 32}, "end": {"line": 0, "character": 41}})
         );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn renaming_a_table_keeps_its_identifier() {
-        let (_, project) = shop("rename-table");
+        let (dir, project) = shop("rename-table");
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         let edit = rename(&project, &customers, "clients", Encoding::Utf16).unwrap();
         let texts = apply(&project, &edit);
@@ -336,11 +333,12 @@ models:
         let texts = apply(&project, &rename(&project, &orders, "sales", Encoding::Utf16).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: sales\n        identifier: raw_orders\n"));
         assert!(texts["m.sql"].contains("source(\"raw\", \"sales\")"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn renaming_a_source_keeps_its_schema() {
-        let (_, project) = shop("rename-source");
+        let (dir, project) = shop("rename-source");
         let texts = apply(
             &project,
             &rename(&project, &Target::Source { source: "raw".into() }, "landing", Encoding::Utf16).unwrap(),
@@ -361,28 +359,32 @@ models:
             &rename(&project, &Target::Source { source: "events".into() }, "web", Encoding::Utf16).unwrap(),
         );
         assert!(texts["_sources.yml"].contains("  - name: \"web\"\n    schema: analytics\n"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn writes_yaml_values_plain_or_quoted() {
-        let (_, project) = shop("yaml-values");
+        let (dir, project) = shop("yaml-values");
         let views = Target::Table { source: "events".into(), table: "page views".into() };
         let texts = apply(&project, &rename(&project, &views, "visits", Encoding::Utf16).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: 'visits'\n        identifier: \"page views\"\n"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn refuses_what_would_break_a_relation_or_a_quote() {
-        let (_, project) = shop("refusals");
+        let (dir, project) = shop("refusals");
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         assert!(rename(&project, &customers, "it's", Encoding::Utf16).unwrap_err().contains("cannot hold '"));
         assert!(rename(&project, &customers, "", Encoding::Utf16).unwrap_err().contains("empty"));
         let missing = Target::Table { source: "raw".into(), table: "nowhere".into() };
         assert!(rename(&project, &missing, "x", Encoding::Utf16).unwrap_err().contains("declared nowhere"));
         let flow = [("dbt_project.yml", PROJECT), ("models/s.yml", "sources:\n  - {name: s, tables: [{name: t}]}\n")];
-        let (_, project) = scratch_project("flow", &flow);
+        let (flow_dir, project) = scratch_project("flow", &flow);
         let t = Target::Table { source: "s".into(), table: "t".into() };
         assert!(rename(&project, &t, "u", Encoding::Utf16).unwrap_err().contains("flow style"));
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&flow_dir).unwrap();
     }
 
     #[test]
@@ -393,9 +395,10 @@ models:
             ("dbt_packages/q/dbt_project.yml", "name: q\n"),
             ("dbt_packages/q/models/s.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
         ];
-        let (_, project) = scratch_project("two-packages", &files);
+        let (dir, project) = scratch_project("two-packages", &files);
         let t = Target::Table { source: "s".into(), table: "t".into() };
         assert!(rename(&project, &t, "u", Encoding::Utf16).unwrap_err().contains("several packages"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -407,9 +410,10 @@ models:
             ("dbt_packages/q/dbt_project.yml", "name: q\n"),
             ("dbt_packages/q/models/s.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
         ];
-        let (_, project) = scratch_project("installed-package", &files);
+        let (dir, project) = scratch_project("installed-package", &files);
         let t = Target::Table { source: "s".into(), table: "t".into() };
         assert!(rename(&project, &t, "u", Encoding::Utf16).unwrap_err().contains("installed package q"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
