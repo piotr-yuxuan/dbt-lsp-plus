@@ -38,10 +38,19 @@ fn in_front_of_the_real_dbt_lsp() {
 
     let result = session.initialize(&project);
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
-    assert_eq!(result["capabilities"]["documentSymbolProvider"], json!(true));
-    assert_eq!(result["capabilities"]["callHierarchyProvider"], json!(true));
-    assert_eq!(result["capabilities"]["hoverProvider"], json!(true));
+    for capability in ["documentSymbolProvider", "callHierarchyProvider", "hoverProvider", "foldingRangeProvider"] {
+        assert_eq!(result["capabilities"][capability], json!(true), "{capability}");
+    }
+    document_features(&mut session, &project);
+    lineage(&mut session, &project);
+    let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
+    assert_eq!(symbols["result"][0]["name"], "events.page_views");
+    rename_a_source_table_and_compile(&mut session, &project);
+    assert!(session.finish().success());
+}
 
+/// The proxy's outline and folding of a model, and the server's hover through it.
+fn document_features(session: &mut Session, project: &Path) {
     let orders = project.join("models/marts/orders.sql");
     // dbt lsp 2.0.9 compiles nothing until a document opens or a request comes.
     session.open(&orders, None);
@@ -49,44 +58,39 @@ fn in_front_of_the_real_dbt_lsp() {
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&orders)}}));
     let names: Vec<&str> = outline["result"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["orders", "customers", "final"], "the proxy's outline, not the server's tokens");
-
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&orders)}}));
+    assert_eq!(folding["result"].as_array().map(Vec::len), Some(4), "{folding}");
     // The server's hover passes through: on ref('stg_orders'), line 4.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
+}
 
-    // Only the server resolves order_summary's ref(var('summary_upstream')) to orders.
-    let item = json!({"name": "orders", "kind": 5, "uri": uri(&orders),
-                      "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
-                      "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
-                      "data": {"uniqueId": "model.shop.orders"}});
-    let callers =
-        session.poll(Duration::from_secs(120), ("callHierarchy/incomingCalls", json!({"item": item})), |calls| {
-            calls
-                .as_array()
-                .is_some_and(|calls| calls.iter().any(|c| c["from"]["detail"] == "model.shop.order_summary"))
-        });
-    let mut callers: Vec<&str> =
+/// A call hierarchy item for the node ID at PATH of PROJECT.
+fn item(project: &Path, path: &str, id: &str) -> Value {
+    let zero = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
+    json!({"name": id.rsplit('.').next().unwrap(), "kind": 5, "uri": uri(&project.join(path)),
+           "range": zero, "selectionRange": zero, "data": {"uniqueId": id}})
+}
+
+/// The call hierarchy on the server's graph: only the server resolves
+/// order_summary's ref(var('summary_upstream')) to orders.
+fn lineage(session: &mut Session, project: &Path) {
+    let orders = json!({"item": item(project, "models/marts/orders.sql", "model.shop.orders")});
+    let summary = |calls: &Value| {
+        calls.as_array().is_some_and(|calls| calls.iter().any(|c| c["from"]["detail"] == "model.shop.order_summary"))
+    };
+    let callers = session.poll(Duration::from_secs(120), ("callHierarchy/incomingCalls", orders), summary);
+    let callers: Vec<&str> =
         callers.as_array().unwrap().iter().map(|c| c["from"]["detail"].as_str().unwrap()).collect();
-    callers.sort();
     assert!(
         callers.contains(&"model.shop.customers") && callers.contains(&"analysis.shop.order_counts"),
         "{callers:?}"
     );
-
-    let stg_customers = json!({"name": "stg_customers", "kind": 5, "uri": uri(&project.join("models/staging/stg_customers.sql")),
-                               "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
-                               "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
-                               "data": {"uniqueId": "model.shop.stg_customers"}});
-    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": stg_customers}));
+    let stg_customers = json!({"item": item(project, "models/staging/stg_customers.sql", "model.shop.stg_customers")});
+    let outgoing = session.request("callHierarchy/outgoingCalls", stg_customers);
     let callees: Vec<&str> =
         outgoing["result"].as_array().unwrap().iter().map(|c| c["to"]["detail"].as_str().unwrap()).collect();
     assert_eq!(callees, ["source.shop.raw.customers"]);
-
-    let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
-    assert_eq!(symbols["result"][0]["name"], "events.page_views");
-
-    rename_a_source_table_and_compile(&mut session, &project);
-    assert!(session.finish().success());
 }
 
 /// Writes the edits of a `WorkspaceEdit`'s CHANGES to disk.
