@@ -253,6 +253,14 @@ gives nothing.
   `args.command`, else `args.which`).
 - `source: "dbt-lsp-plus"`, `code: "last-run"`, no `version`.
 
+After the user's own `dbt source freshness`, a second thread watches
+`sources.json` the same way: each table found stale shows at its `name:`
+under its source, a Warning, or an Error past `error_after` or when the
+check failed, with `code: "stale-source"` and a message such as `dbt source
+freshness: raw.orders last loaded 2018-01-02T00:00:00Z, 3237 days ago (warn
+after 1 day)`.  Each kind is replaced only by its own file: the check also
+rewrites `run_results.json`, as a command that builds nothing.
+
 The places are found again in the file's text, open or on disk, at each
 publication, its entries and tests read once.  A file the client changes
 or saves after the run loses its failures, as does one whose file is newer
@@ -611,6 +619,8 @@ The server is not restarted after a crash.
     cache; dbt's output kept off the client's channel; a parse killed at
     `exit`; a node by id or by position; the summary first on a hover of a
     ref, any other hover byte for byte.
+  - stale sources at their names, kept by a build and keeping its
+    failures, cleared by a fresh check and by `sources.json` gone;
   - the last run: failures where written, the server's diagnostics joined
     and its others byte for byte, a new run replacing, a `compile`
     keeping, an edit clearing, a change of URI clearing the old one,
