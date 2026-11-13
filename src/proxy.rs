@@ -342,12 +342,17 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The source named at the position of a request on a document, from
-    /// the document's open text or its file.
-    fn source_at(&self, params: &Value) -> Option<(PathBuf, sources::Target)> {
+    /// the document's open text or its file, with the project scanned.  Only
+    /// the scan holds every occurrence: on a document it does not hold, such
+    /// as a file not saved yet or one outside the resource paths, there is
+    /// none, and the request goes to the server.
+    fn source_at(&self, params: &Value) -> Option<(Project, sources::Target)> {
         let path = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
-        let text = self.documents.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok())?;
+        let text = self.documents.get(&path).cloned().or_else(|| text::read(&path))?;
         let offset = LineIndex::new(&text).offset_of(params.get("position")?, self.encoding)?;
-        sources::target_at(&path, &text, offset).map(|target| (path, target))
+        let target = sources::target_at(&path, &text, offset)?;
+        let project = self.project().filter(|project| project.texts.contains_key(&path))?;
+        Some((project, target))
     }
 
     /// The method under which the proxy answers a request itself: an owned
@@ -363,9 +368,7 @@ impl<W: Write> Proxy<W> {
 
     /// The references or the rename of the source at the request's position.
     fn on_source(&self, method: &str, params: &Value) -> Option<Result<Value, String>> {
-        let (Some(project), Some((_, target))) = (self.project(), self.source_at(params)) else {
-            return Some(Ok(Value::Null));
-        };
+        let Some((project, target)) = self.source_at(params) else { return Some(Ok(Value::Null)) };
         if method == "textDocument/references" {
             let declarations = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
             return Some(Ok(sources::references(&project, &target, declarations, self.encoding)));

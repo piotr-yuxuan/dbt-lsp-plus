@@ -813,3 +813,41 @@ fn a_server_that_ignores_exit_is_killed_after_its_grace() {
     assert!(session.finish().success());
     assert!(started.elapsed() < Duration::from_secs(4), "the proxy took {:?} to exit", started.elapsed());
 }
+
+#[test]
+fn a_source_request_on_a_file_the_scan_does_not_hold_goes_to_the_server() {
+    let project = copy_fixture("source-unscanned");
+    let call = "select * from {{ source('events', 'page_views') }}";
+    let outside = project.join("integration_tests/i.sql");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, call).unwrap();
+    let (mut session, _) =
+        Session::fake_with("source-unscanned-session", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let unsaved = project.join("models/new_model.sql");
+    session.open(&unsaved, Some(call));
+    for path in [&unsaved, &outside] {
+        let at = json!({"textDocument": {"uri": uri(path)}, "position": {"line": 0, "character": 37}, "newName": "v"});
+        let answer = session.request("textDocument/rename", at);
+        assert_eq!(answer["result"]["echo"], "textDocument/rename", "{answer}");
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_source_request_counts_no_byte_order_mark() {
+    let project = copy_fixture("source-bom");
+    let model = project.join("models/staging/stg_page_views.sql");
+    let text = std::fs::read_to_string(&model).unwrap();
+    std::fs::write(&model, format!("\u{feff}{text}")).unwrap();
+    let (mut session, log) =
+        Session::fake_with("source-bom-session", json!({}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    // The first letter of page_views, as an editor that leaves the mark out counts it.
+    let at = json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 0, "character": 35},
+                    "context": {"includeDeclaration": false}});
+    let found = session.request("textDocument/references", at);
+    assert_eq!(found["result"].as_array().map(Vec::len), Some(1), "{found}");
+    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    assert!(session.finish().success());
+}
