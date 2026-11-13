@@ -272,20 +272,35 @@ pub fn ctes(text: &str) -> Vec<Symbol> {
     CTE.captures_iter(&code).map(symbol).collect()
 }
 
+/// The places of NAME in TEXT as a whole word, whose neighbours are no
+/// letter, digit, `_` or `$`; without regard to case unless NAME is quoted.
+pub fn whole_words(text: &str, name: &str) -> Vec<Range<usize>> {
+    let escaped = regex::escape(name);
+    let pattern = if name.starts_with('"') { escaped } else { format!("(?i){escaped}") };
+    let Ok(word) = Regex::new(&pattern) else { return Vec::new() };
+    let identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let found = word.find_iter(text).map(|found| found.range());
+    found
+        .filter(|range| !text[..range.start].ends_with(identifier) && !text[range.end..].starts_with(identifier))
+        .collect()
+}
+
 /// Each CTE of TEXT with the places that use it: whole words outside Jinja,
-/// comments and strings, not after a `.`, matched without regard to case
-/// unless the name is quoted.  A column or an alias spelt like a CTE counts.
+/// comments and strings, within the innermost block that defines it (an
+/// adapter's macro beside another's), not after a `.` and not another CTE's
+/// definition.  A column or an alias spelt like a CTE counts.
 pub fn cte_uses(text: &str) -> Vec<(Symbol, Vec<Range<usize>>)> {
     let code = mask_code(text);
+    let (ctes, blocks) = (ctes(text), blocks(text));
+    let definitions: Vec<Range<usize>> = ctes.iter().map(|cte| cte.name_range.clone()).collect();
     let uses = |cte: &Symbol| -> Vec<Range<usize>> {
-        let name = regex::escape(&cte.name);
-        let pattern = if cte.name.starts_with('"') { name } else { format!(r"(?i)\b{name}\b") };
-        let Ok(word) = Regex::new(&pattern) else { return Vec::new() };
-        let found = word.find_iter(&code).map(|found| found.range());
-        found.filter(|range| *range != cte.name_range && !code[..range.start].ends_with('.')).collect()
+        let holds = |range: &&Range<usize>| range.start <= cte.name_range.start && cte.name_range.end <= range.end;
+        let scope = blocks.iter().map(|block| &block.range).filter(holds).min_by_key(|range| range.len());
+        let scope = scope.cloned().unwrap_or(0..text.len());
+        let found = whole_words(&code, &cte.name).into_iter().filter(|range| scope.contains(&range.start));
+        found.filter(|range| !definitions.contains(range) && !code[..range.start].ends_with('.')).collect()
     };
-    ctes(text)
-        .into_iter()
+    ctes.into_iter()
         .map(|cte| {
             let found = uses(&cte);
             (cte, found)

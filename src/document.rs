@@ -258,6 +258,19 @@ mod tests {
         assert_eq!(texts.last().unwrap(), ORDERS);
     }
 
+    /// TEXT once the edits of EDIT for URI are applied.
+    fn applied(text: &str, edit: &Value, uri: &str) -> String {
+        let mut text = text.to_owned();
+        let mut edits: Vec<&Value> = edit["changes"][uri].as_array().unwrap().iter().collect();
+        edits.sort_by_key(|e| {
+            std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64()))
+        });
+        for e in edits {
+            crate::text::apply_change(&mut text, &json!({"range": e["range"], "text": e["newText"]}), Encoding::Utf16);
+        }
+        text
+    }
+
     #[test]
     fn renames_a_cte_and_refuses_a_clash_or_a_bad_name() {
         let offset = ORDERS.find("from orders").unwrap() + 6;
@@ -277,6 +290,29 @@ mod tests {
         assert!(rename_cte(ORDERS, "file:///o.sql", offset, "a b", Encoding::Utf16).unwrap().is_err());
         assert!(rename_cte(ORDERS, "file:///o.sql", 0, "x", Encoding::Utf16).is_none());
     }
+    #[test]
+    fn a_cte_s_uses_are_its_words_in_code_and_in_its_block() {
+        let text =
+            "with Orders as (select 1) -- orders\nselect 'orders', analytics.orders, orders$x, orders from ORDERS";
+        let edit =
+            rename_cte(text, "file:///t.sql", text.find("Orders").unwrap(), "o", Encoding::Utf16).unwrap().unwrap();
+        let text = applied(text, &edit, "file:///t.sql");
+        assert_eq!(text, "with o as (select 1) -- orders\nselect 'orders', analytics.orders, orders$x, o from o");
+        let dollar = "with a$ as (select 1) select * from a$, a$b";
+        let (_, uses) = cte_at(dollar, 6).unwrap();
+        let used = dollar.rfind("a$,").unwrap();
+        assert_eq!((uses.len(), uses[0].clone()), (1, used..used + 2));
+        // Two adapters' macros define the same CTE: each keeps its own.
+        let macros = "{% macro default__d() %}with rows as (select 1) select * from rows{% endmacro %}\n\
+                      {% macro duckdb__d() %}with rows as (select 2) select * from rows{% endmacro %}";
+        let second = macros.rfind("from rows").unwrap() + 6;
+        let found = highlights(macros, true, second, Encoding::Utf16);
+        let starts: Vec<u64> =
+            found.as_array().unwrap().iter().map(|h| h["range"]["start"]["character"].as_u64().unwrap()).collect();
+        let line = &macros[macros.find('\n').unwrap() + 1..];
+        assert_eq!(starts, [line.find("rows").unwrap() as u64, line.rfind("rows").unwrap() as u64]);
+    }
+
     /// The folds of TEXT as (start line, end line).
     fn folds(text: &str, sql: bool) -> Vec<(u64, u64)> {
         let found = folding_ranges(text, sql);
