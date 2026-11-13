@@ -1075,7 +1075,7 @@ fn node_info_parses_with_the_server_s_dbt_once_it_compiled() {
     // Nothing compiled yet: dbt may not have resolved the packages.
     let early = node_info(&mut session, json!("model.shop.orders"));
     assert_eq!(early["error"]["code"], json!(-32803), "{early}");
-    assert!(early["error"]["message"].as_str().unwrap().contains("has not compiled"), "{early}");
+    assert!(early["error"]["message"].as_str().unwrap().contains("waiting for dbt lsp to compile"), "{early}");
     let orders = parsed_orders(&mut session);
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     assert_eq!(orders["config"]["materialized"], "table");

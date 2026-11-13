@@ -506,7 +506,7 @@ impl<W: Write> Proxy<W> {
             let why = match (self.parsing.running.is_some(), &self.parsing.failure) {
                 (true, _) => "it is running",
                 (false, Some(failure)) => failure,
-                (false, None) => "dbt lsp has not compiled the project since the last change",
+                (false, None) => "waiting for dbt lsp to compile the project",
             };
             return Some(Err(format!("dbt parse has not finished: {why}")));
         };
@@ -525,6 +525,10 @@ impl<W: Write> Proxy<W> {
     /// that compiled since the last change, packages that need no network,
     /// no parse under way, no shutdown, a server command with `lsp`.
     fn want_index(&mut self) {
+        // A listing makes dbt lsp compile, as the first document opened does.
+        if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
+            self.list_nodes();
+        }
         let parsing = &self.parsing;
         let ready = !parsing.fresh && parsing.compiled && parsing.running.is_none() && self.server.is_some();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
@@ -704,7 +708,13 @@ impl<W: Write> Proxy<W> {
             (Some(_), Some(id)) if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) => {
                 self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id")
             }
-            (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
+            (Some(method), Some(id)) => {
+                self.on_request(method, id, params, &frame.body);
+                // Once the hover is forwarded, so that a listing takes no id of the client's.
+                if method == "textDocument/hover" {
+                    self.want_index();
+                }
+            }
             (Some(method), None) => {
                 self.track(method, params);
                 // The server gets the change before the listing it prompts.
@@ -736,7 +746,6 @@ impl<W: Write> Proxy<W> {
             }
             (_, Some("dbt.listNodes")) => Pending::Listing,
             ("textDocument/hover", _) => {
-                self.want_index();
                 let index = self.parsing.index.as_ref();
                 let summary =
                     index.and_then(|index| self.node_at(index, params, false).map(|node| index.summary(node)));
