@@ -43,7 +43,7 @@ dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 nix develop
 cargo build --release
 cargo test
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test live -- --ignored
+DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
 ```
 
 The last command runs the opt-in live test against a real dbt 2 (tested

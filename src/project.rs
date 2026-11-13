@@ -224,6 +224,20 @@ pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
     Some(project)
 }
 
+/// A project of FILES, each a path under it and its text, in a fresh
+/// directory of the system's for test NAME; the caller removes it.
+#[cfg(test)]
+pub(crate) fn scratch_project(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    for (path, text) in files {
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,23 +325,51 @@ mod tests {
         assert_eq!(end, serde_json::json!({"line": 3, "character": 22}));
     }
 
+    fn sorted_ids(project: &Project) -> Vec<&str> {
+        let mut ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
+        ids.sort();
+        ids
+    }
+
     #[test]
     fn follows_symbolic_links_once_and_reads_sources_in_every_resource_path() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp/symlinks");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("models/real")).unwrap();
-        fs::create_dir_all(dir.join("elsewhere")).unwrap();
-        fs::create_dir_all(dir.join("seeds")).unwrap();
-        fs::write(dir.join("dbt_project.yml"), "name: linked\n").unwrap();
-        fs::write(dir.join("models/real/a.sql"), "select 1").unwrap();
-        fs::write(dir.join("elsewhere/b.sql"), "select 2").unwrap();
-        fs::write(dir.join("seeds/_sources.yml"), "sources:\n  - name: s\n    tables:\n      - name: t\n").unwrap();
+        let dir = scratch_project(
+            "symlinks",
+            &[
+                ("dbt_project.yml", "name: linked\n"),
+                ("models/real/a.sql", "select 1"),
+                ("elsewhere/b.sql", "select 2"),
+                ("seeds/_sources.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
+            ],
+        );
         std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("models/link")).unwrap();
         std::os::unix::fs::symlink(dir.join("models"), dir.join("models/real/loop")).unwrap();
         let project = scan(&dir, &HashMap::new()).unwrap();
-        let mut ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
-        ids.sort();
-        assert_eq!(ids, ["model.linked.a", "model.linked.b", "source.linked.s.t"]);
+        assert_eq!(sorted_ids(&project), ["model.linked.a", "model.linked.b", "source.linked.s.t"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_the_configured_resource_paths_and_packages_install_path() {
+        let dir = scratch_project(
+            "configured",
+            &[
+                (
+                    "dbt_project.yml",
+                    "name: p\nmodel-paths: [transform]\nmacro-paths: [lib]\npackages-install-path: deps\n",
+                ),
+                ("transform/a.sql", "select 1"),
+                ("models/ignored.sql", "select 2"),
+                ("lib/m.sql", "{% macro m() %}1{% endmacro %}"),
+                ("deps/q/dbt_project.yml", "name: q\n"),
+                ("deps/q/models/b.sql", "select 3"),
+                ("dbt_packages/r/dbt_project.yml", "name: r\n"),
+                ("dbt_packages/r/models/c.sql", "select 4"),
+            ],
+        );
+        let project = scan(&dir, &HashMap::new()).unwrap();
+        assert_eq!(sorted_ids(&project), ["macro.p.m", "model.p.a", "model.q.b"]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

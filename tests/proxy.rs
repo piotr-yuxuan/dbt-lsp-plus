@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The proxy in front of a scripted fake of dbt lsp 2.0.9.
 
+// Opt-in, ignored; in this crate so that one crate uses all of `support`.
+#[path = "proxy/live.rs"]
+mod live;
 mod support;
 
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::{Session, fixture, received_by_server, scratch, until_logged, uri};
 
 fn names(symbols: &Value) -> Vec<&str> {
@@ -47,6 +50,15 @@ fn item(path: &str, id: &str) -> Value {
            "range": zero, "selectionRange": zero, "data": {"uniqueId": id}})
 }
 
+/// The call of CALLS whose SIDE is the node ID.
+fn call<'a>(calls: &'a Value, side: &str, id: &str) -> &'a Value {
+    calls.as_array().unwrap().iter().find(|c| c[side]["detail"] == id).unwrap_or_else(|| panic!("no {id} in {calls}"))
+}
+
+fn show_messages(session: &Session) -> usize {
+    session.received.iter().filter(|m| m["method"] == "window/showMessage").count()
+}
+
 fn details(calls: &Value, side: &str) -> Vec<String> {
     let mut found: Vec<String> =
         calls.as_array().unwrap().iter().map(|c| c[side]["detail"].as_str().unwrap().to_owned()).collect();
@@ -73,12 +85,16 @@ fn forwards_the_client_s_messages_byte_for_byte_and_adds_only_missing_capabiliti
     let body = format!(
         r#"{{"params": {{"textDocument": {{"uri": "{orders}"}}, "position": {{"line": 4, "character": 25}}}}, "method":"textDocument/hover", "id": 7, "jsonrpc": "2.0", "x-extra": 1.50}}"#
     );
+    let change = format!(
+        r#"{{"params": {{"contentChanges": [ {{"text": "select 1"}} ], "textDocument": {{"version": 2, "uri": "{orders}"}}}},"jsonrpc":"2.0", "method": "textDocument/didChange"}}"#
+    );
     session.send_raw(body.as_bytes());
+    session.send_raw(change.as_bytes());
     session.send_raw(b"not json at all");
     let response = session.wait_for(|m| m["id"] == json!(7));
     assert_eq!(response["result"]["echo"], "textDocument/hover");
     until_logged(&log, "the bodies as sent", |lines| {
-        lines.contains(&body) && lines.iter().any(|l| l == "not json at all")
+        lines.contains(&body) && lines.contains(&change) && lines.iter().any(|l| l == "not json at all")
     });
     assert!(session.finish().success());
 }
@@ -87,10 +103,16 @@ fn forwards_the_client_s_messages_byte_for_byte_and_adds_only_missing_capabiliti
 fn forwards_the_server_s_messages_byte_for_byte() {
     let answer = r#"{"result": {"z": 1, "a": 1.50},  "id": $ID, "jsonrpc": "2.0"}"#;
     let notification = r#"{"params": {"b": 2, "a": 1.50}, "method": "dbt/custom" , "jsonrpc": "2.0"}"#;
-    let script = json!({"raw_answers": {"textDocument/hover": answer}, "raw_on_initialized": [notification]});
+    let request = r#"{"params": {"token": "t", "a": [ ]}, "id": "s1", "method": "window/workDoneProgress/create", "jsonrpc":"2.0"}"#;
+    let not_json = "not json from the server";
+    let script = json!({"raw_answers": {"textDocument/hover": answer},
+                        "raw_on_initialized": [request, not_json, notification]});
     let (mut session, _) = Session::fake("server-bytes", script);
     session.initialize(&fixture());
     session.wait_for(|m| m["method"] == "dbt/custom");
+    for sent in [request, not_json] {
+        assert!(session.received_raw.iter().any(|raw| raw == sent.as_bytes()), "the bytes of {sent} changed");
+    }
     let position = json!({"textDocument": {"uri": "file:///x.sql"}, "position": {"line": 0, "character": 0}});
     let hover = session.request("textDocument/hover", position);
     let expected = answer.replace("$ID", &hover["id"].to_string());
@@ -121,14 +143,18 @@ fn answers_the_outline_itself_and_follows_unsaved_edits_in_utf_16() {
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
     assert_eq!(outline["result"][2]["selectionRange"]["start"], json!({"line": 11, "character": 0}));
-    // Renames the CTE final to résultat in the buffer only, then edits a line before it.
+    // In the buffer only: puts 𝄞, two UTF-16 units and one UTF-32 unit,
+    // before the CTE final on its line; renames final to résultat by its
+    // position after 𝄞; then edits a line before it.
     let edits = json!({"textDocument": {"uri": uri(&path), "version": 2}, "contentChanges": [
-        {"range": {"start": {"line": 11, "character": 0}, "end": {"line": 11, "character": 5}}, "text": "résultat"},
-        {"range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 0}}, "text": "-- é𝄞\n"}]});
+        {"range": {"start": {"line": 11, "character": 0}, "end": {"line": 11, "character": 0}}, "text": "/*𝄞*/ "},
+        {"range": {"start": {"line": 11, "character": 7}, "end": {"line": 11, "character": 12}}, "text": "résultat"},
+        {"range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 0}}, "text": "-- é\n"}]});
     session.notify("textDocument/didChange", edits);
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(names(&outline["result"]), ["orders", "customers", "résultat"]);
-    assert_eq!(outline["result"][2]["selectionRange"]["end"], json!({"line": 12, "character": 8}));
+    let range = json!({"start": {"line": 12, "character": 7}, "end": {"line": 12, "character": 15}});
+    assert_eq!(outline["result"][2]["selectionRange"], range);
     assert!(!methods(&log).contains(&"textDocument/documentSymbol".to_owned()));
     until_logged(&log, "didChange", |lines| lines.iter().any(|line| line.contains("textDocument/didChange")));
     assert!(session.finish().success());
@@ -176,6 +202,9 @@ fn leaves_to_the_server_a_feature_it_announces() {
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(outline["result"]["echo"], "textDocument/documentSymbol");
     assert!(methods(&log).contains(&"textDocument/documentSymbol".to_owned()));
+    let position = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 4, "character": 25}});
+    let prepared = session.request("textDocument/prepareCallHierarchy", position);
+    assert_eq!(prepared["result"]["echo"], "textDocument/prepareCallHierarchy");
     assert!(session.finish().success());
 }
 
@@ -219,11 +248,9 @@ fn call_hierarchy_follows_the_server_graph_through_the_proxy_s_own_requests() {
     let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": orders}));
     let callees = ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"];
     assert_eq!(details(&outgoing["result"], "to"), callees);
-    assert_eq!(outgoing["result"][2]["fromRanges"][0]["start"], json!({"line": 4, "character": 21}));
-    assert_eq!(
-        outgoing["result"][2]["to"]["data"],
-        json!({"uniqueId": "model.shop.stg_orders", "resourceType": "model"})
-    );
+    let stg_orders = call(&outgoing["result"], "to", "model.shop.stg_orders");
+    assert_eq!(stg_orders["fromRanges"][0]["start"], json!({"line": 4, "character": 21}));
+    assert_eq!(stg_orders["to"]["data"], json!({"uniqueId": "model.shop.stg_orders", "resourceType": "model"}));
     let stg_customers = uri(&fixture().join("models/staging/stg_customers.sql"));
     let on_source = json!({"textDocument": {"uri": stg_customers}, "position": {"line": 5, "character": 10}});
     let prepared = session.request("textDocument/prepareCallHierarchy", on_source);
@@ -290,6 +317,7 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
     assert_eq!(hover["error"]["code"], json!(-32803));
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    assert_eq!(show_messages(&session), 1, "the proxy warns once");
     assert!(session.finish().success());
 }
 
@@ -307,6 +335,7 @@ fn a_crash_fails_each_pending_request_exactly_once() {
     }
     let error = session.wait_for(|m| m["method"] == "window/showMessage");
     assert_eq!(error["params"]["type"], json!(1));
+    assert!(error["params"]["message"].as_str().unwrap().contains("exit status: 3"), "{error}");
     let symbols = session.request("workspace/symbol", json!({"query": "summary"}));
     assert_eq!(names(&symbols["result"]), ["order_summary"]);
     for id in [1001, 1002, 1003] {
@@ -371,6 +400,11 @@ fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     barrier(&mut session);
     barrier(&mut session);
     assert_eq!((listings(&log, "*"), listings(&log, "source:*")), (2, 2));
+    // The server gets the change before the listing it prompts.
+    let logged = logged(&log);
+    let saved = logged.iter().position(|m| m["method"] == "textDocument/didSave").unwrap();
+    let second = logged.iter().rposition(|m| m["params"]["arguments"][0] == "*").unwrap();
+    assert!(saved < second, "didSave at {saved}, its listing at {second}");
     session.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": uri(&path), "type": 2}]}));
     until_logged(&log, "a listing after a watched change", |_| listings(&log, "source:*") == 3);
     assert!(session.finish().success());
@@ -421,25 +455,60 @@ fn never_lists_while_a_listing_of_the_client_s_is_pending() {
     assert!(session.finish().success());
 }
 
-#[test]
-fn a_failed_listing_keeps_the_graph_it_had() {
-    let failed = json!({"error": "Compilation failed", "error_kind": "compilation_failed", "nodes": []});
-    let stg_node = node("model.shop.stg_customers", "models/staging/stg_customers.sql", &["source.shop.raw.customers"]);
-    let sources =
-        json!({"error": null, "nodes": [node("source.shop.raw.customers", "models/staging/_sources.yml", &[])]});
-    let all = json!({"error": null, "nodes": [stg_node]});
-    let script = json!({"answers_once": {SOURCES: sources}, "answers": {ALL: all, SOURCES: failed}});
-    let (mut session, log) = Session::fake("failed-listing", script);
+/// The listing of `*` in which order_summary depends on orders, which only
+/// the server can tell.
+fn summary_listing() -> Value {
+    let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
+    json!({"error": null, "nodes": [summary_node]})
+}
+
+/// Lists once, then answers the listings after a save with LATER, by key;
+/// the edge order_summary -> orders, which only the first listing gives,
+/// must stay once the fake has received LISTED of them.
+fn keeps_the_graph_after(name: &str, later: Value, listed: (&str, usize)) {
+    let first = json!({ALL: summary_listing(), SOURCES: {"error": null, "nodes": []}});
+    let (mut session, log) = Session::fake(name, json!({"answers_once": first, "answers": later}));
     session.initialize(&fixture());
-    let path = fixture().join("models/staging/stg_customers.sql");
+    let path = fixture().join("models/marts/order_summary.sql");
     session.open(&path, None);
     until_logged(&log, "the first listing", |_| listings(&log, "source:*") == 1);
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
-    until_logged(&log, "the failed second listing", |_| listings(&log, "source:*") == 2);
+    until_logged(&log, "the later listings", |_| listings(&log, listed.0) == listed.1);
     barrier(&mut session);
-    let stg = item("models/staging/stg_customers.sql", "model.shop.stg_customers");
-    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": stg}));
-    assert_eq!(details(&outgoing["result"], "to"), ["source.shop.raw.customers"]);
+    let summary = item("models/marts/order_summary.sql", "model.shop.order_summary");
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": summary}));
+    assert_eq!(details(&outgoing["result"], "to"), ["model.shop.orders"]);
+    assert!(session.finish().success());
+}
+
+const FAILED: &str = r#"{"error": "Compilation failed", "error_kind": "compilation_failed", "nodes": []}"#;
+
+#[test]
+fn a_failed_listing_keeps_the_graph_it_had() {
+    let failed: Value = serde_json::from_str(FAILED).unwrap();
+    keeps_the_graph_after("failed-all", json!({ALL: failed}), ("*", 2));
+    keeps_the_graph_after("failed-sources", json!({ALL: summary_listing(), SOURCES: failed}), ("source:*", 2));
+}
+
+#[test]
+fn a_listing_cancelled_too_often_keeps_the_graph_it_had() {
+    let cancelled = json!({"error": "Operation cancelled", "grain": "unknown", "nodes": []});
+    // One listing, then four tries after the save: the first and its three retries.
+    keeps_the_graph_after("cancelled-later", json!({ALL: cancelled}), ("*", 5));
+}
+
+#[test]
+fn an_empty_first_listing_counts_as_failed_and_leaves_the_scanned_graph() {
+    let (mut session, log) = Session::fake("empty-first", json!({}));
+    session.initialize(&fixture());
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    until_logged(&log, "a listing", |_| listings(&log, "*") == 1);
+    barrier(&mut session);
+    assert_eq!(listings(&log, "source:*"), 0, "an empty `*` ends the listing");
+    let orders = item("models/marts/orders.sql", "model.shop.orders");
+    let incoming = session.request("callHierarchy/incomingCalls", json!({"item": orders}));
+    let expected = ["analysis.shop.order_counts", "model.shop.customers", "test.shop.assert_positive_amount"];
+    assert_eq!(details(&incoming["result"], "from"), expected);
     assert!(session.finish().success());
 }
 
@@ -456,4 +525,87 @@ fn a_failed_first_listing_leaves_the_scanned_graph() {
     let expected = ["analysis.shop.order_counts", "model.shop.customers", "test.shop.assert_positive_amount"];
     assert_eq!(details(&incoming["result"], "from"), expected);
     assert!(session.finish().success());
+}
+
+#[test]
+fn a_closed_document_s_unsaved_edits_leave_the_graph() {
+    let (mut session, _) = Session::fake("closed", json!({}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/order_summary.sql");
+    session.open(&path, Some("select * from {{ ref('stg_customers') }}"));
+    let summary = item("models/marts/order_summary.sql", "model.shop.order_summary");
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": summary}));
+    assert_eq!(details(&outgoing["result"], "to"), ["model.shop.stg_customers"]);
+    session.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(&path)}}));
+    // On disk, order_summary refs a var: no edge the scan can tell.
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": summary}));
+    assert_eq!(outgoing["result"], json!([]));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_document_opened_through_another_spelling_maps_onto_the_root() {
+    let link = scratch("other-spelling").join("shop");
+    std::os::unix::fs::symlink(fixture(), &link).unwrap();
+    let (mut session, _) = Session::fake("other-spelling-session", json!({}));
+    session.initialize(&fixture());
+    let path = link.join("models/marts/order_summary.sql");
+    session.open(&path, Some("select * from {{ ref('stg_customers') }}"));
+    let on_select = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 2}});
+    let prepared = session.request("textDocument/prepareCallHierarchy", on_select);
+    assert_eq!(prepared["result"][0]["data"]["uniqueId"], "model.shop.order_summary", "{prepared}");
+    assert_eq!(prepared["result"][0]["uri"], uri(&fixture().join("models/marts/order_summary.sql")));
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": prepared["result"][0]}));
+    assert_eq!(details(&outgoing["result"], "to"), ["model.shop.stg_customers"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn without_project_dir_the_client_s_folder_is_the_root() {
+    let elsewhere = scratch("no-project-dir");
+    let (mut session, _) = Session::fake_with("no-project-dir-session", json!({}), &[], Some(&elsewhere));
+    session.initialize(&fixture());
+    let all = session.request("workspace/symbol", json!({"query": ""}));
+    assert_eq!(all["result"].as_array().unwrap().len(), 21);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn without_project_dir_nor_a_project_folder_the_working_directory_is_the_root() {
+    let (mut session, _) = Session::fake_with("working-directory", json!({}), &[], Some(&fixture()));
+    session.initialize(&fixture().join("models"));
+    let found = session.request("workspace/symbol", json!({"query": "stg_orders"}));
+    assert_eq!(found["result"][0]["location"]["uri"], uri(&fixture().join("models/staging/stg_orders.sql")));
+    assert!(session.finish().success());
+}
+
+/// The id of the proxy's first listing of `*` that the fake received.
+fn listing_id(log: &Path) -> Value {
+    logged(log).into_iter().find(|m| m["params"]["arguments"][0] == "*").expect("a listing")["id"].clone()
+}
+
+#[test]
+fn the_proxy_never_reuses_the_id_of_a_pending_request_of_the_client_s() {
+    let (mut session, log) = Session::fake("id-skip", json!({"hold": ["textDocument/definition"]}));
+    session.initialize(&fixture());
+    let position = json!({"textDocument": {"uri": "file:///x.sql"}, "position": {"line": 0, "character": 0}});
+    let request =
+        json!({"jsonrpc": "2.0", "id": "dbt-lsp-plus/1", "method": "textDocument/definition", "params": position});
+    session.send(&request);
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    until_logged(&log, "the listing", |_| listings(&log, "*") == 1);
+    assert_ne!(listing_id(&log), "dbt-lsp-plus/1");
+    session.notify("test/release", json!({}));
+    let answer = session.wait_for(|m| m["id"] == "dbt-lsp-plus/1");
+    assert_eq!(answer["result"]["echo"], "textDocument/definition");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_server_that_ignores_exit_is_killed_after_its_grace() {
+    let (mut session, _) = Session::fake("hangs", json!({"hang_on": "exit"}));
+    session.initialize(&fixture());
+    let started = Instant::now();
+    assert!(session.finish().success());
+    assert!(started.elapsed() < Duration::from_secs(4), "the proxy took {:?} to exit", started.elapsed());
 }

@@ -241,11 +241,12 @@ mod tests {
         callers.sort();
         assert_eq!(callers, ["analysis.shop.order_counts", "model.shop.customers", "test.shop.assert_positive_amount"]);
         let outgoing = calls(&project, &graph, "model.shop.orders", false, Encoding::Utf16);
-        let callees: Vec<&str> =
+        let mut callees: Vec<&str> =
             outgoing.as_array().unwrap().iter().map(|c| c["to"]["detail"].as_str().unwrap()).collect();
+        callees.sort();
         assert_eq!(callees, ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"]);
-        let site = &outgoing[2]["fromRanges"][0];
-        assert_eq!(site["start"], json!({"line": 4, "character": 21}));
+        let stg_orders = outgoing.as_array().unwrap().iter().find(|c| c["to"]["detail"] == "model.shop.stg_orders");
+        assert_eq!(stg_orders.unwrap()["fromRanges"][0]["start"], json!({"line": 4, "character": 21}));
     }
 
     #[test]
