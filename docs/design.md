@@ -223,16 +223,19 @@ rename of a CTE, which the server answers with null:
 - Outline: in SQL and Markdown, the Jinja blocks and the CTEs, nested by
   extent.  In a `.yml` or `.yaml` file, where dbt lsp 2.0.9 answers `[]`,
   the named entries of a properties file: those under `models`, `seeds`,
-  `snapshots`, `analyses`, `macros`, `sources`, `exposures`, `metrics`,
-  `semantic_models`, `saved_queries`, `unit_tests` and `groups`, with the
-  `columns` of a model, seed, snapshot, analysis or source table and the
-  `tables` of a source.  The detail is what the entry declares (`model`,
-  `table`, `semantic model`); the kinds are those agreed with dbt-mode.
-  An entry runs from its first key to its last content: the blank lines and
-  the comment lines no deeper than its first key that end it belong to
-  what follows, a block scalar's deeper lines stay in, and in flow style it
-  ends at its brace.  Other YAML, such as `dbt_project.yml`, has no entry,
-  nor does YAML that does not parse.
+  `snapshots`, `analyses`, `macros`, `functions`, `data_tests` (or
+  `tests`), `sources`, `exposures`, `metrics`, `semantic_models`,
+  `saved_queries`, `unit_tests` and `groups`, with the `columns` of a
+  model, seed, snapshot, analysis or source table, a model's `metrics`
+  and the `tables` of a source.  The detail is what the entry declares
+  (`model`, `table`, `semantic model`); the kinds are those agreed with
+  dbt-mode.  An entry runs from its first key to its last content: the
+  blank lines and the comment lines less deep than its first key that end
+  it belong to what follows, while a key commented out and a block
+  scalar's deeper lines stay in; in flow style it ends at its brace.  An
+  entry without a name, such as one whose `name:` is being typed, is no
+  symbol, and aliases are not followed.  Other YAML, such as
+  `dbt_project.yml`, has no entry, nor does YAML that does not parse.
 - Folding: every Jinja block (`if`, `for`, `call`, `filter`, `macro` and
   the others), CTEs and multi-line Jinja tags (`region`), and multi-line
   `{# #}` comments and, in SQL, `/* */` comments (`comment`), by line.  A

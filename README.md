@@ -6,9 +6,9 @@ dbt 2, and adds what it lacks, for every editor and for agents:
 - `textDocument/documentSymbol`: the CTEs of a model and its Jinja blocks
   (macro, test, snapshot, materialization, docs, set), nested by extent, as
   the buffer stands, unsaved edits included; in a YAML properties file, its
-  models, seeds, snapshots, analyses, macros, sources and their tables,
-  columns, exposures, metrics, semantic models, saved queries, unit tests
-  and groups;
+  models, seeds, snapshots, analyses, macros, functions, data tests,
+  sources and their tables, columns, exposures, metrics, semantic models,
+  saved queries, unit tests and groups;
 - `workspace/symbol`: every model, seed, snapshot, analysis, singular test,
   macro, generic test, source table and docs block, installed packages
   included;
