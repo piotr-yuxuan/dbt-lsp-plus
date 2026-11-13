@@ -651,6 +651,21 @@ fn the_project_dir_keeps_its_spelling_when_the_client_names_a_folder_above_it() 
     assert!(session.finish().success());
 }
 
+#[test]
+fn a_server_that_exits_at_once_is_reported_once_and_after_initialize() {
+    let project = fixture().to_string_lossy().into_owned();
+    let command = ["sh".into(), "-c".into(), "exit 2".into(), "--project-dir".into(), project];
+    let mut session = Session::start(&command, &[], None);
+    std::thread::sleep(Duration::from_millis(300));
+    let result = session.initialize(&fixture());
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
+    let path = fixture().join("models/marts/orders.sql");
+    session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
+    assert!(session.received[0].get("result").is_some(), "first received: {}", session.received[0]);
+    assert_eq!(show_messages(&session), 1);
+    assert!(session.finish().success());
+}
+
 /// The id of the proxy's first listing of `*` that the fake received.
 fn listing_id(log: &Path) -> Value {
     logged(log).into_iter().find(|m| m["params"]["arguments"][0] == "*").expect("a listing")["id"].clone()

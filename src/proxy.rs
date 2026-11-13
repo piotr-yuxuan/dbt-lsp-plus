@@ -96,6 +96,8 @@ struct Proxy<W: Write> {
     hierarchical: bool,
     /// The methods that the proxy answers, fixed by the server's capabilities.
     owned: HashSet<&'static str>,
+    /// Whether the client sent `initialize`, before which LSP lets the proxy send nothing.
+    initialized: bool,
     /// The id of the client's `initialize` while the server has not answered it.
     initialize: Option<Value>,
     /// The client's requests that the server has yet to answer.
@@ -161,6 +163,7 @@ impl<W: Write> Proxy<W> {
             encoding: Encoding::Utf16,
             hierarchical: false,
             owned: HashSet::new(),
+            initialized: false,
             initialize: None,
             forwarded: HashMap::new(),
             documents: HashMap::new(),
@@ -447,6 +450,7 @@ impl<W: Write> Proxy<W> {
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
                 self.on_initialize(params);
+                self.initialized = true;
                 self.initialize = Some(id.clone());
                 Pending::Request
             }
@@ -501,7 +505,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The server is gone: answer what it left unanswered, once each, and
-    /// carry on alone, on the scanned graph.
+    /// carry on alone, on the scanned graph.  Before the client's
+    /// `initialize`, only remember why, for its answer.
     fn on_server_closed(&mut self) {
         let Some(mut server) = self.server.take() else { return };
         let status = server.child.try_wait().ok().flatten();
@@ -527,7 +532,7 @@ impl<W: Write> Proxy<W> {
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
         }
-        if !self.shutdown {
+        if self.initialized && !self.shutdown {
             let text = format!("{why}: dbt-lsp-plus keeps its outline, symbols and call hierarchy.");
             self.send_client(
                 &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),
