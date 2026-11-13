@@ -202,7 +202,10 @@ minutes, so only a unit test of the abandonment covers it.
   - an edited YAML file would no longer parse, as when a flow collection
     spans lines that look like blocks, or a new name with `: ` goes into a
     plain `to:` value;
-  - the new name is empty, or breaks the quotes it goes in.
+  - the new name is empty, or breaks the quotes it goes in, or, where a call
+    sits in a YAML value such as a test's `to:`, is no plain identifier:
+    that value may be a plain scalar, where `#`, `: `, `,` or a space at an
+    edge would change it while the file still parses.
 - Without a server, the proxy announces references and rename too, for
   sources; on anything else they fail as other requests do.
 
