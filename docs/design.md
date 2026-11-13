@@ -315,8 +315,10 @@ So the proxy runs the user's own `dbt parse`.
   after `shutdown`.
 - The cache: `$XDG_CACHE_HOME/dbt-lsp-plus/<hash of the root and the
   command>/<pid>/`, else under `~/.cache`, an empty or relative value being
-  ignored; removed at exit, and those of dead processes, as a proxy killed
-  by a signal leaves, removed when the next one starts; the manifest is
+  ignored; removed at exit; those beside it that no parse wrote for a day,
+  as a proxy killed by a signal leaves, removed when the next one starts
+  (asking whether a process lives would miss a home shared between hosts);
+  the manifest is
   deleted before each run, so that only one this run wrote counts.
 - The index: the manifest's nodes, sources, disabled nodes and groups, with
   `relation` (dbt's `relation_name`, null for an analysis) and `tests` (the
