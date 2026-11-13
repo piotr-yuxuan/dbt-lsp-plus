@@ -250,7 +250,7 @@ impl<W: Write> Proxy<W> {
             &json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": capabilities, "serverInfo": info}}),
         );
         let why = self.absent.take().unwrap_or_else(|| "dbt lsp is not running".into());
-        let text = format!("{why}: dbt-lsp-plus serves its outline, symbols and call hierarchy only.");
+        let text = format!("{why}: dbt-lsp-plus serves its outline, symbols, call hierarchy and source renames only.");
         self.send_client(
             &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 2, "message": text}}),
         );
@@ -613,7 +613,7 @@ impl<W: Write> Proxy<W> {
             return self.initialize_alone(&id);
         }
         if self.initialized && !self.shutdown {
-            let text = format!("{why}: dbt-lsp-plus keeps its outline, symbols and call hierarchy.");
+            let text = format!("{why}: dbt-lsp-plus keeps its outline, symbols, call hierarchy and source renames.");
             self.send_client(
                 &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),
             );
