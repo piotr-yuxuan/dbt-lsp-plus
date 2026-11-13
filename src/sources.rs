@@ -169,6 +169,44 @@ fn kept_relation(target: &Target, declared: &[&SourceTable]) -> Result<BTreeSet<
     Ok(lines)
 }
 
+/// Why a rename of TARGET to NEW could not be applied whole, if so:
+/// DECLARED are its declarations and FOUND its occurrences.  `dbt deps`
+/// overwrites an installed package's files, and a root `overrides:` would
+/// keep the old name, so nothing there is renamed.
+fn refusal(
+    project: &Project,
+    target: &Target,
+    new: &str,
+    declared: &[&SourceTable],
+    found: &[Occurrence],
+) -> Option<String> {
+    let packages: BTreeSet<&str> = declared.iter().map(|declared| declared.package.as_str()).collect();
+    let installed = |path: &Path| {
+        let mut others = project.packages.iter().filter(|(name, _)| **name != project.root_package);
+        others.find(|(_, dir)| path.starts_with(dir)).map(|(name, _)| name)
+    };
+    let renamed = match target {
+        Target::Table { source, .. } => Target::Table { source: source.clone(), table: new.to_owned() },
+        Target::Source { .. } => Target::Source { source: new.to_owned() },
+    };
+    if packages.is_empty() {
+        return Some("this source is declared nowhere in the project".into());
+    }
+    if packages.len() > 1 {
+        return Some(format!("this source is declared in several packages: {packages:?}"));
+    }
+    if let Some(package) = packages.iter().find(|package| **package != project.root_package) {
+        return Some(format!("this source is declared in the installed package {package}: rename it there"));
+    }
+    if let Some((path, package)) = found.iter().find_map(|o| installed(&o.path).map(|package| (&o.path, package))) {
+        return Some(format!("{} names it in the installed package {package}: rename it there", path.display()));
+    }
+    if renamed != *target && project.sources.iter().any(|declared| declares(declared, &renamed)) {
+        return Some(format!("{new} is declared already"));
+    }
+    None
+}
+
 /// The `WorkspaceEdit` that renames TARGET to NEW everywhere in PROJECT and
 /// keeps the warehouse relation it names, or the reason it cannot.  URI_OF
 /// names each file as the client does: the ranges are those of the text it
@@ -181,20 +219,13 @@ pub fn rename(
     uri_of: &dyn Fn(&Path) -> String,
 ) -> Result<Value, String> {
     let declared: Vec<&SourceTable> = project.sources.iter().filter(|declared| declares(declared, target)).collect();
-    let packages: Vec<&str> =
-        declared.iter().map(|declared| declared.package.as_str()).collect::<BTreeSet<_>>().into_iter().collect();
-    match packages.as_slice() {
-        [] => return Err("this source is declared nowhere in the project".into()),
-        // `dbt deps` overwrites an installed package's files; a root `overrides:` would keep the old name.
-        [package] if *package != project.root_package => {
-            return Err(format!("this source is declared in the installed package {package}: rename it there"));
-        }
-        [_] => {}
-        _ => return Err(format!("this source is declared in several packages: {packages:?}")),
+    let found = occurrences(project, target);
+    if let Some(reason) = refusal(project, target, new, &declared, &found) {
+        return Err(reason);
     }
     // Every declaration is an occurrence, so `replacement` judges NEW at least once.
     let mut edits: BTreeMap<PathBuf, Vec<(Range<usize>, String)>> = BTreeMap::new();
-    for found in occurrences(project, target) {
+    for found in found {
         let text = project.texts.get(&found.path).map_or("", String::as_str);
         let new_text = replacement(text, &found.range, new)?;
         edits.entry(found.path).or_default().push((found.range, new_text));
@@ -442,6 +473,34 @@ models:
         let (dir, project) = scratch_project("two-packages", &files);
         let t = Target::Table { source: "s".into(), table: "t".into() };
         assert!(rename(&project, &t, "u", Encoding::Utf16, &uri).unwrap_err().contains("several packages"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_edit_an_installed_package() {
+        let files = [
+            ("dbt_project.yml", PROJECT),
+            ("models/_sources.yml", SOURCES),
+            ("dbt_packages/q/dbt_project.yml", "name: q\n"),
+            ("dbt_packages/q/models/m.sql", "select * from {{ source('raw', 'customers') }}"),
+        ];
+        let (dir, project) = scratch_project("refusals-of-packages", &files);
+        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let error = rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap_err();
+        assert!(error.contains("m.sql names it in the installed package q"), "{error}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_take_a_declared_name() {
+        let (dir, project) = shop("refusals-of-names");
+        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        assert!(
+            rename(&project, &orders, "customers", Encoding::Utf16, &uri).unwrap_err().contains("declared already")
+        );
+        let raw = Target::Source { source: "raw".into() };
+        assert!(rename(&project, &raw, "events", Encoding::Utf16, &uri).unwrap_err().contains("declared already"));
+        assert!(rename(&project, &orders, "orders", Encoding::Utf16, &uri).is_ok(), "the same name is no clash");
         fs::remove_dir_all(&dir).unwrap();
     }
 
