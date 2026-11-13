@@ -158,10 +158,16 @@ fn yaml_scalar(value: &str) -> String {
 
 /// The text that replaces the name at RANGE of TEXT with NEW, which must not
 /// be empty: the name alone inside its quotes, which it must not hold; a
-/// YAML scalar where unquoted.
-fn replacement(text: &str, range: &Range<usize>, new: &str) -> Result<String, String> {
+/// YAML scalar where unquoted.  IN_YAML_VALUE tells a call inside a YAML
+/// value, which may be a plain scalar: there `#`, `: `, spaces at an edge
+/// and flow indicators would change the value, so NEW must be a plain
+/// identifier.
+fn replacement(text: &str, range: &Range<usize>, new: &str, in_yaml_value: bool) -> Result<String, String> {
     match text[..range.start].chars().next_back().filter(|c| matches!(c, '\'' | '"')) {
         _ if new.is_empty() => Err("the new name is empty".into()),
+        _ if in_yaml_value && !PLAIN.is_match(new) => {
+            Err(format!("a call in a YAML value, such as a test's to:, cannot hold {new:?}"))
+        }
         Some(quote) if new.contains([quote, '\\']) => Err(format!("the new name cannot hold {quote} or \\ here")),
         Some(_) => Ok(new.to_owned()),
         None => Ok(yaml_scalar(new)),
@@ -254,7 +260,7 @@ pub fn rename(
     let mut edits: BTreeMap<PathBuf, Vec<(Range<usize>, String)>> = BTreeMap::new();
     for found in found {
         let text = project.texts.get(&found.path).map_or("", String::as_str);
-        let new_text = replacement(text, &found.range, new)?;
+        let new_text = replacement(text, &found.range, new, is_yaml(&found.path) && !found.declaration)?;
         edits.entry(found.path).or_default().push((found.range, new_text));
     }
     for (path, at, line) in kept_relation(target, &declared)? {
@@ -463,11 +469,16 @@ models:
         let texts = apply(&project, &rename(&project, &views, "visits", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: 'visits'\n        identifier: \"page views\"\n"));
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
-        let texts = apply(&project, &rename(&project, &customers, "my table", Encoding::Utf16, &uri).unwrap());
-        assert!(texts["_sources.yml"].contains("      - name: \"my table\"\n        identifier: customers\n"));
-        // In the plain value `to: source('raw', 'a: b')`, `: ` would end the scalar.
-        let error = rename(&project, &customers, "a: b", Encoding::Utf16, &uri).unwrap_err();
-        assert!(error.contains("_models.yml invalid"), "{error}");
+        // orders is named in SQL and in its declaration only.
+        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let texts = apply(&project, &rename(&project, &orders, "my table", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["_sources.yml"].contains("      - name: \"my table\"\n        identifier: raw_orders\n"));
+        // customers is also called in the plain value `to: source('raw', 'customers')`, where
+        // `: ` would end the scalar, ` #` start a comment, `,` end a flow entry.
+        for new in ["a: b", "a #b", "a,b", " a"] {
+            let error = rename(&project, &customers, new, Encoding::Utf16, &uri).unwrap_err();
+            assert!(error.contains("YAML value"), "{new}: {error}");
+        }
         for (new, written) in [("null", "\"null\""), ("On", "\"On\""), ("nothing", "nothing")] {
             let texts = apply(&project, &rename(&project, &customers, new, Encoding::Utf16, &uri).unwrap());
             assert!(texts["_sources.yml"].contains(&format!("      - name: {written}\n")), "{new}: {texts:?}");
@@ -530,7 +541,8 @@ models:
     fn refuses_what_would_break_a_relation_or_a_quote() {
         let (dir, project) = shop("refusals");
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
-        assert!(rename(&project, &customers, "it's", Encoding::Utf16, &uri).unwrap_err().contains("cannot hold '"));
+        // Its SQL call quotes with ', and its call in YAML is a plain value: either refuses.
+        assert!(rename(&project, &customers, "it's", Encoding::Utf16, &uri).unwrap_err().contains("cannot hold"));
         assert!(rename(&project, &customers, "", Encoding::Utf16, &uri).unwrap_err().contains("empty"));
         let missing = Target::Table { source: "raw".into(), table: "nowhere".into() };
         assert!(rename(&project, &missing, "x", Encoding::Utf16, &uri).unwrap_err().contains("declared nowhere"));
