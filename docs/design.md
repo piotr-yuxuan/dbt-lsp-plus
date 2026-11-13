@@ -415,9 +415,14 @@ The server is not restarted after a crash.
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
-- The outline of a YAML file that does not parse, as in the middle of an
-  edit, is empty.  It shows no tests, model versions, macro arguments, nor
-  a semantic model's entities, dimensions and measures.
+- The outline of a YAML file that yaml-rust2 does not parse is empty: one
+  in the middle of an edit, but also some that dbt reads, being laxer about
+  indentation inside flow collections and quoted scalars, such as a flow
+  sequence whose `]` sits at its key's column, a quoted description
+  continued at its key's column, or a tab after a colon.  The scan of
+  sources reads no table from such a file either.  The outline shows no
+  tests nested under a resource, model versions, macro arguments, nor a
+  semantic model's entities, dimensions and measures.
 
 ## Tests
 

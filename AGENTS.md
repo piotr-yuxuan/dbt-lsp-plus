@@ -30,6 +30,7 @@ src/rpc.rs                    framing; frames keep their bytes
 src/text.rs                   LSP positions, encodings, incremental changes
 src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
+src/properties.rs             the named entries of a YAML properties file
 src/project.rs                the resources of a project and its packages
 src/graph.rs                  the dependency graph: scanned, then the server's
 src/sources.rs                references and renames of sources
