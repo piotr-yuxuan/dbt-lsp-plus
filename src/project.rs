@@ -40,11 +40,12 @@ pub struct Project {
 }
 
 /// Where a line goes right after a `name:` line: the end of that line, the
-/// indentation of the key, and whether the entry is in block style, the only
-/// style a line can go in.
+/// line break that ends it, the indentation of the key, and whether the
+/// entry is in block style, the only style a line can go in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Insertion {
     pub at: usize,
+    pub newline: &'static str,
     pub indent: usize,
     pub block: bool,
 }
@@ -182,7 +183,8 @@ fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(St
     let before_key =
         text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
     let block = before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
-    Some((value, range, Insertion { at: line_end, indent: *key_column, block }))
+    let newline = ["\r\n", "\r"].into_iter().find(|newline| text[line_end..].starts_with(newline)).unwrap_or("\n");
+    Some((value, range, Insertion { at: line_end, newline, indent: *key_column, block }))
 }
 
 /// The tables of the `sources:` of a properties file of PACKAGE.  A file

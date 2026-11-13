@@ -180,7 +180,7 @@ fn kept_relation(target: &Target, declared: &[&SourceTable]) -> Result<BTreeSet<
                 return Err(format!("{} declares {old} in flow style: add {key}: first", table.path.display()));
             }
             (true, true) => {
-                let line = format!("\n{}{key}: {}", " ".repeat(insertion.indent), yaml_scalar(old));
+                let line = format!("{}{}{key}: {}", insertion.newline, " ".repeat(insertion.indent), yaml_scalar(old));
                 lines.insert((table.path.clone(), insertion.at, line));
             }
         }
@@ -451,6 +451,17 @@ models:
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["dbt_project.yml"].contains("pages: \"{{ source('raw', 'clients') }}\""), "{texts:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_inserted_line_ends_as_the_file_s_lines_do() {
+        let crlf = SOURCES.replace('\n', "\r\n");
+        let (dir, project) = scratch_project("crlf", &[("dbt_project.yml", PROJECT), ("models/_sources.yml", &crlf)]);
+        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["_sources.yml"].contains("- name: clients\r\n        identifier: customers\r\n"), "{texts:?}");
+        assert!(!texts["_sources.yml"].replace("\r\n", "").contains('\n'), "a bare line feed");
         fs::remove_dir_all(&dir).unwrap();
     }
 
