@@ -36,7 +36,7 @@ pub fn is_yaml(path: &Path) -> bool {
 
 /// The calls of TEXT, the file at PATH.  A Python model's `dbt.source()`
 /// reads as a call in YAML does: outside Jinja, with `#` comments.
-fn file_calls(path: &Path, text: &str) -> Vec<Call> {
+pub fn file_calls(path: &Path, text: &str) -> Vec<Call> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("yml" | "yaml" | "py") => scan::yaml_calls(text),
         _ => scan::calls(text),

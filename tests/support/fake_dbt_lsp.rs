@@ -13,7 +13,8 @@
 //!   `{"error": "Operation cancelled", ...}`; with no scripted answer, a
 //!   listing finds no node, `{"error": "No nodes found", ...}`;
 //! - any other request gets the script's answer for it, else
-//!   `{"echo": METHOD, "params": PARAMS}`.
+//!   `{"echo": METHOD, "params": PARAMS}`; an inlay hint request, as 2.0.9
+//!   does, `[]` on a `.sql` file and null on any other.
 //!
 //! Environment:
 //! - `FAKE_DBT_LSP_SCRIPT`: a JSON file, optional, with the keys
@@ -130,9 +131,14 @@ impl Fake {
         }
         let once = self.script.get_mut("answers_once").and_then(Value::as_object_mut).and_then(|a| a.remove(key));
         let listing = key.starts_with(LISTING);
+        let model =
+            params.pointer("/textDocument/uri").and_then(Value::as_str).is_some_and(|uri| uri.ends_with(".sql"));
         let default = match (method, listing) {
             ("shutdown", _) => Value::Null,
             (_, true) => json!({"error": "No nodes found", "grain": "unknown", "nodes": []}),
+            // As 2.0.9: none on a model, null on any other file.
+            ("textDocument/inlayHint", _) if model => json!([]),
+            ("textDocument/inlayHint", _) => Value::Null,
             _ => json!({"echo": method, "params": params}),
         };
         let answer = once.or_else(|| self.script["answers"].get(key).cloned()).unwrap_or(default);

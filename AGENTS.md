@@ -61,6 +61,10 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     listing and the teardown of the server process, each a resource's end;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
+  - `Pending::merged`: what each kind of forwarded request does to the
+    server's answer, so that `on_server` stays a dispatch;
+  - `Proxy::refresh_hints`: the proxy's one request to the client, its id
+    and the answer it keeps;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition` and `Proxy::on_document`: the
     routing of a request the proxy may answer itself (by its method, then

@@ -95,6 +95,20 @@ enum Pending {
     /// line breaks are hard, or a docs block's text or a test's signature,
     /// markdown as written.
     Hover(String, bool),
+    /// An inlay hint request, whose answer gets these hints after its own.
+    Hints(Vec<Value>),
+}
+
+impl Pending {
+    /// The server's answer, MESSAGE, as this kind of request makes it, for a
+    /// client that reads markdown when MARKDOWN; none to pass it unchanged.
+    fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
+        match self {
+            Pending::Hover(text, hard) => features::merge_hover(message, text, *hard, markdown),
+            Pending::Hints(hints) => features::merge_hints(message, hints),
+            _ => None,
+        }
+    }
 }
 
 /// What the proxy knows of the user's `dbt parse`.
@@ -111,6 +125,9 @@ struct Parsing {
     /// Whether the server compiled since the last change: dbt has then
     /// resolved the packages itself.
     compiled: bool,
+    /// Whether a request wanted an index before the server had compiled:
+    /// the server's compilation then starts the parse.
+    wanted: bool,
     /// Why the last parse failed, or none could start, as logged.
     failure: Option<String>,
     cache: Option<PathBuf>,
@@ -154,6 +171,10 @@ struct Proxy<W: Write> {
     shutdown: bool,
     /// Whether the client reads markdown in a hover.
     markdown: bool,
+    /// Whether the client may be asked to refresh its inlay hints.
+    hint_refresh: bool,
+    /// The proxy's own requests to the client, whose answers stay here.
+    asked: HashSet<String>,
     parsing: Parsing,
 }
 
@@ -217,6 +238,8 @@ impl<W: Write> Proxy<W> {
             nodes: None,
             shutdown: false,
             markdown: false,
+            hint_refresh: false,
+            asked: HashSet::new(),
             parsing: Parsing::default(),
         };
         if let Some(root) = root {
@@ -311,6 +334,7 @@ impl<W: Write> Proxy<W> {
         let first =
             formats.and_then(|formats| formats.iter().find(|format| *format == "markdown" || *format == "plaintext"));
         self.markdown = first.is_some_and(|format| format == "markdown");
+        self.hint_refresh = params.pointer("/capabilities/workspace/inlayHint/refreshSupport") == Some(&json!(true));
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         let same = |folder: &Path| fs::canonicalize(folder).ok() == self.canonical_root;
@@ -584,6 +608,7 @@ impl<W: Write> Proxy<W> {
         if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
             self.list_nodes();
         }
+        self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
         let ready = !parsing.fresh && parsing.compiled && parsing.running.is_none() && self.server.is_some();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
@@ -625,6 +650,9 @@ impl<W: Write> Proxy<W> {
         if let Some(running) = self.parsing.running.take() {
             running.stop();
         }
+        if outcome.index.is_some() {
+            self.refresh_hints();
+        }
         match (outcome.index, self.parsing.index.as_mut()) {
             (Some(index), Some(last)) if outcome.failure.is_some() => last.overlay(index),
             (Some(index), _) => self.parsing.index = Some(index),
@@ -634,6 +662,19 @@ impl<W: Write> Proxy<W> {
             Some(failure) => self.log_parse(&format!("dbt parse failed: {failure}")),
             None => self.parsing.failure = None,
         }
+    }
+
+    /// Asks a client that can refresh its inlay hints to do so, since they
+    /// show the relations of the index, under an id of the proxy's own,
+    /// whose answer stays here.
+    fn refresh_hints(&mut self) {
+        if !self.hint_refresh || self.shutdown {
+            return;
+        }
+        self.next_id += 1;
+        let id = json!(format!("{OWN_ID}{}", self.next_id));
+        self.asked.insert(key(&id));
+        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "method": "workspace/inlayHint/refresh"}));
     }
 
     /// Stops a parse under way and removes this process's cache.
@@ -763,17 +804,7 @@ impl<W: Write> Proxy<W> {
         let Some(message) = &frame.value else { return self.send_server(&frame.body) };
         let params = message.get("params").unwrap_or(&Value::Null);
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
-            // The server would get two requests under one id.
-            (Some(_), Some(id)) if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) => {
-                self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id")
-            }
-            (Some(method), Some(id)) => {
-                self.on_request(method, id, params, &frame.body);
-                // Once the hover is forwarded, so that a listing takes no id of the client's.
-                if method == "textDocument/hover" {
-                    self.want_index();
-                }
-            }
+            (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
             (Some(method), None) => {
                 self.track(method, params);
                 // The server gets the change before the listing it prompts.
@@ -784,6 +815,8 @@ impl<W: Write> Proxy<W> {
                     self.list_nodes();
                 }
             }
+            // The client's answer to the proxy's own request was never the server's.
+            (None, Some(id)) if self.asked.remove(&key(id)) => {}
             _ => self.send_server(&frame.body),
         }
     }
@@ -819,6 +852,20 @@ impl<W: Write> Proxy<W> {
                 };
                 summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
             }
+            ("textDocument/inlayHint", _) => {
+                // A panic leaves the server's answer as it is.
+                let hints = panic::catch_unwind(AssertUnwindSafe(|| {
+                    let index = self.parsing.index.as_ref()?;
+                    let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
+                    let lines = LineIndex::new(&text);
+                    let start = lines.offset_of(params.pointer("/range/start")?, self.encoding)?;
+                    let end = lines.offset_of(params.pointer("/range/end")?, self.encoding)?;
+                    let calls = sources::file_calls(&path, &text);
+                    Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
+                }));
+                let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
+                hints.map_or(Pending::Request, Pending::Hints)
+            }
             _ => Pending::Request,
         }
     }
@@ -828,6 +875,10 @@ impl<W: Write> Proxy<W> {
     /// as LSP asks, a definition with no target gets null, and any other
     /// fails.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
+        // The server would get two requests under one id.
+        if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) {
+            return self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id");
+        }
         let pending = self.remember(method, id, params);
         match (self.local_method(method, params), &self.server, method) {
             (Some(owned), ..) => self.answer(owned, id, params),
@@ -845,6 +896,11 @@ impl<W: Write> Proxy<W> {
             }
             (None, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
         }
+        // Once the request is forwarded, so that a listing takes no id of the
+        // client's: a hover keeps the index fresh, an inlay hint only makes one.
+        if method == "textDocument/hover" || (method == "textDocument/inlayHint" && self.parsing.index.is_none()) {
+            self.want_index();
+        }
     }
 
     /// A message of the server.  A response is the proxy's own only when its
@@ -861,9 +917,7 @@ impl<W: Write> Proxy<W> {
             if let Some((_, Pending::Listing)) = pending {
                 self.resume();
             }
-            if let Some((_, Pending::Hover(text, hard))) = &pending
-                && let Some(merged) = features::merge_hover(message, text, *hard, self.markdown)
-            {
+            if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown)) {
                 return self.send_client(&merged);
             }
             if self.initialize.as_ref() == Some(id) {
@@ -877,9 +931,13 @@ impl<W: Write> Proxy<W> {
                 return self.send_client(&message);
             }
         }
-        // The server has resolved the packages: dbt may parse.
+        // The server has resolved the packages: dbt may parse, for a request
+        // that wanted an index before.
         if message.get("method") == Some(&json!("dbt/lspCompileComplete")) {
             self.parsing.compiled = true;
+            if std::mem::take(&mut self.parsing.wanted) {
+                self.want_index();
+            }
         }
         self.send_client_body(&frame.body);
     }

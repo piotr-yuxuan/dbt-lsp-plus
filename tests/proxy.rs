@@ -1161,7 +1161,10 @@ fn node_info_parses_with_the_server_s_dbt_once_it_compiled() {
     let early = node_info(&mut session, json!("model.shop.orders"));
     assert_eq!(early["error"]["code"], json!(-32803), "{early}");
     assert!(early["error"]["message"].as_str().unwrap().contains("waiting for dbt lsp to compile"), "{early}");
-    let orders = parsed_orders(&mut session);
+    // The compilation its listing makes then starts the parse it wanted.
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let orders = session.poll(Duration::from_secs(10), request, |result| result.is_object());
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     assert_eq!(orders["config"]["materialized"], "table");
     // dbt's noise never reached the client; its stderr is in the cache's log.
@@ -1328,7 +1331,8 @@ fn no_parse_after_shutdown_nor_after_a_crash() {
     parsed_orders(&mut session);
     let path = fixture().join("models/marts/orders.sql");
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
-    barrier(&mut session);
+    // An answer of the proxy's own, which asks for no index, as a hover would.
+    session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
     node_info(&mut session, json!("model.shop.orders"));
     parses_stay(&log, 1);
@@ -1345,6 +1349,27 @@ fn no_parse_after_shutdown_nor_after_a_crash() {
     assert_eq!(alone["error"]["code"], json!(-32803), "{alone}");
     parses_stay(&log, 0);
     assert!(session.finish().success());
+}
+
+#[test]
+fn a_parse_wanted_before_a_compilation_does_not_start_after_shutdown() {
+    let (mut session, log) =
+        Session::fake("parse-wanted-shutdown", json!({"manifest": manifest(), "hold_compile": true}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    session.notify("test/compile", json!({}));
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    // A change, then a hover that wants the parse its compilation allows.
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    barrier(&mut session);
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    session.notify("test/compile", json!({}));
+    parses_stay(&log, 1);
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
 }
 
 #[test]
@@ -1643,5 +1668,131 @@ fn alone_a_definition_is_the_proxy_s_or_null() {
     let on_sql_ref = position_in(&project.join("models/marts/orders.sql"), "ref('stg_orders')", 6);
     let null = session.request("textDocument/definition", on_sql_ref);
     assert_eq!((null.get("error"), &null["result"]), (None, &Value::Null), "{null}");
+    assert!(session.finish().success());
+}
+
+/// An inlay hint request on the whole of PATH.
+fn hints_of(session: &mut Session, path: &Path) -> Value {
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1000, "character": 0}});
+    session.request("textDocument/inlayHint", json!({"textDocument": {"uri": uri(path)}, "range": range}))
+}
+
+#[test]
+fn inlay_hints_follow_the_server_s_once_a_parse_has_finished() {
+    let server = r#"{"jsonrpc":"2.0","id":$ID,"result":[{"position":{"line":0,"character":0},"label":"server"}]}"#;
+    let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/inlayHint": server}});
+    let (mut session, log) = Session::fake("hints", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    // No index yet: the server's hints alone, and a parse asked for by the
+    // hint request itself.
+    assert_eq!(hints_of(&mut session, &orders)["result"].as_array().map(Vec::len), Some(1));
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1000, "character": 0}});
+    let request = ("textDocument/inlayHint", json!({"textDocument": {"uri": uri(&orders)}, "range": range}));
+    let hints = session.poll(Duration::from_secs(10), request, |result| result.as_array().is_some_and(|h| h.len() > 1));
+    let relation = json!({"position": {"line": 4, "character": 38}, "label": "\"shop\".\"main\".\"stg_orders\"",
+                          "kind": 1, "paddingLeft": true, "tooltip": "model.shop.stg_orders"});
+    assert_eq!(hints, json!([{"position": {"line": 0, "character": 0}, "label": "server"}, relation]));
+    // With an index, a hint request after a change and its compilation
+    // starts no parse.
+    let parsed = parses(&log).len();
+    session.received.clear();
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    hints_of(&mut session, &orders);
+    parses_stay(&log, parsed);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_server_s_null_or_error_for_hints_passes_unless_the_proxy_has_some() {
+    let null_answer = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
+    let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/inlayHint": null_answer}});
+    let (mut session, _) = Session::fake("hints-null", script);
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let alone = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    assert_eq!(alone["result"].as_array().map(Vec::len), Some(1), "{alone}");
+    // `ref(var(...))` names no node the scan can see: the server's null, byte for byte.
+    let summary = hints_of(&mut session, &fixture().join("models/marts/order_summary.sql"));
+    let expected = null_answer.replace("$ID", &summary["id"].to_string());
+    assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "{summary}");
+    assert!(session.finish().success());
+    let error = r#"{"jsonrpc":"2.0","id":$ID,"error":{"code":-32603,"message":"no"}}"#;
+    let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/inlayHint": error}});
+    let (mut session, _) = Session::fake("hints-error", script);
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let failed = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    let expected = error.replace("$ID", &failed["id"].to_string());
+    assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "{failed}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn hints_asked_before_the_first_compilation_come_by_a_refresh() {
+    let script = json!({"manifest": manifest(), "hold_compile": true});
+    let (mut session, log) = Session::fake("hints-early", script);
+    let capabilities = json!({"workspace": {"inlayHint": {"refreshSupport": true}}});
+    session.request("initialize", json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": capabilities}));
+    session.notify("initialized", json!({}));
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    // On open, before dbt lsp has compiled, as clients ask.
+    hints_of(&mut session, &orders);
+    parses_stay(&log, 0);
+    session.notify("test/compile", json!({}));
+    session.wait_for(|message| message["method"] == "workspace/inlayHint/refresh");
+    assert_eq!(parses(&log).len(), 1);
+    let hints = hints_of(&mut session, &orders);
+    assert!(hints["result"].as_array().is_some_and(|hints| hints.iter().any(|h| h["kind"] == 1)), "{hints}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_parse_asks_a_client_that_can_refresh_its_hints_and_keeps_its_answer() {
+    let (mut session, log) = Session::fake("hints-refresh", json!({"manifest": manifest()}));
+    let capabilities = json!({"workspace": {"inlayHint": {"refreshSupport": true}}});
+    session.request("initialize", json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": capabilities}));
+    session.notify("initialized", json!({}));
+    parsed_orders(&mut session);
+    // The session answers the proxy's request by itself.
+    let refresh = session.wait_for(|message| message["method"] == "workspace/inlayHint/refresh");
+    let id = refresh["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("dbt-lsp-plus/"), "{refresh}");
+    barrier(&mut session);
+    let refreshes = session.received.iter().filter(|m| m["method"] == "workspace/inlayHint/refresh").count();
+    assert_eq!(refreshes, 1, "one per parse");
+    assert!(!logged(&log).iter().any(|message| message["id"] == id.as_str()), "the client's answer reached the server");
+    assert!(session.finish().success());
+    // A client that cannot refresh is not asked.
+    let (mut session, _) = Session::fake("hints-no-refresh", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    barrier(&mut session);
+    assert!(!session.received.iter().any(|message| message["method"] == "workspace/inlayHint/refresh"));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn hints_come_from_the_open_text_of_sql_and_yaml() {
+    let (mut session, _) = Session::fake("hints-open", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    // An unsaved line above the ref moves its hint.
+    let orders = fixture().join("models/marts/orders.sql");
+    let edit = json!({"textDocument": {"uri": uri(&orders), "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "-- new\n"}]});
+    session.notify("textDocument/didChange", edit);
+    let hints = hints_of(&mut session, &orders);
+    assert_eq!(hints["result"][0]["position"], json!({"line": 5, "character": 38}), "{hints}");
+    // In YAML, a ref outside Jinja; the server's null becomes the proxy's hint.
+    let yml = fixture().join("models/staging/_sources.yml");
+    let text = "version: 2\nmodels:\n  - name: x\n    data_tests:\n      - relationships:\n          arguments:\n            to: ref('stg_orders')\n";
+    session.open(&yml, Some(text));
+    let hints = hints_of(&mut session, &yml);
+    assert_eq!(hints["result"][0]["position"], json!({"line": 6, "character": 33}), "{hints}");
     assert!(session.finish().success());
 }
