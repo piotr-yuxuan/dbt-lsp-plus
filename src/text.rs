@@ -2,6 +2,18 @@
 //! Positions in a text: LSP's line and character, and byte offsets.
 
 use serde_json::{Value, json};
+use std::fs;
+use std::path::Path;
+
+/// The text of the file at PATH, without the byte order mark that editors
+/// leave out of a document's text and so of its positions.
+pub fn read(path: &Path) -> Option<String> {
+    let mut text = fs::read_to_string(path).ok()?;
+    if text.starts_with('\u{feff}') {
+        text.drain(..'\u{feff}'.len_utf8());
+    }
+    Some(text)
+}
 
 /// The unit in which LSP counts characters, as the server announced it.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -3,7 +3,7 @@
 //! their files: what dbt itself would parse, without dbt.
 
 use crate::scan::{self, Call, Kind};
-use crate::text::{Encoding, LineIndex};
+use crate::text::{self, Encoding, LineIndex};
 use crate::yaml::{self, Node};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -34,17 +34,18 @@ pub struct Project {
     pub entities: Vec<Entity>,
     /// The source tables, as their properties files declare them.
     pub sources: Vec<SourceTable>,
-    /// The text of each file of the resource paths, as the proxy read it;
-    /// empty for a seed.
+    /// The text of each file of the resource paths, and of each package's
+    /// `dbt_project.yml`, as the proxy read it; empty for a seed.
     pub texts: HashMap<PathBuf, String>,
 }
 
 /// Where a line goes right after a `name:` line: the end of that line, the
-/// indentation of the key, and whether the entry is in block style, the only
-/// style a line can go in.
+/// line break that ends it, the indentation of the key, and whether the
+/// entry is in block style, the only style a line can go in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Insertion {
     pub at: usize,
+    pub newline: &'static str,
     pub indent: usize,
     pub block: bool,
 }
@@ -65,6 +66,9 @@ pub struct SourceTable {
     pub table_insertion: Insertion,
     /// Without `identifier:`, dbt takes the table's name for its identifier.
     pub has_identifier: bool,
+    /// Whether its file shares YAML through an alias or a merge key, so that
+    /// a name, a schema or an identifier may come from elsewhere in it.
+    pub anchored: bool,
 }
 
 impl From<&SourceTable> for Entity {
@@ -152,13 +156,11 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec
     found
 }
 
-/// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
-/// range, inside its quotes, escapes included, and where a line goes after it.
-fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
-    let (Node::Scalar { line: key_line, column: key_column, .. }, Node::Scalar { value, line, column }) = (key, value)
-    else {
-        return None;
-    };
+/// The value of the scalar NODE of TEXT and its range as written: inside
+/// its quotes, escapes included, else as long as its value, else to the end
+/// of its line.
+pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Range<usize>)> {
+    let Node::Scalar { value, line, column } = node else { return None };
     let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
     let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
     let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
@@ -167,21 +169,37 @@ fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(St
         None if text[at..].starts_with(value.as_str()) => at..at + value.len(),
         None => at..line_end,
     };
+    Some((value.clone(), range))
+}
+
+/// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
+/// range, and where a line goes after it.
+fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
+    let Node::Scalar { line: key_line, column: key_column, .. } = key else { return None };
+    let (value, range) = written(text, index, value)?;
+    let line_end = text[range.end..].find(['\n', '\r']).map_or(text.len(), |end| range.end + end);
     let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
     let before_key =
         text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
-    let block = before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
-    Some((value.clone(), range, Insertion { at: line_end, indent: *key_column, block }))
+    // A document in flow style, such as JSON, spans lines that look like blocks.
+    let flow_document = text.trim_start().starts_with(['{', '[']);
+    let block = !flow_document && before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
+    let newline = ["\r\n", "\r"].into_iter().find(|newline| text[line_end..].starts_with(newline)).unwrap_or("\n");
+    Some((value, range, Insertion { at: line_end, newline, indent: *key_column, block }))
 }
 
 /// The tables of the `sources:` of a properties file of PACKAGE.  A file
-/// that is not valid YAML has none.
+/// that is not valid YAML has none, and a source that `overrides` a
+/// package's has none of its own: dbt patches the package's.
 pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable> {
     let Some(root) = yaml::parse(text) else { return Vec::new() };
     let index = LineIndex::new(text);
+    // An anchor anywhere in the file may hold a name, a schema or an identifier.
+    let anchored = root.shares();
     let mut found = Vec::new();
     for source in root.get("sources").map_or(&[][..], Node::items) {
-        let Some((key, value)) = source.entry("name") else { continue };
+        let own = source.entry("name").filter(|_| source.get("overrides").is_none());
+        let Some((key, value)) = own else { continue };
         let Some((source_name, source_range, source_insertion)) = placed(text, &index, key, value) else { continue };
         for table in source.get("tables").map_or(&[][..], Node::items) {
             let Some((key, value)) = table.entry("name") else { continue };
@@ -197,6 +215,7 @@ pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable>
                 table_range,
                 table_insertion,
                 has_identifier: table.get("identifier").is_some(),
+                anchored,
             });
         }
     }
@@ -231,7 +250,7 @@ fn files(dir: &Path) -> Vec<PathBuf> {
 
 /// The name and configuration in a package's `dbt_project.yml`.
 fn package_config(dir: &Path) -> Option<(String, Node)> {
-    let config = yaml::parse(&fs::read_to_string(dir.join("dbt_project.yml")).ok()?)?;
+    let config = yaml::parse(&text::read(&dir.join("dbt_project.yml"))?)?;
     let name = config.get("name")?.as_str()?.to_owned();
     Some((name, config))
 }
@@ -248,7 +267,7 @@ fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, 
             let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
             let text = match extension {
                 "csv" => String::new(),
-                _ => open.get(&path).cloned().or_else(|| fs::read_to_string(&path).ok()).unwrap_or_default(),
+                _ => open.get(&path).cloned().or_else(|| text::read(&path)).unwrap_or_default(),
             };
             let (found, tables) = match extension {
                 "yml" | "yaml" => {
@@ -262,6 +281,10 @@ fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, 
             project.sources.extend(tables);
         }
     }
+    // Its vars and hooks hold calls too.
+    let config = dir.join("dbt_project.yml");
+    let text = open.get(&config).cloned().or_else(|| text::read(&config)).unwrap_or_default();
+    project.texts.insert(config, text);
     project.packages.insert(name, dir.to_owned());
 }
 
@@ -288,6 +311,20 @@ pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
         }
     }
     Some(project)
+}
+
+/// A project of FILES, each a path under it and its text, in a fresh
+/// directory of the system's for test NAME; the caller removes it.
+#[cfg(test)]
+pub(crate) fn scratch_project(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    for (path, text) in files {
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    dir
 }
 
 #[cfg(test)]
@@ -378,23 +415,87 @@ mod tests {
         assert_eq!(end, serde_json::json!({"line": 3, "character": 22}));
     }
 
+    fn sorted_ids(project: &Project) -> Vec<&str> {
+        let mut ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
+        ids.sort();
+        ids
+    }
+
     #[test]
     fn follows_symbolic_links_once_and_reads_sources_in_every_resource_path() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp/symlinks");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("models/real")).unwrap();
-        fs::create_dir_all(dir.join("elsewhere")).unwrap();
-        fs::create_dir_all(dir.join("seeds")).unwrap();
-        fs::write(dir.join("dbt_project.yml"), "name: linked\n").unwrap();
-        fs::write(dir.join("models/real/a.sql"), "select 1").unwrap();
-        fs::write(dir.join("elsewhere/b.sql"), "select 2").unwrap();
-        fs::write(dir.join("seeds/_sources.yml"), "sources:\n  - name: s\n    tables:\n      - name: t\n").unwrap();
+        let dir = scratch_project(
+            "symlinks",
+            &[
+                ("dbt_project.yml", "name: linked\n"),
+                ("models/real/a.sql", "select 1"),
+                ("elsewhere/b.sql", "select 2"),
+                ("seeds/_sources.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
+            ],
+        );
         std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("models/link")).unwrap();
         std::os::unix::fs::symlink(dir.join("models"), dir.join("models/real/loop")).unwrap();
         let project = scan(&dir, &HashMap::new()).unwrap();
-        let mut ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
-        ids.sort();
-        assert_eq!(ids, ["model.linked.a", "model.linked.b", "source.linked.s.t"]);
+        assert_eq!(sorted_ids(&project), ["model.linked.a", "model.linked.b", "source.linked.s.t"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_the_configured_resource_paths_and_packages_install_path() {
+        let dir = scratch_project(
+            "configured",
+            &[
+                (
+                    "dbt_project.yml",
+                    "name: p\nmodel-paths: [transform]\nmacro-paths: [lib]\npackages-install-path: deps\n",
+                ),
+                ("transform/a.sql", "select 1"),
+                ("models/ignored.sql", "select 2"),
+                ("lib/m.sql", "{% macro m() %}1{% endmacro %}"),
+                ("deps/q/dbt_project.yml", "name: q\n"),
+                ("deps/q/models/b.sql", "select 3"),
+                ("dbt_packages/r/dbt_project.yml", "name: r\n"),
+                ("dbt_packages/r/models/c.sql", "select 4"),
+            ],
+        );
+        let project = scan(&dir, &HashMap::new()).unwrap();
+        assert_eq!(sorted_ids(&project), ["macro.p.m", "model.p.a", "model.q.b"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_byte_order_mark_counts_in_no_position() {
+        let macro_text = "{% macro bommed() %}1{% endmacro %}";
+        let dir = scratch_project(
+            "bom",
+            &[("dbt_project.yml", "\u{feff}name: bom\n"), ("macros/bom.sql", &format!("\u{feff}{macro_text}"))],
+        );
+        let project = scan(&dir, &HashMap::new()).unwrap();
+        let bommed = project.entities.iter().find(|e| e.id == "macro.bom.bommed").unwrap();
+        assert_eq!(project.texts[&bommed.path], macro_text);
+        assert_eq!(bommed.name_range, 9..15);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_source_that_overrides_a_package_s_is_the_package_s() {
+        let dir = scratch_project(
+            "overrides",
+            &[
+                ("dbt_project.yml", "name: p\n"),
+                (
+                    "models/_sources.yml",
+                    "sources:\n  - name: stripe\n    overrides: q\n    tables:\n      - name: charge\n",
+                ),
+                ("dbt_packages/q/dbt_project.yml", "name: q\n"),
+                (
+                    "dbt_packages/q/models/_sources.yml",
+                    "sources:\n  - name: stripe\n    tables:\n      - name: charge\n",
+                ),
+            ],
+        );
+        let project = scan(&dir, &HashMap::new()).unwrap();
+        assert_eq!(sorted_ids(&project), ["source.q.stripe.charge"]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

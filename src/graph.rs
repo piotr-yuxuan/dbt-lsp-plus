@@ -3,13 +3,13 @@
 //!
 //! The edges between nodes come from `dbt.listNodes` when the server has
 //! answered, since only dbt resolves a `ref(var('x'))`; otherwise from the
-//! scan of the files.  The server lists no macros, so the edges to macros
-//! always come from the scan.
+//! scan of the files.  The server lists no macros, so the edges to and from
+//! macros always come from the scan.
 
 use crate::project::{Entity, Project};
 use crate::scan::Target;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -101,14 +101,19 @@ pub struct Graph {
 
 /// The ids of the resources that a call of TARGET from ENTITY names, by
 /// dbt's lookup: a package named in the call, else the entity's own package,
-/// then the packages of SEARCH, the root project first.  A ref, source or
-/// macro names the first that exists; a dispatch names every implementation
-/// (`*__name`) of the first package that has one.
+/// then the packages of SEARCH, the root project first; an unqualified macro
+/// only in the entity's package and the root project, since dbt keeps the
+/// others' macros behind their package's name.  A ref, source or macro names
+/// the first that exists; a dispatch names every implementation (`*__name`)
+/// of the first package that has one.
 fn resolve(known: &BTreeSet<&str>, search: &[&str], entity: &Entity, target: &Target) -> Vec<String> {
     let packages: Vec<&str> = match target {
         Target::Ref { package: Some(package), .. }
         | Target::Macro { package: Some(package), .. }
         | Target::Dispatch { package: Some(package), .. } => vec![package],
+        Target::Macro { package: None, .. } => {
+            vec![entity.package.as_str(), search.first().copied().unwrap_or_default()]
+        }
         _ => std::iter::once(entity.package.as_str()).chain(search.iter().copied()).collect(),
     };
     let candidates = packages.into_iter().map(|p| match target {
@@ -160,11 +165,13 @@ impl Graph {
         Graph { items: items.collect(), edges }
     }
 
-    /// This graph with the edges between nodes that the server listed in
-    /// NODES instead of the scanned ones; the scanned call sites stay, and so
-    /// do the edges to macros.  A node the scan missed is placed at the
-    /// start of its file in PROJECT.
+    /// This graph with the dependencies of each node listed in NODES as the
+    /// server gives them, instead of the scanned ones; the scanned call sites
+    /// stay.  The server lists no macro, so the scanned edges to and from
+    /// macros stay, and so do those of a node it did not list.  A node the
+    /// scan missed is placed at the start of its file in PROJECT.
     pub fn with_server(mut self, nodes: &[ServerNode], project: &Project) -> Graph {
+        let listed: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
         let mut scanned: HashMap<(String, String), Vec<Range<usize>>> =
             self.edges.drain(..).map(|edge| ((edge.from, edge.to), edge.sites)).collect();
         let mut edges = Vec::new();
@@ -187,8 +194,9 @@ impl Graph {
             };
             self.items.entry(node.id.clone()).or_insert(item);
         }
-        let to_macros = scanned.into_iter().filter(|((_, to), _)| to.starts_with("macro."));
-        edges.extend(to_macros.map(|((from, to), sites)| Edge { from, to, sites }));
+        let kept =
+            scanned.into_iter().filter(|((from, to), _)| to.starts_with("macro.") || !listed.contains(from.as_str()));
+        edges.extend(kept.map(|((from, to), sites)| Edge { from, to, sites }));
         edges.retain(|edge| self.items.contains_key(&edge.from) && self.items.contains_key(&edge.to));
         edges.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
         self.edges = edges;
@@ -201,6 +209,7 @@ mod tests {
     use super::*;
     use crate::project;
     use serde_json::json;
+    use std::fs;
     use std::path::Path;
 
     fn shop() -> Project {
@@ -234,6 +243,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unqualified_macro_is_looked_up_in_its_package_and_the_root_only() {
+        let dir = project::scratch_project(
+            "unqualified-macro",
+            &[
+                ("dbt_project.yml", "name: shop\n"),
+                ("models/report.sql", "{{ date_spine() }} {{ utils.date_spine() }}"),
+                ("dbt_packages/utils/dbt_project.yml", "name: utils\n"),
+                ("dbt_packages/utils/macros/spine.sql", "{% macro date_spine() %}{{ helper() }}{% endmacro %}"),
+                ("dbt_packages/utils/macros/helper.sql", "{% macro helper() %}1{% endmacro %}"),
+            ],
+        );
+        let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap());
+        assert!(pairs(&graph).contains(&("macro.utils.date_spine", "macro.utils.helper")));
+        // The unqualified date_spine() is dbt's own, not the package's: one site only.
+        let spine = graph.edges.iter().find(|e| e.to == "macro.utils.date_spine").unwrap();
+        assert_eq!((spine.from.as_str(), spine.sites.len()), ("model.shop.report", 1));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn server_edges_win_for_nodes_and_keep_the_scanned_call_sites() {
         let project = shop();
         let answer = json!({"error": null, "nodes": [
@@ -257,11 +286,52 @@ mod tests {
         assert!(edges.contains(&("model.shop.orders", "macro.shop_utils.is_positive")));
         // The server did not list orders -> stg_customers: it is no edge any more.
         assert!(!edges.contains(&("model.shop.orders", "model.shop.stg_customers")));
+        // stg_orders was not listed: its scanned dependencies stay.
+        assert!(edges.contains(&("model.shop.stg_orders", "seed.shop.raw_orders")));
         let stg =
             graph.edges.iter().find(|e| e.from == "model.shop.orders" && e.to == "model.shop.stg_orders").unwrap();
         let text = &project.texts[&graph.items["model.shop.orders"].path];
         assert_eq!(&text[stg.sites[0].clone()], "ref('stg_orders'");
         assert!(graph.items["test.shop.not_null_orders_id.abc"].path.ends_with("models/marts/_marts.yml"));
+    }
+
+    #[test]
+    fn a_listing_keeps_the_edges_of_macros() {
+        let dir = project::scratch_project(
+            "macro-edges",
+            &[
+                ("dbt_project.yml", "name: shop\n"),
+                ("models/_sources.yml", "sources:\n  - name: raw\n    tables:\n      - name: events\n"),
+                ("models/dates.sql", "select 1"),
+                ("models/report.sql", "{{ calendar() }}"),
+                (
+                    "macros/calendar.sql",
+                    "{% macro calendar() %}{{ ref('dates') }} {{ source('raw', 'events') }}{% endmacro %}",
+                ),
+            ],
+        );
+        let project = project::scan(&dir, &HashMap::new()).unwrap();
+        let nodes: Vec<ServerNode> =
+            [("model.shop.report", "models/report.sql"), ("model.shop.dates", "models/dates.sql")]
+                .map(|(id, path)| ServerNode {
+                    id: id.into(),
+                    name: id.rsplit('.').next().unwrap().into(),
+                    resource_type: "model".into(),
+                    package: "shop".into(),
+                    original_file_path: path.into(),
+                    depends_on: Vec::new(),
+                })
+                .to_vec();
+        let graph = Graph::scanned(&project).with_server(&nodes, &project);
+        let edges = pairs(&graph);
+        for expected in [
+            ("macro.shop.calendar", "model.shop.dates"),
+            ("macro.shop.calendar", "source.shop.raw.events"),
+            ("model.shop.report", "macro.shop.calendar"),
+        ] {
+            assert!(edges.contains(&expected), "{expected:?} missing from {edges:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

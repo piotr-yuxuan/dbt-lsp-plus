@@ -305,8 +305,9 @@ pub fn outline(text: &str, sql: bool) -> Vec<Symbol> {
 
 static REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?"#).unwrap());
+// Its arguments are two literals: `'events' ~ var('suffix')` names another table.
 static SOURCE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"\bsource\s*\(\s*['"]([^'"]*)['"]\s*,\s*['"]([^'"]*)['"]"#).unwrap());
+    LazyLock::new(|| Regex::new(r#"\bsource\s*\(\s*['"]([^'"]*)['"]\s*,\s*['"]([^'"]*)['"]\s*\)"#).unwrap());
 static DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"\badapter\s*\.\s*dispatch\s*\(\s*['"]([^'"]+)['"](?:\s*,\s*(?:macro_namespace\s*=\s*)?['"]([^'"]+)['"])?"#,
@@ -386,6 +387,15 @@ pub fn yaml_calls(text: &str) -> Vec<Call> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_with_an_expression_for_argument_names_no_table() {
+        let text = "{{ source('raw', 'events' ~ var('suffix')) }} {{ source( 'raw' , \"orders\" ) }}";
+        let targets: Vec<Target> = calls(text).into_iter().map(|call| call.target).collect();
+        let orders = Target::Source { source: "raw".into(), table: "orders".into() };
+        assert!(targets.contains(&orders), "{targets:?}");
+        assert!(!targets.iter().any(|t| matches!(t, Target::Source { table, .. } if table == "events")), "{targets:?}");
+    }
 
     fn names(symbols: &[Symbol]) -> Vec<(Kind, &str)> {
         symbols.iter().map(|symbol| (symbol.kind, symbol.name.as_str())).collect()
