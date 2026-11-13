@@ -987,3 +987,16 @@ fn renames_a_cte_and_forwards_other_renames() {
     assert_eq!(forwarded["result"]["echo"], "textDocument/rename");
     assert!(session.finish().success());
 }
+
+#[test]
+fn leaves_the_folding_and_selection_of_yaml_to_the_client() {
+    let (mut session, _) = Session::fake("yaml-folding", json!({}));
+    session.initialize(&fixture());
+    let yaml = uri(&fixture().join("models/staging/_sources.yml"));
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": yaml}}));
+    assert_eq!(folding.get("result"), Some(&Value::Null), "{folding}");
+    let at = json!({"textDocument": {"uri": yaml}, "positions": [{"line": 2, "character": 4}]});
+    let selection = session.request("textDocument/selectionRange", at);
+    assert_eq!(selection.get("result"), Some(&Value::Null), "{selection}");
+    assert!(session.finish().success());
+}

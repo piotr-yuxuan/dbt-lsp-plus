@@ -435,7 +435,10 @@ impl<W: Write> Proxy<W> {
             let Some((_, text, offset)) = self.document_at(params) else { return Some(Value::Null) };
             return Some(document::highlights(&text, sql, offset, self.encoding));
         }
-        let Some((_, text)) = self.text_of(uri) else { return Some(Value::Null) };
+        // A YAML file folds and selects best by its indentation, which the client knows.
+        let Some((_, text)) = self.text_of(uri).filter(|_| sql || uri.ends_with(".md")) else {
+            return Some(Value::Null);
+        };
         if method == "textDocument/foldingRange" {
             return Some(document::folding_ranges(&text, sql));
         }
