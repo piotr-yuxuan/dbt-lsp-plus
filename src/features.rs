@@ -272,15 +272,18 @@ pub fn inlay_hints(
             }
             _ => return None,
         };
+        // The range first: a node's lookup costs more.
+        if after < range.start || range.end < after {
+            return None;
+        }
         let built = |node: &&Value| node["disabled"] != true && node["resource_type"] != "analysis";
         let node = index.named(&call.target).filter(built)?;
         let label = match node["config"]["materialized"].as_str() {
             Some("ephemeral") => "ephemeral",
             _ => node["relation"].as_str()?,
         };
-        let hint = json!({"position": lines.position(after, encoding), "label": label, "kind": 1,
-                          "paddingLeft": true, "tooltip": node["unique_id"]});
-        (range.start <= after && after <= range.end).then_some(hint)
+        Some(json!({"position": lines.position(after, encoding), "label": label, "kind": 1,
+                    "paddingLeft": true, "tooltip": node["unique_id"]}))
     };
     calls.into_iter().filter_map(hint).collect()
 }
@@ -506,10 +509,11 @@ mod tests {
         let raw = json!({"unique_id": "source.shop.raw.orders", "name": "orders", "source_name": "raw",
                          "resource_type": "source", "package_name": "shop", "relation_name": "\"raw_orders\"",
                          "config": {}});
+        // Ephemeral, so that only the rule for them keeps their hint away.
         let analysis = json!({"unique_id": "analysis.shop.counts", "name": "counts", "resource_type": "analysis",
-                              "package_name": "shop", "relation_name": "\"counts\"", "config": {}});
+                              "package_name": "shop", "config": {"materialized": "ephemeral"}});
         let off = json!({"unique_id": "model.shop.off", "name": "off", "resource_type": "model",
-                         "package_name": "shop", "relation_name": "\"off\"", "config": {"materialized": "table"}});
+                         "package_name": "shop", "config": {"materialized": "ephemeral"}});
         Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
             "model.shop.orders": model("orders", "table", json!("\"shop\".\"main\".\"orders\"")),
             "model.shop.eph": model("eph", "ephemeral", Value::Null),

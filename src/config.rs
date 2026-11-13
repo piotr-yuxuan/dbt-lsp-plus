@@ -107,6 +107,17 @@ pub struct Index {
     root_package: String,
     nodes: HashMap<String, Value>,
     groups: HashMap<String, Value>,
+    /// The ids of the nodes of each name, so that a lookup reads a few.
+    named: HashMap<String, Vec<String>>,
+}
+
+/// The ids of NODES by their name.
+fn by_name(nodes: &HashMap<String, Value>) -> HashMap<String, Vec<String>> {
+    let mut named: HashMap<String, Vec<String>> = HashMap::new();
+    for (id, node) in nodes {
+        named.entry(node["name"].as_str().unwrap_or_default().to_owned()).or_default().push(id.clone());
+    }
+    named
 }
 
 impl Index {
@@ -143,7 +154,8 @@ impl Index {
             .as_object()
             .map_or_else(HashMap::new, |groups| groups.iter().map(|(id, group)| (id.clone(), group.clone())).collect());
         let root_package = manifest.pointer("/metadata/project_name").and_then(Value::as_str).unwrap_or_default();
-        Index { root_package: root_package.to_owned(), nodes, groups }
+        let named = by_name(&nodes);
+        Index { root_package: root_package.to_owned(), nodes, groups, named }
     }
 
     /// This index with the entries of NEWER laid over it: what a parse that
@@ -151,6 +163,7 @@ impl Index {
     pub fn overlay(&mut self, newer: Index) {
         self.nodes.extend(newer.nodes);
         self.groups.extend(newer.groups);
+        self.named = by_name(&self.nodes);
         if !newer.root_package.is_empty() {
             self.root_package = newer.root_package;
         }
@@ -161,8 +174,8 @@ impl Index {
     }
 
     /// The node that a `ref` or a `source` of TARGET names, as dbt looks it
-    /// up: in the package the call names, else the root project first, then
-    /// any.
+    /// up: an enabled one first, in the package the call names, else the
+    /// root project first, then any.
     pub fn named(&self, target: &Target) -> Option<&Value> {
         let names = |node: &&Value| match target {
             Target::Ref { package, name } => {
@@ -177,11 +190,17 @@ impl Index {
             }
             _ => false,
         };
-        let mut found: Vec<&Value> = self.nodes.values().filter(names).collect();
+        let name = match target {
+            Target::Ref { name, .. } | Target::Source { table: name, .. } => name,
+            _ => return None,
+        };
+        let candidates = self.named.get(name).into_iter().flatten().filter_map(|id| self.nodes.get(id));
+        let mut found: Vec<&Value> = candidates.filter(names).collect();
         // A versioned model without a version named is its latest version.
         let latest = |node: &&Value| node["version"] == node["latest_version"] || node["latest_version"].is_null();
         found.sort_by_key(|node| {
-            (node["package_name"] != self.root_package.as_str(), !latest(node), node["unique_id"].to_string())
+            let package = node["package_name"] != self.root_package.as_str();
+            (node["disabled"] == true, package, !latest(node), node["unique_id"].to_string())
         });
         found.first().copied()
     }
@@ -505,6 +524,27 @@ mod tests {
         assert_eq!(id(index.of_file("models/marts/orders.sql")).as_deref(), Some("model.shop.orders"));
         assert_eq!(index.of_file("models/marts/_marts.yml").map(|_| ()), Some(()), "one test only");
         assert_eq!(index.of_file("models/orders.sql"), None, "a package's file");
+    }
+
+    #[test]
+    fn an_enabled_node_wins_over_a_disabled_one_of_the_root() {
+        let model = |id: &str, package: &str| {
+            json!({"unique_id": id, "name": "customers", "resource_type": "model", "package_name": package,
+                   "relation_name": format!("\"{package}\""), "config": {}})
+        };
+        let manifest = json!({"metadata": {"project_name": "shop"},
+            "nodes": {"model.utils.customers": model("model.utils.customers", "utils")},
+            "disabled": {"model.shop.customers": [model("model.shop.customers", "shop")]}});
+        let mut index = Index::of(&manifest);
+        let customers = Target::Ref { package: None, name: "customers".into() };
+        assert_eq!(index.named(&customers).unwrap()["unique_id"], "model.utils.customers");
+        // A newer manifest's names are found too.
+        let newer = json!({"metadata": {"project_name": "shop"},
+            "nodes": {"model.shop.fresh": {"unique_id": "model.shop.fresh", "name": "fresh", "resource_type": "model",
+                                           "package_name": "shop", "config": {}}}});
+        index.overlay(Index::of(&newer));
+        let fresh = Target::Ref { package: None, name: "fresh".into() };
+        assert_eq!(index.named(&fresh).unwrap()["unique_id"], "model.shop.fresh");
     }
 
     #[test]
