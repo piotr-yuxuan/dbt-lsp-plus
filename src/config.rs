@@ -71,7 +71,8 @@ pub fn packages_settled(root: &Path) -> bool {
     let lock = modified("package-lock.yml");
     ["packages.yml", "dependencies.yml"].into_iter().all(|name| {
         let Ok(text) = fs::read_to_string(root.join(name)) else { return true };
-        let local = yaml::parse(&text).is_some_and(|doc| {
+        // A file of comments only, or empty, parses to no document: no packages.
+        let local = yaml::parse(&text).is_none_or(|doc| {
             doc.get("packages").map_or(&[][..], Node::items).iter().all(|package| package.get("local").is_some())
         });
         local || lock.is_some_and(|lock| modified(name).is_some_and(|named| lock >= named))
@@ -100,14 +101,19 @@ impl Index {
             node["disabled"] = json!(true);
             nodes.entry(id.clone()).or_insert(node);
         }
+        // A test on a source, or a singular test, has no attached node: it
+        // tests what it depends on.
         let mut tests: HashMap<String, Vec<String>> = HashMap::new();
-        for (id, node) in &nodes {
-            if let Some(attached) = node["attached_node"].as_str() {
-                tests.entry(attached.to_owned()).or_default().push(id.clone());
+        for (id, node) in nodes.iter().filter(|(_, node)| node["resource_type"] == "test") {
+            let attached = node["attached_node"].as_str().map(|attached| vec![json!(attached)]);
+            let depends_on =
+                || node.pointer("/depends_on/nodes").and_then(Value::as_array).cloned().unwrap_or_default();
+            for tested in attached.unwrap_or_else(depends_on).iter().filter_map(Value::as_str) {
+                tests.entry(tested.to_owned()).or_default().push(id.clone());
             }
         }
         for (id, node) in &mut nodes {
-            let built = node["resource_type"] != "analysis";
+            let built = node["resource_type"] != "analysis" && node["disabled"] != true;
             node["relation"] = if built { node["relation_name"].clone() } else { Value::Null };
             let mut attached = tests.remove(id).unwrap_or_default();
             attached.sort();
@@ -152,7 +158,11 @@ impl Index {
             _ => false,
         };
         let mut found: Vec<&Value> = self.nodes.values().filter(names).collect();
-        found.sort_by_key(|node| (node["package_name"] != self.root_package.as_str(), node["unique_id"].to_string()));
+        // A versioned model without a version named is its latest version.
+        let latest = |node: &&Value| node["version"] == node["latest_version"] || node["latest_version"].is_null();
+        found.sort_by_key(|node| {
+            (node["package_name"] != self.root_package.as_str(), !latest(node), node["unique_id"].to_string())
+        });
         found.first().copied()
     }
 
@@ -176,11 +186,15 @@ impl Index {
         let materialized = config["materialized"].as_str();
         let incremental = (materialized == Some("incremental")).then(|| {
             let strategy = config["incremental_strategy"].as_str().map(|strategy| format!("strategy {strategy}"));
-            let key = config["unique_key"].as_str().map(|key| format!("unique key {key}"));
+            let keys = config["unique_key"]
+                .as_array()
+                .map(|keys| keys.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
+            let key = config["unique_key"].as_str().map(str::to_owned).or(keys).map(|key| format!("unique key {key}"));
             [strategy, key].into_iter().flatten().collect::<Vec<_>>().join(", ")
         });
-        let freshness =
-            (node["freshness"].is_object() && node["freshness"] != json!({})).then(|| "freshness".to_owned());
+        // dbt 2.0.9 writes null counts for a source with no freshness.
+        let configured = |after: &str| !node["freshness"][after]["count"].is_null();
+        let freshness = (configured("warn_after") || configured("error_after")).then(|| "freshness".to_owned());
         let loaded_at = node["loaded_at_field"].as_str().map(|field| format!("loaded at {field}"));
         let relation = node["relation"].as_str().map_or_else(|| "no relation".to_owned(), str::to_owned);
         let first = [node["resource_type"].as_str().map(str::to_owned), materialized.map(str::to_owned), incremental];
@@ -242,14 +256,6 @@ type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 /// failure, should the thread end without one.
 struct Report(Option<ReportFn>);
 
-impl Report {
-    fn send(mut self, outcome: Outcome) {
-        if let Some(report) = self.0.take() {
-            report(outcome);
-        }
-    }
-}
-
 impl Drop for Report {
     fn drop(&mut self) {
         if let Some(report) = self.0.take() {
@@ -265,7 +271,7 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = Arc::clone(&stop);
     let thread = thread::spawn(move || {
-        let report = Report(Some(report));
+        let mut report = Report(Some(report));
         let (log, manifest) = (cache.join("parse.log"), cache.join("target/manifest.json"));
         let _ = fs::create_dir_all(&cache);
         // Only a manifest this run writes counts.
@@ -274,8 +280,13 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
             let err = out.try_clone()?;
             Command::new(&command[0]).args(&command[1..]).stdin(Stdio::null()).stdout(out).stderr(err).spawn()
         });
-        let first_line =
-            || fs::read_to_string(&log).ok()?.lines().find(|line| !line.trim().is_empty()).map(str::to_owned);
+        // dbt writes a banner of `=` before its `[error]` lines.
+        let first_line = || {
+            let text = fs::read_to_string(&log).ok()?;
+            let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('='));
+            let line = lines().find(|line| line.starts_with("[error]")).or_else(|| lines().next())?;
+            Some(format!("{line} (see {})", log.display()))
+        };
         let failure = match spawned.map(|child| finish(child, deadline, &stopped)) {
             Ok(Some(status)) if status.success() => None,
             Ok(Some(status)) => Some(first_line().unwrap_or_else(|| format!("dbt parse {status}"))),
@@ -283,7 +294,9 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
             Err(error) => Some(format!("cannot run {}: {error}", command[0])),
         };
         let manifest = fs::read_to_string(&manifest).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        report.send(Outcome { index: manifest.as_ref().map(Index::of), failure });
+        if let Some(report) = report.0.take() {
+            report(Outcome { index: manifest.as_ref().map(Index::of), failure });
+        }
     });
     Running { stop, thread: Some(thread) }
 }
@@ -371,6 +384,14 @@ mod tests {
         assert!(!packages_settled(&dir), "a hub package with no lock");
         fs::write(dir.join("package-lock.yml"), "packages: []\n").unwrap();
         assert!(packages_settled(&dir), "a lock no older than packages.yml");
+        let older = std::time::SystemTime::now() - Duration::from_secs(3600);
+        File::options().write(true).open(dir.join("package-lock.yml")).unwrap().set_modified(older).unwrap();
+        assert!(!packages_settled(&dir), "a lock older than packages.yml");
+        fs::write(dir.join("packages.yml"), "# packages:\n#   - package: dbt-labs/dbt_utils\n").unwrap();
+        fs::remove_file(dir.join("package-lock.yml")).unwrap();
+        assert!(packages_settled(&dir), "comments only name no package");
+        fs::write(dir.join("dependencies.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n").unwrap();
+        assert!(!packages_settled(&dir), "a hub package in dependencies.yml");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -394,16 +415,28 @@ mod tests {
                     "original_file_path": "analyses/counts.sql", "config": {}},
                 "test.shop.not_null_orders_id.1": {"unique_id": "test.shop.not_null_orders_id.1", "resource_type": "test",
                     "package_name": "shop", "attached_node": "model.shop.orders", "relation_name": null,
-                    "original_file_path": "models/marts/_marts.yml", "config": {}}
+                    "original_file_path": "models/marts/_marts.yml", "config": {}},
+                "test.shop.unique_raw_customers_id.2": {"unique_id": "test.shop.unique_raw_customers_id.2",
+                    "resource_type": "test", "package_name": "shop", "attached_node": null,
+                    "depends_on": {"nodes": ["source.shop.raw.customers"]}, "original_file_path": "models/s.yml", "config": {}},
+                "model.shop.dim.v1": {"unique_id": "model.shop.dim.v1", "name": "dim", "resource_type": "model",
+                    "package_name": "shop", "version": 1, "latest_version": 2, "relation_name": "v1", "config": {}},
+                "model.shop.dim.v2": {"unique_id": "model.shop.dim.v2", "name": "dim", "resource_type": "model",
+                    "package_name": "shop", "version": 2, "latest_version": 2, "relation_name": "v2",
+                    "config": {"materialized": "incremental", "unique_key": ["id", "day"]}}
             },
             "sources": {
                 "source.shop.raw.customers": {"unique_id": "source.shop.raw.customers", "name": "customers",
                     "source_name": "raw", "resource_type": "source", "package_name": "shop",
                     "relation_name": "\"shop\".\"main\".\"raw_customers\"", "loaded_at_field": "_loaded_at",
-                    "freshness": {"warn_after": {"count": 1, "period": "day"}}, "config": {}}
+                    "freshness": {"warn_after": {"count": 1, "period": "day"}}, "config": {}},
+                "source.shop.raw.orders": {"unique_id": "source.shop.raw.orders", "name": "orders",
+                    "source_name": "raw", "resource_type": "source", "package_name": "shop", "relation_name": "o",
+                    "freshness": {"error_after": {"count": null, "period": null}, "warn_after": {"count": null, "period": null}},
+                    "config": {}}
             },
             "disabled": {"model.shop.off": [{"unique_id": "model.shop.off", "name": "off", "resource_type": "model",
-                "package_name": "shop", "relation_name": null, "config": {"materialized": "table"}}]},
+                "package_name": "shop", "relation_name": "\"shop\".\"main\".\"off\"", "config": {"materialized": "table"}}]},
             "groups": {"group.shop.finance": {"name": "finance", "owner": {"name": "Ana", "email": "ana@example.invalid"}}}
         })
     }
@@ -417,6 +450,9 @@ mod tests {
         assert_eq!(index.node("model.shop.eph").unwrap()["relation"], Value::Null);
         assert_eq!(index.node("analysis.shop.counts").unwrap()["relation"], Value::Null, "an analysis is never built");
         assert_eq!(index.node("model.shop.off").unwrap()["disabled"], json!(true));
+        assert_eq!(index.node("model.shop.off").unwrap()["relation"], Value::Null, "dbt builds no disabled node");
+        let customers = index.node("source.shop.raw.customers").unwrap();
+        assert_eq!(customers["tests"], json!(["test.shop.unique_raw_customers_id.2"]), "a test on a source");
         assert_eq!(index.node("source.shop.raw.customers").unwrap()["relation"], "\"shop\".\"main\".\"raw_customers\"");
     }
 
@@ -430,6 +466,8 @@ mod tests {
         assert_eq!(id(index.named(&theirs)).as_deref(), Some("model.utils.orders"));
         let customers = Target::Source { source: "raw".into(), table: "customers".into() };
         assert_eq!(id(index.named(&customers)).as_deref(), Some("source.shop.raw.customers"));
+        let dim = Target::Ref { package: None, name: "dim".into() };
+        assert_eq!(id(index.named(&dim)).as_deref(), Some("model.shop.dim.v2"), "the latest version");
         assert_eq!(id(index.of_file("models/marts/orders.sql")).as_deref(), Some("model.shop.orders"));
         assert_eq!(index.of_file("models/marts/_marts.yml").map(|_| ()), Some(()), "one test only");
         assert_eq!(index.of_file("models/orders.sql"), None, "a package's file");
@@ -456,7 +494,10 @@ mod tests {
         );
         assert_eq!(index.summary(index.node("model.shop.eph").unwrap()), "model ephemeral, no relation");
         let source = index.summary(index.node("source.shop.raw.customers").unwrap());
-        assert_eq!(source, "source, \"shop\".\"main\".\"raw_customers\", freshness, loaded at _loaded_at");
+        assert_eq!(source, "source, \"shop\".\"main\".\"raw_customers\", freshness, loaded at _loaded_at\n1 test");
+        assert_eq!(index.summary(index.node("source.shop.raw.orders").unwrap()), "source, o", "no freshness set");
+        let dim = index.summary(index.node("model.shop.dim.v2").unwrap());
+        assert_eq!(dim, "model incremental unique key id, day, v2\nversion 2");
         assert_eq!(index.summary(index.node("model.shop.off").unwrap()), "model table, no relation\ndisabled");
     }
 
@@ -475,10 +516,19 @@ mod tests {
         let started = Instant::now();
         let killed = start(words(&["sleep", "30"]), dir.clone(), Duration::from_millis(200), report(sender.clone()));
         let late = outcomes.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(late.index.is_none(), "a manifest left by an earlier run does not count");
         assert!(late.failure.unwrap().contains("deadline") && started.elapsed() < Duration::from_secs(3));
         killed.stop();
-        start(words(&["sleep", "30"]), dir.clone(), Duration::from_secs(60), report(sender)).stop();
+        start(words(&["sleep", "30"]), dir.clone(), Duration::from_secs(60), report(sender.clone())).stop();
         assert!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap().contains("stopped"));
+        let banner = "echo; echo '======= Errors and Warnings ======='; echo '[error] Compilation failed'; exit 1";
+        let failing = start(words(&["sh", "-c", banner]), dir.clone(), Duration::from_secs(10), report(sender));
+        let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
+        failing.stop();
+        assert!(
+            failure.starts_with("[error] Compilation failed (see ") && failure.ends_with("parse.log)"),
+            "{failure}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }
