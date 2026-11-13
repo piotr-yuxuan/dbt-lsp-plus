@@ -398,9 +398,12 @@ impl<W: Write> Proxy<W> {
         let uri = params.pointer("/textDocument/uri").and_then(Value::as_str);
         let Some(path) = self.local_path(uri) else { return };
         // A file changed since the last run: its failures may no longer hold.
+        // Where the server has diagnostics, their ranges are of the text
+        // before the edit, which the client has moved: its next publication
+        // drops the failures instead.
         if matches!(method, "textDocument/didChange" | "textDocument/didSave") {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
-            if self.diagnostics.failures.remove(&path).is_some() {
+            if self.diagnostics.failures.remove(&path).is_some() && !self.diagnostics.server.contains_key(&path) {
                 self.publish(&path);
             }
         }
@@ -1015,9 +1018,11 @@ impl<W: Write> Proxy<W> {
                 if now.0.is_none() || now.1.is_none() || seen.as_ref() == Some(&now) {
                     continue;
                 }
-                // A file read while dbt writes it is read again next time.
-                let (Some(found), Some(index)) = (read(&results), read(&manifest)) else { continue };
+                // A file read while dbt writes it changes again when dbt has
+                // written it: it is read then, not every second meanwhile.
                 seen = Some(now);
+                let Some(found) = read(&results) else { continue };
+                let Some(index) = read(&manifest) else { continue };
                 let written = now.0.and_then(|(time, _)| time).unwrap_or(SystemTime::UNIX_EPOCH);
                 if events.send(Event::Runs(runs::failures(&found, &index), written)).is_err() {
                     return;
