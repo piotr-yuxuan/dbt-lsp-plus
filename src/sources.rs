@@ -514,10 +514,19 @@ models:
         assert!(rename(&project, &customers, "", Encoding::Utf16, &uri).unwrap_err().contains("empty"));
         let missing = Target::Table { source: "raw".into(), table: "nowhere".into() };
         assert!(rename(&project, &missing, "x", Encoding::Utf16, &uri).unwrap_err().contains("declared nowhere"));
-        let flow = [("dbt_project.yml", PROJECT), ("models/s.yml", "sources:\n  - {name: s, tables: [{name: t}]}\n")];
+        let flow = [
+            ("dbt_project.yml", PROJECT),
+            ("models/s.yml", "sources:\n  - {name: s, tables: [{name: t}]}\n"),
+            (
+                "models/j.yml",
+                "{\n  \"sources\": [\n    {\n      \"name\": \"j\",\n      \"tables\": [\n        {\n          \"name\": \"k\",\n          \"description\": \"x\"\n        }\n      ]\n    }\n  ]\n}\n",
+            ),
+        ];
         let (flow_dir, project) = scratch_project("flow", &flow);
         let t = Target::Table { source: "s".into(), table: "t".into() };
         assert!(rename(&project, &t, "u", Encoding::Utf16, &uri).unwrap_err().contains("flow style"));
+        let k = Target::Table { source: "j".into(), table: "k".into() };
+        assert!(rename(&project, &k, "u", Encoding::Utf16, &uri).unwrap_err().contains("flow style"), "JSON");
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&flow_dir).unwrap();
     }

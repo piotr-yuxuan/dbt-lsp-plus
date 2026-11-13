@@ -182,7 +182,9 @@ fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(St
     let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
     let before_key =
         text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
-    let block = before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
+    // A document in flow style, such as JSON, spans lines that look like blocks.
+    let flow_document = text.trim_start().starts_with(['{', '[']);
+    let block = !flow_document && before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
     let newline = ["\r\n", "\r"].into_iter().find(|newline| text[line_end..].starts_with(newline)).unwrap_or("\n");
     Some((value, range, Insertion { at: line_end, newline, indent: *key_column, block }))
 }
