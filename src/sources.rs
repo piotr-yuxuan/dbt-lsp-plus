@@ -260,6 +260,17 @@ pub fn rename(
     for (path, at, line) in kept_relation(target, &declared)? {
         edits.entry(path).or_default().push((at..at, line));
     }
+    // A flow collection may span lines that look like blocks: a YAML file must
+    // still parse once edited, last edit first.
+    for (path, file_edits) in edits.iter().filter(|(path, _)| is_yaml(path)) {
+        let mut text = project.texts.get(path).cloned().unwrap_or_default();
+        let mut file_edits: Vec<_> = file_edits.iter().collect();
+        file_edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        file_edits.into_iter().for_each(|(range, new_text)| text.replace_range(range.clone(), new_text));
+        if yaml::parse(&text).is_none() {
+            return Err(format!("the rename would leave {} invalid: rename it by hand", path.display()));
+        }
+    }
     let changes = edits.into_iter().map(|(path, edits)| {
         let text = project.texts.get(&path).map_or("", String::as_str);
         let edits = edits
@@ -452,8 +463,11 @@ models:
         let texts = apply(&project, &rename(&project, &views, "visits", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: 'visits'\n        identifier: \"page views\"\n"));
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
-        let texts = apply(&project, &rename(&project, &customers, "a: b", Encoding::Utf16, &uri).unwrap());
-        assert!(texts["_sources.yml"].contains("      - name: \"a: b\"\n        identifier: customers\n"));
+        let texts = apply(&project, &rename(&project, &customers, "my table", Encoding::Utf16, &uri).unwrap());
+        assert!(texts["_sources.yml"].contains("      - name: \"my table\"\n        identifier: customers\n"));
+        // In the plain value `to: source('raw', 'a: b')`, `: ` would end the scalar.
+        let error = rename(&project, &customers, "a: b", Encoding::Utf16, &uri).unwrap_err();
+        assert!(error.contains("_models.yml invalid"), "{error}");
         for (new, written) in [("null", "\"null\""), ("On", "\"On\""), ("nothing", "nothing")] {
             let texts = apply(&project, &rename(&project, &customers, new, Encoding::Utf16, &uri).unwrap());
             assert!(texts["_sources.yml"].contains(&format!("      - name: {written}\n")), "{new}: {texts:?}");
@@ -550,6 +564,33 @@ models:
         assert!(texts["m.sql"].contains("source(\"raw\", \"it's\")"), "{texts:?}");
         assert!(texts["_sources.yml"].contains("- name: \"it's\""), "{texts:?}");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_a_rename_that_would_leave_invalid_yaml() {
+        let cases = [
+            (
+                "flow-tables",
+                "sources:\n  - name: s\n    tables: [\n      {\n        name: t,\n        description: x\n      }\n    ]\n",
+                Target::Table { source: "s".into(), table: "t".into() },
+            ),
+            (
+                "flow-last",
+                "sources:\n  - name: s\n    tables: [\n      {\n        description: x,\n        name: t\n      }\n    ]\n",
+                Target::Table { source: "s".into(), table: "t".into() },
+            ),
+            (
+                "flow-source",
+                "sources:\n  - {\n    name: raw,\n    tables: [{name: t, identifier: t}]}\n",
+                Target::Source { source: "raw".into() },
+            ),
+        ];
+        for (name, yaml, target) in cases {
+            let (dir, project) = scratch_project(name, &[("dbt_project.yml", PROJECT), ("models/s.yml", yaml)]);
+            let error = rename(&project, &target, "u", Encoding::Utf16, &uri).unwrap_err();
+            assert!(error.contains("invalid") || error.contains("flow style"), "{name}: {error}");
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
