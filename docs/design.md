@@ -173,8 +173,9 @@ minutes, so only a unit test of the abandonment covers it.
   or a backslash.  An unquoted YAML value is written plain when it is a plain
   identifier, else double-quoted.
 - A rename is refused, never applied in part, when the source is declared
-  nowhere, or in several packages, or in flow style (`{name: t}`), where no
-  line can go.
+  nowhere, or in several packages, or in an installed package, whose files
+  `dbt deps` overwrites and whose name a root `overrides:` would keep, or in
+  flow style (`{name: t}`), where no line can go.
 - Without a server, the proxy announces references and rename too, for
   sources; on anything else they fail as other requests do.
 

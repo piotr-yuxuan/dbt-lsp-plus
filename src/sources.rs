@@ -122,10 +122,12 @@ fn yaml_scalar(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The text that replaces the name at RANGE of TEXT with NEW: the name alone
-/// inside its quotes, which it must not hold; a YAML scalar where unquoted.
+/// The text that replaces the name at RANGE of TEXT with NEW, which must not
+/// be empty: the name alone inside its quotes, which it must not hold; a
+/// YAML scalar where unquoted.
 fn replacement(text: &str, range: &Range<usize>, new: &str) -> Result<String, String> {
     match text[..range.start].chars().next_back().filter(|c| matches!(c, '\'' | '"')) {
+        _ if new.is_empty() => Err("the new name is empty".into()),
         Some(quote) if new.contains([quote, '\\']) => Err(format!("the new name cannot hold {quote} or \\ here")),
         Some(_) => Ok(new.to_owned()),
         None => Ok(yaml_scalar(new)),
@@ -161,15 +163,18 @@ fn kept_relation(target: &Target, declared: &[&SourceTable]) -> Result<BTreeSet<
 /// keeps the warehouse relation it names, or the reason it cannot.
 pub fn rename(project: &Project, target: &Target, new: &str, encoding: Encoding) -> Result<Value, String> {
     let declared: Vec<&SourceTable> = project.sources.iter().filter(|declared| declares(declared, target)).collect();
-    let packages: BTreeSet<&str> = declared.iter().map(|declared| declared.package.as_str()).collect();
-    match packages.len() {
-        0 => return Err("this source is declared nowhere in the project".into()),
-        1 => {}
+    let packages: Vec<&str> =
+        declared.iter().map(|declared| declared.package.as_str()).collect::<BTreeSet<_>>().into_iter().collect();
+    match packages.as_slice() {
+        [] => return Err("this source is declared nowhere in the project".into()),
+        // `dbt deps` overwrites an installed package's files; a root `overrides:` would keep the old name.
+        [package] if *package != project.root_package => {
+            return Err(format!("this source is declared in the installed package {package}: rename it there"));
+        }
+        [_] => {}
         _ => return Err(format!("this source is declared in several packages: {packages:?}")),
     }
-    if new.is_empty() {
-        return Err("the new name is empty".into());
-    }
+    // Every declaration is an occurrence, so `replacement` judges NEW at least once.
     let mut edits: BTreeMap<PathBuf, Vec<(Range<usize>, String)>> = BTreeMap::new();
     for found in occurrences(project, target) {
         let text = project.texts.get(&found.path).map_or("", String::as_str);
@@ -371,7 +376,7 @@ models:
         let (_, project) = shop("refusals");
         let customers = Target::Table { source: "raw".into(), table: "customers".into() };
         assert!(rename(&project, &customers, "it's", Encoding::Utf16).unwrap_err().contains("cannot hold '"));
-        assert!(rename(&project, &customers, "", Encoding::Utf16).is_err());
+        assert!(rename(&project, &customers, "", Encoding::Utf16).unwrap_err().contains("empty"));
         let missing = Target::Table { source: "raw".into(), table: "nowhere".into() };
         assert!(rename(&project, &missing, "x", Encoding::Utf16).unwrap_err().contains("declared nowhere"));
         let flow = [("dbt_project.yml", PROJECT), ("models/s.yml", "sources:\n  - {name: s, tables: [{name: t}]}\n")];
@@ -391,6 +396,20 @@ models:
         let (_, project) = scratch_project("two-packages", &files);
         let t = Target::Table { source: "s".into(), table: "t".into() };
         assert!(rename(&project, &t, "u", Encoding::Utf16).unwrap_err().contains("several packages"));
+    }
+
+    #[test]
+    fn refuses_a_source_of_an_installed_package_even_overridden() {
+        let files = [
+            ("dbt_project.yml", PROJECT),
+            ("models/s.yml", "sources:\n  - name: s\n    overrides: q\n    tables:\n      - name: t\n"),
+            ("models/m.sql", "select * from {{ source('s', 't') }}"),
+            ("dbt_packages/q/dbt_project.yml", "name: q\n"),
+            ("dbt_packages/q/models/s.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
+        ];
+        let (_, project) = scratch_project("installed-package", &files);
+        let t = Target::Table { source: "s".into(), table: "t".into() };
+        assert!(rename(&project, &t, "u", Encoding::Utf16).unwrap_err().contains("installed package q"));
     }
 
     #[test]
