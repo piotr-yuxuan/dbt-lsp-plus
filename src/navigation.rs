@@ -288,7 +288,8 @@ models:
                 ("analyses/a.sql", "select 1"),
                 (
                     "macros/tests.sql",
-                    "{% macro is_even() %}{% endmacro %}\n{% test is_even(model, column_name) %}\nselect 1\n{% endtest %}\n\
+                    "{% macro is_even() %}{% endmacro %}\n\
+                     {% test is_even(model, column_name) %}\nselect 1\n{% endtest %}\n\
                      {% test unique(model, column_name) %}\nselect 1\n{% endtest %}\n",
                 ),
                 ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
@@ -298,7 +299,8 @@ models:
                 ("dbt_packages/pkg/models/_sources.yml", SOURCES),
                 (
                     "dbt_packages/pkg/models/docs.md",
-                    "{% docs order_status %}\nThe package's.\n{% enddocs %}\n{% docs pkg_only %}\nOnly here.\n{% enddocs %}\n",
+                    "{% docs order_status %}\nThe package's.\n{% enddocs %}\n\
+                     {% docs pkg_only %}\nOnly here.\n{% enddocs %}\n",
                 ),
                 (
                     "dbt_packages/pkg/macros/m.sql",

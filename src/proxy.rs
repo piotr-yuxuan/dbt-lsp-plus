@@ -466,7 +466,8 @@ impl<W: Write> Proxy<W> {
             .iter()
             .map(|found| {
                 let index = LineIndex::new(project.texts.get(&found.path).map_or("", String::as_str));
-                json!({"uri": uri_of(&found.path), "range": index.range(found.range.start, found.range.end, self.encoding)})
+                let range = index.range(found.range.start, found.range.end, self.encoding);
+                json!({"uri": uri_of(&found.path), "range": range})
             })
             .collect();
         Some(Ok(match &locations[..] {
