@@ -107,13 +107,15 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec
 }
 
 /// The tables of the `sources:` of a properties file of PACKAGE, each placed
-/// at its name.  A file that is not valid YAML has none.
+/// at its name.  A file that is not valid YAML has none, and a source that
+/// `overrides` a package's has none of its own: dbt patches the package's.
 fn source_tables(package: &str, path: &Path, text: &str) -> Vec<Entity> {
     let Some(root) = yaml::parse(text) else { return Vec::new() };
     let index = LineIndex::new(text);
     let mut found = Vec::new();
     for source in root.get("sources").map_or(&[][..], Node::items) {
-        let Some(source_name) = source.get("name").and_then(Node::as_str) else { continue };
+        let own = source.get("name").and_then(Node::as_str).filter(|_| source.get("overrides").is_none());
+        let Some(source_name) = own else { continue };
         for table in source.get("tables").map_or(&[][..], Node::items) {
             let Some(Node::Scalar { value, line, column }) = table.get("name") else { continue };
             // The name as written: inside its quotes, escapes included, else as long as its value.
@@ -383,6 +385,28 @@ mod tests {
         let bommed = project.entities.iter().find(|e| e.id == "macro.bom.bommed").unwrap();
         assert_eq!(project.texts[&bommed.path], macro_text);
         assert_eq!(bommed.name_range, 9..15);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_source_that_overrides_a_package_s_is_the_package_s() {
+        let dir = scratch_project(
+            "overrides",
+            &[
+                ("dbt_project.yml", "name: p\n"),
+                (
+                    "models/_sources.yml",
+                    "sources:\n  - name: stripe\n    overrides: q\n    tables:\n      - name: charge\n",
+                ),
+                ("dbt_packages/q/dbt_project.yml", "name: q\n"),
+                (
+                    "dbt_packages/q/models/_sources.yml",
+                    "sources:\n  - name: stripe\n    tables:\n      - name: charge\n",
+                ),
+            ],
+        );
+        let project = scan(&dir, &HashMap::new()).unwrap();
+        assert_eq!(sorted_ids(&project), ["source.q.stripe.charge"]);
         fs::remove_dir_all(&dir).unwrap();
     }
 
