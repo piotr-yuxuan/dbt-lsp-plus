@@ -1352,6 +1352,27 @@ fn no_parse_after_shutdown_nor_after_a_crash() {
 }
 
 #[test]
+fn a_parse_wanted_before_a_compilation_does_not_start_after_shutdown() {
+    let (mut session, log) =
+        Session::fake("parse-wanted-shutdown", json!({"manifest": manifest(), "hold_compile": true}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    session.notify("test/compile", json!({}));
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    // A change, then a hover that wants the parse its compilation allows.
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    barrier(&mut session);
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    session.notify("test/compile", json!({}));
+    parses_stay(&log, 1);
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+}
+
+#[test]
 fn a_parse_waits_for_the_server_to_compile_after_a_change() {
     let (mut session, log) = Session::fake("parse-held", json!({"manifest": manifest(), "hold_compile": true}));
     session.initialize(&fixture());
