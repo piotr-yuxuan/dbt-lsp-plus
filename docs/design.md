@@ -49,7 +49,10 @@ owns all state and writes both outputs.
   - the answer to `initialize`, to which the proxy adds the capabilities
     the server lacks (`documentSymbolProvider`, `workspaceSymbolProvider`,
     `callHierarchyProvider`), and whose `positionEncoding` it adopts
-    (UTF-16 when absent, as with 2.0.9);
+    (UTF-16 when absent, as with 2.0.9), and its `experimental.dbtLspPlus`
+    and its command `dbt-lsp-plus.nodeInfo`;
+  - the answer to a hover on a `ref` or a `source`, which gets a summary
+    first (see "Node information and hover");
   - the answers to the proxy's own requests, which never reach the client.
 - References and renames stay the server's, but on a source the server
   answers them with nothing: the proxy answers those requests itself, when
@@ -270,8 +273,16 @@ So the proxy runs the user's own `dbt parse`.
   1 and still writes a manifest of what it parsed; one that fails on the
   profile or an `env_var` writes none.
 - The manifest's `relation_name` is quoted by the adapter, null for an
-  ephemeral model and for tests, set for analyses, which are never built; a
-  disabled node is only under `disabled`; an owner is its group's.
+  ephemeral model and for tests, set for analyses and disabled nodes, which
+  are never built; a disabled node is only under `disabled`; an owner is
+  its group's; a source with no freshness has null counts under
+  `warn_after` and `error_after`; a test on a source, or a singular test,
+  has no `attached_node`, only `depends_on`; a composite `unique_key` is an
+  array; each version of a versioned model is a node of its own.
+- The server's hover on a `ref` is markdown with no range, starting with the
+  description and the parents and children; on a `source()`, a column, a
+  macro call or a comment it answers null.  The fake does not model this:
+  each test that hovers scripts the server's answer.
 
 ### How the proxy runs it
 
@@ -285,19 +296,27 @@ So the proxy runs the user's own `dbt parse`.
   gets no parse.  The working directory and the environment are the
   proxy's.
 - The child: no input; both outputs in `parse.log` in the cache, never on
-  the client's channel.  A thread waits on it and reports to the event loop;
-  it is killed past two minutes, and at `exit` or when the client closes.
-  Only the direct child is killed: a launcher's grandchild may outlive it.
+  the client's channel; a failure names that file and gives dbt's first
+  `[error]` line, past the banner it writes.  A thread waits on it and
+  reports to the event loop; it is killed past two minutes, and at `exit`
+  or when the client closes.  Only the direct child is killed: a launcher's
+  grandchild may outlive it.
 - When: lazily.  A change of the client's marks the index stale; a
   `nodeInfo` or a hover that finds it stale starts a parse, and is answered
   from the last index meanwhile.  A parse starts only when the server has
   compiled since the change, so that dbt has resolved the packages itself,
   when every package is local or `package-lock.yml` is no older than the
-  file naming the packages, with a server and before `shutdown`; one at a
-  time.  A reason it cannot start, or a failure, is logged once with
-  `window/logMessage`.
+  file naming the packages (an empty or comment-only file names none), with
+  a server and before `shutdown`; one at a time.  When nothing has compiled
+  since the change, the request makes the proxy list the graph, which makes
+  dbt lsp compile: dbt lsp compiles only after a document opens, and an
+  agent may ask for a node without opening one.  A reason a parse cannot
+  start, or a failure, is logged once with `window/logMessage`, and never
+  after `shutdown`.
 - The cache: `$XDG_CACHE_HOME/dbt-lsp-plus/<hash of the root and the
-  command>/<pid>/`, else under `~/.cache`, removed at exit; the manifest is
+  command>/<pid>/`, else under `~/.cache`, an empty or relative value being
+  ignored; removed at exit, and those of dead processes, as a proxy killed
+  by a signal leaves, removed when the next one starts; the manifest is
   deleted before each run, so that only one this run wrote counts.
 - The index: the manifest's nodes, sources, disabled nodes and groups, with
   `relation` (dbt's `relation_name`, null for an analysis) and `tests` (the
@@ -310,8 +329,10 @@ So the proxy runs the user's own `dbt parse`.
   server's `executeCommandProvider.commands`: arguments `[uniqueId]` or
   `[{uri, position}]`, a position naming the `ref` or `source` under it,
   else the one node its file defines.  The result is the manifest's node,
-  null for no node, and error -32803 with the reason before any parse has
-  finished.
+  null for no node, and error -32803 with the reason until a first parse
+  has finished; after that, the last index answers, and a later failure is
+  only logged.  A position names the call under it in SQL inside Jinja, and
+  in YAML or a Python model outside it.
 - A hover is the one method that is forwarded and augmented: on a `ref` or
   `source` argument, resolved from the document's text when the request
   arrives, the server's answer gets the node's summary first, then a rule;
@@ -334,7 +355,7 @@ So the proxy runs the user's own `dbt parse`.
 | A body is not JSON | Forwarded unchanged |
 | A header is malformed, or a body is longer than 64 MiB | The stream stops: the frame boundary is lost |
 | `exit` | Forwarded; the server has two seconds to exit before it is killed, and a parse under way is killed.  The proxy exits 0 after `shutdown`, else 1 |
-| `dbt parse` fails, or cannot start | The index keeps what it had, laid over by what a failed run still wrote; the reason is logged once and given by `nodeInfo` |
+| `dbt parse` fails, or cannot start | The index keeps what it had, laid over by what a failed run still wrote; the reason is logged once, and given by `nodeInfo` until a first index exists |
 
 The server is not restarted after a crash.
 
@@ -369,8 +390,9 @@ The server is not restarted after a crash.
   counts as a reference, and a rename edits it.
 - `selectors.yml` and selectors on the command line name a source as
   `source:s.t`; a rename leaves them on the old name.
-- A `ref` with no package names the root project's node first, then any:
-  for a versioned model it names one of the versions, not dbt's latest.
+- A `ref` with no package names the root project's node first, then any,
+  and a versioned model's latest version; a `ref` that names a version
+  (`v=2`) still names the latest.
 - Killing a parse kills `dbt` itself, or the launcher before it (`uvx`,
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
