@@ -9,7 +9,8 @@
 
 use crate::support::{Session, copy_fixture, uri};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[test]
@@ -21,6 +22,9 @@ fn in_front_of_the_real_dbt_lsp() {
     std::fs::create_dir_all(&home).unwrap();
     let project_arg = project.to_string_lossy().into_owned();
     let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
+    // DO_NOT_TRACK does not stop the telemetry of dbt 2.0.9; this flag does.
+    let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
+    let before = paths(&project);
     // An empty environment but for PATH and these, run in the project: dbt
     // writes nowhere else.
     let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
@@ -45,8 +49,47 @@ fn in_front_of_the_real_dbt_lsp() {
     let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
     recorded_observations(&mut session, &result);
+    node_information(&mut session, &project);
     rename_a_source_table_and_compile(&mut session, &project);
     assert!(session.finish().success());
+    let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
+    assert!(added.is_empty(), "the project gained {added:?}");
+}
+
+/// Every path under DIR, relative to it, but dbt lsp's own `target/` and
+/// `logs/`.
+fn paths(dir: &Path) -> BTreeSet<PathBuf> {
+    let mut found = BTreeSet::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        for path in std::fs::read_dir(&next).into_iter().flatten().flatten().map(|entry| entry.path()) {
+            let relative = path.strip_prefix(dir).unwrap().to_owned();
+            if relative == Path::new("target") || relative == Path::new("logs") {
+                continue;
+            }
+            if path.is_dir() && !path.is_symlink() {
+                pending.push(path);
+            }
+            found.insert(relative);
+        }
+    }
+    found
+}
+
+/// The proxy's own `dbt parse`: a node's information and the summary on a
+/// hover of its ref.
+fn node_information(session: &mut Session, project: &Path) {
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let orders = session.poll(Duration::from_secs(120), request, |result| result.is_object());
+    assert_eq!(orders["config"]["materialized"], "table", "{orders}");
+    assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
+    let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_ref);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
+    assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
+    let kept = value.split_once("\n\n---\n\n").map(|(_, server)| server.trim());
+    assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
 }
 
 /// The proxy's outline and folding of a model, and the server's hover through it.

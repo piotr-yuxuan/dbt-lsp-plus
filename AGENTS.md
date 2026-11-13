@@ -34,6 +34,7 @@ src/project.rs                the resources of a project and its packages
 src/graph.rs                  the dependency graph: scanned, then the server's
 src/sources.rs                references and renames of sources
 src/features.rs               the answers of the added features, as LSP JSON
+src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
@@ -68,4 +69,10 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     its own;
   - `sources::argument_naming`: which argument of a call names a target;
   - `yaml::Node::shares`: a walk of the tree, which needs a function of its
-    own to recurse.
+    own to recurse;
+  - `Proxy::node_info`, `Proxy::remember` and `Proxy::handle`: the answer of
+    the proxy's command; what the proxy keeps of a forwarded request apart
+    from where it goes; one event's dispatch apart from the waiting with
+    the listing's deadline;
+  - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
+    outcome and its end, each the end of a resource, as `stop_server`.

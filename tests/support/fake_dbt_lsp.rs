@@ -28,13 +28,23 @@
 //!     whose requests wait for the notification `test/release`;
 //!   - `exit_on`, a method on which the server exits with status 3, and
 //!     `hang_on`, one on which it stops, neither reading nor exiting;
+//!   - `hold_compile`, true when it announces no compilation until the
+//!     notification `test/compile`;
+//!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
+//!     `manifest`, written as `manifest.json` under `--target-path`;
+//!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
+//!     waits for before writing; `parse_hang`, true when it never exits;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
-//!   appended as one line.
+//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID}`
+//!   to that file's name followed by `.parses`, since two processes
+//!   appending to one file could interleave their lines.
 
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 const LISTING: &str = "workspace/executeCommand dbt.listNodes";
 
@@ -126,11 +136,12 @@ impl Fake {
             _ => json!({"echo": method, "params": params}),
         };
         let answer = once.or_else(|| self.script["answers"].get(key).cloned()).unwrap_or(default);
-        if listing {
+        let compiling = listing && self.script["hold_compile"] != json!(true);
+        if compiling {
             compile_start();
         }
         send(json!({"id": id, "result": answer}));
-        if listing {
+        if compiling {
             compile_complete();
         }
     }
@@ -156,14 +167,46 @@ impl Fake {
                 }
                 false
             }
+            "test/compile" => {
+                compile_start();
+                compile_complete();
+                false
+            }
             "exit" => std::process::exit(0),
             _ => method == "textDocument/didSave",
         };
-        if compiles {
+        if compiles && self.script["hold_compile"] != json!(true) {
             compile_start();
             compile_complete();
         }
     }
+}
+
+/// `dbt parse` as the script plays it, with the arguments ARGUMENTS.
+fn parse(script: &Value, arguments: &[String], log: Option<File>) {
+    if let Some(mut log) = log {
+        let line = json!({"parse": arguments, "pid": std::process::id()});
+        writeln!(log, "{line}").expect("write the log");
+    }
+    // dbt writes on both outputs, which must never reach the client: this
+    // noise is a frame whose body is not JSON, which a client would show.
+    print!("Content-Length: 5\r\n\r\nnoise");
+    eprintln!("noise on stderr");
+    if let Some(gate) = script["parse_gate"].as_str() {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !Path::new(gate).exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    while script["parse_hang"] == json!(true) {
+        std::thread::park();
+    }
+    let target = arguments.iter().position(|argument| argument == "--target-path").map(|at| &arguments[at + 1]);
+    if let (Some(target), Some(manifest)) = (target, script.get("manifest")) {
+        std::fs::create_dir_all(target).expect("create the target");
+        std::fs::write(Path::new(target).join("manifest.json"), manifest.to_string()).expect("write the manifest");
+    }
+    std::process::exit(script["parse_exit"].as_i64().unwrap_or(0) as i32);
 }
 
 fn main() {
@@ -173,9 +216,15 @@ fn main() {
             serde_json::from_str(&std::fs::read_to_string(path).expect("read the script")).expect("parse the script")
         })
         .unwrap_or(json!({}));
-    let mut log = std::env::var("FAKE_DBT_LSP_LOG")
-        .ok()
-        .map(|path| OpenOptions::new().create(true).append(true).open(path).expect("open the log"));
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let parsing = arguments.first().map(String::as_str) == Some("parse");
+    let mut log = std::env::var("FAKE_DBT_LSP_LOG").ok().map(|path| {
+        let path = if parsing { format!("{path}.parses") } else { path };
+        OpenOptions::new().create(true).append(true).open(path).expect("open the log")
+    });
+    if parsing {
+        return parse(&script, &arguments, log);
+    }
     let mut fake = Fake { script, opened: false, held: Vec::new() };
     let mut input = BufReader::new(io::stdin());
     while let Ok(Some(frame)) = rpc::read_frame(&mut input) {

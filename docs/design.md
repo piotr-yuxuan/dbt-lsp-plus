@@ -9,8 +9,10 @@ call hierarchy.
 
 ## Boundary
 
-- It uses only the server's interface: its messages, its announced
-  capabilities and its custom command `dbt.listNodes`.
+- It uses only the server's interface (its messages, its announced
+  capabilities and its custom command `dbt.listNodes`) and the user's own
+  dbt CLI, whose `dbt parse` gives the resolved configuration that the
+  server does not expose.
 - It unlocks nothing that dbt gates behind an account.  Column-level
   features stay as the server gives them.
 - It runs the `dbt` the user installed, and ships no part of it.
@@ -47,7 +49,10 @@ owns all state and writes both outputs.
   - the answer to `initialize`, to which the proxy adds the capabilities
     the server lacks (`documentSymbolProvider`, `workspaceSymbolProvider`,
     `callHierarchyProvider`), and whose `positionEncoding` it adopts
-    (UTF-16 when absent, as with 2.0.9);
+    (UTF-16 when absent, as with 2.0.9), and its `experimental.dbtLspPlus`
+    and its command `dbt-lsp-plus.nodeInfo`;
+  - the answer to a hover on a `ref` or a `source`, which gets a summary
+    first (see "Node information and hover");
   - the answers to the proxy's own requests, which never reach the client.
 - References and renames stay the server's, but on a source the server
   answers them with nothing: the proxy answers those requests itself, when
@@ -242,6 +247,104 @@ rename of a CTE, which the server answers with null:
   'ers'`, cannot be seen.
 - Without a server, all of these still answer.
 
+## Node information and hover
+
+dbt lsp 2.0.9 exposes neither relations nor resolved configuration:
+`dbt.listNodes` gives each node `config: {materialized, access, group}` and
+no more, and `dbt.getCurrentNode` answered null to every argument tried.
+So the proxy runs the user's own `dbt parse`.
+
+### What `dbt parse` does, observed on 2.0.9
+
+- With `--target-path` and `--log-path` under a cache, it writes its
+  manifest, `semantic_manifest`, `snapshots/`, `generic_tests/` and logs
+  there, and an empty `~/.dbt/leases/` in the home: 0.25 to 0.4 s on the
+  fixture, 2.1 s on 2,000 models and 4,000 tests.  It runs beside a running
+  `dbt lsp`.
+- When `packages.yml` names a package that is not installed, it resolves
+  packages as `dbt deps` does: online it writes `package-lock.yml` and
+  rewrites `dbt_packages/`; offline it retries the hub for about 5 s.  No
+  flag turns this off; `dbt lsp` does the same at its start.
+- It sends telemetry on every run, even with `DO_NOT_TRACK=1`, unless given
+  `--no-send-anonymous-usage-stats`, which `dbt lsp` takes too.
+- Without `--profiles-dir`, profiles are looked up in the working
+  directory, then `~/.dbt`, not in the project.
+- A run that fails on a Jinja error, an unknown `ref` or invalid YAML exits
+  1 and still writes a manifest of what it parsed; one that fails on the
+  profile or an `env_var` writes none.
+- The manifest's `relation_name` is quoted by the adapter, null for an
+  ephemeral model and for tests, set for analyses and disabled nodes, which
+  are never built; a disabled node is only under `disabled`; an owner is
+  its group's; a source with no freshness has null counts under
+  `warn_after` and `error_after`; a test on a source, or a singular test,
+  has no `attached_node`, only `depends_on`; a composite `unique_key` is an
+  array; each version of a versioned model is a node of its own.
+- The server's hover on a `ref` is markdown with no range, starting with the
+  description and the parents and children; on a `source()`, a column, a
+  macro call or a comment it answers null.  The fake does not model this:
+  each test that hovers scripts the server's answer.
+
+### How the proxy runs it
+
+- The command: the server command with its `lsp` word replaced by `parse`,
+  every word before it kept (`uvx dbt`), then from after it only
+  `--profiles-dir`, `--profile`, `--target`, `--vars` and
+  `--packages-install-path`, in either form; always `--project-dir <root>`,
+  `--target-path` and `--log-path` under the cache, `--write-json`,
+  `--no-version-check`, `--no-send-anonymous-usage-stats`,
+  `--no-manage-state` and `--quiet`.  A server command with no `lsp` word
+  gets no parse.  The working directory and the environment are the
+  proxy's.
+- The child: no input; both outputs in `parse.log` in the cache, never on
+  the client's channel; a failure names that file and gives dbt's first
+  `[error]` line, past the banner it writes.  A thread waits on it and
+  reports to the event loop; it is killed past two minutes, and at `exit`
+  or when the client closes.  Only the direct child is killed: a launcher's
+  grandchild may outlive it.
+- When: lazily.  A change of the client's marks the index stale; a
+  `nodeInfo` or a hover that finds it stale starts a parse, and is answered
+  from the last index meanwhile.  A parse starts only when the server has
+  compiled since the change, so that dbt has resolved the packages itself,
+  when every package is local or `package-lock.yml` is no older than the
+  file naming the packages (an empty or comment-only file names none), with
+  a server and before `shutdown`; one at a time.  When nothing has compiled
+  since the change, the request makes the proxy list the graph, which makes
+  dbt lsp compile: dbt lsp compiles only after a document opens, and an
+  agent may ask for a node without opening one.  A reason a parse cannot
+  start, or a failure, is logged once with `window/logMessage`, and never
+  after `shutdown`.
+- The cache: `$XDG_CACHE_HOME/dbt-lsp-plus/<hash of the root and the
+  command>/<pid>/`, else under `~/.cache`, an empty or relative value being
+  ignored; removed at exit; those beside it that no parse wrote for a day,
+  as a proxy killed by a signal leaves, removed when the next one starts
+  (asking whether a process lives would miss a home shared between hosts);
+  the manifest is
+  deleted before each run, so that only one this run wrote counts.
+- The index: the manifest's nodes, sources, disabled nodes and groups, with
+  `relation` (dbt's `relation_name`, null for an analysis) and `tests` (the
+  ids attached).  A run that fails part of the way lays its entries over the
+  last index.
+
+### What the client gets
+
+- `workspace/executeCommand` `dbt-lsp-plus.nodeInfo`, added to the
+  server's `executeCommandProvider.commands`: arguments `[uniqueId]` or
+  `[{uri, position}]`, a position naming the `ref` or `source` under it,
+  else the one node its file defines.  The result is the manifest's node,
+  null for no node, and error -32803 with the reason until a first parse
+  has finished; after that, the last index answers, and a later failure is
+  only logged.  A position names the call under it in SQL inside Jinja, and
+  in YAML or a Python model outside it.
+- A hover is the one method that is forwarded and augmented: on a `ref` or
+  `source` argument, resolved from the document's text when the request
+  arrives, the server's answer gets the node's summary first, then a rule;
+  plain text gets a blank line instead, an array of marked strings the
+  summary as its first item, a null answer the summary alone.  Elsewhere,
+  or without an index, the answer passes byte for byte.  The summary is one
+  line of what dbt builds and where, then one of what is set beyond the
+  defaults: group and owner, access when not protected, an enforced
+  contract, the version, tags, disabled, the number of tests.
+
 ## Failure modes
 
 | Situation | Behaviour |
@@ -253,7 +356,8 @@ rename of a CTE, which the server answers with null:
 | A YAML file is not valid | Its sources are left out |
 | A body is not JSON | Forwarded unchanged |
 | A header is malformed, or a body is longer than 64 MiB | The stream stops: the frame boundary is lost |
-| `exit` | Forwarded; the server has two seconds to exit before it is killed.  The proxy exits 0 after `shutdown`, else 1 |
+| `exit` | Forwarded; the server has two seconds to exit before it is killed, and a parse under way is killed.  The proxy exits 0 after `shutdown`, else 1 |
+| `dbt parse` fails, or cannot start | The index keeps what it had, laid over by what a failed run still wrote; the reason is logged once, and given by `nodeInfo` until a first index exists |
 
 The server is not restarted after a crash.
 
@@ -288,6 +392,11 @@ The server is not restarted after a crash.
   counts as a reference, and a rename edits it.
 - `selectors.yml` and selectors on the command line name a source as
   `source:s.t`; a rename leaves them on the old name.
+- A `ref` with no package names the root project's node first, then any,
+  and a versioned model's latest version; a `ref` that names a version
+  (`v=2`) still names the latest.
+- Killing a parse kills `dbt` itself, or the launcher before it (`uvx`,
+  `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
   highlights and its rename.
 
@@ -321,7 +430,13 @@ The server is not restarted after a crash.
   - references and renames of sources, and every other one left to the
     server; files the scan does not hold; the client's URI of an open
     document; the server's UTF-8; without a server; the capability that
-    tells a client which requests the proxy answers itself.
+    tells a client which requests the proxy answers itself;
+  - node information and the hover: no parse before the server compiles,
+    with packages that need the network, or without a server; one parse at
+    a time and one more after a change during it; the parse's flags and
+    cache; dbt's output kept off the client's channel; a parse killed at
+    `exit`; a node by id or by position; the summary first on a hover of a
+    ref, any other hover byte for byte.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
@@ -339,13 +454,8 @@ The server is not restarted after a crash.
 In the order of the feature list agreed with the dbt-mode session:
 
 1. Source references and rename (A4): done in plan 002.
-2. Resolved configuration (A5, A20): `dbt parse --profiles-dir <user's>
-   --target-path <cache> --log-path <cache>/logs`, debounced on save (about
-   half a second on a small project).  Then a command `dbtPlus/nodeInfo` that
-   returns the whole node, and a hover that summarises it, merged after the
-   server's own hover.  This is the first feature that needs a request to
-   wait for the server, so the event loop must hold a client request until
-   the server answers.
+2. Resolved configuration and the hover summary (A5, A20): done in plan
+   004.
 3. Folding ranges (A7), with highlights, selection ranges and CTE rename:
    done in plan 003.
 4. A cache of the scan, keyed by path, modification time and size.  The
