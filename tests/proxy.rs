@@ -851,3 +851,26 @@ fn a_source_request_counts_no_byte_order_mark() {
     assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
     assert!(session.finish().success());
 }
+
+#[test]
+fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
+    let project = copy_fixture("rename-spelling");
+    let link = project.with_file_name("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    let (mut session, _) =
+        Session::fake_with("rename-spelling-session", json!({}), &[Path::new("--project-dir"), &link], None);
+    session.initialize(&link);
+    // Opened under the resolved spelling, with an unsaved first line.
+    let model = project.join("models/staging/stg_page_views.sql");
+    let text = format!("-- unsaved\n{}", std::fs::read_to_string(&model).unwrap());
+    session.open(&model, Some(&text));
+    let at =
+        json!({"textDocument": {"uri": uri(&model)}, "position": {"line": 1, "character": 37}, "newName": "visits"});
+    let edit = session.request("textDocument/rename", at);
+    let changes = edit["result"]["changes"].as_object().unwrap_or_else(|| panic!("no edit: {edit}"));
+    let range = json!({"start": {"line": 1, "character": 35}, "end": {"line": 1, "character": 45}});
+    assert_eq!(changes[&uri(&model)], json!([{"range": range, "newText": "visits"}]));
+    assert!(!changes.contains_key(&uri(&link.join("models/staging/stg_page_views.sql"))));
+    assert!(changes.contains_key(&uri(&link.join("models/staging/_sources.yml"))));
+    assert!(session.finish().success());
+}

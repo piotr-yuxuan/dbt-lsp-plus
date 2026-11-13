@@ -108,6 +108,9 @@ struct Proxy<W: Write> {
     /// The client's requests that the server has yet to answer.
     forwarded: HashMap<String, (Value, Pending)>,
     documents: HashMap<PathBuf, String>,
+    /// The URI under which the client opened each of them, which an edit
+    /// of it must name.
+    uris: HashMap<PathBuf, String>,
     /// Whether the client opened a document, the first of which prompts a listing.
     opened: bool,
     next_id: u64,
@@ -172,6 +175,7 @@ impl<W: Write> Proxy<W> {
             initialize: None,
             forwarded: HashMap::new(),
             documents: HashMap::new(),
+            uris: HashMap::new(),
             opened: false,
             next_id: 0,
             listing: None,
@@ -282,13 +286,16 @@ impl<W: Write> Proxy<W> {
         Some(mapped().unwrap_or(path))
     }
 
-    /// Keeps the text of the open documents, for the outline of unsaved edits.
+    /// Keeps the text of the open documents, for the outline of unsaved
+    /// edits, and the URI each was opened under.
     fn track(&mut self, method: &str, params: &Value) {
-        let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else { return };
+        let uri = params.pointer("/textDocument/uri").and_then(Value::as_str);
+        let Some(path) = self.local_path(uri) else { return };
         match method {
             "textDocument/didOpen" => {
                 let text = params.pointer("/textDocument/text").and_then(Value::as_str).unwrap_or_default();
-                self.documents.insert(path, text.to_owned());
+                self.documents.insert(path.clone(), text.to_owned());
+                self.uris.insert(path, uri.unwrap_or_default().to_owned());
             }
             "textDocument/didChange" => {
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
@@ -298,6 +305,7 @@ impl<W: Write> Proxy<W> {
             }
             "textDocument/didClose" => {
                 self.documents.remove(&path);
+                self.uris.remove(&path);
             }
             _ => {}
         }
@@ -369,12 +377,13 @@ impl<W: Write> Proxy<W> {
     /// The references or the rename of the source at the request's position.
     fn on_source(&self, method: &str, params: &Value) -> Option<Result<Value, String>> {
         let Some((project, target)) = self.source_at(params) else { return Some(Ok(Value::Null)) };
+        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
         if method == "textDocument/references" {
             let declarations = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
-            return Some(Ok(sources::references(&project, &target, declarations, self.encoding)));
+            return Some(Ok(sources::references(&project, &target, declarations, self.encoding, &uri_of)));
         }
         let new = params.get("newName")?.as_str()?;
-        Some(sources::rename(&project, &target, new, self.encoding))
+        Some(sources::rename(&project, &target, new, self.encoding, &uri_of))
     }
 
     /// Answers a request that the proxy answers itself.  A refusal fails it
