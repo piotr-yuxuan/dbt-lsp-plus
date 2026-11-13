@@ -6,6 +6,7 @@ pub mod document;
 pub mod features;
 pub mod graph;
 pub mod project;
+pub mod properties;
 pub mod proxy;
 pub mod rpc;
 pub mod scan;
