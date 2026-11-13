@@ -67,9 +67,11 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     and the answer it keeps;
   - `runs::place`: where a failed node is written, apart from how it
     failed;
-  - `Proxy::on_server_response`, `Proxy::on_server_diagnostics` and
-    `Proxy::on_runs`: one handler per kind of message or event, so that
-    `on_server` and `handle` stay dispatches;
+  - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
+    `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,
+    `Proxy::on_restarted` and `Proxy::on_time`: one handler per kind of
+    message or event, so that `on_server`, `on_own_response`, `serve` and
+    `handle` stay dispatches;
   - `answered_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: what dbt lsp
     2.0.9 answers, apart from what the script makes it answer;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
