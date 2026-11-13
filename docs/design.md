@@ -243,17 +243,19 @@ is the only one searched; else a `ref` or a `source` tries the file's own
 package (the installed package whose directory holds it), then the root,
 then any, the root first under `flags:
 require_ref_searches_node_package_before_root: false`; a `doc` tries the
-root, then the file's package, then any, flag or not.  As dbt-core 1.12.6's
-parser reads them: a generic test, the file's package then the root; a
-unit test's model, the file's package; an entry, a model, seed or snapshot
-of the file's package else any, an analysis of any, a macro of the file's
-package.  The first package that has something gives one location, or every
+root, then the file's package, then any, flag or not; an entry describes a
+resource of the file's own package only, since dbt 2.0.9 calls an entry
+naming another package's resource unused (dbt-core 1.12 patches it).  As
+dbt-core 1.12.6's parser reads them: a generic test, the file's package
+then the root; a unit test's model, the file's package.  The first package
+that has something gives one location, or every
 declaration of a source.  A location is the name of a block or of a
 `name:`, or the start of a model's file, as dbt lsp answers a `ref`.
 
 Hover there extends the hover summary (see "Node information and hover"):
-on a `doc`, the docs block's markdown as written; on a generic test, its
-opening tag in a code block and its package; on an entry's `name:`, its
+on a `doc`, the docs block's markdown as written, if it holds any; on a
+generic test, its opening tag and its package, in a code block for a
+client that reads markdown; on an entry's `name:`, its
 node's summary, which `nodeInfo` with that position gives whole.  Without a
 server, the proxy announces `definitionProvider`, answers the same targets,
 and gives null elsewhere rather than a failure.
@@ -389,6 +391,7 @@ So the proxy runs the user's own `dbt parse`.
 - `workspace/executeCommand` `dbt-lsp-plus.nodeInfo`, added to the
   server's `executeCommandProvider.commands`: arguments `[uniqueId]` or
   `[{uri, position}]`, a position naming the `ref` or `source` under it,
+  or the entry whose `name:` is there,
   else the one node its file defines.  The result is the manifest's node,
   null for no node, and error -32803 with the reason until a first parse
   has finished; after that, the last index answers, and a later failure is
@@ -409,7 +412,7 @@ So the proxy runs the user's own `dbt parse`.
 
 | Situation | Behaviour |
 |-----------|-----------|
-| `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, and fails every other request with -32803 |
+| `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for, and fails every other request with -32803 |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, a pending `shutdown` gets null, and an error message is shown unless `shutdown` came first.  The proxy goes on alone, as above, on the scanned graph |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
@@ -465,6 +468,13 @@ The server is not restarted after a crash.
 - A versioned model's `ref` (`v=2`) and its versions' files are not
   navigated; a generic test's arguments (`column_name:`, `to:` aside) and
   a `config:` block lead nowhere.
+- Where one package has two files of a model's name, one of them disabled,
+  a definition leads to the first by path, which may be the disabled one.
+- A `doc` in a project that sets `docs-paths` to a directory outside its
+  resource paths finds no docs block (see `docs-paths` above).
+- A hover or a definition in a large properties file reads it several
+  times: about 0.25 s per request on 2.8 MB of YAML, in a release build,
+  on the loop that forwards every message.
 - The outline of a YAML file that yaml-rust2 does not parse is empty: one
   in the middle of an edit, but also some that dbt reads, being laxer about
   indentation inside flow collections and quoted scalars, such as a flow
