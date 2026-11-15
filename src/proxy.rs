@@ -62,7 +62,7 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 const RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
 /// How long a restarted server has to answer its `initialize`.
-const REPLAY_TIMEOUT: Duration = Duration::from_secs(60);
+const REPLAY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The client's notifications after which the graph may have changed.  The
 /// server's `dbt/lspCompileComplete` is no such signal: a listing makes the
 /// server compile, so listing on it would never end.
