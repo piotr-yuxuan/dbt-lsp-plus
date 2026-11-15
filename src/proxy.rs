@@ -58,6 +58,11 @@ const SELECTORS: [&str; 2] = ["*", "source:*"];
 const MAX_ATTEMPTS: u32 = 3;
 /// A listing unanswered for this long is abandoned.
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
+/// At most this many restarts of a server that died, within the window.
+const RESTARTS: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(600);
+/// How long a restarted server has to answer its `initialize`.
+const REPLAY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The client's notifications after which the graph may have changed.  The
 /// server's `dbt/lspCompileComplete` is no such signal: a listing makes the
 /// server compile, so listing on it would never end.
@@ -72,8 +77,10 @@ const CHANGES: [&str; 5] = [
 enum Event {
     Client(Frame),
     ClientClosed,
-    Server(Frame),
-    ServerClosed,
+    /// A frame of the server process of that generation.
+    Server(u64, Frame),
+    /// The end of the output of the server process of that generation.
+    ServerClosed(u64),
     Parsed(config::Outcome),
     /// The failures of one kind, `runs::LAST_RUN` or `runs::STALE_SOURCE`,
     /// when their file was written; none for results of a command that
@@ -87,6 +94,37 @@ type ReadFailures = fn(&Value, &Value) -> Option<Vec<runs::Failure>>;
 
 /// How often the files of the last run are looked at.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
+
+/// What the proxy knows to start a server that died again.
+#[derive(Default)]
+struct Restart {
+    /// When each restart of the window began.
+    past: Vec<Instant>,
+    /// When the next restart starts.
+    due: Option<Instant>,
+    /// A server started again, until it answers its `initialize`: its id,
+    /// and the deadline of that answer.
+    starting: Option<(Server, String, Instant)>,
+    /// The client's `initialize` parameters, which a restart sends again.
+    initialize: Option<Value>,
+    /// The language and last version of each open document.
+    languages: HashMap<PathBuf, Value>,
+    versions: HashMap<PathBuf, Value>,
+    /// The ids of the registrations the client holds.
+    registered: HashSet<String>,
+    /// The progress tokens the server began and has not ended.
+    progress: HashMap<String, Value>,
+    /// The generation of the last server started.
+    spawned: u64,
+}
+
+/// The wait before restarting a server that died at NOW, after the restarts
+/// of PAST: the n-th restart of a window of `RESTART_WINDOW` waits n
+/// seconds; none past `RESTARTS` restarts.
+fn restart_delay(past: &[Instant], now: Instant) -> Option<Duration> {
+    let recent = past.iter().filter(|at| now.saturating_duration_since(**at) < RESTART_WINDOW).count();
+    (recent < RESTARTS).then(|| Duration::from_secs(recent as u64 + 1))
+}
 
 /// What the proxy knows of each file's diagnostics, by its path as the root
 /// maps it.
@@ -105,6 +143,9 @@ struct Diagnostics {
 struct Server {
     child: Child,
     stdin: ChildStdin,
+    /// Which process of the session it is, from 0: its events carry it, so
+    /// that those of a process the proxy let go of are dropped.
+    generation: u64,
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
@@ -201,6 +242,7 @@ struct Proxy<W: Write> {
     /// The proxy's own requests to the client, whose answers stay here.
     asked: HashSet<String>,
     diagnostics: Diagnostics,
+    restart: Restart,
     parsing: Parsing,
 }
 
@@ -267,6 +309,7 @@ impl<W: Write> Proxy<W> {
             hint_refresh: false,
             asked: HashSet::new(),
             diagnostics: Diagnostics::default(),
+            restart: Restart::default(),
             parsing: Parsing::default(),
         };
         if let Some(root) = root {
@@ -354,6 +397,7 @@ impl<W: Write> Proxy<W> {
     /// root when the server command named none, or the client's spelling of
     /// the one it named.
     fn on_initialize(&mut self, params: &Value) {
+        self.restart.initialize = Some(params.clone());
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
@@ -419,15 +463,20 @@ impl<W: Write> Proxy<W> {
             "textDocument/didOpen" => {
                 let text = params.pointer("/textDocument/text").and_then(Value::as_str).unwrap_or_default();
                 self.documents.insert(path.clone(), text.to_owned());
+                self.restart.languages.insert(path.clone(), params["textDocument"]["languageId"].clone());
+                self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
                 self.uris.insert(path, uri.unwrap_or_default().to_owned());
             }
             "textDocument/didChange" => {
+                self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
                 if let Some(text) = self.documents.get_mut(&path) {
                     changes.iter().for_each(|change| text::apply_change(text, change, self.encoding));
                 }
             }
             "textDocument/didClose" => {
+                self.restart.languages.remove(&path);
+                self.restart.versions.remove(&path);
                 self.documents.remove(&path);
                 self.uris.remove(&path);
             }
@@ -813,6 +862,9 @@ impl<W: Write> Proxy<W> {
     /// Takes the server's answer to the proxy's listing in flight; the answer
     /// to an abandoned one is dropped.  A failed listing keeps the graph.
     fn on_own_response(&mut self, id: &str, message: &Value) {
+        if self.restart.starting.as_ref().is_some_and(|(_, own, _)| own == id) {
+            return self.on_restarted(message);
+        }
         let Some((_, slot, _)) = self.listing.take_if(|(own, ..)| own == id) else { return };
         let result = message.get("result").unwrap_or(&Value::Null);
         if result.get("error") == Some(&json!("Operation cancelled")) && self.attempts < MAX_ATTEMPTS {
@@ -960,8 +1012,37 @@ impl<W: Write> Proxy<W> {
                 self.send_client_body(&frame.body);
             }
             (Some("textDocument/publishDiagnostics"), None) => self.on_server_diagnostics(message, &frame.body),
+            (Some("client/registerCapability"), Some(id)) => self.on_registration(id, message, &frame.body),
+            (Some("$/progress"), None) => self.on_progress(message, &frame.body),
             _ => self.send_client_body(&frame.body),
         }
+    }
+
+    /// The server's `$/progress`, BODY as it came, forwarded: the tokens it
+    /// begins and has not ended are kept, since a server that dies ends none.
+    fn on_progress(&mut self, message: &Value, body: &[u8]) {
+        let (token, kind) = (&message["params"]["token"], message.pointer("/params/value/kind"));
+        match kind.and_then(Value::as_str) {
+            Some("begin") => drop(self.restart.progress.insert(key(token), token.clone())),
+            Some("end") => drop(self.restart.progress.remove(&key(token))),
+            _ => {}
+        }
+        self.send_client_body(body);
+    }
+
+    /// The server's `client/registerCapability`, BODY as it came: forwarded,
+    /// unless the client already holds every registration it names, as after
+    /// a restart, when the proxy answers it.
+    fn on_registration(&mut self, id: &Value, message: &Value, body: &[u8]) {
+        let registrations = message.pointer("/params/registrations").and_then(Value::as_array);
+        let ids: Vec<String> =
+            registrations.into_iter().flatten().filter_map(|r| r["id"].as_str()).map(str::to_owned).collect();
+        if !ids.is_empty() && ids.iter().all(|id| self.restart.registered.contains(id)) {
+            let answer = json!({"jsonrpc": "2.0", "id": id, "result": null}).to_string();
+            return self.send_server(answer.as_bytes());
+        }
+        self.restart.registered.extend(ids);
+        self.send_client_body(body);
     }
 
     /// A response of the server, BODY as it came: to a request of the
@@ -1120,7 +1201,8 @@ impl<W: Write> Proxy<W> {
     /// carry on alone, on the scanned graph.  Before the client's
     /// `initialize`, only remember why, for its answer.
     fn on_server_closed(&mut self) {
-        let Some(mut server) = self.server.take() else { return };
+        let starting = || self.restart.starting.take().map(|(server, ..)| server);
+        let Some(mut server) = self.server.take().or_else(starting) else { return };
         let status = server.child.try_wait().ok().flatten();
         if status.is_none() {
             let _ = server.child.kill();
@@ -1137,6 +1219,7 @@ impl<W: Write> Proxy<W> {
             }
         }
         self.listing = None;
+        self.attempts = 0;
         self.listed.clear();
         self.relist = false;
         self.nodes = None;
@@ -1144,11 +1227,96 @@ impl<W: Write> Proxy<W> {
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
         }
-        if self.initialized && !self.shutdown {
-            let text = format!("{why}: dbt-lsp-plus keeps its own features: symbols, lineage, folding, renames.");
-            self.send_client(
-                &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),
-            );
+        self.lost_server(&why);
+    }
+
+    /// The server lost for WHY during a session: the progress it began is
+    /// ended, and a restart follows after its delay, else the proxy is alone
+    /// from now on; the client is told which.
+    fn lost_server(&mut self, why: &str) {
+        if !self.initialized || self.shutdown {
+            return;
+        }
+        for (_, token) in std::mem::take(&mut self.restart.progress) {
+            self.send_client(&json!({"jsonrpc": "2.0", "method": "$/progress",
+                                     "params": {"token": token, "value": {"kind": "end"}}}));
+        }
+        let now = Instant::now();
+        self.restart.past.retain(|at| now.saturating_duration_since(*at) < RESTART_WINDOW);
+        let delay = restart_delay(&self.restart.past, now);
+        self.restart.due = delay.map(|delay| now + delay);
+        let text = match delay {
+            Some(delay) => format!("{why}: restarting it in {} s.", delay.as_secs()),
+            None => format!("{why}: dbt-lsp-plus keeps its own features: symbols, lineage, folding, renames."),
+        };
+        self.send_client(
+            &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),
+        );
+    }
+
+    /// Starts the server again with the command of the session, and sends it
+    /// the client's `initialize` under an id of the proxy's own; a failure to
+    /// start it is a server lost again.
+    fn start_restart(&mut self) {
+        let (Some(params), Some(events)) = (self.restart.initialize.clone(), self.parsing.events.clone()) else {
+            return;
+        };
+        if self.shutdown {
+            return;
+        }
+        self.restart.past.push(Instant::now());
+        self.restart.spawned += 1;
+        match spawn_server(&self.parsing.server, &events, self.restart.spawned) {
+            Ok(mut server) => {
+                self.next_id += 1;
+                let id = format!("{OWN_ID}{}", self.next_id);
+                let initialize = json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": params});
+                let _ = rpc::write_value(&mut server.stdin, &initialize);
+                self.restart.starting = Some((server, id, Instant::now() + REPLAY_TIMEOUT));
+            }
+            Err(why) => self.lost_server(&why),
+        }
+    }
+
+    /// The restarted server's answer to its `initialize`, MESSAGE: it becomes
+    /// the server, initialized, given the client's open documents as they
+    /// stand, and listed; refused, or after `shutdown`, it is stopped.
+    fn on_restarted(&mut self, message: &Value) {
+        let Some((mut server, ..)) = self.restart.starting.take() else { return };
+        if message.get("error").is_some() || self.shutdown {
+            let _ = server.child.kill();
+            let _ = server.child.wait();
+            return self.lost_server("dbt lsp refused its initialize");
+        }
+        self.server = Some(server);
+        self.absent = None;
+        self.send_server(json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}).to_string().as_bytes());
+        let mut documents: Vec<(&PathBuf, &String)> = self.documents.iter().collect();
+        documents.sort();
+        let opened: Vec<Value> = documents
+            .into_iter()
+            .map(|(path, text)| {
+                let document = json!({"uri": self.uris.get(path), "languageId": self.restart.languages.get(path),
+                                      "version": self.restart.versions.get(path), "text": text});
+                json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": document}})
+            })
+            .collect();
+        opened.iter().for_each(|open| self.send_server(open.to_string().as_bytes()));
+        self.list_nodes();
+    }
+
+    /// What is due when the loop wakes with no event: the listing's deadline,
+    /// a restart after its delay, a restarted server that did not answer.
+    fn on_time(&mut self) {
+        self.expire_listing();
+        let now = Instant::now();
+        if self.restart.due.take_if(|due| *due <= now).is_some() {
+            self.start_restart();
+        }
+        if let Some((mut server, ..)) = self.restart.starting.take_if(|(.., deadline)| *deadline <= now) {
+            let _ = server.child.kill();
+            let _ = server.child.wait();
+            self.lost_server("dbt lsp did not answer its initialize");
         }
     }
 
@@ -1156,12 +1324,14 @@ impl<W: Write> Proxy<W> {
     /// its output; a listing past its deadline is abandoned on time.
     fn serve(&mut self, inbox: Receiver<Event>) {
         loop {
-            let wait =
-                self.listing.as_ref().map_or(Duration::MAX, |(_, _, sent)| LIST_TIMEOUT.saturating_sub(sent.elapsed()));
+            let listing = self.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
+            let replay = self.restart.starting.as_ref().map(|(.., deadline)| *deadline);
+            let next = [listing, self.restart.due, replay].into_iter().flatten().min();
+            let wait = next.map_or(Duration::MAX, |at| at.saturating_duration_since(Instant::now()));
             let event = match inbox.recv_timeout(wait) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
-                    self.expire_listing();
+                    self.on_time();
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -1175,6 +1345,13 @@ impl<W: Write> Proxy<W> {
     /// Handles EVENT; true when the session ends, at `exit` or when the client
     /// closes its output.
     fn handle(&mut self, event: Event) -> bool {
+        // The last frames and the end of a process the proxy let go of.
+        if let Event::Server(generation, _) | Event::ServerClosed(generation) = &event {
+            let starting = self.restart.starting.as_ref().map(|(server, ..)| server);
+            if !self.server.iter().chain(starting).any(|server| server.generation == *generation) {
+                return false;
+            }
+        }
         match event {
             Event::Client(frame) => {
                 let exit = frame.value.as_ref().and_then(|m| m.get("method")) == Some(&json!("exit"));
@@ -1182,8 +1359,8 @@ impl<W: Write> Proxy<W> {
                 return exit;
             }
             Event::ClientClosed => return true,
-            Event::Server(frame) => self.on_server(frame),
-            Event::ServerClosed => self.on_server_closed(),
+            Event::Server(_, frame) => self.on_server(frame),
+            Event::ServerClosed(_) => self.on_server_closed(),
             Event::Parsed(outcome) => self.on_parsed(outcome),
             Event::Runs(code, found, written) => self.on_runs(code, found, written),
         }
@@ -1192,6 +1369,10 @@ impl<W: Write> Proxy<W> {
 
     /// Waits for the server to exit after `exit`, within EXIT_GRACE, then kills it.
     fn stop_server(&mut self) {
+        if let Some((mut starting, ..)) = self.restart.starting.take() {
+            let _ = starting.child.kill();
+            let _ = starting.child.wait();
+        }
         let Some(mut server) = self.server.take() else { return };
         drop(server.stdin);
         let deadline = Instant::now() + EXIT_GRACE;
@@ -1203,7 +1384,12 @@ impl<W: Write> Proxy<W> {
     }
 }
 
-fn spawn_reader(input: impl io::Read + Send + 'static, events: Sender<Event>, wrap: fn(Frame) -> Event, closed: Event) {
+fn spawn_reader(
+    input: impl io::Read + Send + 'static,
+    events: Sender<Event>,
+    wrap: impl Fn(Frame) -> Event + Send + 'static,
+    closed: Event,
+) {
     thread::spawn(move || {
         let mut reader = BufReader::new(input);
         while let Ok(Some(frame)) = rpc::read_frame(&mut reader) {
@@ -1215,26 +1401,36 @@ fn spawn_reader(input: impl io::Read + Send + 'static, events: Sender<Event>, wr
     });
 }
 
-/// Runs the proxy on the standard input and output, in front of COMMAND.
-pub fn run(command: &[String]) -> ExitCode {
-    let (events, inbox) = mpsc::channel();
+/// The server COMMAND started as process GENERATION, its output read into
+/// EVENTS; else why not.
+fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> Result<Server, String> {
     let spawned = Command::new(&command[0])
         .args(&command[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn();
-    let (server, absent) = match spawned {
-        Ok(mut child) => {
-            let stdout = child.stdout.take().expect("piped stdout");
-            spawn_reader(stdout, events.clone(), Event::Server, Event::ServerClosed);
-            let stdin = child.stdin.take().expect("piped stdin");
-            (Some(Server { child, stdin }), None)
-        }
-        Err(error) => {
-            eprintln!("dbt-lsp-plus: cannot start {}: {error}", command.join(" "));
-            (None, Some(format!("dbt lsp could not start ({error})")))
-        }
+    let mut child = spawned.map_err(|error| {
+        eprintln!("dbt-lsp-plus: cannot start {}: {error}", command.join(" "));
+        format!("dbt lsp could not start ({error})")
+    })?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    spawn_reader(
+        stdout,
+        events.clone(),
+        move |frame| Event::Server(generation, frame),
+        Event::ServerClosed(generation),
+    );
+    let stdin = child.stdin.take().expect("piped stdin");
+    Ok(Server { child, stdin, generation })
+}
+
+/// Runs the proxy on the standard input and output, in front of COMMAND.
+pub fn run(command: &[String]) -> ExitCode {
+    let (events, inbox) = mpsc::channel();
+    let (server, absent) = match spawn_server(command, &events, 0) {
+        Ok(server) => (Some(server), None),
+        Err(why) => (None, Some(why)),
     };
     let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
@@ -1249,6 +1445,20 @@ pub fn run(command: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restart_waits_one_more_second_each_time_and_three_a_window() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let seconds = |past: &[Instant]| restart_delay(past, now).map(|delay| delay.as_secs());
+        assert_eq!(seconds(&[]), Some(1));
+        assert_eq!(seconds(&[now - Duration::from_secs(5)]), Some(2));
+        assert_eq!(seconds(&[now - Duration::from_secs(9), now - Duration::from_secs(5)]), Some(3));
+        let three = [now - Duration::from_secs(30), now - Duration::from_secs(20), now - Duration::from_secs(10)];
+        assert_eq!(seconds(&three), None);
+        // A restart that left the window counts no more.
+        let one_old = [now - Duration::from_secs(601), now - Duration::from_secs(20), now - Duration::from_secs(10)];
+        assert_eq!(seconds(&one_old), Some(3));
+    }
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()

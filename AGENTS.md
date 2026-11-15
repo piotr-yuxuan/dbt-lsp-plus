@@ -57,8 +57,11 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
     so that `answer` stays a dispatch;
-  - `Proxy::expire_listing` and `Proxy::stop_server`: the deadline of a
-    listing and the teardown of the server process, each a resource's end;
+  - `Proxy::expire_listing`, `Proxy::start_restart` and
+    `Proxy::stop_server`: the deadline of a listing, and the start and the
+    teardown of the server process, each a resource's start or end;
+  - `restart_delay`: the decision on a lost server, free of the clock,
+    with tests of its own;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
@@ -67,11 +70,16 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     and the answer it keeps;
   - `runs::place`: where a failed node is written, apart from how it
     failed;
-  - `Proxy::on_server_response`, `Proxy::on_server_diagnostics` and
-    `Proxy::on_runs`: one handler per kind of message or event, so that
-    `on_server` and `handle` stay dispatches;
+  - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
+    `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,
+    `Proxy::on_restarted` and `Proxy::on_time`: one handler per kind of
+    message or event, so that `on_server`, `on_own_response`, `serve` and
+    `handle` stay dispatches;
   - `answered_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: what dbt lsp
     2.0.9 answers, apart from what the script makes it answer;
+  - `Fake::misbehaves` in `tests/support/fake_dbt_lsp.rs`: what the
+    script makes one life do in place of an answer, apart from `main`'s
+    loop over frames;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition` and `Proxy::on_document`: the
     routing of a request the proxy may answer itself (by its method, then

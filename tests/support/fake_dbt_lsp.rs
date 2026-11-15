@@ -29,8 +29,15 @@
 //!     which 2.0.9 publishes with no version;
 //!   - `silent`, keys whose requests are never answered, and `hold`, keys
 //!     whose requests wait for the notification `test/release`;
-//!   - `exit_on`, a method on which the server exits with status 3, and
+//!   - `exit_on`, a method on which the server exits with status 3;
 //!     `hang_on`, one on which it stops, neither reading nor exiting;
+//!     `refuse_on`, a request it answers with an error; `orphan_on`, one on
+//!     which it leaves a process that holds its output three seconds more,
+//!     as a launcher's child would, and writes a `window/showMessage` "from
+//!     the orphan" on it after one second; `send_on`, one before whose
+//!     handling it sends the bodies listed in `send`, as they are; each only
+//!     in the life that `exit_life`, `hang_life`, `refuse_life`,
+//!     `orphan_life` or `send_life` numbers, from 1, when given;
 //!   - `hold_compile`, true when it announces no compilation until the
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
@@ -40,7 +47,9 @@
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
 //!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID}`
 //!   to that file's name followed by `.parses`, since two processes
-//!   appending to one file could interleave their lines.
+//!   appending to one file could interleave their lines; and each server
+//!   process, a life of the fake, appends its pid to the name followed by
+//!   `.lives`, by which it knows its life.
 
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
@@ -117,9 +126,47 @@ struct Fake {
     opened: bool,
     /// Held requests: id, method, params.
     held: Vec<(Value, String, Value)>,
+    /// Which process of the session this is, from 1.
+    life: usize,
 }
 
 impl Fake {
+    /// Whether the script makes this life ACT (`exit` or `hang`) on METHOD.
+    fn acts_on(&self, act: &str, method: &str) -> bool {
+        let life = self.script[format!("{act}_life")].as_u64().is_none_or(|life| life as usize == self.life);
+        self.script[format!("{act}_on")].as_str() == Some(method) && life
+    }
+
+    /// What the script makes this life do on METHOD, a request when ID,
+    /// before or in place of its answer: send bodies, leave an orphan, exit,
+    /// hang, or refuse; true when it refused.
+    fn misbehaves(&self, method: &str, id: Option<&Value>) -> bool {
+        if self.acts_on("send", method) {
+            self.script["send"].as_array().into_iter().flatten().filter_map(Value::as_str).for_each(send_raw);
+        }
+        if self.acts_on("orphan", method) {
+            // The shell's background child inherits the output and outlives it.
+            let message = json!({"type": 3, "message": "from the orphan"});
+            let body = json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": message}).to_string();
+            let script =
+                format!("(sleep 1; printf 'Content-Length: {}\\r\\n\\r\\n%s' '{body}'; sleep 2) &", body.len());
+            std::process::Command::new("sh").args(["-c", &script]).status().expect("leave an orphan");
+        }
+        if self.acts_on("exit", method) {
+            std::process::exit(3);
+        }
+        if self.acts_on("hang", method) {
+            loop {
+                std::thread::park();
+            }
+        }
+        let refused = self.acts_on("refuse", method) && id.is_some();
+        if refused {
+            send(json!({"id": id, "error": {"code": -32603, "message": "refused by the script"}}));
+        }
+        refused
+    }
+
     fn lists(&self, list: &str, key: &str) -> bool {
         self.script[list].as_array().is_some_and(|keys| keys.iter().any(|k| k == key))
     }
@@ -244,7 +291,14 @@ fn main() {
     if parsing {
         return parse(&script, &arguments, log);
     }
-    let mut fake = Fake { script, opened: false, held: Vec::new() };
+    // Each server process of a session is one life of the fake.
+    let life = std::env::var("FAKE_DBT_LSP_LOG").map_or(1, |log| {
+        let lives = format!("{log}.lives");
+        let mut file = OpenOptions::new().create(true).append(true).open(&lives).expect("open the lives");
+        writeln!(file, "{}", std::process::id()).expect("count a life");
+        std::fs::read_to_string(&lives).expect("read the lives").lines().count()
+    });
+    let mut fake = Fake { script, opened: false, held: Vec::new(), life };
     let mut input = BufReader::new(io::stdin());
     while let Ok(Some(frame)) = rpc::read_frame(&mut input) {
         if let Some(log) = &mut log {
@@ -252,13 +306,8 @@ fn main() {
         }
         let message = frame.value.unwrap_or(Value::Null);
         let (Some(method), id) = (message["method"].as_str(), message.get("id")) else { continue };
-        if fake.script["exit_on"].as_str() == Some(method) {
-            std::process::exit(3);
-        }
-        if fake.script["hang_on"].as_str() == Some(method) {
-            loop {
-                std::thread::park();
-            }
+        if fake.misbehaves(method, id) {
+            continue;
         }
         match (method, id) {
             ("initialize", Some(id)) => {

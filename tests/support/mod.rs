@@ -36,7 +36,8 @@ pub fn uri(path: &Path) -> String {
 }
 
 pub struct Session {
-    child: Child,
+    /// The proxy's process.
+    pub child: Child,
     stdin: ChildStdin,
     inbox: Receiver<(Vec<u8>, Value)>,
     next_id: i64,
@@ -178,6 +179,12 @@ impl Session {
     pub fn initialize_with(&mut self, root: &Path, hierarchical: bool) -> Value {
         let capabilities =
             json!({"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": hierarchical}}});
+        self.initialize_as(root, capabilities)
+    }
+
+    /// Initializes the session on ROOT as a client with CAPABILITIES;
+    /// returns the result.
+    pub fn initialize_as(&mut self, root: &Path, capabilities: Value) -> Value {
         let params = json!({"processId": null, "rootUri": uri(root), "capabilities": capabilities,
                             "workspaceFolders": [{"uri": uri(root), "name": "shop"}]});
         let response = self.request("initialize", params);
@@ -198,6 +205,19 @@ impl Session {
         assert_eq!(response["result"], Value::Null, "{response}");
         self.notify("exit", Value::Null);
         self.wait()
+    }
+
+    /// Sends `exit`; returns the proxy's exit status and every message it
+    /// sent that the session had not read.
+    pub fn exit(mut self) -> (ExitStatus, Vec<Value>) {
+        self.notify("exit", Value::Null);
+        let deadline = Instant::now() + self.timeout;
+        let mut unread = Vec::new();
+        // Until the proxy closes its output.
+        while let Ok((_, message)) = self.inbox.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            unread.push(message);
+        }
+        (self.wait(), unread)
     }
 
     /// Waits for the proxy to exit, within the session's timeout.

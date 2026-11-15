@@ -140,11 +140,15 @@ resolved path.
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
   found resources; an empty `source:*` does not.  After a crash, the scan
-  gives the whole graph again.
+  gives the whole graph again, until a restarted server lists it.
 - A source that `overrides` a package's source is that package's source:
   dbt patches it, so the proxy places its tables in the package.
 - Text read from disk loses its byte order mark, as an editor's document
   does, so that positions on its first line match.
+- For a restart: the client's `initialize` parameters; each open
+  document's URI, language and last version, as the client sent them; the
+  registrations the client holds; the progress tokens the server began and
+  has not ended.
 
 ### What `dbt.listNodes` does, observed on 2.0.9
 
@@ -498,12 +502,50 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   defaults: group and owner, access when not protected, an enforced
   contract, the version, tags, disabled, the number of tests.
 
+## Restart
+
+When `dbt lsp` ends while the session is established (the client's
+`initialize` answered, no `shutdown`), the proxy starts it again with the
+same command, at most three times in a sliding window of ten minutes, the
+n-th restart of the window waiting n seconds first; one pure function
+decides (`restart_delay`).  Past that, the proxy stays alone and says so.
+
+- The new process is held apart until it answers its `initialize`, so
+  that every check of a running server stays right: meanwhile the client's
+  requests are answered as without a server, and its notifications change
+  only the proxy's state.
+- It gets the client's own `initialize` parameters, under an id of the
+  proxy's own, and the client never sees its answer: the client keeps the
+  capabilities it got.  Then `initialized`; a `didOpen` of each open
+  document, in the order of their paths, under its URI, language and last
+  version as the client sent them, with its text as it now stands; then a
+  listing.
+- A `client/registerCapability` whose registration ids the client already
+  holds is answered null by the proxy: dbt lsp 2.0.9 registers its file
+  watcher (`default-dbt-file-system-watcher`, request id 0) after each
+  `initialized`, when the client declares
+  `workspace.didChangeWatchedFiles.dynamicRegistration`.
+- The dead server's pending requests fail once each, and a `$/progress` it
+  began and never ended is ended for the client, unless `shutdown` came
+  first: after it, the proxy sends nothing but answers.  Its diagnostics
+  stay until the new server's first compilation, which publishes every
+  file of the project (143 on the fixture).
+- A restarted server that cannot start, refuses its `initialize`, or does
+  not answer it within 10 seconds counts as one more crash; dbt lsp 2.0.9
+  answered in 18 ms on the fixture.  `exit` kills a server still starting,
+  as it does the server.
+- Each server process has a generation, from 0, which its frames and the
+  end of its output carry: those of a process the proxy already let go
+  of are dropped.  A process it killed may end its output late, when a
+  launcher's child holds it, and that end must not stop the server
+  started since.
+
 ## Failure modes
 
 | Situation | Behaviour |
 |-----------|-----------|
 | `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for, and fails every other request with -32803 |
-| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, a pending `shutdown` gets null, and an error message is shown unless `shutdown` came first.  The proxy goes on alone, as above, on the scanned graph |
+| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, and a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A YAML file is not valid | Its sources are left out |
@@ -512,7 +554,6 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
 | `exit` | Forwarded; the server has two seconds to exit before it is killed, and a parse under way is killed.  The proxy exits 0 after `shutdown`, else 1 |
 | `dbt parse` fails, or cannot start | The index keeps what it had, laid over by what a failed run still wrote; the reason is logged once, and given by `nodeInfo` until a first index exists |
 
-The server is not restarted after a crash.
 
 ## Known limitations
 
@@ -592,6 +633,17 @@ The server is not restarted after a crash.
   sources reads no table from such a file either.  The outline shows no
   tests nested under a resource, model versions, macro arguments, nor a
   semantic model's entities, dimensions and measures.
+- After a restart, an `untitled:` document, which the proxy does not
+  track, is not given to the new server, and of two URIs of one path, the
+  last is.  A client's late answer to a request of the dead server reaches
+  the new one, which numbers its requests from 0 again.  The new server's
+  capabilities may differ from the old one's: the client keeps those it
+  got, and the proxy the methods it owned.  A launcher (`uvx`, `nix run`)
+  may leave the dead server's own child running beside the new one, as
+  for parses.
+- The proxy does not follow `client/unregisterCapability`: a registration
+  the server withdrew and makes again is answered by the proxy, and never
+  reaches the client.  dbt lsp 2.0.9 was not seen to withdraw one.
 
 ## Tests
 
@@ -644,11 +696,30 @@ The server is not restarted after a crash.
   - navigation from YAML: each kind of target and its location, dbt's own
     test null, the server never asked; a column's name, `dbt_project.yml`
     and a SQL `ref` forwarded; a `source()` in SQL; hover on a doc, a test
-    and an entry's name; nodeInfo on an entry's name; without a server.
+    and an entry's name; nodeInfo on an entry's name; without a server;
+  - the restart: the client's `initialize`, `initialized` and the open
+    documents as they stand, edits, opens and closes during the delay
+    included, then a request reaching the new server, four documents
+    replayed in the order of their paths; one answer to `initialize` and
+    one registration reaching the client, a begun progress ended, one the
+    server ended not ended again; three crashes after 1, 2 then 3 s,
+    measured, then alone, with one message; a replayed `initialize` that
+    hangs, given ten seconds; one refused, whose leftover process writes
+    a frame that the client never gets, then ends its output after the
+    next server answered; one refused after it began a progress, which is
+    ended; one that cannot start; one that dies before it answers; none
+    after `shutdown`, nor any message or progress, nor before the client's
+    `initialize` is answered; `exit` killing a server still starting; a
+    crash that leaves the new server's listing all three retries.  The
+    fake counts its processes, its lives, so that a script can make one
+    life exit or hang and a test can count restarts.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
+  It ends by killing the server, which the proxy restarts: diagnostics
+  are published again and a hover is answered, and the client, which
+  declares dynamic registration, gets dbt's watcher registration once.
   The fake also asks for the configuration after `initialized` and answers
   an empty listing with `{"error": "No nodes found"}`, as 2.0.9 was seen to.
   The live rename also relies on two observations that no fake-backed test
@@ -672,7 +743,7 @@ In the order of the feature list agreed with the dbt-mode session:
    `sources:`; the 40 ms above had no YAML.
 5. YAML outline (A1): done in plan 005.
 6. Restart of a crashed server, replaying `initialize`, `initialized` and
-   the open documents.
+   the open documents: done in plan 010.
 7. `packages.yml` local packages outside `packages-install-path`, versioned
    models (`ref('m', v=2)`), Python models, YAML snapshots.
 8. A run in an editor, then with refmux in front of the server for
