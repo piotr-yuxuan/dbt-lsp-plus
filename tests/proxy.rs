@@ -383,8 +383,9 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
 
 #[test]
 fn a_crash_fails_each_pending_request_exactly_once() {
-    let script =
-        json!({"silent": ["textDocument/definition", "textDocument/completion"], "exit_on": "textDocument/hover"});
+    // The restarted server never answers: the proxy stays alone.
+    let silent = ["textDocument/definition", "textDocument/completion"];
+    let script = json!({"silent": silent, "exit_on": "textDocument/hover", "hang_on": "initialize", "hang_life": 2});
     let (mut session, _) = Session::fake("crash", script);
     session.initialize(&fixture());
     let position = json!({"textDocument": {"uri": "file:///x.sql"}, "position": {"line": 0, "character": 0}});
@@ -688,7 +689,9 @@ fn alone_it_still_answers_on_sources() {
 #[test]
 fn after_a_crash_the_scan_gives_the_graph() {
     let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
-    let script = json!({"answers": {ALL: {"error": null, "nodes": [summary_node]}}, "exit_on": "textDocument/hover"});
+    // The restarted server never answers: the proxy stays alone.
+    let answers = json!({ALL: {"error": null, "nodes": [summary_node]}});
+    let script = json!({"answers": answers, "exit_on": "textDocument/hover", "hang_on": "initialize", "hang_life": 2});
     let (mut session, _) = Session::fake("crash-then-scan", script);
     session.initialize(&fixture());
     let path = fixture().join("models/marts/order_summary.sql");
@@ -1338,7 +1341,9 @@ fn no_parse_after_shutdown_nor_after_a_crash() {
     parses_stay(&log, 1);
     session.notify("exit", Value::Null);
     assert!(session.wait().success());
-    let script = json!({"manifest": manifest(), "exit_on": "textDocument/definition"});
+    // The restarted server never answers: the proxy stays alone.
+    let script =
+        json!({"manifest": manifest(), "exit_on": "textDocument/definition", "hang_on": "initialize", "hang_life": 2});
     let (mut session, log) = Session::fake("parse-crash", script);
     session.initialize(&fixture());
     session.open(&path, None);
