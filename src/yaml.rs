@@ -2,13 +2,15 @@
 //! A YAML document as a tree whose scalars keep their place in the text.
 
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
-use yaml_rust2::scanner::Marker;
+use yaml_rust2::scanner::{Marker, TScalarStyle};
 
 #[derive(Debug, PartialEq)]
 pub enum Node {
-    /// A scalar, with its line (from 0) and column (in characters, from 0).
+    /// A scalar, with whether it was written plain (neither quoted nor a
+    /// block), its line (from 0) and column (in characters, from 0).
     Scalar {
         value: String,
+        plain: bool,
         line: usize,
         column: usize,
     },
@@ -93,9 +95,12 @@ impl Builder {
 impl MarkedEventReceiver for Builder {
     fn on_event(&mut self, event: Event, mark: Marker) {
         match event {
-            Event::Scalar(value, ..) => {
-                self.attach(Node::Scalar { value, line: mark.line().saturating_sub(1), column: mark.col() })
-            }
+            Event::Scalar(value, style, ..) => self.attach(Node::Scalar {
+                value,
+                plain: style == TScalarStyle::Plain,
+                line: mark.line().saturating_sub(1),
+                column: mark.col(),
+            }),
             Event::Alias(_) => self.attach(Node::Alias),
             Event::SequenceStart(..) => self.stack.push(Frame::Seq(Vec::new())),
             Event::MappingStart(..) => self.stack.push(Frame::Map(Vec::new(), None)),
@@ -127,9 +132,29 @@ mod tests {
         let text = "sources:\n  - name: \"événements\"\n    tables:\n      - name: page_views\n";
         let root = parse(text).unwrap();
         let source = &root.get("sources").unwrap().items()[0];
-        assert_eq!(source.get("name"), Some(&Node::Scalar { value: "événements".into(), line: 1, column: 10 }));
+        assert_eq!(
+            source.get("name"),
+            Some(&Node::Scalar { value: "événements".into(), plain: false, line: 1, column: 10 })
+        );
         let table = &source.get("tables").unwrap().items()[0];
-        assert_eq!(table.get("name"), Some(&Node::Scalar { value: "page_views".into(), line: 3, column: 14 }));
+        assert_eq!(
+            table.get("name"),
+            Some(&Node::Scalar { value: "page_views".into(), plain: true, line: 3, column: 14 })
+        );
+    }
+
+    #[test]
+    fn keeps_whether_a_scalar_is_plain() {
+        let text = "plain: a\nsingle: 'a'\ndouble: \"a\"\nliteral: |\n  a\nfolded: >\n  a\n";
+        let root = parse(text).unwrap();
+        let plain = |key: &str| match root.get(key) {
+            Some(Node::Scalar { plain, .. }) => *plain,
+            other => panic!("not a scalar: {other:?}"),
+        };
+        assert!(plain("plain"));
+        for key in ["single", "double", "literal", "folded"] {
+            assert!(!plain(key), "{key}");
+        }
     }
 
     fn end(node: &Node) -> (usize, usize) {

@@ -160,7 +160,7 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec
 /// its quotes, escapes included, else as long as its value, else to the end
 /// of its line.
 pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Range<usize>)> {
-    let Node::Scalar { value, line, column } = node else { return None };
+    let Node::Scalar { value, line, column, .. } = node else { return None };
     let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
     let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
     let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
