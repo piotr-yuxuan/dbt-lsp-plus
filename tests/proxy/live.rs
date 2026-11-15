@@ -59,6 +59,7 @@ fn in_front_of_the_real_dbt_lsp() {
     recorded_observations(&mut session, &result);
     node_information(&mut session, &project);
     rename_a_source_table_and_compile(&mut session, &project);
+    restart(&mut session, &project);
     assert!(session.finish().success());
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
@@ -113,6 +114,32 @@ fn node_information(session: &mut Session, project: &Path) {
         let hints = session.request("textDocument/inlayHint", params);
         assert_eq!(hints["result"], Value::Null, "{file}: {hints}");
     }
+}
+
+/// The server killed: the proxy restarts it, whose first compilation
+/// publishes again, dbt's warning on the models' file among them, and which
+/// answers a hover.
+fn restart(session: &mut Session, project: &Path) {
+    let proxy = session.child.id().to_string();
+    let children = std::process::Command::new("pgrep").args(["-P", &proxy, "-f", " lsp "]).output().expect("run pgrep");
+    let servers: Vec<String> =
+        String::from_utf8_lossy(&children.stdout).split_whitespace().map(str::to_owned).collect();
+    assert_eq!(servers.len(), 1, "one dbt lsp among the proxy's children: {servers:?}");
+    session.received.clear();
+    let killed = std::process::Command::new("kill").args(["-KILL", &servers[0]]).status().expect("run kill");
+    assert!(killed.success());
+    let shown = session.wait_for(|m| m["method"] == "window/showMessage");
+    assert!(shown["params"]["message"].as_str().unwrap().ends_with("restarting it in 1 s."), "{shown}");
+    let models = uri(&project.join("models/marts/_models.yml"));
+    session.wait_for(|message| {
+        let diagnostics = message["params"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == models.as_str()
+            && diagnostics.iter().any(|d| d["source"] == "dbt")
+    });
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+    session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
 }
 
 /// The proxy's outline and folding of a model, the outline of a properties

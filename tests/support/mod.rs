@@ -36,7 +36,8 @@ pub fn uri(path: &Path) -> String {
 }
 
 pub struct Session {
-    child: Child,
+    /// The proxy's process.
+    pub child: Child,
     stdin: ChildStdin,
     inbox: Receiver<(Vec<u8>, Value)>,
     next_id: i64,
