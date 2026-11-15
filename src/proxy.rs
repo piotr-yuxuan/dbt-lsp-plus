@@ -1219,6 +1219,7 @@ impl<W: Write> Proxy<W> {
             }
         }
         self.listing = None;
+        self.attempts = 0;
         self.listed.clear();
         self.relist = false;
         self.nodes = None;
