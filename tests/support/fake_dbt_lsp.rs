@@ -33,11 +33,11 @@
 //!     `hang_on`, one on which it stops, neither reading nor exiting;
 //!     `refuse_on`, a request it answers with an error; `orphan_on`, one on
 //!     which it leaves a process that holds its output three seconds more,
-//!     as a launcher's child would, then writes a `window/showMessage`
-//!     "from the orphan" on it; `send_on`, one before whose handling it
-//!     sends the bodies listed in `send`, as they are; each only in the life
-//!     that `exit_life`, `hang_life`, `refuse_life`, `orphan_life` or
-//!     `send_life` numbers, from 1, when given;
+//!     as a launcher's child would, and writes a `window/showMessage` "from
+//!     the orphan" on it after one second; `send_on`, one before whose
+//!     handling it sends the bodies listed in `send`, as they are; each only
+//!     in the life that `exit_life`, `hang_life`, `refuse_life`,
+//!     `orphan_life` or `send_life` numbers, from 1, when given;
 //!   - `hold_compile`, true when it announces no compilation until the
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
@@ -148,7 +148,8 @@ impl Fake {
             // The shell's background child inherits the output and outlives it.
             let message = json!({"type": 3, "message": "from the orphan"});
             let body = json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": message}).to_string();
-            let script = format!("(sleep 3; printf 'Content-Length: {}\\r\\n\\r\\n%s' '{body}') &", body.len());
+            let script =
+                format!("(sleep 1; printf 'Content-Length: {}\\r\\n\\r\\n%s' '{body}'; sleep 2) &", body.len());
             std::process::Command::new("sh").args(["-c", &script]).status().expect("leave an orphan");
         }
         if self.acts_on("exit", method) {

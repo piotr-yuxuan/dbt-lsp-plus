@@ -704,9 +704,9 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
     one registration reaching the client, a begun progress ended, one the
     server ended not ended again; three crashes after 1, 2 then 3 s,
     measured, then alone, with one message; a replayed `initialize` that
-    hangs, given ten seconds; one refused, whose leftover process, after
-    the next server answered, writes a frame that the client never gets
-    and ends its output; one refused after it began a progress, which is
+    hangs, given ten seconds; one refused, whose leftover process writes
+    a frame that the client never gets, then ends its output after the
+    next server answered; one refused after it began a progress, which is
     ended; one that cannot start; one that dies before it answers; none
     after `shutdown`, nor any message or progress, nor before the client's
     `initialize` is answered; `exit` killing a server still starting; a
