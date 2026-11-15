@@ -693,6 +693,31 @@ fn a_restarted_server_that_dies_before_answering_counts_as_a_crash() {
 }
 
 #[test]
+fn a_crash_leaves_the_next_server_s_listing_all_its_retries() {
+    let cancelled = json!({"error": "Operation cancelled", "grain": "unknown", "nodes": []});
+    let script = json!({"hold": [ALL], "answers": {ALL: cancelled}, "exit_on": "textDocument/hover", "exit_life": 1});
+    let (mut session, log) = Session::fake("restart-retries", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let listed_in = |n: usize| life(&log, n).iter().filter(|m| m["params"]["arguments"][0] == "*").count();
+    until_logged(&log, "the first listing", |_| listed_in(1) == 1);
+    // One retry spent, then the server dies with the retry pending.
+    session.notify("test/release", Value::Null);
+    until_logged(&log, "a retry", |_| listed_in(1) == 2);
+    session.request("textDocument/hover", hover_at_start(&orders));
+    until_initialized(&log, 2);
+    for n in 1..=4 {
+        until_logged(&log, "the new server's listing or one of its three retries", |_| listed_in(2) == n);
+        session.notify("test/release", Value::Null);
+    }
+    barrier(&mut session);
+    barrier(&mut session);
+    assert_eq!(listed_in(2), 4);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn shutdown_during_the_delay_leaves_no_restart() {
     let (mut session, log) = Session::fake("restart-shutdown", json!({"exit_on": "textDocument/hover"}));
     session.initialize(&fixture());

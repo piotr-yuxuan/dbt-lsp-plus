@@ -708,9 +708,10 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
     output after the next server answered; one that cannot start; one
     that dies before it answers; none after `shutdown`, nor any message or
     progress, nor before the client's `initialize` is answered; `exit`
-    killing a server still starting.  The fake counts its processes, its
-    lives, so that a script can make one life exit or hang and a test can
-    count restarts.
+    killing a server still starting; a crash that leaves the new server's
+    listing all three retries.  The fake counts its processes, its lives,
+    so that a script can make one life exit or hang and a test can count
+    restarts.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
