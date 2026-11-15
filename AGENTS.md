@@ -60,6 +60,8 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
   - `Proxy::expire_listing`, `Proxy::start_restart` and
     `Proxy::stop_server`: the deadline of a listing, and the start and the
     teardown of the server process, each a resource's start or end;
+  - `restart_delay`: the decision on a lost server, free of the clock,
+    with tests of its own;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
