@@ -34,9 +34,10 @@
 //!     `refuse_on`, a request it answers with an error; `orphan_on`, one on
 //!     which it leaves a process that holds its output three seconds more,
 //!     as a launcher's child would, then writes a `window/showMessage`
-//!     "from the orphan" on it; each only in the life that `exit_life`,
-//!     `hang_life`, `refuse_life` or `orphan_life` numbers, from 1, when
-//!     given;
+//!     "from the orphan" on it; `send_on`, one before whose handling it
+//!     sends the bodies listed in `send`, as they are; each only in the life
+//!     that `exit_life`, `hang_life`, `refuse_life`, `orphan_life` or
+//!     `send_life` numbers, from 1, when given;
 //!   - `hold_compile`, true when it announces no compilation until the
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
@@ -136,10 +137,13 @@ impl Fake {
         self.script[format!("{act}_on")].as_str() == Some(method) && life
     }
 
-    /// What the script makes this life do on METHOD, a request when ID, in
-    /// place of its answer: leave an orphan, exit, hang, or refuse; true when
-    /// it refused.
+    /// What the script makes this life do on METHOD, a request when ID,
+    /// before or in place of its answer: send bodies, leave an orphan, exit,
+    /// hang, or refuse; true when it refused.
     fn misbehaves(&self, method: &str, id: Option<&Value>) -> bool {
+        if self.acts_on("send", method) {
+            self.script["send"].as_array().into_iter().flatten().filter_map(Value::as_str).for_each(send_raw);
+        }
         if self.acts_on("orphan", method) {
             // The shell's background child inherits the output and outlives it.
             let message = json!({"type": 3, "message": "from the orphan"});

@@ -706,12 +706,13 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
     measured, then alone, with one message; a replayed `initialize` that
     hangs, given ten seconds; one refused, whose leftover process, after
     the next server answered, writes a frame that the client never gets
-    and ends its output; one that cannot start; one that dies before it
-    answers; none after `shutdown`, nor any message or progress, nor
-    before the client's `initialize` is answered; `exit` killing a server
-    still starting; a crash that leaves the new server's listing all
-    three retries.  The fake counts its processes, its lives, so that a
-    script can make one life exit or hang and a test can count restarts.
+    and ends its output; one refused after it began a progress, which is
+    ended; one that cannot start; one that dies before it answers; none
+    after `shutdown`, nor any message or progress, nor before the client's
+    `initialize` is answered; `exit` killing a server still starting; a
+    crash that leaves the new server's listing all three retries.  The
+    fake counts its processes, its lives, so that a script can make one
+    life exit or hang and a test can count restarts.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:

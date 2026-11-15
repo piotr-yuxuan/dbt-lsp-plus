@@ -770,6 +770,23 @@ fn a_refused_restart_s_late_end_leaves_the_next_server_running() {
 }
 
 #[test]
+fn a_refused_restart_ends_the_progress_it_began() {
+    let begin =
+        r#"{"jsonrpc": "2.0", "method": "$/progress", "params": {"token": "replaying", "value": {"kind": "begin"}}}"#;
+    let script = json!({"exit_on": "textDocument/hover", "exit_life": 1, "send_on": "initialize", "send_life": 2,
+                        "send": [begin], "refuse_on": "initialize", "refuse_life": 2});
+    let (mut session, _) = Session::fake("restart-refused-progress", script);
+    session.initialize(&fixture());
+    session.request("textDocument/hover", hover_at_start(&fixture().join("models/marts/order_summary.sql")));
+    session.wait_for(|m| m["params"]["message"].as_str().is_some_and(|text| text.starts_with("dbt lsp refused")));
+    // Begun before the refusal, ended as the proxy lets that server go.
+    let replaying = |m: &&Value| m["params"]["token"] == "replaying";
+    let kinds: Vec<&Value> = session.received.iter().filter(replaying).map(|m| &m["params"]["value"]["kind"]).collect();
+    assert_eq!(kinds, ["begin", "end"]);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let (mut session, log) = Session::fake("no-feedback", json!({"answers": {ALL: all}}));
