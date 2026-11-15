@@ -29,10 +29,13 @@
 //!     which 2.0.9 publishes with no version;
 //!   - `silent`, keys whose requests are never answered, and `hold`, keys
 //!     whose requests wait for the notification `test/release`;
-//!   - `exit_on`, a method on which the server exits with status 3, and
-//!     `hang_on`, one on which it stops, neither reading nor exiting; each
-//!     only in the life that `exit_life` or `hang_life` numbers, from 1,
-//!     when given;
+//!   - `exit_on`, a method on which the server exits with status 3;
+//!     `hang_on`, one on which it stops, neither reading nor exiting;
+//!     `refuse_on`, a request it answers with an error; `orphan_on`, one on
+//!     which it leaves a process that holds its output three seconds more,
+//!     as a launcher's child would; each only in the life that `exit_life`,
+//!     `hang_life`, `refuse_life` or `orphan_life` numbers, from 1, when
+//!     given;
 //!   - `hold_compile`, true when it announces no compilation until the
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
@@ -130,6 +133,29 @@ impl Fake {
     fn acts_on(&self, act: &str, method: &str) -> bool {
         let life = self.script[format!("{act}_life")].as_u64().is_none_or(|life| life as usize == self.life);
         self.script[format!("{act}_on")].as_str() == Some(method) && life
+    }
+
+    /// What the script makes this life do on METHOD, a request when ID, in
+    /// place of its answer: leave an orphan, exit, hang, or refuse; true when
+    /// it refused.
+    fn misbehaves(&self, method: &str, id: Option<&Value>) -> bool {
+        if self.acts_on("orphan", method) {
+            // The shell's background child inherits the output and outlives it.
+            std::process::Command::new("sh").args(["-c", "sleep 3 &"]).status().expect("leave an orphan");
+        }
+        if self.acts_on("exit", method) {
+            std::process::exit(3);
+        }
+        if self.acts_on("hang", method) {
+            loop {
+                std::thread::park();
+            }
+        }
+        let refused = self.acts_on("refuse", method) && id.is_some();
+        if refused {
+            send(json!({"id": id, "error": {"code": -32603, "message": "refused by the script"}}));
+        }
+        refused
     }
 
     fn lists(&self, list: &str, key: &str) -> bool {
@@ -271,13 +297,8 @@ fn main() {
         }
         let message = frame.value.unwrap_or(Value::Null);
         let (Some(method), id) = (message["method"].as_str(), message.get("id")) else { continue };
-        if fake.acts_on("exit", method) {
-            std::process::exit(3);
-        }
-        if fake.acts_on("hang", method) {
-            loop {
-                std::thread::park();
-            }
+        if fake.misbehaves(method, id) {
+            continue;
         }
         match (method, id) {
             ("initialize", Some(id)) => {

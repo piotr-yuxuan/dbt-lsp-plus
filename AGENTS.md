@@ -75,6 +75,9 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     `handle` stay dispatches;
   - `answered_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: what dbt lsp
     2.0.9 answers, apart from what the script makes it answer;
+  - `Fake::misbehaves` in `tests/support/fake_dbt_lsp.rs`: what the
+    script makes one life do in place of an answer, apart from `main`'s
+    loop over frames;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition` and `Proxy::on_document`: the
     routing of a request the proxy may answer itself (by its method, then
