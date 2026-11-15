@@ -8,7 +8,7 @@ mod support;
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use support::{Session, copy_fixture, fixture, received_by_server, scratch, until_logged, uri};
 
 fn names(symbols: &Value) -> Vec<&str> {
@@ -27,6 +27,36 @@ fn methods(log: &Path) -> Vec<String> {
 fn listings(log: &Path, selector: &str) -> usize {
     let own = |m: &Value| m["id"].as_str().is_some_and(|id| id.starts_with("dbt-lsp-plus/"));
     logged(log).iter().filter(|m| own(m) && m["params"]["arguments"][0] == selector).count()
+}
+
+/// What the fake's N-th process received, from 1: the processes of a
+/// session share one log, each beginning with its `initialize`.
+fn life(log: &Path, n: usize) -> Vec<Value> {
+    let mut lives: Vec<Vec<Value>> = Vec::new();
+    for message in logged(log) {
+        if message["method"] == "initialize" {
+            lives.push(Vec::new());
+        }
+        lives.last_mut().expect("initialize comes first").push(message);
+    }
+    lives.into_iter().nth(n - 1).unwrap_or_default()
+}
+
+/// The pids of the fake's processes, in the order they started.
+fn lives(log: &Path) -> Vec<u32> {
+    received_by_server(&log.with_extension("jsonl.lives")).iter().map(|pid| pid.parse().unwrap()).collect()
+}
+
+/// Waits until the fake's N-th process got its `initialized`.
+fn until_initialized(log: &Path, n: usize) {
+    until_logged(log, "a restarted server initialized", |_| life(log, n).iter().any(|m| m["method"] == "initialized"));
+}
+
+/// Whether the process PID runs, or waits to be reaped.
+fn alive(pid: u32) -> bool {
+    let mut probe = std::process::Command::new("kill");
+    probe.args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null());
+    probe.status().expect("run kill").success()
 }
 
 /// Sends a request that the server answers, so that everything the proxy
@@ -410,7 +440,7 @@ fn a_crash_fails_each_pending_request_exactly_once() {
 
 #[test]
 fn a_server_that_exits_before_initialize_leaves_the_proxy_alone() {
-    let (mut session, _) = Session::fake("exit-before-initialize", json!({"exit_on": "initialize"}));
+    let (mut session, log) = Session::fake("exit-before-initialize", json!({"exit_on": "initialize"}));
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
     let warning = session.wait_for(|m| m["method"] == "window/showMessage");
@@ -421,16 +451,22 @@ fn a_server_that_exits_before_initialize_leaves_the_proxy_alone() {
     let path = fixture().join("models/marts/orders.sql");
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
     assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    // Past the first restart's delay: none comes before the client's initialize is answered.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(lives(&log).len(), 1);
     assert!(session.finish().success());
 }
 
 #[test]
 fn a_crash_during_shutdown_still_answers_shutdown() {
-    let (mut session, _) = Session::fake("crash-on-shutdown", json!({"exit_on": "shutdown"}));
+    let (mut session, log) = Session::fake("crash-on-shutdown", json!({"exit_on": "shutdown"}));
     session.initialize(&fixture());
     let response = session.request("shutdown", Value::Null);
     assert_eq!(response["result"], Value::Null);
     assert!(response.get("error").is_none(), "{response}");
+    // Past the first restart's delay: none comes after shutdown.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(lives(&log).len(), 1);
     session.notify("exit", Value::Null);
     assert!(session.wait().success());
 }
@@ -441,6 +477,163 @@ fn exit_without_shutdown_fails() {
     session.initialize(&fixture());
     session.notify("exit", Value::Null);
     assert_eq!(session.wait().code(), Some(1));
+}
+
+/// A hover on the first line of PATH, a comment in each model it names.
+fn hover_at_start(path: &Path) -> Value {
+    json!({"textDocument": {"uri": uri(path)}, "position": {"line": 0, "character": 0}})
+}
+
+/// A server that exits on a hover, then one that never answers its initialize.
+fn restart_hangs() -> Value {
+    json!({"exit_on": "textDocument/hover", "exit_life": 1, "hang_on": "initialize", "hang_life": 2})
+}
+
+#[test]
+fn a_crashed_server_restarts_with_the_session_as_the_client_left_it() {
+    let (mut session, log) = Session::fake("restart", json!({"exit_on": "textDocument/hover", "exit_life": 1}));
+    session.initialize(&fixture());
+    let [orders, summary, customers] = ["marts/orders.sql", "marts/order_summary.sql", "staging/stg_customers.sql"]
+        .map(|p| fixture().join("models").join(p));
+    session.open(&orders, None);
+    let text = std::fs::read_to_string(&summary).unwrap();
+    let summary_document = json!({"uri": uri(&summary), "languageId": "jinja-sql", "version": 7, "text": text});
+    session.notify("textDocument/didOpen", json!({"textDocument": summary_document}));
+    assert_eq!(session.request("textDocument/hover", hover_at_start(&orders))["error"]["code"], json!(-32803));
+    let shown = session.wait_for(|m| m["method"] == "window/showMessage");
+    let message = shown["params"]["message"].as_str().unwrap();
+    assert!(message.starts_with("dbt lsp exited") && message.ends_with("restarting it in 1 s."), "{shown}");
+    // During the delay: an edit, a document opened then closed, a request.
+    let edit = json!({"textDocument": {"uri": uri(&orders), "version": 3}, "contentChanges": [{"text": "select 3\n"}]});
+    session.notify("textDocument/didChange", edit);
+    session.open(&customers, None);
+    session.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(&customers)}}));
+    assert_eq!(session.request("textDocument/hover", hover_at_start(&summary))["error"]["code"], json!(-32803));
+    until_initialized(&log, 2);
+    let listed = |m: &Value| m["params"]["command"] == "dbt.listNodes";
+    until_logged(&log, "the restarted server listed", |_| life(&log, 2).iter().any(listed));
+    let hover = session.request("textDocument/hover", hover_at_start(&summary));
+    assert_eq!(hover["result"]["echo"], "textDocument/hover", "{hover}");
+    let (first, second) = (life(&log, 1), life(&log, 2));
+    assert_eq!(second[0]["params"], first[0]["params"], "the client's own parameters");
+    assert!(second[0]["id"].as_str().is_some_and(|id| id.starts_with("dbt-lsp-plus/")), "{}", second[0]);
+    // Everything the proxy sends before its listing, the closed document left out.
+    let methods = second.iter().map(|m| m["method"].as_str().unwrap_or("(an answer)"));
+    let replayed: Vec<&str> = methods.take_while(|method| *method != "workspace/executeCommand").collect();
+    assert_eq!(replayed, ["initialize", "initialized", "textDocument/didOpen", "textDocument/didOpen"]);
+    let orders_document = json!({"uri": uri(&orders), "languageId": "sql", "version": 3, "text": "select 3\n"});
+    // In the order of their paths.
+    assert_eq!(
+        [&second[2]["params"]["textDocument"], &second[3]["params"]["textDocument"]],
+        [&summary_document, &orders_document]
+    );
+    assert!(session.finish().success());
+}
+
+#[test]
+fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_the_proxy_alone() {
+    let (mut session, log) = Session::fake("restarts", json!({"exit_on": "textDocument/hover"}));
+    session.initialize(&fixture());
+    let summary = fixture().join("models/marts/order_summary.sql");
+    for delay in 1..=3 {
+        session.received.clear();
+        session.request("textDocument/hover", hover_at_start(&summary));
+        let shown = session.wait_for(|m| m["method"] == "window/showMessage");
+        let crashed = SystemTime::now();
+        let message = shown["params"]["message"].as_str().unwrap();
+        assert!(message.ends_with(&format!("restarting it in {delay} s.")), "{shown}");
+        until_initialized(&log, delay as usize + 1);
+        let started = std::fs::metadata(log.with_extension("jsonl.lives")).unwrap().modified().unwrap();
+        let waited = started.duration_since(crashed).expect("a restart after the crash");
+        // The client heard of the crash a little after the proxy did.
+        let early = Duration::from_millis(50);
+        assert!(waited + early >= Duration::from_secs(delay) && waited < Duration::from_secs(delay + 1), "{waited:?}");
+    }
+    session.received.clear();
+    session.request("textDocument/hover", hover_at_start(&summary));
+    let shown = session.wait_for(|m| m["method"] == "window/showMessage");
+    assert!(shown["params"]["message"].as_str().unwrap().contains("keeps its own features"), "{shown}");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(lives(&log).len(), 4);
+    assert!(session.finish().success());
+}
+
+const WATCHER: &str = r#"{"jsonrpc": "2.0", "id": 0, "method": "client/registerCapability", "params": {"registrations":
+[{"id": "default-dbt-file-system-watcher", "method": "workspace/didChangeWatchedFiles",
+"registerOptions": {"watchers": [{"globPattern": "**/*"}]}}]}}"#;
+const ANALYZING: &str =
+    r#"{"jsonrpc": "2.0", "method": "$/progress", "params": {"token": "analyzing", "value": {"kind": "begin"}}}"#;
+
+#[test]
+fn across_a_restart_the_client_gets_one_initialize_answer_one_registration_and_a_begun_progress_ended() {
+    let script = json!({"raw_on_initialized": [WATCHER, ANALYZING], "exit_on": "textDocument/hover", "exit_life": 1});
+    let (mut session, log) = Session::fake("restart-registration", script);
+    session.initialize(&fixture());
+    session.wait_for(|m| m["method"] == "$/progress");
+    let summary = fixture().join("models/marts/order_summary.sql");
+    session.request("textDocument/hover", hover_at_start(&summary));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    until_initialized(&log, 2);
+    // The restarted server registered and began before it answers this.
+    let hover = session.request("textDocument/hover", hover_at_start(&summary));
+    assert_eq!(hover["result"]["echo"], "textDocument/hover", "{hover}");
+    // The answer to the proxy's initialize stays with the proxy.
+    let capabilities = |m: &&Value| m.get("result").is_some_and(|r| r.get("capabilities").is_some());
+    assert_eq!(session.received.iter().filter(capabilities).count(), 1);
+    let registrations = session.received.iter().filter(|m| m["method"] == "client/registerCapability").count();
+    assert_eq!(registrations, 1);
+    let answer = json!({"jsonrpc": "2.0", "id": 0, "result": null});
+    assert!(life(&log, 2).contains(&answer), "the proxy answers the second registration");
+    let progress = |m: &&Value| m["method"] == "$/progress" && m["params"]["token"] == "analyzing";
+    let kinds: Vec<&Value> = session.received.iter().filter(progress).map(|m| &m["params"]["value"]["kind"]).collect();
+    assert_eq!(kinds, ["begin", "end", "begin"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_restarted_server_that_never_answers_its_initialize_is_killed_and_replaced() {
+    let (mut session, log) = Session::fake("restart-hangs", restart_hangs());
+    session.initialize(&fixture());
+    let summary = fixture().join("models/marts/order_summary.sql");
+    session.request("textDocument/hover", hover_at_start(&summary));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    until_logged(&log, "the second life", |_| lives(&log).len() == 2);
+    // Meanwhile the proxy answers alone.
+    assert_eq!(session.request("textDocument/hover", hover_at_start(&summary))["error"]["code"], json!(-32803));
+    session.received.clear();
+    session.timeout = Duration::from_secs(20);
+    let shown = session.wait_for(|m| m["method"] == "window/showMessage");
+    assert_eq!(shown["params"]["message"], "dbt lsp did not answer its initialize: restarting it in 2 s.");
+    assert!(!alive(lives(&log)[1]), "the hung server is killed");
+    until_initialized(&log, 3);
+    let hover = session.request("textDocument/hover", hover_at_start(&summary));
+    assert_eq!(hover["result"]["echo"], "textDocument/hover", "{hover}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn shutdown_during_the_delay_leaves_no_restart() {
+    let (mut session, log) = Session::fake("restart-shutdown", json!({"exit_on": "textDocument/hover"}));
+    session.initialize(&fixture());
+    session.request("textDocument/hover", hover_at_start(&fixture().join("models/marts/order_summary.sql")));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(lives(&log).len(), 1);
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+}
+
+#[test]
+fn exit_during_a_restart_kills_the_starting_server() {
+    let (mut session, log) = Session::fake("restart-exit", restart_hangs());
+    session.initialize(&fixture());
+    session.request("textDocument/hover", hover_at_start(&fixture().join("models/marts/order_summary.sql")));
+    until_logged(&log, "the second life", |_| lives(&log).len() == 2);
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+    assert!(!alive(lives(&log)[1]));
 }
 
 #[test]
