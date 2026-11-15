@@ -37,7 +37,10 @@ fn in_front_of_the_real_dbt_lsp() {
     let mut session = Session::start(&server, &env, Some(&project));
     session.timeout = Duration::from_secs(180);
 
-    let result = session.initialize(&project);
+    // As an editor that lets dbt lsp register its file watcher.
+    let capabilities = json!({"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}},
+                              "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
+    let result = session.initialize_as(&project, capabilities);
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
     let announced = [
         "documentSymbolProvider",
@@ -118,8 +121,11 @@ fn node_information(session: &mut Session, project: &Path) {
 
 /// The server killed: the proxy restarts it, whose first compilation
 /// publishes again, dbt's warning on the models' file among them, and which
-/// answers a hover.
+/// answers a hover.  Its registration of the file watcher, which the client
+/// holds, stays with the proxy.
 fn restart(session: &mut Session, project: &Path) {
+    let registration = |m: &&Value| m["method"] == "client/registerCapability";
+    assert_eq!(session.received.iter().filter(registration).count(), 1, "dbt lsp registers its watcher");
     let proxy = session.child.id().to_string();
     let children = std::process::Command::new("pgrep").args(["-P", &proxy, "-f", " lsp "]).output().expect("run pgrep");
     let servers: Vec<String> =
@@ -140,6 +146,7 @@ fn restart(session: &mut Session, project: &Path) {
     let orders = uri(&project.join("models/marts/orders.sql"));
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
+    assert_eq!(session.received.iter().filter(registration).count(), 0, "the second registration");
 }
 
 /// The proxy's outline and folding of a model, the outline of a properties

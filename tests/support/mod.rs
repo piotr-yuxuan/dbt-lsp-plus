@@ -179,6 +179,12 @@ impl Session {
     pub fn initialize_with(&mut self, root: &Path, hierarchical: bool) -> Value {
         let capabilities =
             json!({"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": hierarchical}}});
+        self.initialize_as(root, capabilities)
+    }
+
+    /// Initializes the session on ROOT as a client with CAPABILITIES;
+    /// returns the result.
+    pub fn initialize_as(&mut self, root: &Path, capabilities: Value) -> Value {
         let params = json!({"processId": null, "rootUri": uri(root), "capabilities": capabilities,
                             "workspaceFolders": [{"uri": uri(root), "name": "shop"}]});
         let response = self.request("initialize", params);

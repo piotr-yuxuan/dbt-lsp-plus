@@ -523,7 +523,8 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - A `client/registerCapability` whose registration ids the client already
   holds is answered null by the proxy: dbt lsp 2.0.9 registers its file
   watcher (`default-dbt-file-system-watcher`, request id 0) after each
-  `initialized`.
+  `initialized`, when the client declares
+  `workspace.didChangeWatchedFiles.dynamicRegistration`.
 - The dead server's pending requests fail once each, and a `$/progress` it
   began and never ended is ended for the client, unless `shutdown` came
   first: after it, the proxy sends nothing but answers.  Its diagnostics
@@ -715,7 +716,8 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   what this note records of `dbt.listNodes` and of `positionEncoding`:
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
   It ends by killing the server, which the proxy restarts: diagnostics
-  are published again and a hover is answered.
+  are published again and a hover is answered, and the client, which
+  declares dynamic registration, gets dbt's watcher registration once.
   The fake also asks for the configuration after `initialized` and answers
   an empty listing with `{"error": "No nodes found"}`, as 2.0.9 was seen to.
   The live rename also relies on two observations that no fake-backed test
