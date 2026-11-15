@@ -1226,18 +1226,19 @@ impl<W: Write> Proxy<W> {
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
         }
-        for (_, token) in std::mem::take(&mut self.restart.progress) {
-            self.send_client(&json!({"jsonrpc": "2.0", "method": "$/progress",
-                                     "params": {"token": token, "value": {"kind": "end"}}}));
-        }
         self.lost_server(&why);
     }
 
-    /// The server lost for WHY during a session: a restart after its delay,
-    /// else the proxy alone from now on; the client is told which.
+    /// The server lost for WHY during a session: the progress it began is
+    /// ended, and a restart follows after its delay, else the proxy is alone
+    /// from now on; the client is told which.
     fn lost_server(&mut self, why: &str) {
         if !self.initialized || self.shutdown {
             return;
+        }
+        for (_, token) in std::mem::take(&mut self.restart.progress) {
+            self.send_client(&json!({"jsonrpc": "2.0", "method": "$/progress",
+                                     "params": {"token": token, "value": {"kind": "end"}}}));
         }
         let now = Instant::now();
         self.restart.past.retain(|at| now.saturating_duration_since(*at) < RESTART_WINDOW);

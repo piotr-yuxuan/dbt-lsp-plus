@@ -458,17 +458,21 @@ fn a_server_that_exits_before_initialize_leaves_the_proxy_alone() {
 }
 
 #[test]
-fn a_crash_during_shutdown_still_answers_shutdown() {
-    let (mut session, log) = Session::fake("crash-on-shutdown", json!({"exit_on": "shutdown"}));
+fn a_crash_during_shutdown_still_answers_shutdown_and_sends_nothing_more() {
+    let script = json!({"exit_on": "shutdown", "raw_on_initialized": [ANALYZING]});
+    let (mut session, log) = Session::fake("crash-on-shutdown", script);
     session.initialize(&fixture());
+    session.wait_for(|m| m["method"] == "$/progress");
     let response = session.request("shutdown", Value::Null);
     assert_eq!(response["result"], Value::Null);
     assert!(response.get("error").is_none(), "{response}");
     // Past the first restart's delay: none comes after shutdown.
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(lives(&log).len(), 1);
-    session.notify("exit", Value::Null);
-    assert!(session.wait().success());
+    // After shutdown, only answers: no message, no progress ended.
+    let (status, unread) = session.exit();
+    assert!(status.success());
+    assert_eq!(unread, Vec::<Value>::new());
 }
 
 #[test]
@@ -620,8 +624,10 @@ fn shutdown_during_the_delay_leaves_no_restart() {
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(lives(&log).len(), 1);
-    session.notify("exit", Value::Null);
-    assert!(session.wait().success());
+    // Nothing after shutdown: no restart, no message.
+    let (status, unread) = session.exit();
+    assert!(status.success());
+    assert_eq!(unread, Vec::<Value>::new());
 }
 
 #[test]

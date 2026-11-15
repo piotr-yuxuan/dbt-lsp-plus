@@ -201,6 +201,19 @@ impl Session {
         self.wait()
     }
 
+    /// Sends `exit`; returns the proxy's exit status and every message it
+    /// sent that the session had not read.
+    pub fn exit(mut self) -> (ExitStatus, Vec<Value>) {
+        self.notify("exit", Value::Null);
+        let deadline = Instant::now() + self.timeout;
+        let mut unread = Vec::new();
+        // Until the proxy closes its output.
+        while let Ok((_, message)) = self.inbox.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            unread.push(message);
+        }
+        (self.wait(), unread)
+    }
+
     /// Waits for the proxy to exit, within the session's timeout.
     pub fn wait(mut self) -> ExitStatus {
         let deadline = Instant::now() + self.timeout;

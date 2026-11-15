@@ -525,9 +525,10 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   watcher (`default-dbt-file-system-watcher`, request id 0) after each
   `initialized`.
 - The dead server's pending requests fail once each, and a `$/progress` it
-  began and never ended is ended for the client.  Its diagnostics stay
-  until the new server's first compilation, which publishes every file of
-  the project (143 on the fixture).
+  began and never ended is ended for the client, unless `shutdown` came
+  first: after it, the proxy sends nothing but answers.  Its diagnostics
+  stay until the new server's first compilation, which publishes every
+  file of the project (143 on the fixture).
 - A restarted server that cannot start, refuses its `initialize`, or does
   not answer it within 10 seconds counts as one more crash; dbt lsp 2.0.9
   answered in 18 ms on the fixture.  `exit` kills a server still starting,
@@ -702,10 +703,10 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
     progress ended; three crashes after 1, 2 then 3 s, measured, then
     alone; a replayed `initialize` that hangs; one refused, whose leftover
     process ends its output after the next server answered; none after
-    `shutdown`, nor before the client's `initialize` is answered; `exit`
-    killing a server still starting.  The fake counts its processes, its
-    lives, so that a script can make one life exit or hang and a test can
-    count restarts.
+    `shutdown`, nor any message or progress, nor before the client's
+    `initialize` is answered; `exit` killing a server still starting.  The
+    fake counts its processes, its lives, so that a script can make one
+    life exit or hang and a test can count restarts.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
