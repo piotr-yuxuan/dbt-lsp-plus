@@ -30,7 +30,9 @@
 //!   - `silent`, keys whose requests are never answered, and `hold`, keys
 //!     whose requests wait for the notification `test/release`;
 //!   - `exit_on`, a method on which the server exits with status 3, and
-//!     `hang_on`, one on which it stops, neither reading nor exiting;
+//!     `hang_on`, one on which it stops, neither reading nor exiting; each
+//!     only in the life that `exit_life` or `hang_life` numbers, from 1,
+//!     when given;
 //!   - `hold_compile`, true when it announces no compilation until the
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
@@ -40,7 +42,9 @@
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
 //!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID}`
 //!   to that file's name followed by `.parses`, since two processes
-//!   appending to one file could interleave their lines.
+//!   appending to one file could interleave their lines; and each server
+//!   process, a life of the fake, appends its pid to the name followed by
+//!   `.lives`, by which it knows its life.
 
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
@@ -117,9 +121,17 @@ struct Fake {
     opened: bool,
     /// Held requests: id, method, params.
     held: Vec<(Value, String, Value)>,
+    /// Which process of the session this is, from 1.
+    life: usize,
 }
 
 impl Fake {
+    /// Whether the script makes this life ACT (`exit` or `hang`) on METHOD.
+    fn acts_on(&self, act: &str, method: &str) -> bool {
+        let life = self.script[format!("{act}_life")].as_u64().is_none_or(|life| life as usize == self.life);
+        self.script[format!("{act}_on")].as_str() == Some(method) && life
+    }
+
     fn lists(&self, list: &str, key: &str) -> bool {
         self.script[list].as_array().is_some_and(|keys| keys.iter().any(|k| k == key))
     }
@@ -244,7 +256,14 @@ fn main() {
     if parsing {
         return parse(&script, &arguments, log);
     }
-    let mut fake = Fake { script, opened: false, held: Vec::new() };
+    // Each server process of a session is one life of the fake.
+    let life = std::env::var("FAKE_DBT_LSP_LOG").map_or(1, |log| {
+        let lives = format!("{log}.lives");
+        let mut file = OpenOptions::new().create(true).append(true).open(&lives).expect("open the lives");
+        writeln!(file, "{}", std::process::id()).expect("count a life");
+        std::fs::read_to_string(&lives).expect("read the lives").lines().count()
+    });
+    let mut fake = Fake { script, opened: false, held: Vec::new(), life };
     let mut input = BufReader::new(io::stdin());
     while let Ok(Some(frame)) = rpc::read_frame(&mut input) {
         if let Some(log) = &mut log {
@@ -252,10 +271,10 @@ fn main() {
         }
         let message = frame.value.unwrap_or(Value::Null);
         let (Some(method), id) = (message["method"].as_str(), message.get("id")) else { continue };
-        if fake.script["exit_on"].as_str() == Some(method) {
+        if fake.acts_on("exit", method) {
             std::process::exit(3);
         }
-        if fake.script["hang_on"].as_str() == Some(method) {
+        if fake.acts_on("hang", method) {
             loop {
                 std::thread::park();
             }
