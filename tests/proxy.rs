@@ -633,10 +633,10 @@ fn a_restarted_server_that_never_answers_its_initialize_is_killed_and_replaced()
     session.timeout = Duration::from_secs(20);
     let shown = session.wait_for(|m| m["method"] == "window/showMessage");
     assert_eq!(shown["params"]["message"], "dbt lsp did not answer its initialize: restarting it in 2 s.");
-    // Ten seconds after the second life started, not sooner.
+    // Ten seconds after the second life started: not sooner, nor half a second later.
     let waited = SystemTime::now().duration_since(started).unwrap();
     assert!(
-        waited + Duration::from_millis(100) >= Duration::from_secs(10) && waited < Duration::from_secs(12),
+        waited + Duration::from_millis(100) >= Duration::from_secs(10) && waited < Duration::from_millis(10_500),
         "{waited:?}"
     );
     assert!(!alive(lives(&log)[1]), "the hung server is killed");
