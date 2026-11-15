@@ -623,6 +623,11 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - Navigation does not read an explicit tag on that flag: `!!str false`
   puts the root first, where dbt keeps the calling node's package first,
   and `!!bool "false"` does not, where dbt does.
+- A `ref` or a `source` inside a macro resolves in dbt in the package of
+  the node that calls the macro, not in the macro's own; the proxy, which
+  does not know the caller, resolves it in the macro's package.  It shows
+  in the navigation of a `source()` in a macro file, and in the call
+  hierarchy's edges from a macro, which always come from the scan.
 - A versioned model's `ref` (`v=2`) and its versions' files are not
   navigated; a generic test's arguments (`column_name:`, `to:` aside) and
   a `config:` block lead nowhere.
