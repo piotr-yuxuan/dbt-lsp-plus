@@ -34,8 +34,8 @@ pub struct Found {
 
 /// A package searched for a name.  For a call, dbt 2.0.9 searches the
 /// calling file's package first and the root project second, the other
-/// way round under `flags: require_ref_searches_node_package_before_root:
-/// false`.
+/// way round when `flags: require_ref_searches_node_package_before_root` is
+/// a YAML 1.2 false: a plain `false`, `False` or `FALSE`.
 #[derive(Clone, Copy)]
 enum Step {
     Own,
@@ -145,7 +145,9 @@ pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
     let config = project.packages.get(root).and_then(|dir| project.texts.get(&dir.join("dbt_project.yml")));
     let root_first = config.and_then(|text| yaml::parse(text)).is_some_and(|config| {
         let value = config.get("flags").and_then(|flags| flags.get("require_ref_searches_node_package_before_root"));
-        value.and_then(Node::as_str).is_some_and(|value| value.eq_ignore_ascii_case("false"))
+        // As dbt reads the flag: neither `fAlse` nor a quoted `'false'`.
+        let yaml_false = ["false", "False", "FALSE"];
+        matches!(value, Some(Node::Scalar { value, plain: true, .. }) if yaml_false.contains(&value.as_str()))
     });
     let (first, second) = if root_first { (root, own) } else { (own, root) };
     let packages = |steps: &[Step]| -> Vec<Option<&str>> {
@@ -435,18 +437,30 @@ models:
     }
 
     #[test]
-    fn the_flag_set_to_false_puts_the_root_first() {
+    fn only_the_flag_as_a_yaml_false_puts_the_root_first() {
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
-        let flagged =
-            shop("navigation-flag", "name: shop\nflags:\n  require_ref_searches_node_package_before_root: false\n");
-        assert_eq!(leads(&flagged, pkg_yml, named("ref", None, "orders"))[0].0, "model.shop.orders");
-        assert_eq!(leads(&flagged, pkg_yml, table)[0].0, "source.shop.raw.orders");
-        let default =
-            shop("navigation-flag-true", "name: shop\nflags:\n  require_ref_searches_node_package_before_root: true\n");
-        assert_eq!(leads(&default, pkg_yml, named("ref", None, "orders"))[0].0, "model.pkg.orders");
-        for dir in [flagged, default] {
-            std::fs::remove_dir_all(dir).unwrap();
+        // Each value of the flag, if any, and the package searched first, as
+        // dbt 2.0.9 and dbt-oss 2.0.11 read it: a YAML 1.2 boolean.
+        let values = [
+            (Some("false"), "shop"),
+            (Some("False"), "shop"),
+            (Some("FALSE"), "shop"),
+            (Some("fAlse"), "pkg"),
+            (Some("'false'"), "pkg"),
+            (Some("\"false\""), "pkg"),
+            (Some("no"), "pkg"),
+            (Some("true"), "pkg"),
+            (None, "pkg"),
+        ];
+        for (i, (value, first)) in values.into_iter().enumerate() {
+            let flag = value.map(|value| format!("flags:\n  require_ref_searches_node_package_before_root: {value}\n"));
+            let root = shop(&format!("navigation-flag-{i}"), &format!("name: shop\n{}", flag.unwrap_or_default()));
+            let found = leads(&root, pkg_yml, named("ref", None, "orders"));
+            assert_eq!(found[0].0, format!("model.{first}.orders"), "ref with the flag {value:?}");
+            let found = leads(&root, pkg_yml, table.clone());
+            assert_eq!(found[0].0, format!("source.{first}.raw.orders"), "source with the flag {value:?}");
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 

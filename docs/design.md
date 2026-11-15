@@ -310,11 +310,14 @@ one of these targets, and forwards every other one, YAML included:
 Lookup follows dbt 2.0.9, probed with `dbt parse`: a package the name gives
 is the only one searched; else a `ref` or a `source` tries the file's own
 package (the installed package whose directory holds it), then the root,
-then any, the root first under `flags:
-require_ref_searches_node_package_before_root: false`; a `doc` tries the
-root, then the file's package, then any, flag or not; an entry describes a
-resource of the file's own package only, since dbt 2.0.9 calls an entry
-naming another package's resource unused (dbt-core 1.12 patches it).  As
+then any, the root first when `flags:
+require_ref_searches_node_package_before_root` is a YAML 1.2 false, as dbt
+2.0.9 and dbt-oss 2.0.11 read it: a plain `false`, `False` or `FALSE`, not
+`fAlse`, `no` nor a quoted `'false'`, and no parse warns of a value it
+ignores; a `doc` tries the root, then the file's package, then any, flag
+or not; an entry describes a resource of the file's own package only,
+since dbt 2.0.9 calls an entry naming another package's resource unused
+(dbt-core 1.12 patches it).  As
 dbt-core 1.12.6's parser reads them: a generic test, the file's package
 then the root; a unit test's model, the file's package.  The first package
 that has something gives one location, or every
@@ -615,6 +618,9 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - `graph::resolve`, behind the call hierarchy, ignores `flags:
   require_ref_searches_node_package_before_root: false`, which navigation
   reads.
+- Navigation does not read an explicit tag on that flag: `!!str false`
+  puts the root first, where dbt keeps the calling node's package first,
+  and `!!bool "false"` does not, where dbt does.
 - A versioned model's `ref` (`v=2`) and its versions' files are not
   navigated; a generic test's arguments (`column_name:`, `to:` aside) and
   a `config:` block lead nowhere.
