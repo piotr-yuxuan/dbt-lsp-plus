@@ -747,7 +747,8 @@ fn exit_during_a_restart_kills_the_starting_server() {
 #[test]
 fn a_refused_restart_s_late_end_leaves_the_next_server_running() {
     // The second life refuses its initialize and leaves a process that holds
-    // its output three seconds more: that end comes after the third answered.
+    // its output three seconds more: its frame and its end come after the
+    // third answered.
     let script = json!({"exit_on": "textDocument/hover", "exit_life": 1, "refuse_on": "initialize", "refuse_life": 2,
                         "orphan_on": "initialize", "orphan_life": 2});
     let (mut session, log) = Session::fake("restart-orphan", script);
@@ -762,6 +763,8 @@ fn a_refused_restart_s_late_end_leaves_the_next_server_running() {
     std::thread::sleep(Duration::from_millis(1500));
     let hover = session.request("textDocument/hover", hover_at_start(&summary));
     assert_eq!(hover["result"]["echo"], "textDocument/hover", "{hover}");
+    let orphan = |m: &&Value| m["params"]["message"] == "from the orphan";
+    assert_eq!(session.received.iter().find(orphan), None, "the frame of a process let go of");
     assert_eq!(show_messages(&session), 1);
     assert!(session.finish().success());
 }

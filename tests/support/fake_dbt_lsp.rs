@@ -33,7 +33,8 @@
 //!     `hang_on`, one on which it stops, neither reading nor exiting;
 //!     `refuse_on`, a request it answers with an error; `orphan_on`, one on
 //!     which it leaves a process that holds its output three seconds more,
-//!     as a launcher's child would; each only in the life that `exit_life`,
+//!     as a launcher's child would, then writes a `window/showMessage`
+//!     "from the orphan" on it; each only in the life that `exit_life`,
 //!     `hang_life`, `refuse_life` or `orphan_life` numbers, from 1, when
 //!     given;
 //!   - `hold_compile`, true when it announces no compilation until the
@@ -141,7 +142,10 @@ impl Fake {
     fn misbehaves(&self, method: &str, id: Option<&Value>) -> bool {
         if self.acts_on("orphan", method) {
             // The shell's background child inherits the output and outlives it.
-            std::process::Command::new("sh").args(["-c", "sleep 3 &"]).status().expect("leave an orphan");
+            let message = json!({"type": 3, "message": "from the orphan"});
+            let body = json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": message}).to_string();
+            let script = format!("(sleep 3; printf 'Content-Length: {}\\r\\n\\r\\n%s' '{body}') &", body.len());
+            std::process::Command::new("sh").args(["-c", &script]).status().expect("leave an orphan");
         }
         if self.acts_on("exit", method) {
             std::process::exit(3);
