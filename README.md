@@ -44,7 +44,9 @@ dbt 2, and adds what it lacks, for every editor and for agents:
 Every other message passes unchanged, byte for byte.  A feature that the
 server announces stays the server's, but for references and renames on a
 source; the initialize result names those under `experimental.dbtLspPlus`.
-Without `dbt lsp`, or after it crashed, the proxy keeps serving its own
+When `dbt lsp` crashes, the proxy starts it again, at most three times in
+ten minutes, and gives it the open documents as they stand.  Without
+`dbt lsp`, and while it restarts, the proxy keeps serving its own
 features.
 
 It uses only the server's interface, unlocks nothing that dbt gates behind

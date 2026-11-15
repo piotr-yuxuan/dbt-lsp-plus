@@ -57,8 +57,9 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
     so that `answer` stays a dispatch;
-  - `Proxy::expire_listing` and `Proxy::stop_server`: the deadline of a
-    listing and the teardown of the server process, each a resource's end;
+  - `Proxy::expire_listing`, `Proxy::start_restart` and
+    `Proxy::stop_server`: the deadline of a listing, and the start and the
+    teardown of the server process, each a resource's start or end;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
