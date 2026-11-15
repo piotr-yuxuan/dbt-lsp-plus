@@ -52,12 +52,15 @@ const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 /// the kind, the resource types it may name, the prefix of the name in
 /// their ids, and the packages searched in turn.  A `ref`, `doc` or
 /// generic test names its kind; the `name:` of an entry, the entry's label;
-/// a unit test's `model:`, `unit test model`.  An entry describes a
-/// resource of its own package only: dbt 2.0.9 calls one naming another
-/// package's resource unused, where dbt-core 1.12 patches it.
+/// a unit test's `model:`, `unit test model`.  A `doc` ignores the calling
+/// file's package: past the root, the first package by path, which is the
+/// byte order of their names, since dbt installs each at
+/// `dbt_packages/<name>`.  An entry describes a resource of its own package
+/// only: dbt 2.0.9 calls one naming another package's resource unused,
+/// where dbt-core 1.12 patches it.
 const LOOKUP: [(&str, &[&str], &str, &[Step]); 9] = [
     ("ref", &["model", "seed", "snapshot"], "", CALLS),
-    ("doc", &["doc"], "", &[Step::Root, Step::Own, Step::Any]),
+    ("doc", &["doc"], "", &[Step::Root, Step::Any]),
     ("test", &["macro"], "test_", &[Step::Own, Step::Root]),
     ("unit test model", &["model"], "", &[Step::Own]),
     ("model", &["model"], "", &[Step::Own]),
@@ -482,13 +485,46 @@ models:
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
         assert_eq!(found, lead("doc.shop.order_status", "models/docs.md", "order_status"));
-        // From the root, any package that has it; from a package, its own.
+        // From the root or a package, that of the package whose name sorts first.
         assert_eq!(leads(&root, "models/_models.yml", named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
-        assert_eq!(leads(&root, pkg_yml, named("doc", None, "pkg_only"))[0].0, "doc.pkg.pkg_only");
+        assert_eq!(leads(&root, pkg_yml, named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
         assert_eq!(
             leads(&root, "models/_models.yml", named("doc", Some("pkg"), "order_status"))[0].0,
             "doc.pkg.order_status"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_doc_ignores_the_calling_file_s_package() {
+        let calls = "version: 2\nmodels:\n  - name: m\n    description: \"{{ doc('shared') }} {{ doc('both') }}\"\n";
+        let shared = "{% docs shared %}\n{% enddocs %}\n";
+        let both = "{% docs both %}\n{% enddocs %}\n";
+        let root = scratch_project(
+            "navigation-doc-order",
+            &[
+                ("dbt_project.yml", "name: shop\n"),
+                ("models/_models.yml", calls),
+                ("models/docs.md", both),
+                ("dbt_packages/aaa/dbt_project.yml", "name: aaa\n"),
+                ("dbt_packages/aaa/models/_models.yml", calls),
+                ("dbt_packages/aaa/models/docs.md", shared),
+                ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+                ("dbt_packages/pkg/models/_models.yml", calls),
+                ("dbt_packages/pkg/models/docs.md", shared),
+                ("dbt_packages/shop_utils/dbt_project.yml", "name: shop_utils\n"),
+                ("dbt_packages/shop_utils/models/_models.yml", calls),
+                ("dbt_packages/shop_utils/models/docs.md", &format!("{shared}{both}")),
+            ],
+        );
+        // As dbt 2.0.9 gives it from a model of each: the root's, else that of
+        // the package whose name sorts first.
+        for package in ["", "dbt_packages/aaa/", "dbt_packages/pkg/", "dbt_packages/shop_utils/"] {
+            let yml = format!("{package}models/_models.yml");
+            assert_eq!(leads(&root, &yml, named("doc", None, "shared"))[0].0, "doc.aaa.shared", "from {yml}");
+        }
+        let yml = "dbt_packages/shop_utils/models/_models.yml";
+        assert_eq!(leads(&root, yml, named("doc", None, "both")), lead("doc.shop.both", "models/docs.md", "both"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
