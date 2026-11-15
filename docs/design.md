@@ -532,6 +532,11 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   not answer it within 10 seconds counts as one more crash; dbt lsp 2.0.9
   answered in 18 ms on the fixture.  `exit` kills a server still starting,
   as it does the server.
+- Each server process has a generation, from 0, which its frames and the
+  end of its output carry: those of a process the proxy already let go
+  of are dropped.  A process it killed may end its output late, when a
+  launcher's child holds it, and that end must not stop the server
+  started since.
 
 ## Failure modes
 
@@ -695,10 +700,12 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
     included, then a request reaching the new server; one answer to
     `initialize` and one registration reaching the client, a begun
     progress ended; three crashes after 1, 2 then 3 s, measured, then
-    alone; a replayed `initialize` that hangs; none after `shutdown`, nor
-    before the client's `initialize` is answered; `exit` killing a server
-    still starting.  The fake counts its processes, its lives, so that a
-    script can make one life exit or hang and a test can count restarts.
+    alone; a replayed `initialize` that hangs; one refused, whose leftover
+    process ends its output after the next server answered; none after
+    `shutdown`, nor before the client's `initialize` is answered; `exit`
+    killing a server still starting.  The fake counts its processes, its
+    lives, so that a script can make one life exit or hang and a test can
+    count restarts.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:

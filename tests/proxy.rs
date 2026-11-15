@@ -637,6 +637,28 @@ fn exit_during_a_restart_kills_the_starting_server() {
 }
 
 #[test]
+fn a_refused_restart_s_late_end_leaves_the_next_server_running() {
+    // The second life refuses its initialize and leaves a process that holds
+    // its output three seconds more: that end comes after the third answered.
+    let script = json!({"exit_on": "textDocument/hover", "exit_life": 1, "refuse_on": "initialize", "refuse_life": 2,
+                        "orphan_on": "initialize", "orphan_life": 2});
+    let (mut session, log) = Session::fake("restart-orphan", script);
+    session.initialize(&fixture());
+    let summary = fixture().join("models/marts/order_summary.sql");
+    session.request("textDocument/hover", hover_at_start(&summary));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    session.received.clear();
+    let refused = session.wait_for(|m| m["method"] == "window/showMessage");
+    assert_eq!(refused["params"]["message"], "dbt lsp refused its initialize: restarting it in 2 s.");
+    until_initialized(&log, 3);
+    std::thread::sleep(Duration::from_millis(1500));
+    let hover = session.request("textDocument/hover", hover_at_start(&summary));
+    assert_eq!(hover["result"]["echo"], "textDocument/hover", "{hover}");
+    assert_eq!(show_messages(&session), 1);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let (mut session, log) = Session::fake("no-feedback", json!({"answers": {ALL: all}}));

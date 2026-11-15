@@ -77,8 +77,10 @@ const CHANGES: [&str; 5] = [
 enum Event {
     Client(Frame),
     ClientClosed,
-    Server(Frame),
-    ServerClosed,
+    /// A frame of the server process of that generation.
+    Server(u64, Frame),
+    /// The end of the output of the server process of that generation.
+    ServerClosed(u64),
     Parsed(config::Outcome),
     /// The failures of one kind, `runs::LAST_RUN` or `runs::STALE_SOURCE`,
     /// when their file was written; none for results of a command that
@@ -112,6 +114,8 @@ struct Restart {
     registered: HashSet<String>,
     /// The progress tokens the server began and has not ended.
     progress: HashMap<String, Value>,
+    /// The generation of the last server started.
+    spawned: u64,
 }
 
 /// The wait before restarting a server that died at NOW, after the restarts
@@ -139,6 +143,9 @@ struct Diagnostics {
 struct Server {
     child: Child,
     stdin: ChildStdin,
+    /// Which process of the session it is, from 0: its events carry it, so
+    /// that those of a process the proxy let go of are dropped.
+    generation: u64,
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
@@ -1256,7 +1263,8 @@ impl<W: Write> Proxy<W> {
             return;
         }
         self.restart.past.push(Instant::now());
-        match spawn_server(&self.parsing.server, &events) {
+        self.restart.spawned += 1;
+        match spawn_server(&self.parsing.server, &events, self.restart.spawned) {
             Ok(mut server) => {
                 self.next_id += 1;
                 let id = format!("{OWN_ID}{}", self.next_id);
@@ -1335,6 +1343,13 @@ impl<W: Write> Proxy<W> {
     /// Handles EVENT; true when the session ends, at `exit` or when the client
     /// closes its output.
     fn handle(&mut self, event: Event) -> bool {
+        // The last frames and the end of a process the proxy let go of.
+        if let Event::Server(generation, _) | Event::ServerClosed(generation) = &event {
+            let starting = self.restart.starting.as_ref().map(|(server, ..)| server);
+            if !self.server.iter().chain(starting).any(|server| server.generation == *generation) {
+                return false;
+            }
+        }
         match event {
             Event::Client(frame) => {
                 let exit = frame.value.as_ref().and_then(|m| m.get("method")) == Some(&json!("exit"));
@@ -1342,8 +1357,8 @@ impl<W: Write> Proxy<W> {
                 return exit;
             }
             Event::ClientClosed => return true,
-            Event::Server(frame) => self.on_server(frame),
-            Event::ServerClosed => self.on_server_closed(),
+            Event::Server(_, frame) => self.on_server(frame),
+            Event::ServerClosed(_) => self.on_server_closed(),
             Event::Parsed(outcome) => self.on_parsed(outcome),
             Event::Runs(code, found, written) => self.on_runs(code, found, written),
         }
@@ -1367,7 +1382,12 @@ impl<W: Write> Proxy<W> {
     }
 }
 
-fn spawn_reader(input: impl io::Read + Send + 'static, events: Sender<Event>, wrap: fn(Frame) -> Event, closed: Event) {
+fn spawn_reader(
+    input: impl io::Read + Send + 'static,
+    events: Sender<Event>,
+    wrap: impl Fn(Frame) -> Event + Send + 'static,
+    closed: Event,
+) {
     thread::spawn(move || {
         let mut reader = BufReader::new(input);
         while let Ok(Some(frame)) = rpc::read_frame(&mut reader) {
@@ -1379,8 +1399,9 @@ fn spawn_reader(input: impl io::Read + Send + 'static, events: Sender<Event>, wr
     });
 }
 
-/// The server COMMAND started, its output read into EVENTS; else why not.
-fn spawn_server(command: &[String], events: &Sender<Event>) -> Result<Server, String> {
+/// The server COMMAND started as process GENERATION, its output read into
+/// EVENTS; else why not.
+fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> Result<Server, String> {
     let spawned = Command::new(&command[0])
         .args(&command[1..])
         .stdin(Stdio::piped())
@@ -1392,15 +1413,20 @@ fn spawn_server(command: &[String], events: &Sender<Event>) -> Result<Server, St
         format!("dbt lsp could not start ({error})")
     })?;
     let stdout = child.stdout.take().expect("piped stdout");
-    spawn_reader(stdout, events.clone(), Event::Server, Event::ServerClosed);
+    spawn_reader(
+        stdout,
+        events.clone(),
+        move |frame| Event::Server(generation, frame),
+        Event::ServerClosed(generation),
+    );
     let stdin = child.stdin.take().expect("piped stdin");
-    Ok(Server { child, stdin })
+    Ok(Server { child, stdin, generation })
 }
 
 /// Runs the proxy on the standard input and output, in front of COMMAND.
 pub fn run(command: &[String]) -> ExitCode {
     let (events, inbox) = mpsc::channel();
-    let (server, absent) = match spawn_server(command, &events) {
+    let (server, absent) = match spawn_server(command, &events, 0) {
         Ok(server) => (Some(server), None),
         Err(why) => (None, Some(why)),
     };
