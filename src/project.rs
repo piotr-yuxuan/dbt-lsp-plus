@@ -73,6 +73,20 @@ impl Scanned {
             _ => Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() },
         }
     }
+
+    /// The file at PATH as it is now, OPEN being its text if the editor has
+    /// it open, and what that gives.  A seed's text is not read: its entity
+    /// needs none, and a seed can be large.  A file that is not UTF-8, such
+    /// as a `.DS_Store`, gives nothing.  None when the file cannot be read.
+    pub fn read(path: &Path, open: Option<&str>) -> Option<Scanned> {
+        let seed = path.extension().is_some_and(|extension| extension == "csv");
+        let text = match open {
+            _ if seed => String::new(),
+            Some(text) => text.to_owned(),
+            None => text::decoded(fs::read(path).ok()?).unwrap_or_default(),
+        };
+        Some(Scanned::of(path, text))
+    }
 }
 
 /// Where a line goes right after a `name:` line: the end of that line, the
@@ -262,9 +276,9 @@ pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable>
 static DOUBLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\A"(?:[^"\\]|\\.)*""#).unwrap());
 static SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A'(?:[^']|'')*'").unwrap());
 
-/// Every file below DIR, in a stable order, through symbolic links but once
-/// per directory; nothing when DIR does not exist.
-fn files(dir: &Path) -> Vec<PathBuf> {
+/// Every file below DIR with its metadata, in a stable order, through
+/// symbolic links but once per directory; nothing when DIR does not exist.
+fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     let mut pending = vec![dir.to_owned()];
     let mut seen = HashSet::new();
     let mut found = Vec::new();
@@ -276,12 +290,12 @@ fn files(dir: &Path) -> Vec<PathBuf> {
         for path in entries.flatten().map(|entry| entry.path()) {
             match fs::metadata(&path) {
                 Ok(kind) if kind.is_dir() => pending.push(path),
-                Ok(kind) if kind.is_file() => found.push(path),
+                Ok(kind) if kind.is_file() => found.push((path, kind)),
                 _ => {}
             }
         }
     }
-    found.sort();
+    found.sort_by(|(one, _), (other, _)| one.cmp(other));
     found
 }
 
@@ -292,72 +306,100 @@ pub fn package_config(dir: &Path) -> Option<(String, Node)> {
     Some((name, config))
 }
 
-/// Adds to PROJECT the entities of the package NAME at DIR, configured by
-/// CONFIG, each file as READ gives it.  A seed's content is not read: its
-/// entity needs none, and a seed can be large.
-fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, read: &mut Read) {
-    for layout in &LAYOUT {
-        let configured: Vec<&str> =
-            config.get(layout.key).map_or(Vec::new(), |paths| paths.items().iter().filter_map(Node::as_str).collect());
-        let dirs = if configured.is_empty() { vec![layout.default] } else { configured };
-        for path in dirs.iter().flat_map(|sub| files(&dir.join(sub))) {
-            let scanned = read(&path);
-            let (found, tables) = match path.extension().and_then(|e| e.to_str()) {
-                Some("yml" | "yaml") => {
-                    let package = |table: &SourceTable| SourceTable { package: name.clone(), ..table.clone() };
-                    let tables: Vec<SourceTable> = scanned.tables.iter().map(package).collect();
-                    (tables.iter().map(Entity::from).collect(), tables)
-                }
-                _ => (file_entities(&name, layout, &path, &scanned), Vec::new()),
-            };
-            project.files.insert(path, scanned);
-            project.entities.extend(found);
-            project.sources.extend(tables);
-        }
-    }
-    // Its vars and hooks hold calls too.
-    let config = dir.join("dbt_project.yml");
-    project.files.insert(config.clone(), read(&config));
-    project.packages.insert(name, dir.to_owned());
+/// A file of a project as a scan finds it: its path, its metadata, read
+/// before its content, its package's index, and the layout of the directory
+/// it was found in, none for a package's `dbt_project.yml`.
+#[derive(Debug)]
+pub struct Found {
+    pub path: PathBuf,
+    pub metadata: Option<fs::Metadata>,
+    pub package: usize,
+    pub layout: Option<usize>,
 }
 
-/// How a scan reads the file at a path: its text and what the text gives.
-pub type Read<'a> = dyn FnMut(&Path) -> Arc<Scanned> + 'a;
-
-/// The project at ROOT and the packages installed in it, or `None` when ROOT
-/// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
-/// editor has open, which wins over the file on disk.
-pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
-    let mut read = |path: &Path| {
-        let seed = path.extension().is_some_and(|extension| extension == "csv");
-        let text = open.get(path).cloned().or_else(|| text::read(path)).filter(|_| !seed).unwrap_or_default();
-        Arc::new(Scanned::of(path, text))
-    };
-    scan_with(root, &mut read)
+/// What a scan finds of a project: its packages, its own first, by name and
+/// directory, and their files in the order of the scan.
+#[derive(Debug)]
+pub struct Listing {
+    pub packages: Vec<(String, PathBuf)>,
+    pub found: Vec<Found>,
 }
 
-/// The project at ROOT and the packages installed in it, each file as READ
-/// gives it, or `None` when ROOT has no named `dbt_project.yml`.
-pub fn scan_with(root: &Path, read: &mut Read) -> Option<Project> {
+/// What a scan finds of the project at ROOT: each package's resource paths,
+/// layout by layout, then its `dbt_project.yml`, whose vars and hooks hold
+/// calls too.  None when ROOT has no named `dbt_project.yml`.
+pub fn find(root: &Path) -> Option<Listing> {
     let (root_package, root_config) = package_config(root)?;
+    let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
+    let mut installed: Vec<PathBuf> =
+        fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    installed.sort();
+    let others = installed.into_iter().filter_map(|dir| package_config(&dir).map(|(name, config)| (name, dir, config)));
+    let packages: Vec<(String, PathBuf, Node)> =
+        std::iter::once((root_package, root.to_owned(), root_config)).chain(others).collect();
+    let mut found = Vec::new();
+    for (package, (_, dir, config)) in packages.iter().enumerate() {
+        for (at, layout) in LAYOUT.iter().enumerate() {
+            let configured: Vec<&str> = config
+                .get(layout.key)
+                .map_or(Vec::new(), |paths| paths.items().iter().filter_map(Node::as_str).collect());
+            let dirs = if configured.is_empty() { vec![layout.default] } else { configured };
+            let listed = dirs.iter().flat_map(|sub| files(&dir.join(sub)));
+            found.extend(listed.map(|(path, metadata)| Found {
+                path,
+                metadata: Some(metadata),
+                package,
+                layout: Some(at),
+            }));
+        }
+        let path = dir.join("dbt_project.yml");
+        found.push(Found { metadata: fs::metadata(&path).ok(), path, package, layout: None });
+    }
+    Some(Listing { packages: packages.into_iter().map(|(name, dir, _)| (name, dir)).collect(), found })
+}
+
+/// How a scan reads a file it found: its text and what the text gives.
+pub type Read<'a> = dyn FnMut(&Found) -> Arc<Scanned> + 'a;
+
+/// The project that LISTING finds, each file as READ gives it.
+pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
+    let packages = &listing.packages;
     let mut project = Project {
-        root_package: root_package.clone(),
+        root_package: packages.first().map(|(name, _)| name.clone()).unwrap_or_default(),
         packages: HashMap::new(),
         entities: Vec::new(),
         sources: Vec::new(),
         files: HashMap::new(),
     };
-    scan_package(&mut project, root, root_package, &root_config, read);
-    let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
-    let mut installed: Vec<PathBuf> =
-        fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
-    installed.sort();
-    for dir in installed {
-        if let Some((name, config)) = package_config(&dir) {
-            scan_package(&mut project, &dir, name, &config, read);
+    for file in &listing.found {
+        let scanned = read(file);
+        let name = &packages[file.package].0;
+        let yaml = file.path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
+        match file.layout {
+            Some(_) if yaml => {
+                let package = |table: &SourceTable| SourceTable { package: name.clone(), ..table.clone() };
+                let tables: Vec<SourceTable> = scanned.tables.iter().map(package).collect();
+                project.entities.extend(tables.iter().map(Entity::from));
+                project.sources.extend(tables);
+            }
+            Some(layout) => project.entities.extend(file_entities(name, &LAYOUT[layout], &file.path, &scanned)),
+            None => {}
         }
+        project.files.insert(file.path.clone(), scanned);
     }
-    Some(project)
+    project.packages.extend(packages.iter().cloned());
+    project
+}
+
+/// The project at ROOT and the packages installed in it, or `None` when ROOT
+/// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
+/// editor has open, which wins over the file on disk.
+pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
+    let listing = find(root)?;
+    let mut read = |file: &Found| {
+        Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default())
+    };
+    Some(assemble(&listing, &mut read))
 }
 
 /// A project of FILES, each a path under it and its text, in a fresh

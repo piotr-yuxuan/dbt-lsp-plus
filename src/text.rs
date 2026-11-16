@@ -5,10 +5,16 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
-/// The text of the file at PATH, without the byte order mark that editors
-/// leave out of a document's text and so of its positions.
+/// The text of the file at PATH, as `decoded` gives it; none when it cannot
+/// be read or is not UTF-8.
 pub fn read(path: &Path) -> Option<String> {
-    let mut text = fs::read_to_string(path).ok()?;
+    decoded(fs::read(path).ok()?)
+}
+
+/// BYTES as text, without the byte order mark that editors leave out of a
+/// document's text and so of its positions; none when they are not UTF-8.
+pub fn decoded(bytes: Vec<u8>) -> Option<String> {
+    let mut text = String::from_utf8(bytes).ok()?;
     if text.starts_with('\u{feff}') {
         text.drain(..'\u{feff}'.len_utf8());
     }
