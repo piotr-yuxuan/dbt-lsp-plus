@@ -1,6 +1,6 @@
 # The release pipeline
 
-Two workflows of GitHub Actions and two scripts, after imprimeur's. None of the workflows holds
+Three workflows of GitHub Actions and two scripts, after imprimeur's. None of the workflows holds
 a check of its own: the checks are in the `Makefile`, the release in `scripts/release.py`, and the
 fetch of dbt in `scripts/fetch-dbt`. Nothing has run on GitHub yet: the repository has no remote.
 
@@ -47,6 +47,51 @@ allows it on GitHub's runners is the owner's reading, hence the variable.
 A job with `continue-on-error` that fails leaves the run's conclusion `success`, so no failure is
 notified and CD goes on: a failure of `macos` or `dbt` shows on the run's page only. CD also waits
 for both before each release.
+
+## The workflow Weekly
+
+`.github/workflows/weekly.yml` runs the corpus on the latest stable dbt each Monday at 06:17
+UTC, off the hour when GitHub drops scheduled runs first, and by hand (`workflow_dispatch`).
+GitHub schedules the copy on the default branch only: a branch's copy runs by hand.
+It is apart from CI, so that it neither cancels nor is cancelled by a push's run, and counts
+for neither CI nor CD. Its permission is `contents: read`.
+
+| Job | Runs |
+|---|---|
+| `dbt-oss` | `scripts/fetch-dbt --latest oss`: the highest release `vX.Y.Z` of GitHub's `dbt-labs/dbt`, compared as numbers, not a draft nor a pre-release, that holds the Linux archive, checked by GitHub's SHA-256 of it; then the network cut and `make conformance` |
+| `dbt` | `scripts/fetch-dbt --latest proprietary`: the stable tag of dbt Labs' `versions.json`, as dbt Labs' installer reads it, checked by the `.sha256` that dbt Labs publishes beside the archive; then the corpus, and the live test built, then run with the network cut. Only when the repository's variable `DBT_LSP_PLUS_PROPRIETARY` is `true` |
+
+- No `continue-on-error`: a drift fails the run, and GitHub tells the user who last changed
+  its schedule, if they have Actions notifications on.
+- Caches are restored only, and the checkout keeps no credentials: the workflow itself never
+  saves a cache. The build of dbt it fetches runs as the runner's user, as CI's pinned builds
+  do, so a hostile build, not merely a broken one, could tamper with the rest of its job, and
+  read the job's read-only token, which the Nix installer writes into `/etc/nix/nix.conf`.
+- Each job's summary holds the build it fetched (`BUILD VERSION URL SHA256`), the corpus's
+  line, and the corpus's failure whole: what drifted (the divergences to register, and those
+  registered that no longer diverge, a changed answer showing in both), or which parse failed
+  and how; with the proprietary build, the live test's result and failure too. The live test
+  runs whatever the corpus said, once the build is fetched and the network cut.
+- dbt-oss's latest is trusted through GitHub's digest of its asset; a newer release that holds
+  the Linux archive without one fails the run rather than being skipped. The proprietary
+  latest is trusted through TLS to dbt Labs' CDN and the digest dbt Labs publishes on the same
+  origin, which catches a corrupt download but not a compromised origin. No signature exists.
+  Canary and preview builds are not run.
+- In a public repository, GitHub disables a scheduled workflow after 60 days without
+  activity: it is enabled again under **Actions**.
+
+What a weekly run shows beyond CI: the latest dbt's resolution, as new and stale divergences;
+a changed error code, through a case's `expected-error`; the proxy's parse flags still
+accepted; a need of the network under the cut; dbt writing into the project; and with the
+proprietary build, the drift of what the live test checks of dbt lsp's protocol. Not: rules
+that the corpus has no case for, whether the fake server is still faithful, macOS and other
+targets, other adapters, builds released and superseded within a week, dbt-mode's side.
+
+To move CI's pins to a new build, one commit changes `scripts/fetch-dbt`'s URL and SHA-256
+(the weekly run's fetch line gives them) and its docstring, `tests/fixtures/conformance/divergences.txt`,
+`docs/design.md`'s statement of the builds and the CI table above, checked by hand with
+`make conformance` and `make live` on the new build. One registry holds one set of divergences: if the two builds
+part, a later plan qualifies it by build.
 
 ## The workflow CD
 

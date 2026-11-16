@@ -855,8 +855,10 @@ source's description.
   temporary directory, so they take turns: a process's first scratch
   directory waits for a lock there, held until the process ends.
 - CI runs the same checks on GitHub Actions, and the corpus on dbt-oss
-  2.0.11, and on dbt 2.0.9 with the live test once the owner allows it:
-  see `docs/release-pipeline.md`.
+  2.0.11, and on dbt 2.0.9 with the live test once the owner allows it;
+  each week, the corpus runs on the latest stable dbt-oss, and with the
+  live test on the latest proprietary build when allowed: see
+  `docs/release-pipeline.md`.
 - The conformance corpus, opt-in as the live test (see "Conformance"):
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance
   -- --ignored`.

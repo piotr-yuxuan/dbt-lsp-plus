@@ -202,6 +202,8 @@ FROM_HERE = "github.event_name == 'push' || github.event.pull_request.head.repo.
 PROPRIETARY = "vars.DBT_LSP_PLUS_PROPRIETARY == 'true' && github.event_name == 'push'"
 # A job, not one of its steps, that may fail without failing the run.
 JOB_MAY_FAIL = r"(?m)^    continue-on-error: true$"
+# A panic's message whole, to its note, or to the list of failures when no note follows.
+PANIC = "'/panicked at/,/^note: run with\\|^failures:$/p'"
 CARGO_CACHE = ["~/.cargo/registry", "~/.cargo/git", "target"]
 CD_GATE = """    if: >-
       !github.event.repository.fork && (
@@ -213,16 +215,22 @@ CD_GATE = """    if: >-
 """
 
 
+def jobs_of(workflow):
+    """Each job of the text of WORKFLOW, by name: the lines indented under it."""
+    body = workflow[workflow.index("\njobs:\n") :]
+    return {
+        match[1]: match[2] for match in re.finditer(r"(?m)^  ([\w-]+):\n((?:(?:    .*)?\n)*)", body)
+    }
+
+
 class Workflows(unittest.TestCase):
     """What ties the workflows to the script and to the checks, as no local run can trigger them."""
 
     def setUp(self):
         self.cd = (ROOT / ".github/workflows/cd.yml").read_text()
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        # Each job, by name: the lines indented under it.
-        body = self.ci[self.ci.index("\njobs:\n") :]
-        found = re.finditer(r"(?m)^  ([\w-]+):\n((?:(?:    .*)?\n)*)", body)
-        self.jobs = {match[1]: match[2] for match in found}
+        self.weekly = (ROOT / ".github/workflows/weekly.yml").read_text()
+        self.jobs = jobs_of(self.ci)
 
     def test_ci_has_the_jobs_of_plan_024(self):
         self.assertEqual(sorted(self.jobs), ["dbt", "dbt-oss", "macos", "static", "test"])
@@ -326,7 +334,7 @@ class Workflows(unittest.TestCase):
         self.assertRegex(self.ci, r"(?m)^name: CI$")
 
     def test_every_action_is_pinned_by_a_full_commit(self):
-        for text in (self.ci, self.cd):
+        for text in (self.ci, self.cd, self.weekly):
             uses = re.findall(r"uses: (\S+)( # v\S+)?", text)
             self.assertTrue(uses)
             for action, version in uses:
@@ -354,6 +362,115 @@ class Workflows(unittest.TestCase):
                 prefix = re.search(r"restore-prefixes-first-match: (.+)", job)[1]
                 self.assertIn("hashFiles('flake.nix', 'flake.lock')", key)
                 self.assertTrue(key.startswith(prefix))
+
+
+class Weekly(unittest.TestCase):
+    """The weekly runs on the latest dbt, as plan 014 decides them."""
+
+    def setUp(self):
+        self.weekly = (ROOT / ".github/workflows/weekly.yml").read_text()
+        self.weekly_jobs = jobs_of(self.weekly)
+
+    def test_runs_each_monday_off_the_hour_and_by_hand_only(self):
+        triggers = self.weekly[self.weekly.index("\non:\n") : self.weekly.index("\npermissions:")]
+        self.assertEqual(re.findall(r"(?m)^  ([\w-]+):", triggers), ["schedule", "workflow_dispatch"])
+        self.assertEqual(re.findall(r"cron: (.*)", self.weekly), ['"17 6 * * 1"'])
+
+    def test_may_only_read_and_stands_alone(self):
+        self.assertRegex(self.weekly, r"(?m)^permissions:\n  contents: read\n\n")
+        self.assertEqual(self.weekly.count("permissions:"), 1)
+        self.assertNotIn("concurrency:", self.weekly)
+
+    def test_has_the_two_builds_and_fails_on_any_failure(self):
+        self.assertEqual(sorted(self.weekly_jobs), ["dbt", "dbt-oss"])
+        self.assertNotRegex(self.weekly, r"(?m)^ +continue-on-error:")
+        gate = re.escape("vars.DBT_LSP_PLUS_PROPRIETARY == 'true'")
+        self.assertRegex(self.weekly_jobs["dbt"], rf"(?m)^    if: {gate}$")
+        self.assertNotRegex(self.weekly_jobs["dbt-oss"], r"(?m)^    if:")
+        for name, job in self.weekly_jobs.items():
+            with self.subTest(name):
+                self.assertRegex(job, r"(?m)^    timeout-minutes: 30$")
+
+    def test_saves_no_cache_and_keeps_no_credentials(self):
+        allowed = {
+            "actions/checkout",
+            "cachix/install-nix-action",
+            "nix-community/cache-nix-action",
+            "actions/cache/restore",
+        }
+        for name, job in self.weekly_jobs.items():
+            with self.subTest(name):
+                used = re.findall(r"uses: ([^@\s]+)@", job)
+                self.assertEqual(sorted(used), sorted(allowed))
+                self.assertEqual(
+                    job.count("          save: false\n"), used.count("nix-community/cache-nix-action")
+                )
+                self.assertRegex(
+                    job,
+                    r"uses: actions/checkout@\S+ # \S+\n {8}with:\n {10}persist-credentials: false\n",
+                )
+                blocks = re.findall(r"path: \|\n((?: {12}.*\n)+)", job)
+                self.assertEqual([block.split() for block in blocks], [CARGO_CACHE])
+
+    def test_fetches_the_latest_then_cuts_the_network_before_the_corpus(self):
+        for name, build in (("dbt-oss", "oss"), ("dbt", "proprietary")):
+            with self.subTest(name):
+                job = self.weekly_jobs[name]
+                steps = [
+                    f"run: python3 scripts/fetch-dbt --latest {build} ",
+                    "      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n",
+                    "run: unshare -rn true\n",
+                    "      - run: nix develop -c make conformance ",
+                ]
+                places = [job.find(step) for step in steps]
+                self.assertNotIn(-1, places)
+                self.assertEqual(places, sorted(places))
+
+    def test_the_proprietary_live_test_runs_cut_off_after_its_build_whatever_the_corpus_said(self):
+        job = self.weekly_jobs["dbt"]
+        self.assertIn(
+            "      - id: fetch\n        run: python3 scripts/fetch-dbt --latest proprietary ", job
+        )
+        self.assertIn("      - id: cut\n        run: unshare -rn true\n", job)
+        outcomes = "steps.fetch.outcome == 'success' && steps.cut.outcome == 'success'"
+        condition = f"if: ${{{{ !cancelled() && {outcomes} }}}}"
+        for step in (
+            "run: nix develop -c cargo test --locked --test proxy --no-run",
+            "run: nix develop -c unshare -rn make live ",
+        ):
+            with self.subTest(step):
+                self.assertIn(f"      - {condition}\n        {step}", job)
+        corpus = job.index("run: nix develop -c make conformance ")
+        built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
+        self.assertLess(corpus, built)
+        self.assertLess(built, job.index("run: nix develop -c unshare -rn make live "))
+
+    def test_every_pipe_fails_with_its_command(self):
+        self.assertRegex(self.weekly, r"(?m)^defaults:\n  run:\n    shell: bash\n")
+        self.assertEqual(self.weekly.count("shell:"), 1)
+
+    def test_each_job_ends_with_its_summary_of_what_it_found(self):
+        for name, job in self.weekly_jobs.items():
+            with self.subTest(name):
+                last = job[job.rindex("      - ") :]
+                self.assertTrue(last.startswith("      - if: always()\n        run: |\n"), last)
+                self.assertIn('>> "$GITHUB_STEP_SUMMARY"', last)
+                for log in ("fetch", "corpus"):
+                    self.assertIn(f'| tee "$RUNNER_TEMP/{log}.log"', job)
+                    self.assertIn(f'"$RUNNER_TEMP/{log}.log"', last)
+                self.assertIn("grep -h '^conformance:' \"$RUNNER_TEMP/corpus.log\"", last)
+                self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/corpus.log"', last)
+
+    def test_the_proprietary_summary_has_the_live_test_s_result(self):
+        last = self.weekly_jobs["dbt"][self.weekly_jobs["dbt"].rindex("      - ") :]
+        self.assertIn("grep -h '^test live' \"$RUNNER_TEMP/live.log\"", last)
+        self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/live.log"', last)
+
+    def test_github_s_listing_gets_the_job_s_token(self):
+        fetch = re.search(
+            r"run: python3 scripts/fetch-dbt --latest oss .*\n((?:        .*\n)*)", self.weekly
+        )
+        self.assertIn("GH_TOKEN: ${{ github.token }}", fetch[1])
 
 
 class Bounds(unittest.TestCase):
