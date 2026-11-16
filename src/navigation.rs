@@ -28,6 +28,21 @@ pub enum Target {
     Named { kind: &'static str, package: Option<String>, name: String },
 }
 
+impl Target {
+    /// The kind of this target in `experimental.dbtLspPlus`: `source`, `ref`
+    /// (a unit test's `model:` too), `macro`, `doc`, `test`, or `entry`, the
+    /// `name:` of an entry.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Target::Source(_) => "source",
+            Target::Call(scan::Target::Macro { .. }) => "macro",
+            Target::Call(_) | Target::Named { kind: "unit test model", .. } => "ref",
+            Target::Named { kind: kind @ ("doc" | "test"), .. } => kind,
+            Target::Named { .. } => "entry",
+        }
+    }
+}
+
 /// Where a target leads: dbt's unique id of what it names, and the range of
 /// that name in its file.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,13 +100,23 @@ static DOC: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// What the position OFFSET of TEXT, the file at PATH, names, from that
-/// text alone: a `source` anywhere; in YAML, a `ref`, a `doc`, the `name:`
-/// of a navigable entry, a generic test's name, or a unit test's `model:`.
+/// text alone: a `source` anywhere; elsewhere than in YAML, a `ref`'s
+/// argument or a macro call's name or package; in YAML, a `ref`, a `doc`,
+/// the `name:` of a navigable entry, a generic test's name, or a unit
+/// test's `model:`.
 pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
     let source = sources::target_at(path, text, offset).map(Target::Source);
-    if source.is_some() || !sources::is_yaml(path) {
+    if source.is_some() {
         return source;
+    }
+    if !sources::is_yaml(path) {
+        let named = |call: &scan::Call| match call.target {
+            scan::Target::Ref { .. } => call.arguments.iter().any(inside),
+            scan::Target::Macro { .. } => inside(&call.range),
+            _ => false,
+        };
+        return sources::file_calls(path, text).into_iter().find(named).map(|call| Target::Call(call.target));
     }
     let named = |kind: &'static str, package: Option<&str>, name: &str| Target::Named {
         kind,
@@ -519,13 +544,19 @@ models:
     }
 
     #[test]
-    fn finds_only_a_source_in_sql() {
-        // The server answers a ref there, and dbt has no doc in SQL.
+    fn finds_a_source_a_ref_and_a_macro_call_in_sql() {
         let sql = Path::new("/p/models/customers.sql");
         let text = "select * from {{ source('raw', 'orders') }} join {{ ref('orders') }} -- {{ doc('order_status') }}";
         let table = sources::Target::Table { source: "raw".into(), table: "orders".into() };
         assert_eq!(at(sql, text, "'orders') }} join", 2), Some(Target::Source(table)));
-        assert_eq!(at(sql, text, "ref('orders')", 6), None);
+        let orders = scan::Target::Ref { package: None, name: "orders".into(), version: None };
+        assert_eq!(at(sql, text, "ref('orders')", 6), Some(Target::Call(orders)));
+        // The keyword: a macro call, as a project may override `ref`.
+        let keyword = scan::Target::Macro { package: None, name: "ref".into() };
+        assert_eq!(at(sql, text, "ref('orders')", 1), Some(Target::Call(keyword)));
+        // dbt has no doc in SQL: a call of a macro, which none defines.
+        let doc = scan::Target::Macro { package: None, name: "doc".into() };
+        assert_eq!(at(sql, text, "doc(", 1), Some(Target::Call(doc)));
         assert_eq!(at(sql, text, "order_status", 2), None);
     }
 
@@ -655,6 +686,36 @@ models:
             leads(&scanned, uses, "orders", None),
             lead("model.pkg.orders", "dbt_packages/pkg/models/orders.sql")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_macro_call_looks_in_its_file_s_package_then_the_root_only() {
+        const MODEL: &str = "{{ helper() }} {{ pkg.outer() }} {{ only_pkg() }} {{ dbt.current_timestamp() }}";
+        const PACKAGE: &str = "{% macro helper() %}pkg{% endmacro %}\n{% macro outer() %}{{ helper() }}{% endmacro %}\n\
+                               {% macro only_pkg() %}{% endmacro %}\n";
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("macros/helper.sql", "{% macro helper() %}root{% endmacro %}\n"),
+            ("models/m.sql", MODEL),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/macros/m.sql", PACKAGE),
+        ];
+        let root = scratch_project("navigation-macros", &files);
+        let model = |needle: &str, delta: usize| {
+            leads(&root, "models/m.sql", at(&root.join("models/m.sql"), MODEL, needle, delta))
+        };
+        // A macro leads to its whole block, as dbt lsp answers.
+        let helper = lead("macro.shop.helper", "macros/helper.sql", "{% macro helper() %}root{% endmacro %}");
+        assert_eq!(model("helper", 1), helper);
+        assert_eq!(model("pkg.outer", 1)[0].0, "macro.pkg.outer", "on its package");
+        assert_eq!(model("outer", 1)[0].0, "macro.pkg.outer");
+        assert_eq!(model("only_pkg", 1), Vec::new(), "another package's macro, behind its name");
+        assert_eq!(model("current_timestamp", 1), Vec::new(), "dbt's own");
+        // Inside a package's macro, the file's package first; dbt looks in the rendering node's.
+        let package = "dbt_packages/pkg/macros/m.sql";
+        let inner = leads(&root, package, at(&root.join(package), PACKAGE, "{{ helper", 4));
+        assert_eq!(inner[0].0, "macro.pkg.helper");
         std::fs::remove_dir_all(root).unwrap();
     }
 

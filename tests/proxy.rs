@@ -1570,10 +1570,22 @@ fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
     assert!(session.finish().success());
 }
 
+/// What `experimental.dbtLspPlus` says the proxy answers itself, with a
+/// server or ALONE.
+fn answered_itself(alone: bool) -> Value {
+    let everywhere = json!(["sql", "yaml", "python"]);
+    let mut definition = json!({"source": everywhere, "ref": ["yaml"], "doc": ["yaml"], "entry": ["yaml"],
+                                "test": ["yaml"]});
+    if alone {
+        (definition["ref"], definition["macro"]) = (json!(["sql", "yaml"]), json!(["sql"]));
+    }
+    json!({"version": 2, "definition": definition, "references": {"source": everywhere},
+           "rename": {"source": everywhere, "cte": ["sql"]}})
+}
+
 #[test]
 fn tells_which_requests_it_answers_itself() {
-    let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"],
-                          "definition": ["source", "ref", "doc", "entry", "test"]});
+    let answered = answered_itself(false);
     let capabilities = json!({"textDocumentSync": 2, "experimental": {"server": 1}});
     let (mut session, _) = Session::fake("experimental", json!({"capabilities": capabilities}));
     let result = session.initialize(&fixture());
@@ -2677,6 +2689,61 @@ fn a_definition_names_an_open_document_by_the_uri_it_was_opened_under() {
     let on_ref = position_in(&link.join("models/marts/_models.yml"), "ref('customers')", 6);
     let found = session.request("textDocument/definition", on_ref);
     assert_eq!(found["result"]["uri"], uri(&customers));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_ref_and_a_macro_call_in_sql_lead_where_dbt_resolves_them() {
+    let project = copy_fixture("sql-definitions-project");
+    let package_models = project.join("dbt_packages/shop_utils/models");
+    std::fs::create_dir_all(&package_models).unwrap();
+    std::fs::write(package_models.join("orders.sql"), "select 1 as order_id").unwrap();
+    std::fs::write(package_models.join("uses.sql"), "select * from {{ ref('orders') }}").unwrap();
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with("sql-definitions", json!({"no_lsp": true}), &flags, None);
+    let result = session.initialize(&project);
+    assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered_itself(true));
+    let mut definition = |file: &str, needle: &str, delta: usize| {
+        session.request("textDocument/definition", position_in(&project.join(file), needle, delta))["result"].clone()
+    };
+    let on_orders = definition("models/marts/orders.sql", "ref('stg_orders')", 6);
+    assert_eq!(on_orders, location(&project, "models/staging/stg_orders.sql", 0, 0, 0));
+    // A macro leads to its whole block, as dbt lsp answers, from its package or its name.
+    let block = |file: &str| {
+        json!({"uri": uri(&project.join(file)),
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 15}}})
+    };
+    let is_positive = block("dbt_packages/shop_utils/macros/is_positive.sql");
+    assert_eq!(definition("models/marts/orders.sql", "shop_utils.is_positive", 3), is_positive);
+    assert_eq!(definition("models/marts/orders.sql", "is_positive(", 2), is_positive);
+    assert_eq!(definition("models/staging/stg_orders.sql", "cents_to_dollars", 2), block("macros/money.sql"));
+    // A package's model looks in its own package first, unless the flag says the root.
+    let uses = "dbt_packages/shop_utils/models/uses.sql";
+    assert_eq!(
+        definition(uses, "ref('orders')", 6),
+        location(&project, "dbt_packages/shop_utils/models/orders.sql", 0, 0, 0)
+    );
+    let config = std::fs::read_to_string(project.join("dbt_project.yml")).unwrap();
+    let flag = "flags:\n  require_ref_searches_node_package_before_root: false\n";
+    std::fs::write(project.join("dbt_project.yml"), format!("{config}{flag}")).unwrap();
+    assert_eq!(definition(uses, "ref('orders')", 6), location(&project, "models/marts/orders.sql", 0, 0, 0));
+    // dbt's own macros are no file of the project.
+    let scratch = project.join("models/marts/scratch.sql");
+    session.open(&scratch, Some("select {{ dbt.current_timestamp() }}"));
+    let on_dbt = json!({"textDocument": {"uri": uri(&scratch)}, "position": {"line": 0, "character": 14}});
+    let answer = session.request("textDocument/definition", on_dbt);
+    assert_eq!((answer.get("error"), &answer["result"]), (None, &Value::Null), "{answer}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_a_ref_in_sql_reaches_the_server() {
+    let (mut session, log) = Session::fake("sql-ref-server", json!({}));
+    session.initialize(&fixture());
+    let on_ref = position_in(&fixture().join("models/marts/orders.sql"), "ref('stg_orders')", 6);
+    let answer = session.request("textDocument/definition", on_ref.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_ref}));
+    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 1);
     assert!(session.finish().success());
 }
 

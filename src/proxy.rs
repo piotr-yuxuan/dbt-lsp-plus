@@ -54,6 +54,25 @@ const ADDED: [(&str, &[&str]); 6] = [
 /// elsewhere they go to the server.
 const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "textDocument/definition"];
 
+/// What the proxy answers itself, as `experimental.dbtLspPlus` announces
+/// it, version 2: per request, each kind of target with the places where a
+/// request's position may be, `sql`, `yaml` or `python` by the file's
+/// extension; the last column says alone only, with a dbt without `lsp`.
+/// A kind listed at a place is the proxy's at every position of that kind
+/// there, never forwarded; the rows of a kind follow the order of places.
+const ANSWERED: [(&str, &str, &[&str], bool); 10] = [
+    ("definition", "source", &["sql", "yaml", "python"], false),
+    ("definition", "ref", &["sql"], true),
+    ("definition", "ref", &["yaml"], false),
+    ("definition", "macro", &["sql"], true),
+    ("definition", "doc", &["yaml"], false),
+    ("definition", "entry", &["yaml"], false),
+    ("definition", "test", &["yaml"], false),
+    ("references", "source", &["sql", "yaml", "python"], false),
+    ("rename", "source", &["sql", "yaml", "python"], false),
+    ("rename", "cte", &["sql"], false),
+];
+
 /// The requests answered by the proxy that ask for the parse's index, in
 /// both modes: nodeInfo, and a definition for versions and disabled nodes.
 /// A stale index is parsed again, as for a hover.
@@ -446,8 +465,13 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"],
-                                  "definition": ["source", "ref", "doc", "entry", "test"]});
+            let mut answered = json!({"version": 2});
+            for (request, kind, places, _) in ANSWERED.iter().filter(|(.., alone)| self.standalone || !alone) {
+                let mut listed: Vec<Value> =
+                    serde_json::from_value(answered[*request][*kind].take()).unwrap_or_default();
+                listed.extend(places.iter().map(|place| json!(place)));
+                answered[*request][*kind] = json!(listed);
+            }
             experimental.insert("dbtLspPlus".into(), answered);
         }
         // The proxy's own command, beside the server's.
@@ -707,12 +731,28 @@ impl<W: Write> Proxy<W> {
         let (path, text, offset) = self.document_at(params)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
         let answered = match method {
-            "textDocument/definition" => navigation::target_at(&path, &text, offset).is_some(),
+            "textDocument/definition" => navigation::target_at(&path, &text, offset)
+                .is_some_and(|target| self.claims("definition", &target, &path)),
             // A CTE lives in its file; a source only the scan sees whole.
             "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
             _ => self.source_at(params).is_some(),
         };
         answered.then_some(method)
+    }
+
+    /// Whether the proxy answers REQUEST itself on TARGET in the file at
+    /// PATH, as `ANSWERED` says.
+    fn claims(&self, request: &str, target: &navigation::Target, path: &Path) -> bool {
+        let place = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("sql") => "sql",
+            Some("yml" | "yaml") => "yaml",
+            Some("py") => "python",
+            _ => return false,
+        };
+        let listed = |(answered, kind, places, alone): &&(&str, &str, &[&str], bool)| {
+            *answered == request && *kind == target.kind() && places.contains(&place) && (self.standalone || !alone)
+        };
+        ANSWERED.iter().any(|row| listed(&row))
     }
 
     /// The definition of the target at the request's position, by dbt
