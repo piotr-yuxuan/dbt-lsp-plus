@@ -179,9 +179,9 @@ pub struct Lookup<'a> {
     /// What the last parse knows that the scan does not: versions, Python
     /// models, snapshots defined in YAML, and which nodes are disabled.
     index: Option<&'a Index>,
-    /// Each resource by id, in order, so that a package's macros read as a
-    /// range.
-    by_id: BTreeMap<&'a str, &'a Entity>,
+    /// The resources of each id, in order, so that a package's macros read
+    /// as a range; two files may give one id, one of them disabled.
+    by_id: BTreeMap<&'a str, Vec<&'a Entity>>,
     /// The packages, the root first, then the others in the byte order of
     /// their names, which is the order of their paths, since dbt installs
     /// each at `dbt_packages/<name>`.
@@ -205,7 +205,10 @@ impl<'a> Lookup<'a> {
         });
         let mut packages: Vec<&str> = project.packages.keys().map(String::as_str).collect();
         packages.sort_by_key(|package| (*package != root, *package));
-        let by_id = project.entities.iter().map(|entity| (entity.id.as_str(), entity)).collect();
+        let mut by_id: BTreeMap<&str, Vec<&Entity>> = BTreeMap::new();
+        for entity in &project.entities {
+            by_id.entry(entity.id.as_str()).or_default().push(entity);
+        }
         Lookup { project, index, by_id, packages, root_first }
     }
 
@@ -237,7 +240,7 @@ impl<'a> Lookup<'a> {
             scan::Target::Macro { package: None, .. } => vec![Some(own), Some(root)],
             _ => vec![Some(first), Some(second), None],
         };
-        let get = |id: String| self.by_id.get(id.as_str()).copied();
+        let get = |id: String| self.by_id.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let found = |entity: &Entity| Found {
             id: entity.id.clone(),
             path: entity.path.clone(),
@@ -267,27 +270,26 @@ impl<'a> Lookup<'a> {
         let in_package = |package: &str| -> Vec<Found> {
             match target {
                 scan::Target::Ref { name, version, .. } => {
+                    // Once a parse knows the name in PACKAGE, its nodes decide: they know versions, Python
+                    // models, snapshots defined in YAML, and which of two files of one name dbt keeps.
+                    if self.index.is_some_and(|index| !index.resources(package, name).is_empty()) {
+                        return parsed(package, name, version.as_deref());
+                    }
                     // The scan knows no versions: a ref that names one finds nothing there.
                     let kinds = ["model", "seed", "snapshot"].into_iter().filter(|_| version.is_none());
-                    let mut found: Vec<Found> =
-                        kinds.filter_map(|kind| get(format!("{kind}.{package}.{name}"))).map(found).collect();
-                    for parsed in parsed(package, name, version.as_deref()) {
-                        if !found.iter().any(|found| found.id == parsed.id) {
-                            found.push(parsed);
-                        }
-                    }
-                    found
+                    kinds.flat_map(|kind| get(format!("{kind}.{package}.{name}"))).map(|entity| found(entity)).collect()
                 }
                 scan::Target::Source { source, table } => {
-                    get(format!("source.{package}.{source}.{table}")).map(found).into_iter().collect()
+                    get(format!("source.{package}.{source}.{table}")).iter().map(|entity| found(entity)).collect()
                 }
                 scan::Target::Macro { name, .. } => {
-                    get(format!("macro.{package}.{name}")).map(found).into_iter().collect()
+                    get(format!("macro.{package}.{name}")).iter().map(|entity| found(entity)).collect()
                 }
                 scan::Target::Dispatch { name, .. } => {
                     let (prefix, suffix) = (format!("macro.{package}."), format!("__{name}"));
                     let in_package = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
-                    in_package.filter(|(id, _)| id.ends_with(&suffix)).map(|(_, entity)| found(entity)).collect()
+                    let implementations = in_package.filter(|(id, _)| id.ends_with(&suffix));
+                    implementations.flat_map(|(_, entities)| entities.iter().map(|entity| found(entity))).collect()
                 }
             }
         };
@@ -362,17 +364,18 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
         let found = Found { id: entity.id.clone(), path: entity.path.clone(), range: entity.name_range.clone() };
         (entity.package.as_str(), found)
     });
-    let mut found = first_step(found.collect(), &steps, false);
-    let resource = ["model", "seed", "snapshot"].contains(kind) && package.is_none();
-    let parsed = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, name));
-    for node in parsed.into_iter().filter(|node| node["resource_type"] == *kind) {
-        if let Some(parsed) = parsed_at(project, node).filter(|parsed| found.iter().all(|found| found.id != parsed.id))
-        {
-            found.push(parsed);
-        }
+    // Once a parse knows the resource of an entry or of a unit test's model, its nodes decide, each version
+    // of a versioned model, as dbt patches or tests them all.
+    let resource_type = if *kind == "unit test model" { "model" } else { kind };
+    let resource = ["model", "seed", "snapshot"].contains(&resource_type) && package.is_none();
+    let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, name));
+    let typed = nodes.into_iter().filter(|node| node["resource_type"] == resource_type);
+    let mut parsed: Vec<Found> = typed.filter_map(|node| parsed_at(project, node)).collect();
+    if parsed.is_empty() {
+        return first_step(found.collect(), &steps, false);
     }
-    found.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
-    found
+    parsed.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
+    parsed
 }
 
 /// Where what TARGET, named in the file at PATH, is used, by LOOKUP: each
@@ -696,6 +699,49 @@ models:
             lead("source.shop.raw.orders", "models/_sources.yml", "orders")
         );
         assert_eq!(leads(&root, pkg_yml, table)[0].0, "source.pkg.raw.orders");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn after_a_parse_its_nodes_decide_a_name_it_knows() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/m.sql", "select 1"),
+            ("models/fact.sql", "select 1"),
+            ("models/fact_v2.sql", "select 2"),
+            ("models/a/twin.sql", "select 1"),
+            ("models/b/twin.sql", "{{ config(enabled=false) }} select 2"),
+        ];
+        let root = scratch_project("navigation-parse-decides", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        let node = |id: &str, name: &str, file: &str, version: Value| {
+            json!({"unique_id": id, "name": name, "resource_type": "model", "package_name": "shop",
+                   "original_file_path": file, "version": version, "latest_version": 2})
+        };
+        let mut twin = node("model.shop.twin", "twin", "models/b/twin.sql", Value::Null);
+        twin["latest_version"] = Value::Null;
+        let mut enabled = twin.clone();
+        enabled["original_file_path"] = json!("models/a/twin.sql");
+        // fact's version 1 is defined in the file named after the model, as `defined_in: fact` says.
+        let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {
+            "model.shop.fact.v1": node("model.shop.fact.v1", "fact", "models/fact.sql", json!(1)),
+            "model.shop.fact.v2": node("model.shop.fact.v2", "fact", "models/fact_v2.sql", json!(2)),
+            "model.shop.twin": enabled}, "disabled": {"model.shop.twin": [twin]}});
+        let index = Index::of(&manifest);
+        let files_of = |lookup: &Lookup, target: Target| -> Vec<String> {
+            let found = resolve(lookup, &root.join("models/m.sql"), &target);
+            found.iter().map(|found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()).collect()
+        };
+        let reference =
+            |name: &str| Target::Call(scan::Target::Ref { package: None, name: name.into(), version: None });
+        let parsed = Lookup::new(&project, Some(&index));
+        assert_eq!(files_of(&parsed, reference("fact")), ["models/fact_v2.sql"], "the latest alone");
+        assert_eq!(files_of(&parsed, reference("twin")), ["models/a/twin.sql"], "the one dbt keeps");
+        let unit = Target::Named { kind: "unit test model", package: None, name: "fact".into() };
+        assert_eq!(files_of(&parsed, unit), ["models/fact.sql", "models/fact_v2.sql"], "each version");
+        // Before a parse, two files of one name are both candidates.
+        let scanned = Lookup::new(&project, None);
+        assert_eq!(files_of(&scanned, reference("twin")), ["models/a/twin.sql", "models/b/twin.sql"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
