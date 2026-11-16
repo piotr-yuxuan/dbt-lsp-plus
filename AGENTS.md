@@ -8,12 +8,10 @@ its design, what `dbt lsp` was observed to do, and what is left to do.
 
 Every change follows the skill `workflow:plans`; load it before the first
 edit.  In this repository: plans are `docs/work/plans/NNN-slug.md`, not
-tracked; the checks, run in `nix develop`, are:
+tracked; the checks are the `Makefile`'s, run in `nix develop`:
 
 ```
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+make check
 ```
 
 and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming a
@@ -21,14 +19,17 @@ dbt 2 executable: with the proprietary build, which has `dbt lsp`, the live
 test and the conformance corpus,
 
 ```
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
+make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 ```
 
 and with dbt-oss, which has no `dbt lsp`, the corpus alone:
 
 ```
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance -- --ignored
+make conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 ```
+
+Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
+test runs in one checkout take turns.
 
 ## Layout
 
@@ -52,6 +53,7 @@ tests/proxy/conformance.rs    the library's resolution against dbt's manifest, o
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
+Makefile                      the checks, which CI runs too
 ```
 
 ## Rules of the code
