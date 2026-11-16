@@ -6,7 +6,6 @@
 use crate::config::Index;
 use crate::project::{self, Entity, Project};
 use crate::sources;
-use crate::text::LineIndex;
 use crate::yaml::{self, Node};
 use crate::{properties, scan};
 use regex::Regex;
@@ -149,10 +148,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     };
     let model = || {
         let root = yaml::parse(text)?;
-        let index = LineIndex::new(text);
-        let models = root.get("unit_tests").map_or(&[][..], Node::items).iter().filter_map(|unit| unit.get("model"));
-        let (name, _) =
-            models.filter_map(|model| project::written(text, &index, model)).find(|(_, range)| inside(range))?;
+        let (name, _) = project::unit_test_models(text, &root).into_iter().find(|(_, range)| inside(range))?;
         Some(named("unit test model", None, &name))
     };
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model)
