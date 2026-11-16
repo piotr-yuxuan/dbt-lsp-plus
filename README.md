@@ -14,12 +14,11 @@ outline of a model, every resource of a project as a workspace symbol, the
 call hierarchy of models, sources and macros, references and renames of
 sources, definitions from YAML, and the last run's failures as
 diagnostics.  With dbt-oss, which has no `dbt lsp`, it works alone, from
-the files and your own `dbt parse`.  It is pre-release.
+the files and your own `dbt parse`.  It uses only the server's interface,
+unlocks nothing that dbt gates behind an account, and does not ship dbt.
+It is pre-release.
 
 ![](./docs/social-media-preview.png)
-
-It uses only the server's interface, unlocks nothing that dbt gates behind
-an account, and does not ship dbt.
 
 ## Install and run
 
@@ -38,9 +37,10 @@ Then have your editor's LSP client start, in place of `dbt lsp`:
 dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 ```
 
-Every message passes unchanged, byte for byte; the proxy answers only what
-the server lacks.  [Your first session](docs/tutorials/first-session.md)
-walks through it on the project of the tests, from Emacs.
+The proxy answers what the server lacks, and passes every other message
+unchanged, byte for byte.  [Your first
+session](docs/tutorials/first-session.md) walks through it on the project
+of the tests, from Emacs.
 
 ## Documentation
 

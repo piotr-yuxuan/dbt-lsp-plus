@@ -22,6 +22,6 @@ dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 | `-V`, `--version` | Prints the version and exits |
 
 `-h`, `-V` and `--` are read only as the first argument.  Before it spawns
-the server, the proxy runs the words of its command before `lsp`, then
-`lsp --help`; with a dbt that has no `lsp`, it answers alone (see
+a server command that has the word `lsp`, the proxy runs the words before
+it, then `lsp --help`; with a dbt that has no `lsp`, it answers alone (see
 [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md)).
