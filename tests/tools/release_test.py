@@ -530,15 +530,16 @@ class FirstAndNext(Pipeline):
         self.assertIn("https://github.example/owner/name/compare/0.1.1...0.1.2", notes)
 
     def test_the_notes_compare_with_the_highest_earlier_version_by_number(self):
-        commit = self.push({**TREE, "Cargo.toml": manifest("0.1.9"), "Cargo.lock": lock("0.1.9")})
-        for tag in ("0.1.1", "0.1.9"):
+        commit = self.push({**TREE, "Cargo.toml": manifest("0.1.10"), "Cargo.lock": lock("0.1.10")})
+        # As text, 0.1.3 would come after 0.1.10.
+        for tag in ("0.1.3", "0.1.10"):
             self.git(self.work, "tag", tag, commit)
             self.git(self.work, "push", "-q", "origin", tag)
         changed = self.push({"docs/page.md": "Changed.\n"})
         done = self.release(changed)
         self.assertEqual(done.returncode, 0, done.stderr)
         notes = self.release_body()["body"]
-        self.assertIn("https://github.example/owner/name/compare/0.1.9...0.1.10", notes)
+        self.assertIn("https://github.example/owner/name/compare/0.1.10...0.1.11", notes)
         self.assertIn("| Changed | `docs/page.md` |", notes)
         self.assertNotIn("Cargo", notes)
 
