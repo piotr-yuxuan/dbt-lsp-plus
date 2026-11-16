@@ -140,7 +140,10 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     or GitHub, so that `main` stays the run's order;
   - `fetch` in `scripts/fetch-dbt`: the download and its checks, with tests
     of their own, apart from `main`, which reads the arguments and turns
-    failures into status 2;
+    failures into status 2; `latest_oss`, `latest_proprietary` and
+    `sidecar_digest`, the pure decisions on what the latest build is and
+    its digest, with tests on recorded listings; `find_oss` and
+    `find_proprietary`, one per build, behind `LATEST`;
   - `commit_on_branch`, `create_release`, `graphql` and `runs_of_ci` in
     `tests/bin/fake-gh`: one per call of GitHub's, so that `main` stays a
     dispatch.
