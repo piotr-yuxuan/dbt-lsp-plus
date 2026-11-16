@@ -1,0 +1,6 @@
+name: pb
+config-version: 2
+version: '0.1.0'
+models:
+  pb:
+    +schema: pb

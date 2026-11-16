@@ -2,6 +2,10 @@
 # CASE<TAB>SUBJECT<TAB>LOOKUP<TAB>REASON, as the corpus prints it.
 # See tests/proxy/conformance.rs.
 
+ambiguous-ref	model.r.c ref('z')	graph	dbt fails on two packages defining it (dbt1005); the proxy takes the first
+ambiguous-ref	model.r.c ref('z')	navigation	dbt fails on two packages defining it (dbt1005); the proxy takes the first
+ambiguous-source	model.r.c source('s', 't')	graph	dbt fails on two packages defining it (dbt1005); the proxy takes the first
+ambiguous-source	model.r.c source('s', 't')	navigation	dbt fails on two packages declaring it (dbt1005); navigation gives both
 disabled-package-model	model.pa.pa_m ref('x')	graph	the scan reads no `+enabled: false`: the disabled model of the caller's package wins
 disabled-package-model	model.pa.pa_m ref('x')	navigation	the scan reads no `+enabled: false`: the disabled model of the caller's package wins
 disabled-package-model	node:model.pa.x	scan	the scan reads no `+enabled: false` from the root's dbt_project.yml
@@ -15,6 +19,7 @@ flag-false	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.
 flag-false	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)
 function	model.r.c -> function.r.double_it	scan	the scan reads no function() call
 function	node:function.r.double_it	scan	the scan reads no functions
+macro-unknown	node:model.r.c	scan	dbt drops a node whose macro is unknown (dbt1501); the scan keeps it
 python-model	node:model.r.py_m	scan	the scan reads no Python model
 ref-var	model.r.c -> model.r.x	scan	the scan reads no ref of a variable; the server's listing gives it
 versions	model.pa.pc ref('m')	graph	the scan knows no versions: a ref of one answers nothing

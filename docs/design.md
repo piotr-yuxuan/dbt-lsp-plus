@@ -730,7 +730,8 @@ library's answers, each named by a lookup:
 A case may expect dbt to fail, in a file `expected-error`, and its
 manifest is compared all the same; dbt must leave the copy as it was.
 `divergences.txt` lists every divergence with its reason: one it lacks, or
-an entry that no longer diverges, fails the corpus.
+an entry that no longer diverges, fails the corpus.  dbt 2.0.9 and dbt-oss
+2.0.11 gave the same divergences on every case.
 
 ## Tests
 
