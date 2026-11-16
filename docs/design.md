@@ -416,6 +416,40 @@ So the proxy runs the user's own `dbt parse`.
   `warn_after` and `error_after`; a test on a source, or a singular test,
   has no `attached_node`, only `depends_on`; a composite `unique_key` is an
   array; each version of a versioned model is a node of its own.
+- dbt-oss 2.0.11 parses as 2.0.9 does, and the two wrote the same
+  manifests for every project of the corpus (see "Conformance").  It
+  has no `lsp`: `dbt lsp --help` exits 2, its standard output empty and
+  `error: unrecognized subcommand 'lsp'` on its standard error, where
+  2.0.9 exits 0 with its help.  Its `format --help` exits 2 too, but its
+  `lint --help` exits 0.
+- Offline, under `unshare -rn` with a scratch home, a parse of a DuckDB
+  project needs no driver on either build, and with the flags above
+  makes no connection attempt; without them, both builds try to connect,
+  and on a host with nscd their name lookups cross the namespace through
+  its socket.  `--write-json` is not needed: both write the manifest
+  anyway.
+- A package under `packages-install-path` is read whatever its directory
+  is called, with no `packages.yml`; one that `packages.yml` names as
+  `local: dbt_packages/<directory>` under another name makes dbt delete
+  that directory and fail.  A root model and a package model of one name
+  fail with dbt1005 on their database relation unless one sets another
+  schema.
+- A parse that fails on an ambiguous `ref` or `source` (dbt1005: two
+  packages other than the caller's and the root define the name) or on
+  an unknown macro (dbt1501) still writes a manifest, the failing call
+  missing from `depends_on`.  An entry naming another package's
+  resource warns dbt1089, even with `--quiet`, and leaves that
+  resource's `patch_path` null.
+- The manifest lists a node's calls in `depends_on.nodes` and
+  `depends_on.macros` (dbt's own macros included), and a macro's in its
+  own `depends_on.macros`, but nothing for a `doc()`, whose block shows
+  only in the rendered `description`.  A macro called in a YAML value is
+  rendered and listed nowhere.  `adapter.dispatch` called from a node
+  lists nothing; from a macro, only the implementation for the adapter.
+- Both builds support, beyond what the scan reads: versioned models,
+  each version a node such as `model.p.m.v2`; snapshots declared in YAML;
+  functions (`function('f')`, as `function.p.f`), on DuckDB too; and
+  `dbt.ref` and `dbt.source` in a Python model.
 - The server's hover on a `ref` is markdown with no range, starting with the
   description and the parents and children; on a `source()`, a column, a
   macro call or a comment it answers null.  The fake does not model this:
