@@ -1,0 +1,6 @@
+name: pa
+config-version: 2
+version: '0.1.0'
+models:
+  pa:
+    +schema: pa

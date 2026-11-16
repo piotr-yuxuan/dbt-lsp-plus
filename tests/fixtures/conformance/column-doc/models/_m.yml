@@ -1,0 +1,9 @@
+version: 2
+models:
+  - name: m
+    description: "{{ doc('m_desc') }}"
+    columns:
+      - name: id
+        description: "{{ doc('col_id') }}"
+  - name: n
+    description: "{{ doc('n_desc') }} Refreshed daily."

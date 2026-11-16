@@ -1,0 +1,6 @@
+name: stripe_source
+config-version: 2
+version: '0.1.0'
+models:
+  stripe_source:
+    +schema: stripe_source

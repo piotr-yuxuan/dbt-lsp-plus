@@ -1,0 +1,7 @@
+version: 2
+sources:
+  - name: stripe
+    overrides: stripe_source
+    schema: my_stripe
+    tables:
+      - name: charge

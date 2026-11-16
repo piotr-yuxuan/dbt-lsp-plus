@@ -144,7 +144,8 @@ resolved path.
   found resources; an empty `source:*` does not.  After a crash, the scan
   gives the whole graph again, until a restarted server lists it.
 - A source that `overrides` a package's source is that package's source:
-  dbt patches it, so the proxy places its tables in the package.
+  dbt-core patches it, so the proxy places its tables in the package
+  (dbt 2 does not: see "Known limitations").
 - Text read from disk loses its byte order mark, as an editor's document
   does, so that positions on its first line match.
 - For a restart: the client's `initialize` parameters; each open
@@ -416,8 +417,9 @@ So the proxy runs the user's own `dbt parse`.
   `warn_after` and `error_after`; a test on a source, or a singular test,
   has no `attached_node`, only `depends_on`; a composite `unique_key` is an
   array; each version of a versioned model is a node of its own.
-- dbt-oss 2.0.11 parses as 2.0.9 does, and the two wrote the same
-  manifests for every project of the corpus (see "Conformance").  It
+- dbt-oss 2.0.11 parses as 2.0.9 does: for every project of the corpus
+  (see "Conformance") the two wrote the same entries for the project's
+  packages, and differed only in a few of dbt's own macros.  It
   has no `lsp`: `dbt lsp --help` exits 2, its standard output empty and
   `error: unrecognized subcommand 'lsp'` on its standard error, where
   2.0.9 exits 0 with its help.  Its `format --help` exits 2 too, but its
@@ -434,18 +436,25 @@ So the proxy runs the user's own `dbt parse`.
   that directory and fail.  A root model and a package model of one name
   fail with dbt1005 on their database relation unless one sets another
   schema.
-- A parse that fails on an ambiguous `ref` or `source` (dbt1005: two
-  packages other than the caller's and the root define the name) or on
-  an unknown macro (dbt1501) still writes a manifest, the failing call
-  missing from `depends_on`.  An entry naming another package's
+- A parse that fails still writes a manifest: on an ambiguous `ref` or
+  `source` (dbt1005: two packages other than the caller's and the root
+  define the name), with the node and without that call in its
+  `depends_on`; on an unknown macro (dbt1501), without the node at all,
+  though its dependents still name it.  dbt 2 ignores a source's
+  `overrides` (dbt1060, an error) and declares a source of the root's
+  own.  An entry naming another package's
   resource warns dbt1089, even with `--quiet`, and leaves that
   resource's `patch_path` null.
-- The manifest lists a node's calls in `depends_on.nodes` and
-  `depends_on.macros` (dbt's own macros included), and a macro's in its
-  own `depends_on.macros`, but nothing for a `doc()`, whose block shows
-  only in the rendered `description`.  A macro called in a YAML value is
-  rendered and listed nowhere.  `adapter.dispatch` called from a node
-  lists nothing; from a macro, only the implementation for the adapter.
+- A node's `depends_on` lists what rendering it reached: in `macros`,
+  the macros it calls and those they call in turn (dbt's own included),
+  but not through a dispatch; in `nodes`, its `ref` and `source` calls
+  and those of the macros it reaches, resolved for that node.  A macro's
+  own `depends_on` lists macros only.  Nothing lists a `doc()`, whose
+  block shows only in the rendered `description`, nor a call in a branch
+  that the parse does not render (`is_incremental()`).  A macro called in
+  a YAML value is rendered and listed nowhere.  `adapter.dispatch` called
+  from a node lists nothing; from a macro, only the implementation for
+  the adapter.
 - Both builds support, beyond what the scan reads: versioned models,
   each version a node such as `model.p.m.v2`; snapshots declared in YAML;
   functions (`function('f')`, as `function.p.f`), on DuckDB too; and
@@ -702,7 +711,8 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   still resolves, ahead of the root's; a `function()` call and the
   functions it names are not read; the graph names every implementation
   of a dispatch, where dbt lists the adapter's alone from a macro, and
-  nothing from a node.
+  nothing from a node; dbt 2 ignores a source's `overrides`, which the
+  scan follows.
 
 ## Conformance
 
@@ -718,20 +728,30 @@ library's answers, each named by a lookup:
   entities and source tables; and a dependency that no call the scan
   reads names;
 - `location`: the file of each, against `original_file_path`;
-- `navigation`: each `ref` and `source` of a node, and in a properties
-  file each entry's `name:` and each `doc()` in it, against the
-  dependency of the call's name, the node that dbt patched from that file
-  (`patch_path`), and the docs block it rendered as that node's
-  description;
+- `navigation`: each `ref` and `source` of a node, but a `ref` naming a
+  version, which navigation forwards; and in a properties file each
+  entry's `name:` and each `doc()` in it, against the dependency of the
+  call's name, the node that dbt patched from that file (`patch_path`),
+  and the docs block of the doc's name whose text dbt rendered in the
+  description that holds the call, a column's or the node's;
 - `graph`: each call of a node or a macro, by the edges whose sites hold
   it, against the dependencies (nodes, and the project's macros) that bear
   the call's name, a dispatch's being its `*__name` implementations.
 
-A case may expect dbt to fail, in a file `expected-error`, and its
-manifest is compared all the same; dbt must leave the copy as it was.
-`divergences.txt` lists every divergence with its reason: one it lacks, or
-an entry that no longer diverges, fails the corpus.  dbt 2.0.9 and dbt-oss
-2.0.11 gave the same divergences on every case.
+A node is compared on its own calls and on the `ref` and `source` of each
+macro it reaches through the graph, as `<node> via <macro>`, since dbt
+resolves those for the node; a macro, on its own calls of macros; a node
+that dbt dropped, against nothing.  A case may expect dbt to fail, in a
+file `expected-error`, and its manifest is compared all the same; dbt
+must leave the copy as it was.  `divergences.txt` lists every divergence,
+what each side answered and why: one it lacks, or an entry that no longer
+diverges, as when an answer changes, fails the corpus.  dbt 2.0.9 and
+dbt-oss 2.0.11 gave the same divergences on every case.
+
+A case keeps to what the comparison can attribute: one call per node and
+target name, every call rendered at parse, and docs blocks of distinct
+texts.  Not compared: a generic test's name, a unit test's `model:`, and
+a `ref` or `source` in YAML, whose nodes dbt generates.
 
 ## Tests
 
