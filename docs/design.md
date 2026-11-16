@@ -726,7 +726,8 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   server that honours `--target-path` would write where the filter does
   not look.  A resource path named `target` or `logs` (dbt 2.0.9 accepts
   `model-paths: ["logs"]`) loses the listing on an outside change of its
-  files, until the next save.
+  files, until the next save; so does every file below the directory
+  that `target` or `logs` links to, when it holds the project.
 - The proxy does not follow `client/unregisterCapability`: a registration
   the server withdrew and makes again is answered by the proxy, and never
   reaches the client.  dbt lsp 2.0.9 was not seen to withdraw one.

@@ -323,16 +323,20 @@ fn watcher(session: &mut Session, project: &Path) {
     let watchers = &registered["params"]["registrations"][0]["registerOptions"]["watchers"];
     assert_eq!(watchers, &json!([{"globPattern": "**/*"}]), "{registered}");
     // A model's change makes the proxy list, and dbt lsp compile and write within the window.
-    let completed =
-        |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
-    let before = completed(session);
-    let model = json!({"changes": [{"uri": uri(&project.join("models/marts/orders.sql")), "type": 2}]});
-    session.notify("workspace/didChangeWatchedFiles", model);
-    let waited = Instant::now() + Duration::from_secs(60);
-    while completed(session) < before + 2 && Instant::now() < waited {
-        session.request("workspace/symbol", json!({"query": "orders"}));
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let compile_once = |session: &mut Session| {
+        let completed =
+            |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+        let before = completed(session);
+        let model = json!({"changes": [{"uri": uri(&project.join("models/marts/orders.sql")), "type": 2}]});
+        session.notify("workspace/didChangeWatchedFiles", model);
+        let waited = Instant::now() + Duration::from_secs(60);
+        while completed(session) < before + 2 && Instant::now() < waited {
+            session.request("workspace/symbol", json!({"query": "orders"}));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(completed(session) >= before + 2, "no compilation after a model's change");
+    };
+    compile_once(session);
     let start = session.received.len();
     let mut seen = look();
     let mut sent = 0;

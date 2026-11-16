@@ -863,6 +863,8 @@ fn ignores_dbt_s_output_through_a_link_out_of_the_project() {
     let project = copy_fixture("dbt-output-out-link");
     let elsewhere = project.with_file_name("elsewhere-logs");
     std::fs::create_dir_all(&elsewhere).unwrap();
+    // As lsp-mode reports it, whatever links the scratch directory sits under.
+    let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
     std::os::unix::fs::symlink(&elsewhere, project.join("logs")).unwrap();
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let arguments = [Path::new("--project-dir"), &project];
