@@ -294,7 +294,7 @@ mod tests {
         assert!(edges.contains(&("model.shop.stg_orders", "seed.shop.raw_orders")));
         let stg =
             graph.edges.iter().find(|e| e.from == "model.shop.orders" && e.to == "model.shop.stg_orders").unwrap();
-        let text = &project.texts[&graph.items["model.shop.orders"].path];
+        let text = project.text(&graph.items["model.shop.orders"].path).unwrap();
         assert_eq!(&text[stg.sites[0].clone()], "ref('stg_orders'");
         assert!(graph.items["test.shop.not_null_orders_id.abc"].path.ends_with("models/marts/_marts.yml"));
     }

@@ -86,7 +86,7 @@ pub fn declares(declared: &SourceTable, target: &Target) -> bool {
 /// carry for the configuration to keep applying.
 fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
     let path = project.packages.get(&project.root_package)?.join("dbt_project.yml");
-    let text = project.texts.get(&path)?;
+    let text = project.text(&path)?;
     let config = yaml::parse(text)?;
     let (parents, key): (&[&str], &str) = match target {
         Target::Source { source } => (&[&project.root_package], source),
@@ -101,9 +101,8 @@ fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
 /// Every place of PROJECT that names TARGET, ordered by file and offset.
 pub fn occurrences(project: &Project, target: &Target) -> Vec<Occurrence> {
     let mut found = Vec::new();
-    for (path, text) in &project.texts {
-        let calls = file_calls(path, text);
-        let named = calls.iter().filter_map(|call| argument_naming(call, target));
+    for (path, file) in &project.files {
+        let named = file.calls.iter().filter_map(|call| argument_naming(call, target));
         found.extend(named.map(|range| Occurrence { path: path.clone(), range: range.clone(), declaration: false }));
     }
     for declared in project.sources.iter().filter(|declared| declares(declared, target)) {
@@ -135,7 +134,7 @@ pub fn references(
 ) -> Value {
     let found = occurrences(project, target).into_iter().filter(|o| declarations || !o.declaration);
     let locations = found.map(|o| {
-        let text = project.texts.get(&o.path).map_or("", String::as_str);
+        let text = project.text(&o.path).unwrap_or_default();
         json!({"uri": uri_of(&o.path), "range": lsp_range(text, &o.range, encoding)})
     });
     Value::Array(locations.collect())
@@ -259,7 +258,7 @@ pub fn rename(
     // Every declaration is an occurrence, so `replacement` judges NEW at least once.
     let mut edits: BTreeMap<PathBuf, Vec<(Range<usize>, String)>> = BTreeMap::new();
     for found in found {
-        let text = project.texts.get(&found.path).map_or("", String::as_str);
+        let text = project.text(&found.path).unwrap_or_default();
         let new_text = replacement(text, &found.range, new, is_yaml(&found.path) && !found.declaration)?;
         edits.entry(found.path).or_default().push((found.range, new_text));
     }
@@ -269,7 +268,7 @@ pub fn rename(
     // A flow collection may span lines that look like blocks: a YAML file must
     // still parse once edited, last edit first.
     for (path, file_edits) in edits.iter().filter(|(path, _)| is_yaml(path)) {
-        let mut text = project.texts.get(path).cloned().unwrap_or_default();
+        let mut text = project.text(path).unwrap_or_default().to_owned();
         let mut file_edits: Vec<_> = file_edits.iter().collect();
         file_edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
         file_edits.into_iter().for_each(|(range, new_text)| text.replace_range(range.clone(), new_text));
@@ -278,7 +277,7 @@ pub fn rename(
         }
     }
     let changes = edits.into_iter().map(|(path, edits)| {
-        let text = project.texts.get(&path).map_or("", String::as_str);
+        let text = project.text(&path).unwrap_or_default();
         let edits = edits
             .iter()
             .map(|(range, new_text)| json!({"range": lsp_range(text, range, encoding), "newText": new_text}));
@@ -312,7 +311,7 @@ mod tests {
         let mut texts = BTreeMap::new();
         for (file, edits) in edit["changes"].as_object().unwrap() {
             let path = url::Url::parse(file).unwrap().to_file_path().unwrap();
-            let mut text = project.texts[&path].clone();
+            let mut text = project.text(&path).unwrap_or_default().to_owned();
             let mut edits: Vec<&Value> = edits.as_array().unwrap().iter().collect();
             edits.sort_by_key(|e| {
                 std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64()))

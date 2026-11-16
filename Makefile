@@ -10,7 +10,7 @@ CARGO_JOBS ?= 4
 TEST_THREADS ?= 4
 CARGO_TEST := cargo test --locked -j $(CARGO_JOBS)
 # The Python of the release, which has no extension in tests/bin.
-PYTHON := scripts/release.py scripts/fetch-dbt tests/tools tests/bin/fake-gh
+PYTHON := scripts/release.py scripts/fetch-dbt scripts/bench tests/tools tests/bin/fake-gh
 export PYTHONDONTWRITEBYTECODE := 1
 
 .PHONY: check check-static fmt clippy public python test-python workflows test conformance live commits

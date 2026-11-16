@@ -286,7 +286,7 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         let edges = graph.edges.iter().filter(|edge| edge.from == holder.id && edge.sites.contains(&call.range));
         let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
         // A keyword argument after a ref's name, as `v=2`, names a version, which navigation forwards.
-        let text = project.texts.get(&holder.path).map_or("", String::as_str);
+        let text = project.text(&holder.path).unwrap_or_default();
         let versioned = text.get(call.range.end..).is_some_and(|rest| rest.trim_start().starts_with(','));
         let navigated = target.filter(|_| !versioned).map(|target| {
             navigation::resolve(project, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
@@ -382,7 +382,8 @@ fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         found
     };
     let mut found = Vec::new();
-    for (path, text) in project.texts.iter().filter(|(path, _)| sources::is_yaml(path)) {
+    for (path, file) in project.files.iter().filter(|(path, _)| sources::is_yaml(path)) {
+        let text = file.text.as_str();
         let holders = project.packages.iter().filter(|(_, dir)| path.starts_with(dir));
         let Some((package, dir)) = holders.max_by_key(|(_, dir)| dir.components().count()) else { continue };
         let file = format!("{package}://{}", path.strip_prefix(dir).unwrap().to_string_lossy());
