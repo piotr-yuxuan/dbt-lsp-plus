@@ -9,6 +9,11 @@ editor gets them through standard LSP, and so does an agent whose LSP tool
 speaks definition, references, hover, document and workspace symbols and the
 call hierarchy.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/architecture-dark.png">
+  <img alt="An editor or an agent speaks LSP to dbt-lsp-plus, which forwards every message to dbt lsp and answers what it lacks from the project's files, its own dbt parse and the user's last run." src="../images/architecture.png">
+</picture>
+
 ## Boundary
 
 - It uses only the server's interface (its messages, its announced

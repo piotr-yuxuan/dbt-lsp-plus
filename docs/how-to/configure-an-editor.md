@@ -9,8 +9,8 @@ dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 ```
 
 The project is the `--project-dir` of the server command, else the
-client's root folder, else the current directory; [the command
-line](../reference/command-line.md) gives every argument.  Alone, with
+client's root folder, else the current directory; [the
+configuration](../reference/configuration.md) gives every option.  Alone, with
 dbt-oss, the proxy's `dbt parse` keeps `--profiles-dir`, `--profile`,
 `--target`, `--vars` and `--packages-install-path` from the server
 command: without `--profiles-dir`, dbt looks for `profiles.yml` in the
@@ -20,7 +20,13 @@ proxy's working directory, then in `~/.dbt`, not in the project.
 
 dbt-mode's lsp-mode client runs `dbt lsp` through dbt-lsp-plus when
 `dbt-lsp-proxy` is non-nil and `dbt-lsp-plus` is on `exec-path`, and runs
-the proxy alone for dbt-oss.
+the proxy alone for dbt-oss.  `dbt-lsp-arguments` adds flags to the server
+command:
+
+```elisp
+(setq dbt-lsp-proxy t
+      dbt-lsp-arguments '("--profiles-dir" "/path/to/project"))
+```
 
 ## Emacs with Eglot
 
