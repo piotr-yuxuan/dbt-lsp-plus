@@ -9,12 +9,15 @@ BASE ?= main
 CARGO_JOBS ?= 4
 TEST_THREADS ?= 4
 CARGO_TEST := cargo test --locked -j $(CARGO_JOBS)
+# The Python of the release, which has no extension in tests/bin.
+PYTHON := scripts/release.py tests/tools tests/bin/fake-gh
+export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check check-static fmt clippy public test conformance live commits
+.PHONY: check check-static fmt clippy public python test-python test conformance live commits
 
 check: check-static test
 
-check-static: fmt clippy public
+check-static: fmt clippy public python test-python
 
 fmt:
 	@cargo fmt --check
@@ -25,6 +28,12 @@ clippy:
 # Nothing that must not be published, and an SPDX line in each source file.
 public:
 	@scripts/check-public
+
+python:
+	@ruff check --no-cache $(PYTHON)
+
+test-python:
+	@python3 -m unittest discover -s tests/tools -p '*_test.py'
 
 test:
 	@$(CARGO_TEST) -- --test-threads=$(TEST_THREADS)

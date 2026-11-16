@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+# The Python of the release and its tests, as the owner's other projects lint theirs.
+line-length = 104
+
+[lint]
+select = ["E", "F", "B", "C901"]
+
+[lint.mccabe]
+max-complexity = 10

@@ -15,6 +15,7 @@
           pkgs.cargo pkgs.rustc pkgs.clippy pkgs.rustfmt pkgs.git pkgs.gnumake
           # For the scripts of the release and their tests, and for the workflows.
           pkgs.python3
+          pkgs.ruff
           pkgs.actionlint
         ];
       };
