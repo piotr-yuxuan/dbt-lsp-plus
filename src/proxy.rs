@@ -295,12 +295,8 @@ fn key(id: &Value) -> String {
 /// it.  Resolved only when that names another directory, through a link
 /// before a `..`.
 fn project_dir(command: &[String]) -> Option<PathBuf> {
-    let value = command.iter().enumerate().find_map(|(at, arg)| match arg.strip_prefix("--project-dir") {
-        Some("") => command.get(at + 1).cloned(),
-        Some(rest) => rest.strip_prefix('=').map(str::to_owned),
-        None => None,
-    })?;
-    let spelt = std::path::absolute(&value).ok()?.components().fold(PathBuf::new(), |mut path, component| {
+    let value = config::flag(command, "--project-dir")?;
+    let spelt = std::path::absolute(value).ok()?.components().fold(PathBuf::new(), |mut path, component| {
         match component {
             Component::ParentDir => {
                 path.pop();
@@ -309,7 +305,7 @@ fn project_dir(command: &[String]) -> Option<PathBuf> {
         }
         path
     });
-    match fs::canonicalize(&value) {
+    match fs::canonicalize(value) {
         Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
         _ => Some(spelt),
     }
@@ -755,8 +751,8 @@ impl<W: Write> Proxy<W> {
         let can = self.standalone || (parsing.compiled && self.server.is_some());
         let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        if !config::packages_settled(&root) {
-            return self.log_parse("packages.yml names packages that are not installed: run dbt deps");
+        if let Some(why) = config::packages_refused(&root, &self.parsing.server) {
+            return self.log_parse(&why);
         }
         // An empty or relative base would put the cache in the working directory.
         let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
