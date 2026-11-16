@@ -9,9 +9,9 @@
 
 use crate::support::{Session, copy_fixture, uri};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
@@ -57,6 +57,7 @@ fn in_front_of_the_real_dbt_lsp() {
     navigation(&mut session, &project);
     last_run(&mut session, &project);
     lineage(&mut session, &project);
+    watcher(&mut session, &project);
     let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
     recorded_observations(&mut session, &result);
@@ -294,6 +295,78 @@ fn lineage(session: &mut Session, project: &Path) {
     let callees: Vec<&str> =
         outgoing["result"].as_array().unwrap().iter().map(|c| c["to"]["detail"].as_str().unwrap()).collect();
     assert_eq!(callees, ["source.shop.raw.customers"]);
+}
+
+/// Five seconds as an editor that honours dbt lsp's watcher of `**/*`: one
+/// event a round for each file created, changed or deleted under the
+/// project, `.git` aside.  dbt lsp writes `target/` and `logs/` at each
+/// compilation: were the proxy to list on those events, it would never stop.
+fn watcher(session: &mut Session, project: &Path) {
+    let look = || {
+        let mut found: BTreeMap<PathBuf, (SystemTime, u64)> = BTreeMap::new();
+        let mut pending = vec![project.to_owned()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+                let (path, Ok(meta)) = (entry.path(), entry.metadata()) else { continue };
+                if path.file_name().is_some_and(|name| name == ".git") {
+                    continue;
+                }
+                if meta.is_dir() {
+                    pending.push(path.clone());
+                }
+                found.insert(path, (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()));
+            }
+        }
+        found
+    };
+    let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
+    let watchers = &registered["params"]["registrations"][0]["registerOptions"]["watchers"];
+    assert_eq!(watchers, &json!([{"globPattern": "**/*"}]), "{registered}");
+    // A model's change makes the proxy list, and dbt lsp compile and write within the window.
+    let compile_once = |session: &mut Session| {
+        let completed =
+            |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+        let before = completed(session);
+        let model = json!({"changes": [{"uri": uri(&project.join("models/marts/orders.sql")), "type": 2}]});
+        session.notify("workspace/didChangeWatchedFiles", model);
+        let waited = Instant::now() + Duration::from_secs(60);
+        while completed(session) < before + 2 && Instant::now() < waited {
+            session.request("workspace/symbol", json!({"query": "orders"}));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(completed(session) >= before + 2, "no compilation after a model's change");
+    };
+    compile_once(session);
+    let start = session.received.len();
+    let mut seen = look();
+    let mut sent = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let now = look();
+        let mut changes = Vec::new();
+        for (path, stamp) in &now {
+            match seen.get(path) {
+                None => changes.push(json!({"uri": uri(path), "type": 1})),
+                Some(before) if before != stamp => changes.push(json!({"uri": uri(path), "type": 2})),
+                Some(_) => {}
+            }
+        }
+        let deleted = seen.keys().filter(|path| !now.contains_key(*path));
+        changes.extend(deleted.map(|path| json!({"uri": uri(path), "type": 3})));
+        if !changes.is_empty() {
+            session.notify("workspace/didChangeWatchedFiles", json!({"changes": changes}));
+            sent += 1;
+        }
+        seen = now;
+        // Answered by the proxy itself: what the server sent meanwhile has been read.
+        session.request("workspace/symbol", json!({"query": "orders"}));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert!(sent > 0, "dbt lsp wrote nothing under the project within the window");
+    let compiled = session.received[start..].iter().filter(|m| m["method"] == "dbt/lspCompileStart").count();
+    assert!(compiled <= 2, "{compiled} compilations in five seconds as a watcher of dbt lsp's own output");
 }
 
 /// What design.md records of dbt lsp 2.0.9, and the fake models, from the

@@ -73,6 +73,9 @@ const CHANGES: [&str; 5] = [
     "workspace/didRenameFiles",
     "workspace/didDeleteFiles",
 ];
+/// The directories under its project where dbt lsp 2.0.9 writes at each
+/// compilation, whatever its `--target-path` and `--log-path` say.
+const OUTPUT: [&str; 2] = ["target", "logs"];
 
 enum Event {
     Client(Frame),
@@ -249,6 +252,33 @@ struct Proxy<W: Write> {
 /// The path of a `file:` URI.
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
     Url::parse(uri?).ok()?.to_file_path().ok()
+}
+
+/// Whether the client's notification METHOD, of PARAMS, may change the
+/// graph: one of `CHANGES`, but a watched-files event whose every change is
+/// a `file:` URI that MAP places in one of the directories OUTPUT gives,
+/// dbt lsp's own output, where it writes at each compilation: listing on it
+/// would never end, for a client that honours dbt lsp's watcher of `**/*`.
+/// An event the proxy cannot read is a change.
+fn changes_graph(
+    method: &str,
+    params: &Value,
+    output: impl Fn() -> Vec<PathBuf>,
+    map: impl Fn(Option<&str>) -> Option<PathBuf>,
+) -> bool {
+    if !CHANGES.contains(&method) {
+        return false;
+    }
+    let changes = params["changes"].as_array().map_or(&[][..], Vec::as_slice);
+    if method != "workspace/didChangeWatchedFiles" || changes.is_empty() {
+        return true;
+    }
+    let output = output();
+    let in_output = |change: &Value| {
+        let uri = change["uri"].as_str().filter(|uri| Url::parse(uri).is_ok_and(|url| url.scheme() == "file"));
+        map(uri).is_some_and(|path| output.iter().any(|dir| path.starts_with(dir)))
+    };
+    output.is_empty() || !changes.iter().all(in_output)
 }
 
 fn key(id: &Value) -> String {
@@ -903,7 +933,12 @@ impl<W: Write> Proxy<W> {
                 // The server gets the change before the listing it prompts.
                 self.send_server(&frame.body);
                 let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
-                if CHANGES.contains(&method) || first_open {
+                // dbt lsp's output, as spelt and as resolved: a link out of the project included.
+                let output = || {
+                    let spelt = self.root.iter().flat_map(|root| OUTPUT.map(|dir| root.join(dir)));
+                    spelt.flat_map(|dir| [fs::canonicalize(&dir).ok(), Some(dir)]).flatten().collect()
+                };
+                if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
                     (self.parsing.fresh, self.parsing.compiled) = (false, false);
                     self.list_nodes();
                 }
@@ -1445,6 +1480,57 @@ pub fn run(command: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
+        let root = Path::new("/work/a b/shop");
+        // As the proxy gives them: a link of logs out of the project, resolved, included.
+        let output = vec![root.join("target"), root.join("logs"), PathBuf::from("/elsewhere/logs")];
+        let file = |path: &str| format!("file:///work/a%20b/shop/{path}");
+        let watched = |uris: &[String]| {
+            let changes: Vec<Value> = uris.iter().map(|uri| json!({"uri": uri, "type": 2})).collect();
+            json!({"changes": changes})
+        };
+        let (event, created) = ("workspace/didChangeWatchedFiles", "workspace/didCreateFiles");
+        let (log, model) = (file("logs/dbt-lsp.log"), file("models/orders.sql"));
+        let resolved = "file:///elsewhere/logs/dbt-lsp.log".to_owned();
+        let cases = [
+            ("target itself", event, watched(&[file("target")]), true, false),
+            ("output only", event, watched(&[file("target/compiled/shop/x.sql"), log.clone()]), true, false),
+            ("through a link out of the project", event, watched(std::slice::from_ref(&resolved)), true, false),
+            ("output, then a model", event, watched(&[log.clone(), model.clone()]), true, true),
+            ("a model, then output", event, watched(&[model.clone(), log.clone()]), true, true),
+            ("another first directory", event, watched(&[file("target2/x")]), true, true),
+            ("a target below the root's top", event, watched(&[file("models/target/x.sql")]), true, true),
+            ("the root itself", event, watched(&[file("")]), true, true),
+            (
+                "outside the root, beside output",
+                event,
+                watched(&["file:///else/target/x".into(), log.clone()]),
+                true,
+                true,
+            ),
+            ("not a file", event, watched(&["untitled:Untitled-1".into(), log.clone()]), true, true),
+            (
+                "another scheme on a path in the output",
+                event,
+                watched(&["untitled:/work/a%20b/shop/target/x".into()]),
+                true,
+                true,
+            ),
+            ("no URI, beside output", event, json!({"changes": [{"type": 2}, {"uri": log, "type": 2}]}), true, true),
+            ("no change", event, json!({"changes": []}), true, true),
+            ("no changes", event, json!({}), true, true),
+            ("no root", event, watched(std::slice::from_ref(&resolved)), false, true),
+            ("a file the client creates", created, json!({"files": [{"uri": file("target/x")}]}), true, true),
+            ("a save", "textDocument/didSave", json!({}), true, true),
+            ("an edit", "textDocument/didChange", json!({}), true, false),
+        ];
+        for (name, method, params, rooted, expected) in cases {
+            let given = || if rooted { output.clone() } else { Vec::new() };
+            assert_eq!(changes_graph(method, &params, given, uri_path), expected, "{name}");
+        }
+    }
 
     #[test]
     fn a_restart_waits_one_more_second_each_time_and_three_a_window() {

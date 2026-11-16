@@ -85,6 +85,8 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     teardown of the server process, each a resource's start or end;
   - `restart_delay`: the decision on a lost server, free of the clock,
     with tests of its own;
+  - `changes_graph`: the decision whether a client's notification may
+    change the graph, free of the file system, with tests of its own;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
@@ -122,6 +124,10 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     the listing's deadline;
   - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
     outcome and its end, each the end of a resource, as `stop_server`;
+  - the sections of `tests/proxy/live.rs` (`document_features`,
+    `navigation`, `last_run`, `lineage`, `watcher` and the others): one
+    per observed behaviour, so that `in_front_of_the_real_dbt_lsp` stays
+    their sequence;
   - `parse` in `tests/proxy/conformance.rs`: dbt's run, the corpus's one
     effect, apart from the comparisons, which decide;
   - `nodes_compared`, `calls_compared` and `entries_compared` in

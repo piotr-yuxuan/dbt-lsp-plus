@@ -165,6 +165,18 @@ resolved path.
   a loop: 565 compilations in two minutes.
 - The server compiles nothing after `initialized` until a document opens or
   a request comes.
+- It writes under its `--project-dir` only `logs/dbt-lsp.log`, from its
+  start, and `target/**` at each compilation (compiled SQL, the seeds'
+  parquet, `private/metadata/compile/schemas/N.parquet` created and
+  deleted), whatever its `--target-path`, `--log-path`, `DBT_TARGET_PATH`
+  and `DBT_LOG_PATH` say (probed once by plan 025's critic; no test
+  checks it); `dbt_project.yml` refuses `log-path` as it refuses
+  `target-path` (dbt1005).  Right after `initialized` it registers
+  the watcher `{"watchers": [{"globPattern": "**/*"}]}`.  A client that
+  honours it and sends an event for each write made the proxy, before it
+  filtered them, list 1249 times a minute on the fixture; ignoring
+  `target/` alone, 1381; `logs/` alone, 182.  The server itself compiles
+  on no event that names only its output.
 
 So the proxy lists `*` and then `source:*`, one after the other.  It lists
 on the client's signals only:
@@ -172,7 +184,13 @@ on the client's signals only:
   each listing compiles the whole project, and an editor that restores a
   session opens many documents; the next change lists again;
 - `didSave`;
-- `workspace/didChangeWatchedFiles`, and files created, renamed or deleted.
+- `workspace/didChangeWatchedFiles`, and files created, renamed or deleted;
+  but not a watched change whose every file is a `file:` URI in dbt's own
+  output, `target` and `logs` under the root, the directories and all
+  below them, as spelt or as resolved (lsp-mode reports a linked
+  directory's files at their resolved path): such an event changes no
+  state of the proxy (no listing, the parse not marked stale), and
+  reaches the server as it came.
 
 The server gets the client's change before the listing it prompts.  The
 proxy never lists while a `dbt.listNodes` of the client's is pending, nor
@@ -702,6 +720,14 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   got, and the proxy the methods it owned.  A launcher (`uvx`, `nix run`)
   may leave the dead server's own child running beside the new one, as
   for parses.
+- A server started without `--project-dir`, in a workspace whose root holds
+  no `dbt_project.yml`, writes under a project that is not the proxy's
+  root, whose events the filter of dbt's output then misses; and a later
+  server that honours `--target-path` would write where the filter does
+  not look.  A resource path named `target` or `logs` (dbt 2.0.9 accepts
+  `model-paths: ["logs"]`) loses the listing on an outside change of its
+  files, until the next save; so does every file below the directory
+  that `target` or `logs` links to, when it holds the project.
 - The proxy does not follow `client/unregisterCapability`: a registration
   the server withdrew and makes again is answered by the proxy, and never
   reaches the client.  dbt lsp 2.0.9 was not seen to withdraw one.
@@ -838,6 +864,11 @@ source's description.
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
+  As an editor that honours dbt lsp's watcher, whose glob it checks, it
+  makes the server compile once, then for five seconds sends an event a
+  round for the files written under the project: at most two
+  compilations, where the proxy without its filter of dbt's output gave
+  twelve.
   It ends by killing the server, which the proxy restarts: diagnostics
   are published again and a hover is answered, and the client, which
   declares dynamic registration, gets dbt's watcher registration once.
