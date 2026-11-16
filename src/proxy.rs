@@ -796,7 +796,9 @@ impl<W: Write> Proxy<W> {
     fn locations(&self, project: &Project, found: &[navigation::Found]) -> Vec<Value> {
         let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
         let location = |found: &navigation::Found| {
-            let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
+            // Up to the range's end only: a macro's references may span thousands of files.
+            let text = project.text(&found.path).unwrap_or_default();
+            let index = LineIndex::new(text.get(..found.range.end).unwrap_or(text));
             let range = index.range(found.range.start, found.range.end, self.encoding);
             json!({"uri": uri_of(&found.path), "range": range})
         };

@@ -419,24 +419,21 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
             .filter_map(|call| Some(Found { id: lead(own, &call.target)?, path: file.to_owned(), range: at(call) }))
             .collect()
     };
-    // A unit test's `model:`, a generic test, and with DECLARATION an entry's `name:`, looked up as their
-    // definitions, each with the name it stands for.
+    // A unit test's `model:`, a generic test, the macro `test_<name>`, and with DECLARATION an entry's
+    // `name:`, those of the name only, looked up as their definitions.
+    let test_name = name.strip_prefix("test_");
     let named = |file: &Path, scanned: &project::Scanned| -> Vec<Found> {
-        let target = |kind: &'static str, package: &Option<String>, name: &String| Target::Named {
-            kind,
-            package: package.clone(),
-            name: name.clone(),
+        let models = scanned.models.iter().filter(|(model, _)| model == name);
+        let models = models.map(|(model, range)| ("unit test model", None, model, range));
+        let tests = scanned.tests.iter().filter(|test| test_name == Some(test.name.as_str()));
+        let tests = tests.map(|test| ("test", test.package.as_deref(), &test.name, &test.range));
+        let entries = scanned.entries.iter().filter(|entry| declaration && entry.name == *name);
+        let entries = entries.map(|entry| (entry.label, None, &entry.name, &entry.name_range));
+        let found = |(kind, package, named, range): (&'static str, Option<&str>, &String, &Range<usize>)| {
+            let target = Target::Named { kind, package: package.map(str::to_owned), name: named.clone() };
+            leading(file, range.clone(), resolve(lookup, file, &target))
         };
-        let models =
-            scanned.models.iter().map(|(model, range)| (target("unit test model", &None, model), model.clone(), range));
-        let tests = scanned.tests.iter();
-        let tests =
-            tests.map(|test| (target("test", &test.package, &test.name), format!("test_{}", test.name), &test.range));
-        let entries = scanned.entries.iter().filter(|_| declaration);
-        let entries =
-            entries.map(|entry| (target(entry.label, &None, &entry.name), entry.name.clone(), &entry.name_range));
-        let lookups = models.chain(tests).chain(entries).filter(|(_, stands_for, _)| stands_for == name);
-        lookups.filter_map(|(target, _, range)| leading(file, range.clone(), resolve(lookup, file, &target))).collect()
+        models.chain(tests).chain(entries).filter_map(found).collect()
     };
     let files = lookup.project.files.iter().map(|(file, scanned)| (file, &**scanned));
     let mut found: Vec<Found> =
