@@ -2,6 +2,7 @@
 //! A scripted stand-in for `dbt lsp`, on the standard input and output,
 //! which behaves as dbt lsp 2.0.9 was seen to:
 //!
+//! - `lsp --help` prints a help and exits, as 2.0.9 does;
 //! - it answers `initialize` with the capabilities of 2.0.9, unless the
 //!   script names others, and after `initialized` asks the client for the
 //!   configuration section "dbt" (request id 1);
@@ -18,6 +19,9 @@
 //!
 //! Environment:
 //! - `FAKE_DBT_LSP_SCRIPT`: a JSON file, optional, with the keys
+//!   - `no_lsp`, true when `lsp` is refused as dbt-oss 2.0.11 refuses it,
+//!     its help included, with status 2 and its message on the standard
+//!     error;
 //!   - `capabilities`;
 //!   - `answers`, keyed by method, or by "workspace/executeCommand COMMAND
 //!     ARGUMENTS..." for a command, and `answers_once`, likewise, each used
@@ -248,6 +252,22 @@ impl Fake {
     }
 }
 
+/// `dbt lsp ARGUMENTS` answered without serving, exiting: refused when the
+/// script says `no_lsp`, as dbt-oss 2.0.11 refuses it, its help included;
+/// else its help printed, as 2.0.9 does, when asked for it.  A server is
+/// refused only once COUNTED as a life, so that a test sees it started.
+fn refuse_or_help(script: &Value, arguments: &[String], counted: bool) {
+    let help = arguments.iter().any(|argument| argument == "--help");
+    if script["no_lsp"] == json!(true) && (help || counted) {
+        eprintln!("error: unrecognized subcommand 'lsp'\n\nUsage: dbt [OPTIONS] <COMMAND>");
+        std::process::exit(2);
+    }
+    if help {
+        println!("Start the dbt language server");
+        std::process::exit(0);
+    }
+}
+
 /// `dbt parse` as the script plays it, with the arguments ARGUMENTS.
 fn parse(script: &Value, arguments: &[String], log: Option<File>) {
     if let Some(mut log) = log {
@@ -291,6 +311,7 @@ fn main() {
     if parsing {
         return parse(&script, &arguments, log);
     }
+    refuse_or_help(&script, &arguments, false);
     // Each server process of a session is one life of the fake.
     let life = std::env::var("FAKE_DBT_LSP_LOG").map_or(1, |log| {
         let lives = format!("{log}.lives");
@@ -298,6 +319,7 @@ fn main() {
         writeln!(file, "{}", std::process::id()).expect("count a life");
         std::fs::read_to_string(&lives).expect("read the lives").lines().count()
     });
+    refuse_or_help(&script, &arguments, true);
     let mut fake = Fake { script, opened: false, held: Vec::new(), life };
     let mut input = BufReader::new(io::stdin());
     while let Ok(Some(frame)) = rpc::read_frame(&mut input) {

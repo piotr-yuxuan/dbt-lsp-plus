@@ -11,10 +11,11 @@ use crate::{config, document, features, navigation, project, properties, runs, s
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -205,6 +206,9 @@ struct Parsing {
 struct Proxy<W: Write> {
     client: W,
     server: Option<Server>,
+    /// Whether the user's dbt has no `lsp`, as dbt-oss: no server runs, and
+    /// the proxy answers alone, from its scan and the user's `dbt parse`.
+    standalone: bool,
     /// Why there is no server, told to the client once it is initialized.
     absent: Option<String>,
     /// The project directory: the server command's `--project-dir`, spelt
@@ -316,6 +320,7 @@ impl<W: Write> Proxy<W> {
         let mut proxy = Proxy {
             client,
             server,
+            standalone: false,
             absent,
             root: None,
             canonical_root: None,
@@ -416,6 +421,13 @@ impl<W: Write> Proxy<W> {
         self.send_client(
             &json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": capabilities, "serverInfo": info}}),
         );
+        // A dbt without `lsp` is no failure: said once, out of the user's way.
+        if self.standalone {
+            let dbt = self.parsing.server.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>();
+            let text = format!("dbt-lsp-plus: {} has no lsp: dbt-lsp-plus answers alone.", dbt.join(" "));
+            let params = json!({"type": 3, "message": text});
+            return self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+        }
         let why = self.absent.take().unwrap_or_else(|| "dbt lsp is not running".into());
         let text = format!("{why}: dbt-lsp-plus serves only its own features: symbols, lineage, folding, renames.");
         self.send_client(
@@ -1460,16 +1472,47 @@ fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> 
     Ok(Server { child, stdin, generation })
 }
 
-/// Runs the proxy on the standard input and output, in front of COMMAND.
+/// Whether the dbt of COMMAND, a server command, has no `lsp`, as dbt-oss
+/// 2.0.11: the words before its `lsp` word, then `lsp --help`, exit 2 with
+/// "unrecognized subcommand 'lsp'" on the standard error.  A launcher's own
+/// failure (`uvx dbt` offline exits 2 too), a probe past its deadline, any
+/// other answer, or a command with no word before `lsp` is not.
+fn lacks_lsp(command: &[String]) -> bool {
+    let Some(at) = command.iter().position(|word| word == "lsp").filter(|at| *at > 0) else { return false };
+    let mut probe = Command::new(&command[0]);
+    probe.args(&command[1..at]).args(["lsp", "--help"]).env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
+    let Ok(mut child) = probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() else {
+        return false;
+    };
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (sender, read) = mpsc::channel();
+    // Read apart, so that neither a full pipe nor a launcher's child holding
+    // it open holds the proxy.
+    thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = stderr.take(1 << 16).read_to_end(&mut text);
+        let _ = sender.send(text);
+    });
+    let status = config::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false));
+    let stderr = read.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    status.and_then(|status| status.code()) == Some(2)
+        && String::from_utf8_lossy(&stderr).contains("unrecognized subcommand 'lsp'")
+}
+
+/// Runs the proxy on the standard input and output, in front of COMMAND,
+/// alone when its dbt has no `lsp`.
 pub fn run(command: &[String]) -> ExitCode {
     let (events, inbox) = mpsc::channel();
-    let (server, absent) = match spawn_server(command, &events, 0) {
-        Ok(server) => (Some(server), None),
-        Err(why) => (None, Some(why)),
+    let standalone = lacks_lsp(command);
+    let (server, absent) = match (!standalone).then(|| spawn_server(command, &events, 0)) {
+        Some(Ok(server)) => (Some(server), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
     };
     let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, project_dir(command));
+    proxy.standalone = standalone;
     proxy.parsing = parsing;
     proxy.serve(inbox);
     proxy.stop_parse();
@@ -1548,6 +1591,28 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn only_a_refusal_of_lsp_by_dbt_itself_means_no_lsp() {
+        // `sh -c SCRIPT lsp --help` runs SCRIPT, as a dbt answering its probe.
+        let dbt = |script: &str| lacks_lsp(&args(&["sh", "-c", script, "lsp", "--project-dir", "/p"]));
+        let refused = "echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2";
+        assert!(dbt(refused), "dbt-oss 2.0.11");
+        assert!(!dbt("echo 'Start the dbt language server'; exit 0"), "2.0.9 prints its help");
+        assert!(!dbt("echo 'error: Failed to fetch the index' >&2; exit 2"), "a launcher offline");
+        assert!(!dbt("echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 1"), "another status");
+        // The probe takes only the words before `lsp`, and adds `--help`.
+        assert!(dbt(
+            "[ \"$0 $1\" = 'lsp --help' ] && [ $# -eq 1 ] && { echo \"unrecognized subcommand 'lsp'\" >&2; exit 2; }"
+        ));
+        // dbt-oss 2.0.11 colours the word under CLICOLOR_FORCE, unless NO_COLOR is set.
+        let coloured =
+            "[ -n \"$NO_COLOR\" ] || { printf \"unrecognized subcommand '\\033[33mlsp\\033[0m'\" >&2; exit 2; }";
+        assert!(dbt(&format!("{coloured}; echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2")));
+        assert!(!lacks_lsp(&args(&["/nonexistent/dbt", "lsp"])), "a dbt that cannot start");
+        assert!(!lacks_lsp(&args(&["sh", "-c", "exit 2"])), "a command with no lsp word");
+        assert!(!lacks_lsp(&args(&["lsp", "--project-dir", "/p"])), "no word before lsp");
     }
 
     #[test]

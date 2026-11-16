@@ -414,6 +414,41 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
 }
 
 #[test]
+fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
+    let (mut session, log) = Session::fake("standalone", json!({"no_lsp": true}));
+    let result = session.initialize(&fixture());
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
+    let logged = session.wait_for(|m| m["method"] == "window/logMessage");
+    assert!(logged["params"]["message"].as_str().unwrap().contains("has no lsp"), "{logged}");
+    // Past what the client would get first.
+    session.request("workspace/symbol", json!({"query": "summary"}));
+    assert_eq!(show_messages(&session), 0, "no warning");
+    assert_eq!(session.received.iter().filter(|m| m["method"] == "window/logMessage").count(), 1);
+    assert!(lives(&log).is_empty(), "a server started");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_the_proxy_s_own_features_answer() {
+    let (mut session, _) = Session::fake("standalone-features", json!({"no_lsp": true}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
+    assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    let symbols = session.request("workspace/symbol", json!({"query": "summary"}));
+    assert_eq!(names(&symbols["result"]), ["order_summary"]);
+    let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&path)}}));
+    assert!(!folding["result"].as_array().unwrap().is_empty(), "{folding}");
+    let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
+    let prepared = session.request("textDocument/prepareCallHierarchy", on_with);
+    assert_eq!(prepared["result"][0]["data"]["uniqueId"], "model.shop.orders");
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": prepared["result"][0]}));
+    let to = ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"];
+    assert_eq!(details(&outgoing["result"], "to"), to);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_crash_fails_each_pending_request_exactly_once() {
     // The restarted server never answers: the proxy stays alone.
     let silent = ["textDocument/definition", "textDocument/completion"];

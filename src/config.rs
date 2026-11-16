@@ -22,6 +22,10 @@ pub const NODE_INFO: &str = "dbt-lsp-plus.nodeInfo";
 /// How long a parse may run before it is killed.
 pub const PARSE_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long a probe of what a command can do, such as `dbt lsp --help`,
+/// may run before it is killed.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
 /// How long a cache beside this process's may go unwritten before it is
 /// taken for a dead process's.
 const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
@@ -342,7 +346,7 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
 
 /// Waits for CHILD to exit within DEADLINE, unless STOP is set; else kills
 /// and reaps it, and gives none.
-fn finish(mut child: Child, deadline: Duration, stop: &AtomicBool) -> Option<ExitStatus> {
+pub fn finish(mut child: Child, deadline: Duration, stop: &AtomicBool) -> Option<ExitStatus> {
     let end = Instant::now() + deadline;
     while Instant::now() < end && !stop.load(Ordering::Relaxed) {
         if let Ok(Some(status)) = child.try_wait() {
