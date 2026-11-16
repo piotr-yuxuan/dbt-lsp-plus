@@ -5,21 +5,26 @@
 # Four workers by default, to keep a laptop cool: `make test CARGO_JOBS=8
 # TEST_THREADS=8` widens them.
 
+BASE ?= main
 CARGO_JOBS ?= 4
 TEST_THREADS ?= 4
 CARGO_TEST := cargo test --locked -j $(CARGO_JOBS)
 
-.PHONY: check check-static fmt clippy test conformance live
+.PHONY: check check-static fmt clippy public test conformance live commits
 
 check: check-static test
 
-check-static: fmt clippy
+check-static: fmt clippy public
 
 fmt:
 	@cargo fmt --check
 
 clippy:
 	@cargo clippy --locked -j $(CARGO_JOBS) --all-targets -- -D warnings
+
+# Nothing that must not be published, and an SPDX line in each source file.
+public:
+	@scripts/check-public
 
 test:
 	@$(CARGO_TEST) -- --test-threads=$(TEST_THREADS)
@@ -31,3 +36,7 @@ conformance:
 
 live:
 	@$(CARGO_TEST) --test proxy live:: -- --ignored --test-threads=$(TEST_THREADS)
+
+# Each commit of BASE..HEAD: its title, its trailers, nothing private.
+commits:
+	@scripts/check-commits $(BASE)
