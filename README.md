@@ -49,7 +49,7 @@ of the tests, from Emacs.
   [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md),
   [Build and test](docs/how-to/build-and-test.md)
 - Reference: [The features](docs/reference/features.md), by LSP method;
-  [The command line](docs/reference/command-line.md);
+  [The configuration](docs/reference/configuration.md), every option;
   [The release pipeline](docs/reference/release-pipeline.md)
 - Explanation: [The design](docs/explanation/design.md), what `dbt lsp`
   was observed to do, and what it would take to finish
