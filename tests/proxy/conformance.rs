@@ -197,13 +197,19 @@ fn nodes_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     found
 }
 
-/// Each call of a node or a macro that dbt knows, as the graph and, for a
-/// node's `ref` or `source`, navigation resolve it, against what dbt says
-/// the call names: those of the caller's dependencies (its `depends_on`
-/// nodes, and its macros of the project's packages) that bear the call's
-/// name; then each dependency that no call that the scan reads names.
+/// Each call that the scan reads, as the graph and, for a `ref` or a
+/// `source`, navigation resolve it, against what dbt says it names: those of
+/// the caller's dependencies (its `depends_on` nodes, and its macros of the
+/// project's packages) that bear the call's name; none for a caller that dbt
+/// dropped.  dbt lists for a node what the macros it calls call in turn,
+/// and resolves their `ref` and `source` for that node: so a node is
+/// compared on its own calls and on the `ref` and `source` of each macro it
+/// reaches through the graph; a macro, on its own calls of macros.  Then
+/// each dependency that no call of the caller, or of a macro it reaches,
+/// names.
 fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let graph = Graph::scanned(project);
+    let entities: HashMap<&str, &project::Entity> = project.entities.iter().map(|e| (e.id.as_str(), e)).collect();
     let field = |id: &str, key: &str| {
         manifest_entry(manifest, id).and_then(|entry| entry[key].as_str()).unwrap_or_default().to_owned()
     };
@@ -213,8 +219,9 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         let macros = ids("macros").filter(|id| project.packages.contains_key(&field(id, "package_name")));
         ids("nodes").chain(macros).map(str::to_owned).collect()
     };
-    // The calls that name DEPENDENCY, as `written` writes them: a dispatch
-    // names each implementation, `*__name`.
+    // The calls that name DEPENDENCY, as `written` writes them: a dispatch,
+    // to any namespace, names each implementation `*__name`, since the
+    // root's `dispatch:` may send one namespace to another package.
     let callers = |dependency: &str| -> Vec<String> {
         let (package, name) = (field(dependency, "package_name"), field(dependency, "name"));
         match field(dependency, "resource_type").as_str() {
@@ -222,8 +229,11 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
             "source" => vec![format!("source('{}', '{name}')", field(dependency, "source_name"))],
             "macro" => {
                 let dispatched = name.rsplit_once("__").map(|(_, name)| name.to_owned());
+                let namespaces = || project.packages.keys().map(|namespace| format!(", '{namespace}'"));
                 let dispatches = dispatched.iter().flat_map(|name| {
-                    [format!("adapter.dispatch('{name}')"), format!("adapter.dispatch('{name}', '{package}')")]
+                    std::iter::once(String::new())
+                        .chain(namespaces())
+                        .map(move |n| format!("adapter.dispatch('{name}'{n})"))
                 });
                 [format!("{name}()"), format!("{package}.{name}()")].into_iter().chain(dispatches).collect()
             }
@@ -249,24 +259,58 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
             None,
         ),
     };
+    // ID, then each macro that it reaches through the graph's edges.
+    let reached = |id: &str| -> Vec<String> {
+        let mut reached = vec![id.to_owned()];
+        let mut next = 0;
+        while let Some(from) = reached.get(next).cloned() {
+            for edge in graph.edges.iter().filter(|edge| edge.from == from && edge.to.starts_with("macro.")) {
+                if !reached.contains(&edge.to) {
+                    reached.push(edge.to.clone());
+                }
+            }
+            next += 1;
+        }
+        reached
+    };
+    // What the graph and navigation answer for CALL, in the file of HOLDER.
+    let answers = |holder: &project::Entity, call: &scan::Call, target: Option<navigation::Target>| {
+        let edges = graph.edges.iter().filter(|edge| edge.from == holder.id && edge.sites.contains(&call.range));
+        let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
+        // A keyword argument after a ref's name, as `v=2`, names a version, which navigation forwards.
+        let text = project.texts.get(&holder.path).map_or("", String::as_str);
+        let versioned = text.get(call.range.end..).is_some_and(|rest| rest.trim_start().starts_with(','));
+        let navigated = target.filter(|_| !versioned).map(|target| {
+            navigation::resolve(project, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
+        });
+        [("graph", Some(graphed)), ("navigation", navigated)]
+    };
+    // The subject under which ENTITY compares a call of HOLDER, a `ref` or a
+    // `source` when REFERENCE, if it does: a node, its own calls and the
+    // `ref` and `source` of the macros it reaches; a macro, its own calls of
+    // macros.
+    let subject = |entity: &project::Entity, holder: &project::Entity, reference: bool| {
+        let own = holder.id == entity.id;
+        let compared = if entity.resource_type == "macro" { own && !reference } else { own || reference };
+        let via = if own { String::new() } else { format!(" via {}", holder.id) };
+        compared.then(|| format!("{}{via}", entity.id))
+    };
     let mut found = Vec::new();
-    for entity in project.entities.iter().filter(|entity| manifest_entry(manifest, &entity.id).is_some()) {
+    for entity in &project.entities {
         let dependencies: Vec<(Vec<String>, String)> =
             dependencies(&entity.id).into_iter().map(|dependency| (callers(&dependency), dependency)).collect();
         let mut named = BTreeSet::new();
-        for call in &entity.calls {
-            let (written, target) = written(&call.target);
-            let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
-            let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
-            named.extend(dbt.iter().cloned());
-            let edges = graph.edges.iter().filter(|edge| edge.from == entity.id && edge.sites.contains(&call.range));
-            let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
-            let navigated = target.filter(|_| manifest["nodes"].get(&entity.id).is_some()).map(|target| {
-                navigation::resolve(project, &entity.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
-            });
-            for (lookup, ours) in [("graph", Some(graphed)), ("navigation", navigated)] {
-                if let Some(ours) = ours.filter(|ours| *ours != dbt) {
-                    found.push((format!("{} {written}", entity.id), lookup, format!("proxy {ours:?}, dbt {dbt:?}")));
+        for holder in reached(&entity.id).iter().filter_map(|id| entities.get(id.as_str())) {
+            for call in &holder.calls {
+                let (written, target) = written(&call.target);
+                let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
+                let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
+                named.extend(dbt.iter().cloned());
+                let Some(subject) = subject(entity, holder, target.is_some()) else { continue };
+                for (lookup, ours) in answers(holder, call, target) {
+                    if let Some(ours) = ours.filter(|ours| *ours != dbt) {
+                        found.push((format!("{subject} {written}"), lookup, format!("proxy {ours:?}, dbt {dbt:?}")));
+                    }
                 }
             }
         }
