@@ -24,6 +24,8 @@ pub fn scratch(name: &str) -> PathBuf {
     static TURN: OnceLock<File> = OnceLock::new();
     let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
     TURN.get_or_init(|| {
+        // Cargo makes it when it builds the tests, not when it runs them.
+        std::fs::create_dir_all(base).expect("create Cargo's temporary directory");
         let path = base.join("turn.lock");
         let lock = File::create(&path).expect("create the lock of the test runs");
         match lock.try_lock() {
