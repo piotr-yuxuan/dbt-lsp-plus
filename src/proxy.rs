@@ -588,7 +588,7 @@ impl<W: Write> Proxy<W> {
         let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else {
             return Some(Value::Null);
         };
-        let text = project.texts.get(&path).map_or("", String::as_str);
+        let text = project.text(&path).unwrap_or_default();
         let offset = LineIndex::new(text).offset_of(params.get("position")?, self.encoding)?;
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
     }
@@ -609,7 +609,7 @@ impl<W: Write> Proxy<W> {
     fn source_at(&self, params: &Value) -> Option<(Project, sources::Target)> {
         let (path, text, offset) = self.document_at(params)?;
         let target = sources::target_at(&path, &text, offset)?;
-        let project = self.project().filter(|project| project.texts.contains_key(&path))?;
+        let project = self.project().filter(|project| project.files.contains_key(&path))?;
         Some((project, target))
     }
 
@@ -651,7 +651,7 @@ impl<W: Write> Proxy<W> {
         let locations: Vec<Value> = navigation::resolve(&project, &path, &target)
             .iter()
             .map(|found| {
-                let index = LineIndex::new(project.texts.get(&found.path).map_or("", String::as_str));
+                let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
                 let range = index.range(found.range.start, found.range.end, self.encoding);
                 json!({"uri": uri_of(&found.path), "range": range})
             })

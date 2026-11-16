@@ -151,7 +151,7 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
     let mut indexes: HashMap<&Path, LineIndex> = HashMap::new();
     let mut symbols = Vec::new();
     for entity in project.entities.iter().filter(|entity| matches(&entity.name)).take(MAX_WORKSPACE_SYMBOLS) {
-        let text = project.texts.get(&entity.path).map_or("", String::as_str);
+        let text = project.text(&entity.path).unwrap_or_default();
         let index = indexes.entry(&entity.path).or_insert_with(|| LineIndex::new(text));
         symbols.push(json!({
             "name": entity.name,
@@ -166,7 +166,7 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
 
 /// The `CallHierarchyItem` of ITEM.
 fn hierarchy_item(item: &Item, project: &Project, encoding: Encoding) -> Value {
-    let index = LineIndex::new(project.texts.get(&item.path).map_or("", String::as_str));
+    let index = LineIndex::new(project.text(&item.path).unwrap_or_default());
     json!({
         "name": item.name,
         "kind": resource_kind(&item.resource_type),
@@ -211,7 +211,7 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
     let answer = edges.map(|edge: &Edge| {
         let (other, key) = if incoming { (&edge.from, "from") } else { (&edge.to, "to") };
         let caller = &graph.items[&edge.from];
-        let index = LineIndex::new(project.texts.get(&caller.path).map_or("", String::as_str));
+        let index = LineIndex::new(project.text(&caller.path).unwrap_or_default());
         let ranges: Vec<Value> = edge.sites.iter().map(|site| index.range(site.start, site.end, encoding)).collect();
         json!({key: hierarchy_item(&graph.items[other], project, encoding), "fromRanges": ranges})
     });
@@ -475,7 +475,7 @@ mod tests {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
         let graph = Graph::scanned(&project);
         let orders = fixture().join("models/marts/orders.sql");
-        let text = &project.texts[&orders];
+        let text = project.text(&orders).unwrap();
         let on_ref = text.find("stg_orders").unwrap();
         let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_ref, Encoding::Utf16);
         assert_eq!(prepared[0]["data"]["uniqueId"], "model.shop.stg_orders");

@@ -145,8 +145,8 @@ pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
     let root = project.root_package.as_str();
     let holders = project.packages.iter().filter(|(_, dir)| path.starts_with(dir));
     let own = holders.max_by_key(|(_, dir)| dir.as_os_str().len()).map_or(root, |(name, _)| name.as_str());
-    let config = project.packages.get(root).and_then(|dir| project.texts.get(&dir.join("dbt_project.yml")));
-    let root_first = config.and_then(|text| yaml::parse(text)).is_some_and(|config| {
+    let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));
+    let root_first = config.and_then(yaml::parse).is_some_and(|config| {
         let value = config.get("flags").and_then(|flags| flags.get("require_ref_searches_node_package_before_root"));
         // As dbt reads the flag: neither `fAlse` nor a quoted `'false'`.
         let yaml_false = ["false", "False", "FALSE"];
@@ -200,7 +200,7 @@ pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
 /// and code spans when MARKDOWN.
 pub fn hover(project: &Project, target: &Target, found: &Found, markdown: bool) -> Option<String> {
     let Target::Named { kind: kind @ ("doc" | "test"), .. } = target else { return None };
-    let text = project.texts.get(&found.path)?;
+    let text = project.text(&found.path)?;
     let block = scan::blocks(text).into_iter().find(|block| block.name_range == found.range)?;
     if *kind == "doc" {
         return Some(text[block.inner].trim().to_owned()).filter(|docs| !docs.is_empty());
@@ -404,7 +404,7 @@ models:
     fn leads(root: &Path, rel: &str, target: Option<Target>) -> Vec<(String, String, String)> {
         let project = project::scan(root, &HashMap::new()).unwrap();
         let found = resolve(&project, &root.join(rel), &target.unwrap());
-        let text = |found: &Found| project.texts[&found.path][found.range.clone()].to_owned();
+        let text = |found: &Found| project.text(&found.path).unwrap()[found.range.clone()].to_owned();
         let relative = |found: &Found| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
         found.iter().map(|found| (found.id.clone(), relative(found), text(found))).collect()
     }

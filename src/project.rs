@@ -2,7 +2,8 @@
 //! The resources of a dbt project and of its installed packages, read from
 //! their files: what dbt itself would parse, without dbt.
 
-use crate::scan::{self, Call, Kind};
+use crate::scan::{self, Call, Kind, Symbol};
+use crate::sources;
 use crate::text::{self, Encoding, LineIndex};
 use crate::yaml::{self, Node};
 use regex::Regex;
@@ -10,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 /// A resource: a model, seed, snapshot, analysis, singular test, macro,
 /// source table or docs block, with the calls of its body.
@@ -34,9 +35,44 @@ pub struct Project {
     pub entities: Vec<Entity>,
     /// The source tables, as their properties files declare them.
     pub sources: Vec<SourceTable>,
-    /// The text of each file of the resource paths, and of each package's
-    /// `dbt_project.yml`, as the proxy read it; empty for a seed.
-    pub texts: HashMap<PathBuf, String>,
+    /// Each file of the resource paths, and each package's
+    /// `dbt_project.yml`, as the proxy read it: its text, empty for a seed,
+    /// and what the text gives.
+    pub files: HashMap<PathBuf, Arc<Scanned>>,
+}
+
+impl Project {
+    /// The text of the file at PATH, as the proxy read it.
+    pub fn text(&self, path: &Path) -> Option<&str> {
+        self.files.get(path).map(|file| file.text.as_str())
+    }
+}
+
+/// What the text of one file alone gives, whatever its package or the
+/// directory it is found in, so that it can be kept while the file stays
+/// as it is.
+#[derive(Debug, Default)]
+pub struct Scanned {
+    pub text: String,
+    /// Its Jinja blocks, in SQL and Markdown.
+    pub blocks: Vec<Symbol>,
+    /// Its calls, as `sources::file_calls` reads them.
+    pub calls: Vec<Call>,
+    /// The source tables of a properties file, their package left empty.
+    pub tables: Vec<SourceTable>,
+}
+
+impl Scanned {
+    /// What TEXT, the content of the file at PATH, gives.
+    pub fn of(path: &Path, text: String) -> Scanned {
+        let calls = sources::file_calls(path, &text);
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("yml" | "yaml") => {
+                Scanned { tables: source_tables("", path, &text), calls, text, ..Scanned::default() }
+            }
+            _ => Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() },
+        }
+    }
 }
 
 /// Where a line goes right after a `name:` line: the end of that line, the
@@ -120,11 +156,11 @@ const LAYOUT: [Layout; 6] = [
 ];
 
 /// The entities of one file of SQL, Markdown or CSV of PACKAGE, found in a
-/// directory of LAYOUT.
-fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec<Entity> {
+/// directory of LAYOUT, from what its text gives, SCANNED.
+fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned) -> Vec<Entity> {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-    let calls = scan::calls(text);
+    let calls = &scanned.calls;
     let entity = |resource_type: &'static str, id: String, name: &str, range: Range<usize>, name_range| Entity {
         id,
         name: name.to_owned(),
@@ -140,18 +176,19 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, text: &str) -> Vec
         name_range,
     };
     let mut found = Vec::new();
-    for block in scan::blocks(text) {
+    for block in &scanned.blocks {
         let layout_block = layout.blocks.iter().find(|(kind, ext, ..)| *kind == block.kind && *ext == extension);
         if let Some((_, _, resource_type, prefix)) = layout_block {
             let id = format!("{resource_type}.{package}.{prefix}{}", block.name);
-            found.push(entity(resource_type, id, &block.name, block.range, block.name_range));
+            found.push(entity(resource_type, id, &block.name, block.range.clone(), block.name_range.clone()));
         }
     }
     if let Some((ext, resource_type)) = layout.file
         && ext == extension
         && found.iter().all(|e| e.resource_type == "doc")
     {
-        found.push(entity(resource_type, format!("{resource_type}.{package}.{stem}"), stem, 0..text.len(), 0..0));
+        let whole = 0..scanned.text.len();
+        found.push(entity(resource_type, format!("{resource_type}.{package}.{stem}"), stem, whole, 0..0));
     }
     found
 }
@@ -256,58 +293,68 @@ pub fn package_config(dir: &Path) -> Option<(String, Node)> {
 }
 
 /// Adds to PROJECT the entities of the package NAME at DIR, configured by
-/// CONFIG.  A seed's content is not read: its entity needs none, and a seed
-/// can be large.
-fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, open: &HashMap<PathBuf, String>) {
+/// CONFIG, each file as READ gives it.  A seed's content is not read: its
+/// entity needs none, and a seed can be large.
+fn scan_package(project: &mut Project, dir: &Path, name: String, config: &Node, read: &mut Read) {
     for layout in &LAYOUT {
         let configured: Vec<&str> =
             config.get(layout.key).map_or(Vec::new(), |paths| paths.items().iter().filter_map(Node::as_str).collect());
         let dirs = if configured.is_empty() { vec![layout.default] } else { configured };
         for path in dirs.iter().flat_map(|sub| files(&dir.join(sub))) {
-            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-            let text = match extension {
-                "csv" => String::new(),
-                _ => open.get(&path).cloned().or_else(|| text::read(&path)).unwrap_or_default(),
-            };
-            let (found, tables) = match extension {
-                "yml" | "yaml" => {
-                    let tables = source_tables(&name, &path, &text);
+            let scanned = read(&path);
+            let (found, tables) = match path.extension().and_then(|e| e.to_str()) {
+                Some("yml" | "yaml") => {
+                    let package = |table: &SourceTable| SourceTable { package: name.clone(), ..table.clone() };
+                    let tables: Vec<SourceTable> = scanned.tables.iter().map(package).collect();
                     (tables.iter().map(Entity::from).collect(), tables)
                 }
-                _ => (file_entities(&name, layout, &path, &text), Vec::new()),
+                _ => (file_entities(&name, layout, &path, &scanned), Vec::new()),
             };
-            project.texts.insert(path, text);
+            project.files.insert(path, scanned);
             project.entities.extend(found);
             project.sources.extend(tables);
         }
     }
     // Its vars and hooks hold calls too.
     let config = dir.join("dbt_project.yml");
-    let text = open.get(&config).cloned().or_else(|| text::read(&config)).unwrap_or_default();
-    project.texts.insert(config, text);
+    project.files.insert(config.clone(), read(&config));
     project.packages.insert(name, dir.to_owned());
 }
+
+/// How a scan reads the file at a path: its text and what the text gives.
+pub type Read<'a> = dyn FnMut(&Path) -> Arc<Scanned> + 'a;
 
 /// The project at ROOT and the packages installed in it, or `None` when ROOT
 /// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
 /// editor has open, which wins over the file on disk.
 pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
+    let mut read = |path: &Path| {
+        let seed = path.extension().is_some_and(|extension| extension == "csv");
+        let text = open.get(path).cloned().or_else(|| text::read(path)).filter(|_| !seed).unwrap_or_default();
+        Arc::new(Scanned::of(path, text))
+    };
+    scan_with(root, &mut read)
+}
+
+/// The project at ROOT and the packages installed in it, each file as READ
+/// gives it, or `None` when ROOT has no named `dbt_project.yml`.
+pub fn scan_with(root: &Path, read: &mut Read) -> Option<Project> {
     let (root_package, root_config) = package_config(root)?;
     let mut project = Project {
         root_package: root_package.clone(),
         packages: HashMap::new(),
         entities: Vec::new(),
         sources: Vec::new(),
-        texts: HashMap::new(),
+        files: HashMap::new(),
     };
-    scan_package(&mut project, root, root_package, &root_config, open);
+    scan_package(&mut project, root, root_package, &root_config, read);
     let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
     let mut installed: Vec<PathBuf> =
         fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
     installed.sort();
     for dir in installed {
         if let Some((name, config)) = package_config(&dir) {
-            scan_package(&mut project, &dir, name, &config, open);
+            scan_package(&mut project, &dir, name, &config, read);
         }
     }
     Some(project)
@@ -375,7 +422,7 @@ mod tests {
         let project = scan(&fixture(), &HashMap::new()).unwrap();
         for id in ["source.shop.raw.orders", "source.shop.events.page_views"] {
             let table = project.entities.iter().find(|e| e.id == id).unwrap();
-            let text = &project.texts[&table.path];
+            let text = project.text(&table.path).unwrap();
             assert_eq!(&text[table.name_range.clone()], id.rsplit('.').next().unwrap());
         }
     }
@@ -400,7 +447,7 @@ mod tests {
     fn a_seed_is_found_but_not_read() {
         let project = scan(&fixture(), &HashMap::new()).unwrap();
         let seed = project.entities.iter().find(|e| e.id == "seed.shop.raw_orders").unwrap();
-        assert_eq!(project.texts[&seed.path], "");
+        assert_eq!(project.text(&seed.path).unwrap(), "");
     }
 
     #[test]
@@ -471,7 +518,7 @@ mod tests {
         );
         let project = scan(&dir, &HashMap::new()).unwrap();
         let bommed = project.entities.iter().find(|e| e.id == "macro.bom.bommed").unwrap();
-        assert_eq!(project.texts[&bommed.path], macro_text);
+        assert_eq!(project.text(&bommed.path).unwrap(), macro_text);
         assert_eq!(bommed.name_range, 9..15);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -505,7 +552,7 @@ mod tests {
         let (orders, views) = (table("orders"), table("page_views"));
         assert!(orders.has_identifier && orders.has_schema);
         assert!(!views.has_identifier && !views.has_schema);
-        let text = &project.texts[&orders.path];
+        let text = project.text(&orders.path).unwrap();
         assert_eq!((&text[orders.source_range.clone()], &text[views.source_range.clone()]), ("raw", "events"));
         // `      - name: orders`: the key `name` is at column 8.
         assert_eq!(orders.table_insertion.indent, 8);
