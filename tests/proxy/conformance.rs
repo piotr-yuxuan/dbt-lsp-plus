@@ -295,13 +295,13 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         });
         [("graph", Some(graphed)), ("navigation", navigated)]
     };
-    // The subject under which ENTITY compares a call of HOLDER, if it does,
-    // REFERENCE when the call is a `ref` or a `source` that dbt renders for
-    // ENTITY: a node, its own calls and the `ref` and `source` of the macros
-    // it reaches through plain calls; a macro, its own calls of macros.
-    let subject = |entity: &project::Entity, holder: &project::Entity, reference: bool| {
+    // The subject under which ENTITY compares a call of HOLDER, if it does:
+    // a node, its own calls and the `ref`, `source` and macro calls of the
+    // macros it reaches through plain calls, RENDERED for it; a macro, its
+    // own calls of macros, the call being no REFERENCE, a `ref` or a `source`.
+    let subject = |entity: &project::Entity, holder: &project::Entity, reference: bool, rendered: bool| {
         let own = holder.id == entity.id;
-        let compared = if entity.resource_type == "macro" { own && !reference } else { own || reference };
+        let compared = if entity.resource_type == "macro" { own && !reference } else { own || rendered };
         let via = if own { String::new() } else { format!(" via {}", holder.id) };
         compared.then(|| format!("{}{via}", entity.id))
     };
@@ -317,8 +317,9 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
                 let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
                 let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
                 named.extend(dbt.iter().cloned());
-                let reference = target.is_some() && rendered.contains(&holder.id);
-                let Some(subject) = subject(entity, holder, reference) else { continue };
+                let reference = matches!(call.target, scan::Target::Ref { .. } | scan::Target::Source { .. });
+                let in_rendering = target.is_some() && rendered.contains(&holder.id);
+                let Some(subject) = subject(entity, holder, reference, in_rendering) else { continue };
                 for (lookup, ours) in answers(holder, call, target) {
                     if let Some(ours) = ours.filter(|ours| *ours != dbt) {
                         found.push((format!("{subject} {written}"), lookup, format!("proxy {ours:?}, dbt {dbt:?}")));
@@ -334,9 +335,15 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
 }
 
 /// Each call that navigation resolves whose place the references of its
-/// target miss: a definition at a call must find that call among the
-/// references of what it leads to.
+/// target miss, and each reference at which a definition leads elsewhere:
+/// a definition at a call leads to X if and only if the call is among X's
+/// references.
 fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<String> {
+    let leads_back = |found: &navigation::Found| {
+        let text = project.text(&found.path).unwrap_or_default();
+        let back = navigation::target_at(&found.path, text, found.range.start);
+        back.is_some_and(|target| navigation::resolve(lookup, &found.path, &target).iter().any(|to| to.id == found.id))
+    };
     let mut missed = Vec::new();
     for (path, file) in &project.files {
         for call in &file.calls {
@@ -352,6 +359,9 @@ fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<Stri
             let references = navigation::references(lookup, path, &target, false);
             if !references.iter().any(|found| found.path == *path && found.range == at) {
                 missed.push(format!("{} {:?}", path.display(), call.target));
+            }
+            for found in references.iter().filter(|found| !leads_back(found)) {
+                missed.push(format!("{}:{:?} leads elsewhere than {}", found.path.display(), found.range, found.id));
             }
         }
     }

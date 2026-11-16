@@ -14,6 +14,8 @@ dispatch-ref	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.def
 dispatch-search-order	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn"}, dbt {"macro.r.default__fn"}	the graph follows no `dispatch:` search order (design.md, known limitations)
 function	model.r.c -> function.r.double_it	scan	no call that the scan reads	the scan reads no function() call
 function	node:function.r.double_it	scan	only dbt has it	the scan reads no functions
+macro-in-package-macro	macro.pa.outer inner()	graph	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
+macro-in-package-macro	macro.pa.outer inner()	navigation	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
 macro-in-package-macro	model.r.c via macro.pa.outer inner()	graph	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
 macro-in-package-macro	model.r.c via macro.pa.outer inner()	navigation	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
 macro-ref	model.r.c via macro.pa.get_x ref('x')	graph	proxy {"model.pa.x"}, dbt {"model.r.x"}	a ref in a macro resolves in the macro's package, dbt's in the calling node's (design.md)

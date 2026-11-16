@@ -890,7 +890,8 @@ models:
             ("macros/tests.sql", "{% test is_even(model, column_name) %}\nselect 1\n{% endtest %}\n"),
             ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
             ("dbt_packages/pkg/models/b.sql", "select 2"),
-            ("dbt_packages/pkg/models/c.sql", "{{ ref('b') }}"),
+            ("dbt_packages/pkg/models/c.sql", "{{ ref('b') }} {{ m() }}"),
+            ("dbt_packages/pkg/macros/m.sql", "{% macro m() %}2{% endmacro %}\n"),
         ];
         scratch_project(name, &files)
     }
