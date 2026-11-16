@@ -1510,7 +1510,7 @@ fn a_server_that_ignores_exit_is_killed_after_its_grace() {
 }
 
 #[test]
-fn a_source_request_on_a_file_the_scan_does_not_hold_goes_to_the_server() {
+fn a_source_rename_on_a_file_the_scan_does_not_hold_goes_to_the_server_but_not_its_references() {
     let project = copy_fixture("source-unscanned");
     let call = "select * from {{ source('events', 'page_views') }}";
     let outside = project.join("integration_tests/i.sql");
@@ -1523,8 +1523,15 @@ fn a_source_request_on_a_file_the_scan_does_not_hold_goes_to_the_server() {
     session.open(&unsaved, Some(call));
     for path in [&unsaved, &outside] {
         let at = json!({"textDocument": {"uri": uri(path)}, "position": {"line": 0, "character": 37}, "newName": "v"});
-        let answer = session.request("textDocument/rename", at);
+        let answer = session.request("textDocument/rename", at.clone());
         assert_eq!(answer["result"]["echo"], "textDocument/rename", "{answer}");
+        // References come from the scan whichever file of the project asks.
+        let answer = session.request("textDocument/references", at);
+        let page_views = uri(&project.join("models/staging/stg_page_views.sql"));
+        assert!(
+            answer["result"].as_array().is_some_and(|found| found.iter().any(|l| l["uri"] == page_views)),
+            "{answer}"
+        );
     }
     assert!(session.finish().success());
 }

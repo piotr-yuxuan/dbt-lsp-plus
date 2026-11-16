@@ -71,9 +71,10 @@ owns all state and writes both outputs.
 - References and renames stay the server's, but on a source the server
   answers them with nothing: the proxy answers those requests itself, when
   the position is on a `source()` argument or on a source's or table's
-  `name:` under `sources:`, in a file the scan holds, and forwards every
-  other one.  Definitions likewise, where the document shows a target that
-  the server answers with null (see "Navigation").  It says so under the
+  `name:` under `sources:`, references in any file under the root and a
+  rename in a file the scan holds, and forwards every other one.
+  Definitions likewise, where the document shows a target that the server
+  answers with null (see "Navigation").  It says so under the
   standard `capabilities.experimental`, merged with the server's:
   `"dbtLspPlus": {"version": 2, "definition": {KIND: [PLACE, ...]},
   "references": {...}, "rename": {...}}` names, per request, the kinds of
@@ -84,11 +85,13 @@ owns all state and writes both outputs.
   `source` [sql, yaml, python] and `cte` [sql].  Alone, also definition and
   references of `ref` [sql, yaml] and `macro` [sql, yaml].  A kind listed
   at a place is the proxy's at every position of that kind there, possibly
-  null or `[]`, never forwarded; references also need a file the scan
-  holds.  The kinds are by position: `entry` is the `name:` of an entry,
-  `test` a generic test's name, `ref` in YAML a unit test's `model:` too,
-  and `macro` the `ref` keyword itself and the name in the tag of a macro
-  or a generic test.  dbt-mode steps aside for exactly those (its plan
+  null or `[]`, never forwarded, in any file under the root: references
+  come from the scan whichever file asks, while a rename needs a file the
+  scan holds, since it would leave the asking file as it is.  The kinds
+  are by position: `entry` is the `name:` of an entry, `test` a generic
+  test's name, `ref` in YAML a unit test's `model:` too, and `macro` the
+  `ref` keyword itself and the name in the tag of a macro or a generic
+  test.  dbt-mode steps aside for exactly those (its plan
   014, agreed with plan 017), and reads version 2 only.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
@@ -257,9 +260,11 @@ minutes, so only a unit test of the abandonment covers it.
   under `sources:` in the root `dbt_project.yml`; and its declarations when
   the client asks.  A call whose argument is an expression, as in
   `source('raw', 'events' ~ var('suffix'))`, names no table.
-- The proxy answers only on a file the scan holds: on a file not saved yet,
-  or one outside the resource paths, it could not see every occurrence, so
-  the request goes to the server.
+- References come from the scan whichever file under the root asks, the
+  asking file left out when the scan does not hold it, as a file not saved
+  yet or one outside the resource paths.  A rename is answered only on a
+  file the scan holds, which it then edits; elsewhere it goes to the
+  server.
 - An open document is named by the URI the client opened it under, and its
   ranges are those of its open text.
 - A rename keeps the relation in the warehouse.  dbt takes a table's

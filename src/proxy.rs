@@ -737,10 +737,11 @@ impl<W: Write> Proxy<W> {
                 .is_some_and(|target| self.claims("definition", &target, &path)),
             // A CTE lives in its file; a source only the scan sees whole, and so its references.
             "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
             "textDocument/references" => {
                 let claimed = navigation::target_at(&path, &text, offset)
                     .is_some_and(|target| self.claims("references", &target, &path));
-                claimed && self.project().is_some_and(|project| project.files.contains_key(&path))
+                claimed && self.root.as_ref().is_some_and(|root| path.starts_with(root))
             }
             _ => self.source_at(params).is_some(),
         };
@@ -780,39 +781,41 @@ impl<W: Write> Proxy<W> {
     /// The references of the source, the node or the macro at the request's
     /// position, with their declaration when the client asks.
     fn on_references(&self, params: &Value) -> Option<Result<Value, String>> {
-        if self.source_at(params).is_some() {
-            return self.on_source("textDocument/references", params);
-        }
         let (path, text, offset) = self.document_at(params)?;
         let target = navigation::target_at(&path, &text, offset);
         let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(json!([]))) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
+        if let navigation::Target::Source(source) = &target {
+            let uri_of = |path: &Path| self.uri_of(path);
+            return Some(Ok(sources::references(&project, source, declaration, self.encoding, &uri_of)));
+        }
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let found = navigation::references(&lookup, &path, &target, declaration);
         Some(Ok(Value::Array(self.locations(&project, &found))))
     }
 
+    /// The URI of the file at PATH, as the client spelt it if it opened it.
+    fn uri_of(&self, path: &Path) -> String {
+        self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path))
+    }
+
     /// The locations of FOUND in PROJECT, as the client spelt their URIs.
     fn locations(&self, project: &Project, found: &[navigation::Found]) -> Vec<Value> {
-        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
         let location = |found: &navigation::Found| {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
             let index = LineIndex::new(text.get(..found.range.end).unwrap_or(text));
             let range = index.range(found.range.start, found.range.end, self.encoding);
-            json!({"uri": uri_of(&found.path), "range": range})
+            json!({"uri": self.uri_of(&found.path), "range": range})
         };
         found.iter().map(location).collect()
     }
 
-    /// The references or the rename of the source at the request's position.
-    fn on_source(&self, method: &str, params: &Value) -> Option<Result<Value, String>> {
+    /// The rename of the source at the request's position, in a file the scan
+    /// holds: a rename that left the asking file as it is would be wrong.
+    fn on_source(&self, params: &Value) -> Option<Result<Value, String>> {
         let Some((project, target)) = self.source_at(params) else { return Some(Ok(Value::Null)) };
-        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
-        if method == "textDocument/references" {
-            let declarations = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
-            return Some(Ok(sources::references(&project, &target, declarations, self.encoding, &uri_of)));
-        }
+        let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
         Some(sources::rename(&project, &target, new, self.encoding, &uri_of))
     }
@@ -820,7 +823,7 @@ impl<W: Write> Proxy<W> {
     /// The rename of the source, else of the CTE, at the request's position.
     fn on_rename(&self, params: &Value) -> Option<Result<Value, String>> {
         if self.source_at(params).is_some() {
-            return self.on_source("textDocument/rename", params);
+            return self.on_source(params);
         }
         let (_, text, offset) = self.document_at(params)?;
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
