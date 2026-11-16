@@ -822,29 +822,60 @@ fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
 /// event for each write: a listing on such an event would never end.
 #[test]
 fn ignores_watched_changes_of_dbt_s_own_output() {
+    let link = scratch("dbt-output-link").join("shop");
+    std::os::unix::fs::symlink(fixture(), &link).unwrap();
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
-    let (mut session, log) = Session::fake("dbt-output-events", json!({"answers": {ALL: all}}));
+    let (mut session, log) = Session::fake("dbt-output-events", json!({"answers": {ALL: all}, "manifest": manifest()}));
     session.initialize(&fixture());
-    let model = fixture().join("models/marts/orders.sql");
-    session.open(&model, None);
+    parsed_orders(&mut session);
     until_logged(&log, "the first listing", |_| listings(&log, "source:*") == 1);
-    let written = ["target", "target/compiled/shop/x.sql", "logs/dbt-lsp.log"];
-    let changes: Vec<String> =
-        written.iter().map(|path| format!(r#"{{"uri":"{}","type":2}}"#, uri(&fixture().join(path)))).collect();
-    let output = format!(
-        r#"{{"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{{"changes":[{}]}}}}"#,
-        changes.join(",")
-    );
+    let raw = |paths: &[PathBuf]| {
+        let changes: Vec<String> = paths.iter().map(|path| format!(r#"{{"uri":"{}","type":2}}"#, uri(path))).collect();
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{{"changes":[{}]}}}}"#,
+            changes.join(",")
+        )
+    };
+    let written = ["target", "target/compiled/shop/x.sql", "logs/dbt-lsp.log"].map(|path| fixture().join(path));
+    // Through another spelling of the root: the directory itself, as the fixture has none to resolve below.
+    let output = raw(&[&written[..], &[link.join("logs")]].concat());
     session.send_raw(output.as_bytes());
     until_logged(&log, "the event, byte for byte", |lines| lines.contains(&output));
-    // A hover after a change of the graph would list or parse again.
+    // A hover after a change of the graph would list, or parse again.
     barrier(&mut session);
     barrier(&mut session);
     assert_eq!((listings(&log, "*"), listings(&log, "source:*")), (1, 1));
-    let log_file = uri(&fixture().join("logs/dbt-lsp.log"));
-    let both = json!({"changes": [{"uri": log_file, "type": 2}, {"uri": uri(&model), "type": 2}]});
-    session.notify("workspace/didChangeWatchedFiles", both);
+    parses_stay(&log, 1);
+    let both = raw(&[fixture().join("models/marts/orders.sql"), fixture().join("logs/dbt-lsp.log")]);
+    session.send_raw(both.as_bytes());
+    until_logged(&log, "the mixed event, byte for byte", |lines| lines.contains(&both));
     until_logged(&log, "a listing after a model's change", |_| listings(&log, "source:*") == 2);
+    barrier(&mut session);
+    barrier(&mut session);
+    assert_eq!((listings(&log, "*"), listings(&log, "source:*")), (2, 2));
+    assert!(session.finish().success());
+}
+
+/// lsp-mode watches a linked directory at its resolved path, and reports its
+/// files there.
+#[test]
+fn ignores_dbt_s_output_through_a_link_out_of_the_project() {
+    let project = copy_fixture("dbt-output-out-link");
+    let elsewhere = project.with_file_name("elsewhere-logs");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, project.join("logs")).unwrap();
+    let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
+    let arguments = [Path::new("--project-dir"), &project];
+    let (mut session, log) =
+        Session::fake_with("dbt-output-out-link-session", json!({"answers": {ALL: all}}), &arguments, None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    until_logged(&log, "the first listing", |_| listings(&log, "source:*") == 1);
+    let written = json!({"changes": [{"uri": uri(&elsewhere.join("dbt-lsp.log")), "type": 2}]});
+    session.notify("workspace/didChangeWatchedFiles", written);
+    barrier(&mut session);
+    barrier(&mut session);
+    assert_eq!((listings(&log, "*"), listings(&log, "source:*")), (1, 1));
     assert!(session.finish().success());
 }
 
