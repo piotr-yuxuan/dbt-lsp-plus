@@ -2,6 +2,7 @@
 """Tests of scripts/fetch-dbt, from its header, on local archives through file:// URLs: no network."""
 
 import hashlib
+import http.client
 import importlib.machinery
 import importlib.util
 import io
@@ -54,6 +55,46 @@ class Fetch(unittest.TestCase):
         with self.assertRaisesRegex(fetch_dbt.FetchError, "SHA-256"):
             fetch_dbt.fetch(url, "0" * 64, self.out)
         self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_the_hash_is_checked_before_the_archive_is_read(self):
+        path = self.scratch / "not-a-tar"
+        path.write_bytes(b"not a tar at all")
+        with self.assertRaisesRegex(fetch_dbt.FetchError, "SHA-256"):
+            fetch_dbt.fetch(path.as_uri(), "0" * 64, self.out)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_a_failure_leaves_no_older_binary_either(self):
+        url, _ = self.archive({"dbt": b"binary"})
+        self.out.mkdir()
+        (self.out / "dbt").write_bytes(b"older build")
+        with self.assertRaises(fetch_dbt.FetchError):
+            fetch_dbt.fetch(url, "0" * 64, self.out)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_only_a_regular_file_named_dbt_counts(self):
+        path = self.scratch / "archive-0.tar.gz"
+        with tarfile.open(path, "w:gz") as tar:
+            directory = tarfile.TarInfo("dbt")
+            directory.type = tarfile.DIRTYPE
+            tar.addfile(directory)
+            link = tarfile.TarInfo("link/dbt")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/passwd"
+            tar.addfile(link)
+            info = tarfile.TarInfo("bin/dbt")
+            info.size = 6
+            tar.addfile(info, io.BytesIO(b"binary"))
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(fetch_dbt.fetch(path.as_uri(), digest, self.out).read_bytes(), b"binary")
+
+    def test_a_protocol_error_gives_status_2_and_no_traceback(self):
+        def broken(*_):
+            raise http.client.BadStatusLine("garbage")
+
+        before = fetch_dbt.fetch
+        fetch_dbt.fetch = broken
+        self.addCleanup(setattr, fetch_dbt, "fetch", before)
+        self.assertEqual(fetch_dbt.main(["oss", str(self.out)]), 2)
 
     def test_an_archive_without_one_dbt_leaves_no_binary(self):
         for members in ({"bin/other": b""}, {"a/dbt": b"1", "b/dbt": b"2"}):

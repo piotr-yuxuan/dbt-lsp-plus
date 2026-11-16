@@ -17,6 +17,7 @@ or contents are not what the pin says.
 """
 
 import hashlib
+import http.client
 import shutil
 import sys
 import tarfile
@@ -49,6 +50,8 @@ class FetchError(Exception):
 def fetch(url: str, sha256: str, directory: Path) -> Path:
     """Download the archive at `url`, check it against `sha256`, and write its `dbt` in `directory`."""
     directory.mkdir(parents=True, exist_ok=True)
+    # So that a failure leaves no binary, not even an older one.
+    (directory / "dbt").unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(dir=directory) as scratch:
         archive, hashed, size = Path(scratch) / "dbt.tar.gz", hashlib.sha256(), 0
         with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as reply, archive.open("wb") as out:
@@ -82,7 +85,7 @@ def main(arguments: list[str]) -> int:
     url, sha256 = BUILDS[arguments[0]]
     try:
         binary = fetch(url, sha256, Path(arguments[1]))
-    except (FetchError, OSError, tarfile.TarError) as error:
+    except (FetchError, OSError, http.client.HTTPException, tarfile.TarError) as error:
         print(f"fetch-dbt: {error}", file=sys.stderr)
         return 2
     print(binary)
