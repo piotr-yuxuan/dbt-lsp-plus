@@ -4,9 +4,11 @@
 
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
-use std::io::BufReader;
+use std::fs::{File, TryLockError};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,9 +17,27 @@ pub fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop")
 }
 
-/// A fresh directory for test NAME under Cargo's temporary directory.
+/// A fresh directory for test NAME under Cargo's temporary directory.  Two
+/// runs in one checkout share that directory, so the first call in a process
+/// waits for the lock on it, held until the process ends: runs take turns.
 pub fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    static TURN: OnceLock<File> = OnceLock::new();
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    TURN.get_or_init(|| {
+        let path = base.join("turn.lock");
+        let lock = File::create(&path).expect("create the lock of the test runs");
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                // Past the harness's capture of `eprintln!`, so that a run that waits says so.
+                let _ = writeln!(std::io::stderr(), "waiting for another test run in this checkout to end");
+                lock.lock().expect("wait for the lock of the test runs");
+            }
+            Err(TryLockError::Error(error)) => panic!("lock {path:?}: {error}"),
+        }
+        lock
+    });
+    let dir = base.join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the scratch directory");
     dir

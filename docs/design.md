@@ -731,6 +731,9 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
     crash that leaves the new server's listing all three retries.  The
     fake counts its processes, its lives, so that a script can make one
     life exit or hang and a test can count restarts.
+- Two runs of the integration tests in one checkout share Cargo's
+  temporary directory, so they take turns: a process's first scratch
+  directory waits for a lock there, held until the process ends.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:
