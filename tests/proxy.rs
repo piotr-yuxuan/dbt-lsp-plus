@@ -1759,6 +1759,22 @@ fn a_parse_is_cut_off_the_network_and_its_project_where_it_can_be() {
 }
 
 #[test]
+fn node_info_gives_the_summary_a_hover_shows() {
+    let nothing = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
+    let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/hover": nothing}});
+    let (mut session, _) = Session::fake("node-info-summary", script);
+    session.initialize(&fixture());
+    let orders = parsed_orders(&mut session);
+    assert_eq!(orders["summary"], "model table, \"shop\".\"main\".\"orders\"");
+    let file = uri(&fixture().join("models/marts/orders.sql"));
+    let on_ref = json!({"line": 4, "character": 28});
+    let info = node_info(&mut session, json!({"uri": file, "position": on_ref}));
+    let hover = session.request("textDocument/hover", json!({"textDocument": {"uri": file}, "position": on_ref}));
+    assert_eq!(info["result"]["summary"], hover["result"]["contents"]["value"], "{hover}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn node_info_names_a_node_by_id_or_by_position() {
     let (mut session, _) = Session::fake("node-info-at", json!({"manifest": manifest()}));
     session.initialize(&fixture());

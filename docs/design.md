@@ -606,7 +606,8 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   `[{uri, position}]`, a position naming the `ref` or `source` under it,
   or the entry whose `name:` is there,
   else the one node its file defines.  The result is the manifest's node,
-  null for no node, and error -32803 with the reason until a first parse
+  with `summary`, the text of the summary a hover shows first (its lines
+  apart by a plain line break), null for no node, and error -32803 with the reason until a first parse
   has finished; after that, the last index answers, and a later failure is
   only logged.  A position names the call under it in SQL inside Jinja, and
   in YAML or a Python model outside it.

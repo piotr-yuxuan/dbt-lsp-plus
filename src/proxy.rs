@@ -734,8 +734,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The information of a node, named by its id or by a position: the
-    /// manifest's node with its relation, null for no node; a failure while
-    /// no parse has finished.
+    /// manifest's node with its relation and the summary a hover shows, null
+    /// for no node; a failure while no parse has finished.
     fn node_info(&self, params: &Value) -> Option<Result<Value, String>> {
         let Some(index) = &self.parsing.index else {
             let why = match (self.parsing.running.is_some(), &self.parsing.failure) {
@@ -753,7 +753,12 @@ impl<W: Write> Proxy<W> {
                 self.node_at(index, &position, true)
             }
         };
-        Some(Ok(node.cloned().unwrap_or(Value::Null)))
+        let summarised = |node: &Value| {
+            let mut answer = node.clone();
+            answer["summary"] = json!(index.summary(node));
+            answer
+        };
+        Some(Ok(node.map_or(Value::Null, summarised)))
     }
 
     /// Starts a parse when the index is stale and dbt can parse: alone, or
