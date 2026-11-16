@@ -134,9 +134,11 @@ resolved path.
   then, and for the nodes it did not list, they come from the scan.  The
   server lists no macros, so the edges to and from macros always come from
   the scan.  The scan looks a ref or a source up in the caller's package,
-  the root project, then any package, as dbt 2.0.9 does by default, and
-  an unqualified macro in the caller's package and the root project only, as
-  dbt does: another package's macros need its name.  A dispatch names every
+  the root project, then any package, as dbt 2.0.9 does by default for a
+  node (in a macro, dbt looks in the calling node's package: see "Known
+  limitations"), and an unqualified macro in the caller's package and the
+  root project only, as dbt does: another package's macros need its name.
+  A dispatch names every
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
   found resources; an empty `source:*` does not.  After a crash, the scan
