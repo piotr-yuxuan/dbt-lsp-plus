@@ -6,10 +6,13 @@ usage: measure.py PROXY FAKE_DBT ROOT RUNS
 Starts PROXY in front of FAKE_DBT (the tests' fake-dbt-lsp, which refuses
 `lsp` as dbt-oss does, so that the proxy answers alone) on the project ROOT.
 It times each request RUNS times, warm: median and minimum in milliseconds,
-from the request written to its answer read.  Then, for each file of SAVED,
-it changes the file on disk, tells the proxy it was saved, and times each
-request of the budget once.  The project's files are changed: generate it
-again before another run.
+from the request written to its answer read.  Then, for each file of SAVED
+and each request of the budget, it changes the file on disk, tells the
+proxy it was saved, and times the request once, the first after the save,
+which pays what the save costs.  The first request of a session is timed apart,
+right after `initialize` and a few seconds later, as an editor's first
+request comes once the user has done something.  The project's files are
+changed: generate it again before another run.
 """
 
 import json
@@ -20,6 +23,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+# The seconds an editor's first request comes after `initialize`.
+FIRST_AFTER = 3
 
 # The requests of plan 016's budget, by the names of `requests`.
 BUDGET = [
@@ -132,23 +138,36 @@ def start(proxy: str, fake: str, root: Path, scratch: Path) -> Client:
     return client
 
 
-def main() -> None:
-    """Time each request warm, then the budget's after each save, one line each."""
-    proxy, fake, root, runs = sys.argv[1], sys.argv[2], Path(sys.argv[3]).resolve(), int(sys.argv[4])
-    every = requests(root)
+def first(proxy: str, fake: str, root: Path, pause: float) -> None:
+    """Time a session's first request, a workspace symbol, PAUSE seconds after `initialize`."""
     with tempfile.TemporaryDirectory() as scratch:
         client = start(proxy, fake, root, Path(scratch))
-        took, _ = client.request(*every["workspace symbol"])
-        sys.stdout.write(f"{'first request (workspace symbol)':52} once   {took:8.1f} ms\n")
+        time.sleep(pause)
+        took, _ = client.request(*requests(root)["workspace symbol"])
+        label = f"first request, {pause} s after initialize"
+        sys.stdout.write(f"{label:52} once   {took:8.1f} ms\n")
+        client.process.stdin.close()
+        client.process.wait()
+
+
+def main() -> None:
+    """Time each request warm, then each of the budget's first after a save, one line each."""
+    proxy, fake, root, runs = sys.argv[1], sys.argv[2], Path(sys.argv[3]).resolve(), int(sys.argv[4])
+    every = requests(root)
+    for pause in (0, FIRST_AFTER):
+        first(proxy, fake, root, pause)
+    with tempfile.TemporaryDirectory() as scratch:
+        client = start(proxy, fake, root, Path(scratch))
+        client.request(*every["workspace symbol"])
         for name, (method, params) in every.items():
             times = [client.request(method, params)[0] for _ in range(runs)]
             median = statistics.median(times)
             sys.stdout.write(f"{name:52} median {median:8.1f} ms  min {min(times):8.1f} ms\n")
         for path in saved(root):
             comment = "#" if path.suffix == ".yml" else "--"
-            path.write_text(path.read_text() + f"{comment} saved\n")
-            client.notify("textDocument/didSave", {"textDocument": {"uri": path.as_uri()}})
             for name in BUDGET:
+                path.write_text(path.read_text() + f"{comment} saved\n")
+                client.notify("textDocument/didSave", {"textDocument": {"uri": path.as_uri()}})
                 took, _ = client.request(*every[name])
                 label = f"{name}, {path.name} saved"
                 sys.stdout.write(f"{label:52} once   {took:8.1f} ms\n")

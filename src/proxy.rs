@@ -4,19 +4,22 @@
 //! server does not announce.
 
 use crate::graph::{self, Graph, ServerNode};
-use crate::project::Project;
+use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, navigation, packages, parse_log, project, properties, runs, scan, sources};
+use crate::{cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, sources};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use url::Url;
@@ -91,6 +94,10 @@ enum Event {
     /// builds nothing.
     Runs(&'static str, Option<Vec<runs::Failure>>, SystemTime),
 }
+
+/// The project's files that a thread reads before the first request needs
+/// them, as `cache::fill` gives them.
+type Filled = Vec<(PathBuf, cache::Key, Arc<project::Scanned>)>;
 
 /// What a watched file and the manifest give: its failures, or none to keep
 /// those known.
@@ -207,7 +214,13 @@ struct Parsing {
     /// Whether a parse runs cut off the network and from writing the project.
     cut: bool,
     cache: Option<PathBuf>,
+    /// How many times the index changed: the graph alone holds while this stays.
+    generation: u64,
 }
+
+/// The generations of the project, the server's nodes and the index a
+/// graph was made of.
+type MadeOf = (u64, u64, u64);
 
 struct Proxy<W: Write> {
     client: W,
@@ -247,6 +260,8 @@ struct Proxy<W: Write> {
     /// The graph may have changed while it could not be listed: list it later.
     relist: bool,
     nodes: Option<Vec<ServerNode>>,
+    /// How many times the server's nodes changed: the graph holds while this stays.
+    nodes_generation: u64,
     shutdown: bool,
     /// Whether the client reads markdown in a hover.
     markdown: bool,
@@ -259,6 +274,20 @@ struct Proxy<W: Write> {
     diagnostics: Diagnostics,
     restart: Restart,
     parsing: Parsing,
+    /// The scan of the project, kept between requests, and refreshed once
+    /// an epoch: one a request or event.
+    cache: RefCell<cache::Cache>,
+    /// The first fill of the cache, under way on a thread, taken once it is
+    /// done: nothing waits for it, and a request that comes before reads
+    /// the files itself.
+    filling: RefCell<Option<Receiver<Filled>>>,
+    epoch: u64,
+    /// The count of each open document's edits, under which the cache keeps
+    /// it, and the count so far.
+    edits: HashMap<PathBuf, u64>,
+    edited: u64,
+    /// The graph, with the generations it was made of.
+    graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
 }
 
 /// PATH with each `..` dropping the component before it, as written: no
@@ -349,6 +378,7 @@ impl<W: Write> Proxy<W> {
             attempts: 0,
             relist: false,
             nodes: None,
+            nodes_generation: 0,
             shutdown: false,
             markdown: false,
             hint_refresh: false,
@@ -357,6 +387,12 @@ impl<W: Write> Proxy<W> {
             diagnostics: Diagnostics::default(),
             restart: Restart::default(),
             parsing: Parsing::default(),
+            cache: RefCell::default(),
+            filling: RefCell::default(),
+            epoch: 0,
+            edits: HashMap::new(),
+            edited: 0,
+            graph: RefCell::default(),
         };
         if let Some(root) = root {
             proxy.set_root(root);
@@ -483,6 +519,12 @@ impl<W: Write> Proxy<W> {
             }
             _ => {}
         }
+        // The first scan, read meanwhile, so that the first request needs none.
+        if let Some(root) = self.root.clone() {
+            let (filled, filling) = mpsc::channel();
+            thread::spawn(move || drop(filled.send(cache::fill(&root))));
+            self.filling.replace(Some(filling));
+        }
     }
 
     /// The path of a `file:` URI, mapped onto the root when it reaches the
@@ -528,12 +570,16 @@ impl<W: Write> Proxy<W> {
             "textDocument/didOpen" => {
                 let text = params.pointer("/textDocument/text").and_then(Value::as_str).unwrap_or_default();
                 self.documents.insert(path.clone(), text.to_owned());
+                self.edited += 1;
+                self.edits.insert(path.clone(), self.edited);
                 self.restart.languages.insert(path.clone(), params["textDocument"]["languageId"].clone());
                 self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
                 self.uris.insert(path, uri.unwrap_or_default().to_owned());
             }
             "textDocument/didChange" => {
                 self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
+                self.edited += 1;
+                self.edits.insert(path.clone(), self.edited);
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
                 if let Some(text) = self.documents.get_mut(&path) {
                     changes.iter().for_each(|change| text::apply_change(text, change, self.encoding));
@@ -543,15 +589,43 @@ impl<W: Write> Proxy<W> {
                 self.restart.languages.remove(&path);
                 self.restart.versions.remove(&path);
                 self.documents.remove(&path);
+                self.edits.remove(&path);
                 self.uris.remove(&path);
             }
             _ => {}
         }
     }
 
-    /// The project as its files and the open documents say, if there is one.
-    fn project(&self) -> Option<Project> {
-        project::scan(self.root.as_deref()?, &self.documents)
+    /// The project as its files and the open documents say, if there is
+    /// one: the cache's, looked at once an epoch.
+    fn project(&self) -> Option<Rc<Project>> {
+        let open = cache::Open { texts: &self.documents, edits: &self.edits };
+        let mut cache = self.cache.borrow_mut();
+        let filling = self.filling.take();
+        match filling.as_ref().map(Receiver::try_recv) {
+            Some(Ok(filled)) => cache.adopt(filled),
+            Some(Err(TryRecvError::Empty)) => drop(self.filling.replace(filling)),
+            Some(Err(TryRecvError::Disconnected)) | None => {}
+        }
+        cache.project(self.root.as_deref()?, self.epoch, &open)
+    }
+
+    /// The graph of PROJECT with the server's nodes once listed, or, alone,
+    /// the last parse's: made again only when the project, the nodes or the
+    /// index changed, as the call hierarchy asks for it at each step.
+    fn graph(&self, project: &Project) -> Rc<Graph> {
+        let made_of = (self.cache.borrow().generation, self.nodes_generation, self.parsing.generation);
+        if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
+            return graph.clone();
+        }
+        let scanned = Graph::scanned(project);
+        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::Index::listed);
+        let graph = Rc::new(match parsed.as_ref().or(self.nodes.as_ref()) {
+            Some(nodes) => scanned.with_server(nodes, project),
+            None => scanned,
+        });
+        *self.graph.borrow_mut() = Some((made_of, graph.clone()));
+        graph
     }
 
     /// The outline of a document, from its open text or its file; null for a
@@ -573,12 +647,7 @@ impl<W: Write> Proxy<W> {
     /// with the server's nodes once listed, or, alone, the last parse's.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Value> {
         let Some(project) = self.project() else { return Some(Value::Null) };
-        let scanned = Graph::scanned(&project);
-        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::Index::listed);
-        let graph = match parsed.as_ref().or(self.nodes.as_ref()) {
-            Some(nodes) => scanned.with_server(nodes, &project),
-            None => scanned,
-        };
+        let graph = self.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
             let incoming = method == "callHierarchy/incomingCalls";
@@ -606,7 +675,7 @@ impl<W: Write> Proxy<W> {
     /// document it does not hold, such as a file not saved yet or one
     /// outside the resource paths, there is none, and the request goes to
     /// the server.
-    fn source_at(&self, params: &Value) -> Option<(Project, sources::Target)> {
+    fn source_at(&self, params: &Value) -> Option<(Rc<Project>, sources::Target)> {
         let (path, text, offset) = self.document_at(params)?;
         let target = sources::target_at(&path, &text, offset)?;
         let project = self.project().filter(|project| project.files.contains_key(&path))?;
@@ -818,8 +887,14 @@ impl<W: Write> Proxy<W> {
             self.refresh_hints();
         }
         match (outcome.index, self.parsing.index.as_mut()) {
-            (Some(index), Some(last)) if outcome.failure.is_some() => last.overlay(index),
-            (Some(index), _) => self.parsing.index = Some(index),
+            (Some(index), Some(last)) if outcome.failure.is_some() => {
+                last.overlay(index);
+                self.parsing.generation += 1;
+            }
+            (Some(index), _) => {
+                self.parsing.index = Some(index);
+                self.parsing.generation += 1;
+            }
             (None, _) => {}
         }
         match outcome.failure {
@@ -844,7 +919,7 @@ impl<W: Write> Proxy<W> {
         let (true, Some(problems)) = (self.standalone, problems) else { return };
         // The packages, while the project's configuration still reads.
         let packages: Vec<PathBuf> =
-            self.project().map_or_else(Vec::new, |project| project.packages.into_values().collect());
+            self.project().map_or_else(Vec::new, |project| project.packages.values().cloned().collect());
         // dbt names a YAML file's error from its working directory, the
         // proxy's, and a package's file from its package.
         let cwd = std::env::current_dir().ok();
@@ -1037,6 +1112,7 @@ impl<W: Write> Proxy<W> {
                 let mut nodes = std::mem::take(&mut self.listed);
                 nodes.extend(sources);
                 self.nodes = Some(nodes);
+                self.nodes_generation += 1;
             }
             (_, None) => self.listed.clear(),
         }
@@ -1408,6 +1484,7 @@ impl<W: Write> Proxy<W> {
         self.listed.clear();
         self.relist = false;
         self.nodes = None;
+        self.nodes_generation += 1;
         self.absent = Some(why.clone());
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
@@ -1530,6 +1607,8 @@ impl<W: Write> Proxy<W> {
     /// Handles EVENT; true when the session ends, at `exit` or when the client
     /// closes its output.
     fn handle(&mut self, event: Event) -> bool {
+        // A new epoch: the cache looks at the project's files again.
+        self.epoch += 1;
         // The last frames and the end of a process the proxy let go of.
         if let Event::Server(generation, _) | Event::ServerClosed(generation) = &event {
             let starting = self.restart.starting.as_ref().map(|(server, ..)| server);
