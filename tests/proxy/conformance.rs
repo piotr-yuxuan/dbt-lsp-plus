@@ -13,12 +13,13 @@ use crate::support::scratch;
 use dbt_lsp_plus::graph::Graph;
 use dbt_lsp_plus::project::{self, Project};
 use dbt_lsp_plus::{config, navigation, properties, scan, sources};
+use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 /// What one lookup answers otherwise than dbt: the subject, the lookup
@@ -321,12 +322,15 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     found
 }
 
+/// `doc('` or `doc("`, YAML's escape included: where navigation reads a doc.
+static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*\\?['"]"#).unwrap());
+
 /// In each properties file, each entry's `name:` that navigation reads, and
 /// each `doc()` in that entry, as navigation resolves them, against what
 /// dbt did with that file: the node or macro of the entry's name that it
-/// patched from there, and the docs block whose text it rendered as that
-/// node's description.  A `doc()` counts for the entry that holds it, so
-/// the corpus writes one only as a top-level description.
+/// patched from there, and the docs block of the doc's name whose text it
+/// rendered in the description that holds the call, a column's or the
+/// node's own.
 fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let resolved = |path: &Path, target: &navigation::Target| -> BTreeSet<String> {
         navigation::resolve(project, path, target).into_iter().map(|found| found.id).collect()
@@ -334,50 +338,60 @@ fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let ids = |section: &str, keep: &dyn Fn(&Value) -> bool| -> BTreeSet<String> {
         manifest[section].as_object().into_iter().flatten().filter(|(_, e)| keep(e)).map(|(id, _)| id.clone()).collect()
     };
-    let docs_in = |path: &Path, text: &str, range: Range<usize>| {
-        let mut docs = Vec::new();
-        for offset in range.filter(|offset| text.is_char_boundary(*offset)) {
-            match navigation::target_at(path, text, offset) {
-                Some(navigation::Target::Named { kind: "doc", package, name })
-                    if !docs.contains(&(package.clone(), name.clone())) =>
-                {
-                    docs.push((package, name))
+    // Each `doc()` of ENTRY, written in TEXT, against the description of NODE that holds it.
+    let docs_compared = |path: &Path,
+                         text: &str,
+                         entries: &[properties::Entry],
+                         entry: &properties::Entry,
+                         node: &Value| {
+        let mut found = Vec::new();
+        for call in DOC_CALL.find_iter(&text[entry.range.clone()]) {
+            let offset = entry.range.start + call.end();
+            let column = entries.iter().find(|e| e.label == "column" && e.range.contains(&offset));
+            let description =
+                column.map_or(&node["description"], |column| &node["columns"][&column.name]["description"]);
+            let description = description.as_str().unwrap_or_default();
+            let literal: String = text[offset..].chars().take_while(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+            let (name, ours) = match navigation::target_at(path, text, offset) {
+                Some(navigation::Target::Named { kind: "doc", package, name }) => {
+                    let ours = resolved(path, &navigation::Target::Named { kind: "doc", package, name: name.clone() });
+                    (name, ours)
                 }
-                _ => {}
+                _ => (literal, BTreeSet::new()),
+            };
+            let rendered = |block: &Value| {
+                let contents = block["block_contents"].as_str().unwrap_or_default().trim();
+                block["name"] == name.as_str() && !contents.is_empty() && description.contains(contents)
+            };
+            let dbt = ids("docs", &rendered);
+            if ours != dbt {
+                let place = column.map_or(String::new(), |column| format!(" column {}", column.name));
+                found.push((format!("{place} doc('{name}')"), "navigation", format!("proxy {ours:?}, dbt {dbt:?}")));
             }
         }
-        docs
+        found
     };
     let mut found = Vec::new();
     for (path, text) in project.texts.iter().filter(|(path, _)| sources::is_yaml(path)) {
         let holders = project.packages.iter().filter(|(_, dir)| path.starts_with(dir));
         let Some((package, dir)) = holders.max_by_key(|(_, dir)| dir.components().count()) else { continue };
         let file = format!("{package}://{}", path.strip_prefix(dir).unwrap().to_string_lossy());
-        for entry in properties::entries(text).into_iter().filter(|entry| PATCHED.contains(&entry.label)) {
-            let Some(target) = navigation::target_at(path, text, entry.name_range.start) else { continue };
+        let entries = properties::entries(text);
+        for entry in entries.iter().filter(|entry| PATCHED.contains(&entry.label)) {
+            let target = navigation::target_at(path, text, entry.name_range.start);
+            let ours = target.map_or_else(BTreeSet::new, |target| resolved(path, &target));
             let patched = |e: &Value| e["patch_path"] == file.as_str() && e["name"] == entry.name.as_str();
             let dbt: BTreeSet<String> =
                 ["nodes", "macros"].into_iter().flat_map(|section| ids(section, &patched)).collect();
             let subject = format!("{file} {}", entry.name);
-            let ours = resolved(path, &target);
             if ours != dbt {
                 found.push((subject.clone(), "navigation", format!("proxy {ours:?}, dbt {dbt:?}")));
             }
-            let node = dbt.iter().find_map(|id| manifest_entry(manifest, id));
-            let description = node.and_then(|node| node["description"].as_str()).unwrap_or_default().trim().to_owned();
-            for (package, name) in docs_in(path, text, entry.range.clone()) {
-                let ours = resolved(path, &navigation::Target::Named { kind: "doc", package, name: name.clone() });
-                let rendered =
-                    |block: &Value| block["block_contents"].as_str().map(str::trim) == Some(description.as_str());
-                let dbt = if description.is_empty() { BTreeSet::new() } else { ids("docs", &rendered) };
-                if ours != dbt {
-                    found.push((
-                        format!("{subject} doc('{name}')"),
-                        "navigation",
-                        format!("proxy {ours:?}, dbt {dbt:?}"),
-                    ));
-                }
-            }
+            let node = dbt.iter().find_map(|id| manifest_entry(manifest, id)).unwrap_or(&Value::Null);
+            let docs = docs_compared(path, text, &entries, entry, node);
+            found.extend(
+                docs.into_iter().map(|(place, lookup, answers)| (format!("{subject}{place}"), lookup, answers)),
+            );
         }
     }
     found
