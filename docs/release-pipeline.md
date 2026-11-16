@@ -66,7 +66,9 @@ runner's Python and `gh` serve: it needs no Nix.
 
 CI's Nix store, keyed on the runner's system and a hash of `flake.nix` and `flake.lock`, with the
 newest store of the same system restored failing that; and per job, cargo's registry and `target/`,
-keyed on the job, the system, and a hash of `Cargo.lock` and `flake.lock`, which fixes rustc. A
+keyed on the job, the system, and a hash of `Cargo.lock` and `flake.lock`, which fixes rustc. Each
+release rewrites `Cargo.lock`'s version line, so the next push's key is new and starts from the
+newest cache of its job, then saves its own: the caches grow until GitHub evicts the oldest. A
 branch reads its own caches and `main`'s, and never writes `main`'s. No third-party binary cache, no
 `--accept-flake-config` and no change to `substituters`. CD has no cache.
 

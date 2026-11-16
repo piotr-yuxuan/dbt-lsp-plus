@@ -73,7 +73,8 @@ jobs:
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
       - run: nix develop -c make test
 
-  # A beginning on macOS, which neither CI nor a release waits on: see the reference.
+  # A beginning on macOS, whose result counts for neither CI nor a release, though CD waits
+  # for it to finish: see the reference.
   macos:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: macos-15
@@ -131,8 +132,9 @@ jobs:
       - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
 
   # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
-  # variable DBT_LSP_PLUS_PROPRIETARY to true, and on a push only.  Neither CI nor a release
-  # waits on it while it is opt-in: see the reference.
+  # variable DBT_LSP_PLUS_PROPRIETARY to true, and on a push only.  While it is opt-in its
+  # result counts for neither CI nor a release, though CD waits for it to finish: see the
+  # reference.
   dbt:
     if: vars.DBT_LSP_PLUS_PROPRIETARY == 'true' && github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -159,8 +161,8 @@ jobs:
       - run: python3 scripts/fetch-dbt proprietary "$RUNNER_TEMP/dbt"
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: unshare -rn true
+      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
       # Built with the network, then the live test with none: dbt lsp runs as the user's
       # command gives it, with no flag of the proxy's.
       - run: nix develop -c cargo test --locked --test proxy --no-run
       - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
-      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"

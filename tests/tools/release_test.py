@@ -196,14 +196,17 @@ class WithVersion(unittest.TestCase):
 
 FROM_HERE = "github.event_name == 'push' || github.event.pull_request.head.repo.fork"
 PROPRIETARY = "vars.DBT_LSP_PLUS_PROPRIETARY == 'true' && github.event_name == 'push'"
-
-
-def jobs(workflow):
-    """Each job of the text of a workflow, by name: the lines indented under it."""
-    body = workflow[workflow.index("\njobs:\n") :]
-    return {
-        match[1]: match[2] for match in re.finditer(r"(?m)^  ([\w-]+):\n((?:(?:    .*)?\n)*)", body)
-    }
+# A job, not one of its steps, that may fail without failing the run.
+JOB_MAY_FAIL = r"(?m)^    continue-on-error: true$"
+CARGO_CACHE = ["~/.cargo/registry", "~/.cargo/git", "target"]
+CD_GATE = """    if: >-
+      !github.event.repository.fork && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_repository.full_name == github.repository)
+      )
+"""
 
 
 class Workflows(unittest.TestCase):
@@ -212,7 +215,10 @@ class Workflows(unittest.TestCase):
     def setUp(self):
         self.cd = (ROOT / ".github/workflows/cd.yml").read_text()
         self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.jobs = jobs(self.ci)
+        # Each job, by name: the lines indented under it.
+        body = self.ci[self.ci.index("\njobs:\n") :]
+        found = re.finditer(r"(?m)^  ([\w-]+):\n((?:(?:    .*)?\n)*)", body)
+        self.jobs = {match[1]: match[2] for match in found}
 
     def test_ci_has_the_jobs_of_plan_024(self):
         self.assertEqual(sorted(self.jobs), ["dbt", "dbt-oss", "macos", "static", "test"])
@@ -224,7 +230,7 @@ class Workflows(unittest.TestCase):
                 self.assertRegex(job, rf"(?m)^    if: {re.escape(condition)}$")
 
     def test_ci_lets_only_macos_and_the_proprietary_build_fail(self):
-        failing = sorted(name for name, job in self.jobs.items() if "continue-on-error: true" in job)
+        failing = sorted(name for name, job in self.jobs.items() if re.search(JOB_MAY_FAIL, job))
         self.assertEqual(failing, ["dbt", "macos"])
         self.assertEqual(self.ci.count("continue-on-error"), 2)
 
@@ -246,25 +252,31 @@ class Workflows(unittest.TestCase):
             with self.subTest(name):
                 job = self.jobs[name]
                 steps = [
-                    f"run: python3 scripts/fetch-dbt {build} ",
-                    "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
-                    "run: unshare -rn true",
-                    "make conformance",
+                    f"      - run: python3 scripts/fetch-dbt {build} ",
+                    "      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n",
+                    "      - run: unshare -rn true\n",
+                    "      - run: nix develop -c make conformance ",
                 ]
                 places = [job.find(step) for step in steps]
                 self.assertNotIn(-1, places)
                 self.assertEqual(places, sorted(places))
 
-    def test_the_live_test_runs_cut_off_after_its_build(self):
+    def test_the_proprietary_corpus_runs_before_the_live_test_built_then_cut_off(self):
         job = self.jobs["dbt"]
+        corpus = job.index("run: nix develop -c make conformance ")
         built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
-        self.assertLess(built, job.index("unshare -rn make live"))
+        self.assertLess(corpus, built)
+        self.assertLess(built, job.index("run: nix develop -c unshare -rn make live "))
 
     def test_no_cache_holds_a_fetched_dbt(self):
         for name, job in self.jobs.items():
             with self.subTest(name):
-                cached = re.search(r"path: \|\n((?: {12}.*\n)+)", job)[1].split()
-                self.assertEqual(cached, ["~/.cargo/registry", "~/.cargo/git", "target"])
+                self.assertEqual(job.count("uses: actions/cache@"), 1)
+                self.assertNotIn("paths:", job)
+                blocks = re.findall(r"path: \|\n((?: {12}.*\n)+)", job)
+                self.assertEqual([block.split() for block in blocks], [CARGO_CACHE])
+                inline = re.findall(r"(?m)^ +path: (?!\|)(.+)$", job)
+                self.assertEqual(inline, [])
 
     def test_ci_keys_each_cargo_cache_on_its_job_and_its_lock_files(self):
         for name, job in self.jobs.items():
@@ -287,15 +299,16 @@ class Workflows(unittest.TestCase):
         self.assertIn("RELEASE_BUMP: ${{ inputs.bump || 'patch' }}", self.cd)
 
     def test_cd_goes_on_only_after_a_success_of_a_push_here_or_by_hand_on_main(self):
-        for clause in (
-            "!github.event.repository.fork",
-            "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
-            "github.event.workflow_run.conclusion == 'success'",
-            "github.event.workflow_run.event == 'push'",
-            "github.event.workflow_run.head_repository.full_name == github.repository",
-        ):
-            with self.subTest(clause):
-                self.assertIn(clause, self.cd)
+        self.assertIn(CD_GATE, self.cd)
+
+    def test_cd_releases_the_commit_that_ci_checked_one_run_at_a_time_never_cancelled(self):
+        self.assertIn(
+            "RELEASE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}", self.cd
+        )
+        self.assertRegex(self.cd, r"(?m)^  group: release\n  cancel-in-progress: false$")
+
+    def test_ci_may_only_read(self):
+        self.assertRegex(self.ci, r"(?m)^permissions:\n  contents: read\n\n")
 
     def test_cd_may_read_the_runs_of_ci_and_write_a_release(self):
         self.assertRegex(self.cd, r"(?m)^  actions: read$")
