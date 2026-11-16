@@ -1,8 +1,9 @@
 # Working in this repository
 
 dbt-lsp-plus is a proxy in front of `dbt lsp` that adds LSP features the
-server lacks.  `README.md` describes it for users; `docs/design.md` explains
-its design, what `dbt lsp` was observed to do, and what is left to do.
+server lacks.  `README.md` describes it for users;
+`docs/explanation/design.md` explains its design, what `dbt lsp` was
+observed to do, and what is left to do.
 
 ## Workflow
 
@@ -26,10 +27,10 @@ Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
 test runs in one checkout take turns.
 
 CI and CD run on GitHub Actions once the repository is published
-(`docs/release-pipeline.md`).  `Cargo.toml`'s version, and the package's
-entry in `Cargo.lock`, are written by the pipeline alone; each release adds
-a commit to `origin/main`, so a clone pulls (`git pull --ff-only`) before
-it merges.
+(`docs/reference/release-pipeline.md`).  `Cargo.toml`'s version, and the
+package's entry in `Cargo.lock`, are written by the pipeline alone; each
+release adds a commit to `origin/main`, so a clone pulls (`git pull
+--ff-only`) before it merges.
 
 ## Layout
 
@@ -64,6 +65,11 @@ scripts/fetch-dbt             CI's dbt by its pinned SHA-256, or the latest by i
 scripts/bench/                synthetic projects and the proxy's times on them
 tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands in for gh
 .github/workflows/            CI and CD, and the weekly runs on the latest dbt
+docs/tutorials/               a first session, from the build to the call hierarchy
+docs/how-to/                  configure an editor, use it with dbt-oss alone, build and test
+docs/reference/               the features by LSP method, the command line, the release pipeline
+docs/explanation/design.md    the design, what dbt lsp was observed to do, what is left
+docs/social-media-preview.png GitHub's preview, from the untracked docs/work/social-preview/
 ```
 
 ## Rules of the code
@@ -73,8 +79,8 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
 - The proxy's own requests carry ids `dbt-lsp-plus/N`, and their answers
   never reach the client.
 - What `dbt lsp` does is observed, not documented: record each new
-  observation in `docs/design.md`, make the fake server behave the same,
-  and let the live test check it.
+  observation in `docs/explanation/design.md`, make the fake server
+  behave the same, and let the live test check it.
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
     so that `answer` stays a dispatch;

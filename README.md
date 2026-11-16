@@ -1,108 +1,60 @@
 # dbt-lsp-plus
 
+[![CI](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/ci.yml)
+[![CD](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/cd.yml/badge.svg)](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/cd.yml)
+[![Weekly](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/weekly.yml/badge.svg)](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/weekly.yml)
+[![Latest release](https://img.shields.io/github/v/release/piotr-yuxuan/dbt-lsp-plus?sort=semver)](https://github.com/piotr-yuxuan/dbt-lsp-plus/releases/latest)
+[![Licence](https://img.shields.io/github/license/piotr-yuxuan/dbt-lsp-plus)](https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/LICENSE)
+[![Issues](https://img.shields.io/github/issues/piotr-yuxuan/dbt-lsp-plus)](https://github.com/piotr-yuxuan/dbt-lsp-plus/issues)
+[![Minimum Rust](https://img.shields.io/badge/rust-1.89%2B-informational)](https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/Cargo.toml)
+
 A language server that sits in front of `dbt lsp`, the language server of
-dbt 2, and adds what it lacks, for every editor and for agents:
+dbt 2, and adds what it lacks, for every editor and for agents: the
+outline of a model, every resource of a project as a workspace symbol, the
+call hierarchy of models, sources and macros, references and renames of
+sources, definitions from YAML, and the last run's failures as
+diagnostics.  With dbt-oss, which has no `dbt lsp`, it works alone, from
+the files and your own `dbt parse`.  It uses only the server's interface,
+unlocks nothing that dbt gates behind an account, and does not ship dbt.
+It is pre-release.
 
-- `textDocument/documentSymbol`: the CTEs of a model and its Jinja blocks
-  (macro, test, snapshot, materialization, docs, set, by their name; if,
-  for and call, by their statement), nested by extent, as
-  the buffer stands, unsaved edits included; in a YAML properties file, its
-  models, seeds, snapshots, analyses, macros, functions, data tests,
-  sources and their tables, columns, exposures, metrics, semantic models,
-  saved queries, unit tests and groups;
-- `workspace/symbol`: every model, seed, snapshot, analysis, singular test,
-  macro, generic test, source table and docs block, installed packages
-  included;
-- the call hierarchy: what a model, source or macro is used by, and what it
-  uses, macros included, with the place of each call.  The dependencies of
-  the nodes are those of `dbt.listNodes` once the server has compiled, so
-  that `ref(var('x'))` resolves; the edges of macros come from the files;
-- references and renames of sources, which dbt lsp answers with nothing:
-  every `source()` call, in SQL, YAML, `dbt_project.yml` and Python models,
-  and the declarations.  A rename keeps the warehouse relation, inserting
-  `identifier:` or `schema:` with the old name, and is refused rather than
-  applied in part;
-- go to definition from a properties file, where dbt lsp answers nothing: a
-  `ref` to its model, a `source` to its table's entry, a `doc` to its docs
-  block, a model's `name:` to its file, a generic test's name to its test
-  block, by dbt 2.0.9's lookup across packages; and from a `source()` in
-  SQL; hover there shows the docs text, the test's signature, the node's
-  summary;
-- the last run's failures as diagnostics, beside dbt lsp's own: after a
-  `dbt build` from anywhere, a model's error at its file, a test's
-  failure at its name in YAML; after `dbt source freshness`, each stale
-  source table at its name;
-- inlay hints after the server's: the relation dbt builds, after each
-  `ref` and `source`;
-- `dbt-lsp-plus.nodeInfo`, a command that gives a node's resolved
-  configuration, relation and summary from the user's own `dbt parse`, and
-  that summary first in the server's hover on a `ref` or a `source`;
-- within a document: folding of Jinja blocks, CTEs, tags and comments;
-  highlights of a CTE's uses and of a block's tags; selection ranges from a
-  word up to the file; the rename of a CTE in its file, refused when a
-  string in a Jinja tag names it, since a macro may render it as SQL.
+![](./docs/social-media-preview.png)
 
-Every other message passes unchanged, byte for byte.  A feature that the
-server announces stays the server's, but for references and renames on a
-source; the initialize result names those under `experimental.dbtLspPlus`.
-When `dbt lsp` crashes, the proxy starts it again, at most three times in
-ten minutes, and gives it the open documents as they stand.  Without
-`dbt lsp`, and while it restarts, the proxy keeps serving its own
-features.
+## Install and run
 
-## With dbt-oss
-
-dbt-oss 2.0.x has no `dbt lsp`.  With it, the proxy is a language server on
-its own: everything above that needs no server, plus, from your own `dbt
-parse`, run offline at each save or change of the project, node
-information, the hover summary, inlay hints, the call hierarchy as dbt
-resolves it, and dbt's errors and warnings as diagnostics (source `dbt
-parse`).  It says so once in the log, and warns of nothing.  Formatting,
-completion, compiled SQL and previews are `dbt lsp`'s, and absent.
-
-The command is the same, `dbt-lsp-plus -- dbt lsp --project-dir
-/path/to/project`: the proxy asks `dbt lsp --help` first.  Point it at the
-dbt executable itself rather than a launcher such as `uvx dbt`: on Linux the
-proxy runs `dbt parse` with no network and the project read-only, under
-`unshare -rnm`, where a launcher fails when its cache is cold.
-
-It uses only the server's interface, unlocks nothing that dbt gates behind
-an account, and does not ship dbt.  `docs/design.md` explains how it works
-and what it would take to finish.
-
-## Usage
+With Rust 1.89 or later and a C linker (or `nix develop`, which gives
+Rust):
 
 ```
-dbt-lsp-plus [--] [SERVER COMMAND...]
+git clone https://github.com/piotr-yuxuan/dbt-lsp-plus
+cd dbt-lsp-plus
+cargo install --locked --path . --bin dbt-lsp-plus
 ```
 
-The server command defaults to `dbt lsp`.  The project is the
-`--project-dir` of the server command, else the client's root folder, else
-the current directory.  For example, with lsp-mode or any client that starts
-a stdio server:
+Then have your editor's LSP client start, in place of `dbt lsp`:
 
 ```
 dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 ```
 
-## Build and test
+The proxy answers what the server lacks, and passes every other message
+unchanged, byte for byte.  [Your first
+session](docs/tutorials/first-session.md) walks through it on the project
+of the tests, from Emacs.
 
-```
-nix develop
-cargo build --release
-cargo test
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
-```
+## Documentation
 
-The last command runs the opt-in live tests against a real dbt 2, on a copy
-of `tests/fixtures/shop` with a scratch home: the proxy in front of `dbt
-lsp` with the proprietary build (tested with 2.0.9), alone with dbt-oss
-(tested with 2.0.11).
-
-The crate also builds `fake-dbt-lsp`, the scripted server of the tests; to
-install the proxy alone, run `cargo install --path . --bin dbt-lsp-plus`.
+- Tutorial: [Your first session](docs/tutorials/first-session.md)
+- How-to: [Configure an editor](docs/how-to/configure-an-editor.md),
+  [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md),
+  [Build and test](docs/how-to/build-and-test.md)
+- Reference: [The features](docs/reference/features.md), by LSP method;
+  [The command line](docs/reference/command-line.md);
+  [The release pipeline](docs/reference/release-pipeline.md)
+- Explanation: [The design](docs/explanation/design.md), what `dbt lsp`
+  was observed to do, and what it would take to finish
 
 ## Licence
 
-European Union Public Licence 1.2 (`LICENSE`) or GNU General Public
-License 3.0 or later (`COPYING`).
+European Union Public Licence 1.2 ([`LICENSE`](LICENSE)) or GNU General
+Public License 3.0 or later ([`COPYING`](COPYING)).

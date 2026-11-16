@@ -1057,7 +1057,7 @@ source's description.
 - CI runs the same checks on GitHub Actions, and the corpus and the live
   test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it; each
   week, the same on the latest stable dbt-oss, and on the latest
-  proprietary build when allowed: see `docs/release-pipeline.md`.
+  proprietary build when allowed: see `docs/reference/release-pipeline.md`.
 - The conformance corpus, opt-in as the live test (see "Conformance"):
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance
   -- --ignored`.

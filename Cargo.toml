@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.89"
 description = "A proxy in front of dbt lsp that adds the LSP features it lacks"
 license = "EUPL-1.2 OR GPL-3.0-or-later"
+repository = "https://github.com/piotr-yuxuan/dbt-lsp-plus"
+homepage = "https://github.com/piotr-yuxuan/dbt-lsp-plus"
+readme = "README.md"
+keywords = ["dbt", "lsp", "language-server", "sql", "jinja"]
+categories = ["development-tools", "text-editors"]
 default-run = "dbt-lsp-plus"
 publish = false
 

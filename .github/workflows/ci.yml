@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 #
 # Every check, on every branch.  It holds no rule: the checks are in the Makefile, and
-# docs/release-pipeline.md describes this file.
+# docs/reference/release-pipeline.md describes this file.
 name: CI
 
 on:
