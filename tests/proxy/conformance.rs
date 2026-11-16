@@ -288,7 +288,7 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         let text = project.text(&holder.path).unwrap_or_default();
         let versioned = text.get(call.range.end..).is_some_and(|rest| rest.trim_start().starts_with(','));
         let navigated = target.filter(|_| !versioned).map(|target| {
-            let lookup = navigation::Lookup::new(project);
+            let lookup = navigation::Lookup::new(project, None);
             navigation::resolve(&lookup, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
         });
         [("graph", Some(graphed)), ("navigation", navigated)]
@@ -342,7 +342,10 @@ static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(
 /// node's own.
 fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let resolved = |path: &Path, target: &navigation::Target| -> BTreeSet<String> {
-        navigation::resolve(&navigation::Lookup::new(project), path, target).into_iter().map(|found| found.id).collect()
+        navigation::resolve(&navigation::Lookup::new(project, None), path, target)
+            .into_iter()
+            .map(|found| found.id)
+            .collect()
     };
     let ids = |section: &str, keep: &dyn Fn(&Value) -> bool| -> BTreeSet<String> {
         manifest[section].as_object().into_iter().flatten().filter(|(_, e)| keep(e)).map(|(id, _)| id.clone()).collect()

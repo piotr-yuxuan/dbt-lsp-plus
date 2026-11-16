@@ -106,7 +106,7 @@ pub struct Graph {
 impl Graph {
     /// The graph that the files of PROJECT give.
     pub fn scanned(project: &Project) -> Graph {
-        let lookup = Lookup::new(project);
+        let lookup = Lookup::new(project, None);
         let mut sites: BTreeMap<(String, String), Vec<Range<usize>>> = BTreeMap::new();
         for entity in &project.entities {
             for call in &entity.calls {

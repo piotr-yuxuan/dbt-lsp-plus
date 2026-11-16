@@ -204,6 +204,23 @@ impl Index {
         self.nodes.get(id)
     }
 
+    /// The enabled models, seeds and snapshots of the last manifest named
+    /// NAME in PACKAGE, each version of a versioned model apart.
+    pub fn resources(&self, package: &str, name: &str) -> Vec<&Value> {
+        let latest = self.named.get(name).into_iter().flatten().filter(|id| self.latest.contains(*id));
+        let resource = |node: &&Value| {
+            matches!(node["resource_type"].as_str(), Some("model" | "seed" | "snapshot"))
+                && node["package_name"] == package
+                && node["disabled"] != true
+        };
+        latest.filter_map(|id| self.nodes.get(id)).filter(resource).collect()
+    }
+
+    /// Whether the last manifest disables the node ID.
+    pub fn disabled(&self, id: &str) -> bool {
+        self.latest.contains(id) && self.nodes.get(id).is_some_and(|node| node["disabled"] == true)
+    }
+
     /// The enabled nodes of the last manifest, of the kinds that
     /// `dbt.listNodes` lists, `*` and `source:*`, by id: what a listing would
     /// give, from the manifest.

@@ -54,6 +54,11 @@ const ADDED: [(&str, &[&str]); 6] = [
 /// elsewhere they go to the server.
 const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "textDocument/definition"];
 
+/// The requests answered by the proxy that ask for the parse's index, in
+/// both modes: nodeInfo, and a definition for versions and disabled nodes.
+/// A stale index is parsed again, as for a hover.
+const WANT_INDEX: [&str; 2] = [config::NODE_INFO, "textDocument/definition"];
+
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
 /// flight cancels the first.
@@ -717,14 +722,15 @@ impl<W: Write> Proxy<W> {
         let target = navigation::target_at(&path, &text, offset);
         let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
         let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
-        let locations: Vec<Value> = navigation::resolve(&navigation::Lookup::new(&project), &path, &target)
-            .iter()
-            .map(|found| {
-                let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
-                let range = index.range(found.range.start, found.range.end, self.encoding);
-                json!({"uri": uri_of(&found.path), "range": range})
-            })
-            .collect();
+        let locations: Vec<Value> =
+            navigation::resolve(&navigation::Lookup::new(&project, self.parsing.index.as_ref()), &path, &target)
+                .iter()
+                .map(|found| {
+                    let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
+                    let range = index.range(found.range.start, found.range.end, self.encoding);
+                    json!({"uri": uri_of(&found.path), "range": range})
+                })
+                .collect();
         Some(Ok(match &locations[..] {
             [] => Value::Null,
             [location] => location.clone(),
@@ -796,7 +802,8 @@ impl<W: Write> Proxy<W> {
         });
         if let Some(target) = entry {
             let project = self.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project), &path, &target);
+            let found =
+                navigation::resolve(&navigation::Lookup::new(&project, self.parsing.index.as_ref()), &path, &target);
             return found.first().and_then(|found| index.node(&found.id));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
@@ -999,9 +1006,9 @@ impl<W: Write> Proxy<W> {
     /// PENDING.  A refusal fails it with its reason; a panic while answering
     /// fails that request alone, never the session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
-        // nodeInfo needs the index; alone, so does the call hierarchy's graph.
+        // Alone, the call hierarchy's graph needs the index too.
         let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
-        if method == config::NODE_INFO || (self.standalone && hierarchy) {
+        if WANT_INDEX.contains(&method) || (self.standalone && hierarchy) {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
@@ -1188,7 +1195,11 @@ impl<W: Write> Proxy<W> {
                     let target = navigation::target_at(&path, &text, offset)
                         .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
                     let project = self.project()?;
-                    let found = navigation::resolve(&navigation::Lookup::new(&project), &path, &target);
+                    let found = navigation::resolve(
+                        &navigation::Lookup::new(&project, self.parsing.index.as_ref()),
+                        &path,
+                        &target,
+                    );
                     navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
                 summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))

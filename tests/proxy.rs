@@ -2580,7 +2580,6 @@ fn a_definition_without_a_target_reaches_the_server() {
     let answers = [
         position_in(&yml, "customer_id", 2),
         position_in(&yml, "weekly", 2),
-        position_in(&yml, "ref('orders', v=2)", 6),
         position_in(&project.join("dbt_project.yml"), "summary_upstream", 2),
         position_in(&project.join("models/marts/orders.sql"), "ref('stg_orders')", 6),
     ];
@@ -2588,7 +2587,7 @@ fn a_definition_without_a_target_reaches_the_server() {
         let answer = session.request("textDocument/definition", params.clone());
         assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": params}));
     }
-    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 5);
+    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 4);
     // A source in SQL is the proxy's.
     let on_source = position_in(&project.join("models/staging/stg_customers.sql"), "'customers'", 2);
     let answer = session.request("textDocument/definition", on_source);
@@ -2678,6 +2677,57 @@ fn a_definition_names_an_open_document_by_the_uri_it_was_opened_under() {
     let on_ref = position_in(&link.join("models/marts/_models.yml"), "ref('customers')", 6);
     let found = session.request("textDocument/definition", on_ref);
     assert_eq!(found["result"]["uri"], uri(&customers));
+    assert!(session.finish().success());
+}
+
+/// A copy of the fixture for test NAME with a model `dim` in two versions,
+/// v1 the latest, and a properties file whose test refs its version 2; and
+/// the manifest that dbt parses there.
+fn versioned(name: &str) -> (PathBuf, Value) {
+    let project = copy_fixture(&format!("{name}-project"));
+    for version in [1, 2] {
+        std::fs::write(project.join(format!("models/marts/dim_v{version}.sql")), "select 1 as id").unwrap();
+    }
+    let properties = "version: 2\nmodels:\n  - name: orders\n    data_tests:\n      - relationships:\n          \
+                      to: ref('dim', v=2)\n          field: id\n";
+    std::fs::write(project.join("models/marts/_dim.yml"), properties).unwrap();
+    let mut manifest = manifest();
+    for version in [1, 2] {
+        let id = format!("model.shop.dim.v{version}");
+        manifest["nodes"][&id] = json!({"unique_id": id, "name": "dim", "resource_type": "model",
+            "package_name": "shop", "original_file_path": format!("models/marts/dim_v{version}.sql"),
+            "version": version, "latest_version": 1});
+    }
+    (project, manifest)
+}
+
+#[test]
+fn alone_a_versioned_ref_in_yaml_leads_to_its_version_once_parsed() {
+    let (project, manifest) = versioned("versioned-alone");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) =
+        Session::fake_with("versioned-alone", json!({"no_lsp": true, "manifest": manifest}), &flags, None);
+    session.initialize(&project);
+    let on_ref = position_in(&project.join("models/marts/_dim.yml"), "ref('dim'", 5);
+    // The first definition asks for the parse; the scan knows no versions meanwhile.
+    assert_eq!(session.request("textDocument/definition", on_ref.clone())["result"], Value::Null);
+    let v2 = location(&project, "models/marts/dim_v2.sql", 0, 0, 0);
+    let found = session.poll(Duration::from_secs(10), ("textDocument/definition", on_ref), |result| *result == v2);
+    assert_eq!(found, v2);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_a_versioned_ref_in_yaml_is_the_proxy_s() {
+    let (project, _) = versioned("versioned-server");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("versioned-server", json!({}), &flags, None);
+    session.initialize(&project);
+    let on_ref = position_in(&project.join("models/marts/_dim.yml"), "ref('dim'", 5);
+    let answer = session.request("textDocument/definition", on_ref);
+    assert_eq!((answer.get("error"), &answer["result"]), (None, &Value::Null), "{answer}");
+    barrier(&mut session);
+    assert!(!methods(&log).iter().any(|method| method == "textDocument/definition"), "forwarded");
     assert!(session.finish().success());
 }
 
