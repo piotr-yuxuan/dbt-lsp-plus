@@ -1,4 +1,5 @@
 /target/
+__pycache__/
 
 # Plans and notes, and one linked worktree per plan
 /docs/work/

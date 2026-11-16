@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 # The Python of the release and its tests, as the owner's other projects lint theirs.
 line-length = 104
+# The runner's own Python runs the scripts in CI and CD.
+target-version = "py311"
 
 [lint]
 select = ["E", "F", "B", "C901"]

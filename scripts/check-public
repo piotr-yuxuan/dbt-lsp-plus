@@ -12,9 +12,10 @@
 # - the machine's user name, unless it is a generic account name;
 # - e-mail addresses, except the noreply identity and example.invalid;
 # - the private words (see scripts/public-patterns.sh for where they are);
-# - a source file without the SPDX line in its first 10 lines: Rust, Nix,
-#   shell, Python, YAML, the Makefile, the scripts and the fake gh, but not
-#   the corpus's projects under tests/fixtures, nor TOML.
+# - a source file without the SPDX line in its first 10 lines: imprimeur's
+#   list (Emacs Lisp, JavaScript, CSS, HTML, Nix, shell, Python, YAML) with
+#   Rust added and Lua dropped, the Makefile, the scripts and the fake gh,
+#   but not the projects under tests/fixtures, nor TOML.
 #
 # Every file is read as bytes, whatever its encoding.  Exit status 1 when
 # anything is found; 2 when the check could not run: outside a git work
@@ -83,7 +84,7 @@ while IFS= read -r pattern; do
 done <<<"$words"
 
 for file in "${tracked[@]}"; do
-  [[ -f $file && $file =~ \.(rs|nix|sh|py|yml)$|^Makefile$|^scripts/|^tests/bin/fake-gh$ ]] || continue
+  [[ -f $file && $file =~ \.(rs|el|mjs|js|css|html|nix|sh|py|yml)$|^Makefile$|^scripts/|^tests/bin/fake-gh$ ]] || continue
   [[ $file =~ ^tests/fixtures/|/vendor/ ]] && continue
   if ! grep -qF -- "$spdx" < <(head -n 10 -- "$file"); then
     echo "$file:1: missing SPDX line"

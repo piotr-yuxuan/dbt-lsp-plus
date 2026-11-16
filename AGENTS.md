@@ -131,4 +131,10 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     `current_version`, `release_notes`, `with_version` and `decide`, the
     pure decisions, each with tests of its own, apart from the effects;
     `read`, `has_release` and `confirm_ci`, one per question asked of git
-    or GitHub, so that `main` stays the run's order.
+    or GitHub, so that `main` stays the run's order;
+  - `fetch` in `scripts/fetch-dbt`: the download and its checks, with tests
+    of their own, apart from `main`, which reads the arguments and turns
+    failures into status 2;
+  - `commit_on_branch`, `create_release`, `graphql` and `runs_of_ci` in
+    `tests/bin/fake-gh`: one per call of GitHub's, so that `main` stays a
+    dispatch.
