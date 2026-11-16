@@ -1,0 +1,7 @@
+snapshots:
+  - name: ys
+    relation: ref('x')
+    config:
+      unique_key: id
+      strategy: check
+      check_cols: all

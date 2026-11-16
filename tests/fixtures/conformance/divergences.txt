@@ -2,9 +2,44 @@
 # CASE<TAB>SUBJECT<TAB>LOOKUP<TAB>REASON, as the corpus prints it.
 # See tests/proxy/conformance.rs.
 
+disabled-package-model	model.pa.pa_m ref('x')	graph	the scan reads no `+enabled: false`: the disabled model of the caller's package wins
+disabled-package-model	model.pa.pa_m ref('x')	navigation	the scan reads no `+enabled: false`: the disabled model of the caller's package wins
+disabled-package-model	node:model.pa.x	scan	the scan reads no `+enabled: false` from the root's dbt_project.yml
+dispatch	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	the graph names every implementation, dbt the adapter's only
+dispatch	model.r.c2 adapter.dispatch('fn', 'pa')	graph	dbt lists nothing for a dispatch called from a node; the graph names every implementation, dbt the adapter's only
 flag-FALSE	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.md, known limitations)
 flag-FALSE	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)
 flag-False	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.md, known limitations)
 flag-False	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)
 flag-false	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.md, known limitations)
 flag-false	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)
+function	model.r.c -> function.r.double_it	scan	the scan reads no function() call
+function	node:function.r.double_it	scan	the scan reads no functions
+python-model	node:model.r.py_m	scan	the scan reads no Python model
+ref-var	model.r.c -> model.r.x	scan	the scan reads no ref of a variable; the server's listing gives it
+versions	model.pa.pc ref('m')	graph	the scan knows no versions: a ref of one answers nothing
+versions	model.pa.pc ref('m')	navigation	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c ref('m')	graph	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c ref('m')	navigation	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c2 ref('m')	graph	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c2 ref('m')	navigation	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c3 ref('m')	graph	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c3 ref('m')	navigation	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c4 ref('pa', 'm')	graph	the scan knows no versions: a ref of one answers nothing
+versions	model.r.c4 ref('pa', 'm')	navigation	the scan knows no versions: a ref of one answers nothing
+versions	node:model.pa.m.v1	scan	the scan knows no versions: no node per version
+versions	node:model.pa.m.v2	scan	the scan knows no versions: no node per version
+versions	node:model.pa.m.v3	scan	the scan knows no versions: no node per version
+versions	node:model.pa.m_v1	scan	the scan knows no versions: a version's file is a model of its own
+versions	node:model.pa.m_v2	scan	the scan knows no versions: a version's file is a model of its own
+versions	node:model.pa.m_v3	scan	the scan knows no versions: a version's file is a model of its own
+versions	node:model.r.m.v1	scan	the scan knows no versions: no node per version
+versions	node:model.r.m.v2	scan	the scan knows no versions: no node per version
+versions	node:model.r.m_v1	scan	the scan knows no versions: a version's file is a model of its own
+versions	node:model.r.m_v2	scan	the scan knows no versions: a version's file is a model of its own
+versions	pa://models/_m.yml m	navigation	the scan knows no versions: the entry of a versioned model leads nowhere
+versions	r://models/_m.yml m	navigation	the scan knows no versions: the entry of a versioned model leads nowhere
+yaml-snapshot	model.r.c ref('ys')	graph	the scan reads no snapshot declared in YAML
+yaml-snapshot	model.r.c ref('ys')	navigation	the scan reads no snapshot declared in YAML
+yaml-snapshot	node:snapshot.r.ys	scan	the scan reads no snapshot declared in YAML
+yaml-snapshot	r://snapshots/_snap.yml ys	navigation	the scan reads no snapshot declared in YAML

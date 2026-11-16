@@ -696,6 +696,13 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - The proxy does not follow `client/unregisterCapability`: a registration
   the server withdrew and makes again is answered by the proxy, and never
   reaches the client.  dbt lsp 2.0.9 was not seen to withdraw one.
+- The corpus's `divergences.txt` lists each divergence from dbt that it
+  shows, with its reason (see "Conformance").  Beyond those above: a
+  package's model that the root project disables (`+enabled: false`)
+  still resolves, ahead of the root's; a `function()` call and the
+  functions it names are not read; the graph names every implementation
+  of a dispatch, where dbt lists the adapter's alone from a macro, and
+  nothing from a node.
 
 ## Conformance
 
