@@ -319,8 +319,23 @@ fn watcher(session: &mut Session, project: &Path) {
         }
         found
     };
+    let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
+    let watchers = &registered["params"]["registrations"][0]["registerOptions"]["watchers"];
+    assert_eq!(watchers, &json!([{"globPattern": "**/*"}]), "{registered}");
+    // A model's change makes the proxy list, and dbt lsp compile and write within the window.
+    let completed =
+        |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+    let before = completed(session);
+    let model = json!({"changes": [{"uri": uri(&project.join("models/marts/orders.sql")), "type": 2}]});
+    session.notify("workspace/didChangeWatchedFiles", model);
+    let waited = Instant::now() + Duration::from_secs(60);
+    while completed(session) < before + 2 && Instant::now() < waited {
+        session.request("workspace/symbol", json!({"query": "orders"}));
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let start = session.received.len();
     let mut seen = look();
+    let mut sent = 0;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let now = look();
@@ -336,6 +351,7 @@ fn watcher(session: &mut Session, project: &Path) {
         changes.extend(deleted.map(|path| json!({"uri": uri(path), "type": 3})));
         if !changes.is_empty() {
             session.notify("workspace/didChangeWatchedFiles", json!({"changes": changes}));
+            sent += 1;
         }
         seen = now;
         // Answered by the proxy itself: what the server sent meanwhile has been read.
@@ -344,6 +360,7 @@ fn watcher(session: &mut Session, project: &Path) {
     }
     std::thread::sleep(Duration::from_secs(1));
     session.request("workspace/symbol", json!({"query": "orders"}));
+    assert!(sent > 0, "dbt lsp wrote nothing under the project within the window");
     let compiled = session.received[start..].iter().filter(|m| m["method"] == "dbt/lspCompileStart").count();
     assert!(compiled <= 2, "{compiled} compilations in five seconds as a watcher of dbt lsp's own output");
 }
