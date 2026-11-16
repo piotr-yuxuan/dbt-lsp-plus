@@ -4,6 +4,7 @@
 //! matches the server's, its run in a thread of its own, the index of the
 //! manifest it writes, and the summary of a node.
 
+use crate::parse_log;
 use crate::project;
 use crate::scan::Target;
 use crate::yaml::{self, Node};
@@ -37,9 +38,9 @@ const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "-
 
 /// The `dbt parse` that matches SERVER, the command that runs `dbt lsp`:
 /// every word before `lsp`, as `uvx dbt` or `env X=1 dbt`; the flags of KEPT
-/// after it, as `--flag X` or `--flag=X`; the project at ROOT; and its output
-/// under CACHE, with neither telemetry nor a check of versions.  None when
-/// SERVER has no `lsp` word, as a wrapper of its own.
+/// after it, as `--flag X` or `--flag=X`; the project at ROOT; its output
+/// under CACHE, its log as JSON, with neither telemetry nor a check of
+/// versions.  None when SERVER has no `lsp` word, as a wrapper of its own.
 pub fn parse_command(server: &[String], root: &Path, cache: &Path) -> Option<Vec<String>> {
     let at = server.iter().position(|word| word == "lsp")?;
     let mut command: Vec<String> = server[..at].to_vec();
@@ -55,6 +56,7 @@ pub fn parse_command(server: &[String], root: &Path, cache: &Path) -> Option<Vec
     let path = |path: &Path| path.to_string_lossy().into_owned();
     command.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
     command.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
+    command.extend(["--log-format".into(), "json".into()]);
     let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
     command.extend(quiet.map(str::to_owned));
     Some(command)
@@ -374,16 +376,18 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
             let err = out.try_clone()?;
             Command::new(&command[0]).args(&command[1..]).stdin(Stdio::null()).stdout(out).stderr(err).spawn()
         });
-        // dbt writes a banner of `=` before its `[error]` lines.
-        let first_line = || {
-            let text = fs::read_to_string(&log).ok()?;
-            let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('='));
-            let line = lines().find(|line| line.starts_with("[error]")).or_else(|| lines().next())?;
-            Some(format!("{line} (see {})", log.display()))
-        };
-        let failure = match spawned.map(|child| finish(child, deadline, &stopped)) {
+        let status = spawned.map(|child| finish(child, deadline, &stopped));
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        // dbt's first error, else the first line that is none of its events,
+        // as a launcher's own.
+        let errors = parse_log::read(&text).problems.into_iter().filter(|problem| problem.severity == 1);
+        let other = || text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'));
+        let first = errors.map(|error| error.message).next().or_else(|| other().map(str::to_owned));
+        let failure = match status {
             Ok(Some(status)) if status.success() => None,
-            Ok(Some(status)) => Some(first_line().unwrap_or_else(|| format!("dbt parse {status}"))),
+            Ok(Some(status)) => Some(
+                first.map_or_else(|| format!("dbt parse {status}"), |first| format!("{first} (see {})", log.display())),
+            ),
             Ok(None) => Some("dbt parse was stopped, or ran past its deadline".into()),
             Err(error) => Some(format!("cannot run {}: {error}", command[0])),
         };
@@ -448,6 +452,8 @@ mod tests {
             "--log-path",
             "/cache/logs",
             "--write-json",
+            "--log-format",
+            "json",
             "--no-version-check",
             "--no-send-anonymous-usage-stats",
             "--no-manage-state",
@@ -696,14 +702,24 @@ mod tests {
         killed.stop();
         start(words(&["sleep", "30"]), dir.clone(), Duration::from_secs(60), report(sender.clone())).stop();
         assert!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap().contains("stopped"));
-        let banner = "echo; echo '======= Errors and Warnings ======='; echo '[error] Compilation failed'; exit 1";
-        let failing = start(words(&["sh", "-c", banner]), dir.clone(), Duration::from_secs(10), report(sender));
+        // dbt's version comes first; its first error says why.
+        let json = r#"echo '{"info": {"code": "A001", "level": "info", "msg": "Running with dbt=2.0.9"}}'
+            echo '{"info": {"code": "1501", "level": "error", "msg": "[error] [JinjaError (dbt1501)]: Failed"}}'
+            echo '{"info": {"code": "1048", "level": "error", "msg": "[error] [DependencyNotFound (dbt1048)]"}}'
+            exit 1"#;
+        let failing = start(words(&["sh", "-c", json]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(
-            failure.starts_with("[error] Compilation failed (see ") && failure.ends_with("parse.log)"),
+            failure.starts_with("[JinjaError (dbt1501)]: Failed (see ") && failure.ends_with("parse.log)"),
             "{failure}"
         );
+        // A launcher fails before dbt says anything.
+        let launcher = "echo; echo 'error: Failed to fetch the index' >&2; exit 2";
+        let failing = start(words(&["sh", "-c", launcher]), dir.clone(), Duration::from_secs(10), report(sender));
+        let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
+        failing.stop();
+        assert!(failure.starts_with("error: Failed to fetch the index (see "), "{failure}");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
