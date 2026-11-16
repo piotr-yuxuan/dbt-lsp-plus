@@ -16,8 +16,14 @@ on:
 permissions:
   contents: read
 
-# Each job: no credentials left in the checkout, and the caches restored only, so that a
-# build of dbt that no pin vouches for can never seed CI's.  No continue-on-error: a drift
+# Every step under bash with pipefail, so that a command behind `| tee` fails its step.
+defaults:
+  run:
+    shell: bash
+
+# Each job: no credentials left in the checkout, and the caches restored only: the workflow
+# itself never saves one.  The build of dbt it runs is checked by its published digest only,
+# and runs as the runner's user, as CI's pinned builds do.  No continue-on-error: a drift
 # fails the run.
 jobs:
   dbt-oss:
@@ -42,7 +48,6 @@ jobs:
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
       - run: python3 scripts/fetch-dbt --latest oss "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
       # That runner's AppArmor otherwise refuses `unshare -r`, which cuts each parse off
@@ -50,14 +55,14 @@ jobs:
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: unshare -rn true
       - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
-        shell: bash
-      # Whatever the corpus said: the build, the corpus's line, and what drifted.
+      # Whatever the corpus said: the build, the corpus's line, and its failure whole, what
+      # drifted or which parse failed.
       - if: always()
         run: |
           { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
-            grep -hP '^conformance:|^divergences to fix|^registered, but|\t' "$RUNNER_TEMP/corpus.log" || true
+            grep -h '^conformance:' "$RUNNER_TEMP/corpus.log" || true
+            sed -n '/panicked at/,/^note: run with/p' "$RUNNER_TEMP/corpus.log" || true
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-        shell: bash
 
   # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
   # variable DBT_LSP_PLUS_PROPRIETARY to true; trusted through TLS and the SHA-256 that dbt
@@ -84,19 +89,23 @@ jobs:
             target
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
-      - run: python3 scripts/fetch-dbt --latest proprietary "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
-        shell: bash
+      - id: fetch
+        run: python3 scripts/fetch-dbt --latest proprietary "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: unshare -rn true
+      - id: cut
+        run: unshare -rn true
       - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
-        shell: bash
-      # Built with the network, then the live test with none.
-      - run: nix develop -c cargo test --locked --test proxy --no-run
-      - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/live.log"
-        shell: bash
+      # Built with the network, then the live test with none, whatever the corpus said, so
+      # that a drift of the protocol shows beside a drift of the resolution.
+      - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
+        run: nix develop -c cargo test --locked --test proxy --no-run
+      - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
+        run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/live.log"
       - if: always()
         run: |
           { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
-            grep -hP '^conformance:|^divergences to fix|^registered, but|\t|^test live' "$RUNNER_TEMP/corpus.log" "$RUNNER_TEMP/live.log" || true
+            grep -h '^conformance:' "$RUNNER_TEMP/corpus.log" || true
+            sed -n '/panicked at/,/^note: run with/p' "$RUNNER_TEMP/corpus.log" || true
+            grep -h '^test live' "$RUNNER_TEMP/live.log" || true
+            sed -n '/panicked at/,/^note: run with/p' "$RUNNER_TEMP/live.log" || true
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-        shell: bash
