@@ -31,6 +31,12 @@ make conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
 test runs in one checkout take turns.
 
+CI and CD run on GitHub Actions once the repository is published
+(`docs/release-pipeline.md`).  `Cargo.toml`'s version, and the package's
+entry in `Cargo.lock`, are written by the pipeline alone; each release adds
+a commit to `origin/main`, so a clone pulls (`git pull --ff-only`) before
+it merges.
+
 ## Layout
 
 ```
@@ -54,6 +60,12 @@ tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
 Makefile                      the checks, which CI runs too
+scripts/check-public          nothing private in the tracked files, an SPDX line in each source
+scripts/check-commits         each commit's title, trailers and text
+scripts/release.py            CD's release: the version commit, the tag and its notes
+scripts/fetch-dbt             CI's dbt, fetched by its pinned SHA-256
+tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands in for gh
+.github/workflows/            CI and CD
 ```
 
 ## Rules of the code
@@ -114,4 +126,9 @@ Makefile                      the checks, which CI runs too
     effect, apart from the comparisons, which decide;
   - `nodes_compared`, `calls_compared` and `entries_compared` in
     `tests/proxy/conformance.rs`: one per kind of answer compared with
-    dbt's, so that `corpus` stays a walk over the cases.
+    dbt's, so that `corpus` stays a walk over the cases;
+  - in `scripts/release.py`, ported from imprimeur: `next_version`,
+    `current_version`, `release_notes`, `with_version` and `decide`, the
+    pure decisions, each with tests of its own, apart from the effects;
+    `read`, `has_release` and `confirm_ci`, one per question asked of git
+    or GitHub, so that `main` stays the run's order.
