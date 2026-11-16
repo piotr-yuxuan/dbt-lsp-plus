@@ -1,0 +1,7 @@
+name: r
+config-version: 2
+version: '1.0.0'
+profile: r
+dispatch:
+  - macro_namespace: pa
+    search_order: ['r', 'pa']

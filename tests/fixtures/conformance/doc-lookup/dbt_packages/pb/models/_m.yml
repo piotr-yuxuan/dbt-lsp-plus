@@ -1,0 +1,6 @@
+version: 2
+models:
+  - name: pbm
+    description: "{{ doc('d_pkgs') }}"
+  - name: pbm2
+    description: "{{ doc('d_all') }}"

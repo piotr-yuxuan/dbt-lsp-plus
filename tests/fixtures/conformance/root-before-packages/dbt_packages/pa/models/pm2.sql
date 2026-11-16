@@ -1,0 +1,1 @@
+select {{ rmac() }} as v

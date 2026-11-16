@@ -1,0 +1,1 @@
+select {{ outer() }} as v

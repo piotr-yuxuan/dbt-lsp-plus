@@ -1,0 +1,7 @@
+version: 2
+models:
+  - name: m
+    latest_version: 1
+    versions:
+      - v: 1
+      - v: 2

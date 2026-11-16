@@ -2,6 +2,8 @@
 //! The proxy in front of a scripted fake of dbt lsp 2.0.9.
 
 // Opt-in, ignored; in this crate so that one crate uses all of `support`.
+#[path = "proxy/conformance.rs"]
+mod conformance;
 #[path = "proxy/live.rs"]
 mod live;
 mod support;
