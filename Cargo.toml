@@ -2,7 +2,7 @@
 name = "dbt-lsp-plus"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "A proxy in front of dbt lsp that adds the LSP features it lacks"
 license = "EUPL-1.2 OR GPL-3.0-or-later"
 default-run = "dbt-lsp-plus"
