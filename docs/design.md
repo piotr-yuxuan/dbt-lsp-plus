@@ -622,9 +622,12 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - `graph::resolve`, behind the call hierarchy, ignores `flags:
   require_ref_searches_node_package_before_root: false`, which navigation
   reads.
-- Navigation does not read an explicit tag on that flag: `!!str false`
-  puts the root first, where dbt keeps the calling node's package first,
-  and `!!bool "false"` does not, where dbt does.
+- Navigation reads that flag as written.  It reads no explicit tag:
+  `!!str false` puts the root first, where dbt keeps the calling node's
+  package first, and `!!bool "false"` does not, where dbt does.  It
+  neither follows an alias nor renders Jinja: dbt 2.0.9 and dbt-oss 2.0.11
+  put the root first for `*no` naming a `false`, for `'{{ False }}'`, and
+  for a comparison of an `env_var` that gives false.
 - A `ref` or a `source` inside a macro resolves in dbt in the package of
   the node that calls the macro, not in the macro's own; the proxy, which
   does not know the caller, resolves it in the macro's package.  It shows
