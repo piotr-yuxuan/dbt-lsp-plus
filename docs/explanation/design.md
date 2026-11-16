@@ -625,8 +625,9 @@ So the proxy runs the user's own `dbt parse`.
   or when the client closes.  Only the direct child is killed: a launcher's
   grandchild may outlive it.
 - When, with a server: lazily.  A change of the client's marks the index stale; a
-  `nodeInfo` or a hover that finds it stale, or an inlay hint request that
-  finds no index, starts a parse, and is answered from the last index
+  `nodeInfo`, a hover, or a definition or references request that the
+  proxy answers, that finds it stale, or an inlay hint request that finds
+  no index, starts a parse, and is answered from the last index
   meanwhile.  A parse starts only when the server has compiled since the
   change, so that dbt has resolved the packages itself, and such a request
   made before that compilation starts it once it comes,
@@ -924,7 +925,9 @@ fails with -32803.
   m() }}") }}`, is not read: its macro calls are no references.
 - With a server, a `ref` or a macro call in SQL goes to dbt lsp, which
   answers as said under "Navigation"; plan 019's modes may give the user
-  the choice.
+  the choice.  A Python model's `dbt.ref` is among a model's references,
+  but a definition there goes to the server: the flag lists no `python`
+  place for `ref`.
 - Observed by plan 017's critic, not checked by a test: dbt lsp 2.0.9,
   compiling a project with an `on-run-start` hook, tried to download
   DuckDB's driver; with the network cut, every definition then answered

@@ -7,8 +7,8 @@ parse`, run offline at each save or change of the project, node
 information, the hover summary, inlay hints, the call hierarchy as dbt
 resolves it, and dbt's errors and warnings as diagnostics (source `dbt
 parse`).  Go to definition and references also cover a `ref` and a macro
-call in SQL, and a macro call in YAML, which `dbt lsp` would answer:
-across the project, versions included.  It says so once in the log, and warns of nothing.  Formatting,
+call in SQL, and a macro call in YAML: across the project, versions
+included once the parse has run.  It says so once in the log, and warns of nothing.  Formatting,
 completion, compiled SQL and previews are `dbt lsp`'s, and absent.
 
 The command is the same, `dbt-lsp-plus -- dbt lsp --project-dir

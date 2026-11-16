@@ -151,7 +151,9 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     effect, apart from the comparisons, which decide;
   - `nodes_compared`, `calls_compared` and `entries_compared` in
     `tests/proxy/conformance.rs`: one per kind of answer compared with
-    dbt's, so that `corpus` stays a walk over the cases;
+    dbt's, so that `corpus` stays a walk over the cases; `references_missed`
+    there, the check of definitions against references, which no registry
+    excuses;
   - in `scripts/release.py`, ported from imprimeur: `next_version`,
     `current_version`, `release_notes`, `with_version` and `decide`, the
     pure decisions, each with tests of its own, apart from the effects;

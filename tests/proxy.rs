@@ -2769,7 +2769,9 @@ fn alone_the_references_of_a_ref_and_a_macro_span_the_project() {
     let uses = [("models/marts/orders.sql", 4, 26, 36), ("snapshots/orders_snapshot.sql", 2, 22, 32)];
     assert_eq!(at(&stg_orders), uses.map(|(file, line, start, end)| (file.to_owned(), line, start, end)));
     let declared = references("snapshots/orders_snapshot.sql", "stg_orders", 2, true);
-    assert_eq!(at(&declared).len(), 3, "its file's start too: {declared}");
+    let mut with_file = uses.map(|(file, line, start, end)| (file.to_owned(), line, start, end)).to_vec();
+    with_file.insert(1, ("models/staging/stg_orders.sql".to_owned(), 0, 0, 0));
+    assert_eq!(at(&declared), with_file, "its file's start too");
     let cents = references("macros/money.sql", "cents_to_dollars", 2, false);
     assert_eq!(at(&cents), [("models/staging/stg_orders.sql".to_owned(), 10, 11, 27)]);
     assert!(session.finish().success());
@@ -2794,7 +2796,10 @@ fn with_dbt_lsp_a_ref_in_sql_reaches_the_server() {
     let on_ref = position_in(&fixture().join("models/marts/orders.sql"), "ref('stg_orders')", 6);
     let answer = session.request("textDocument/definition", on_ref.clone());
     assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_ref}));
-    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 1);
+    let on_macro = position_in(&fixture().join("models/marts/orders.sql"), "is_positive(", 2);
+    let answer = session.request("textDocument/definition", on_macro.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_macro}));
+    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 2);
     assert!(session.finish().success());
 }
 
