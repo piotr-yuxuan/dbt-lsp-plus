@@ -5,7 +5,7 @@ a language server on the standard input and output, for the `.sql`,
 `.yml` and `.yaml` files of a dbt project.  What to give any harness:
 
 - the command: `dbt-lsp-plus`, with the arguments `--`, `dbt`, `lsp`, and
-  any flag of [the configuration](../reference/configuration.md);
+  any flag of [the configuration](../reference/features.md#configuration);
 - the files: `.sql` as `sql`, `.yml` and `.yaml` as `yaml`;
 - the root: the directory of `dbt_project.yml`, else `--project-dir`.
 
