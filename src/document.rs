@@ -35,7 +35,8 @@ pub fn folding_ranges(text: &str, sql: bool) -> Value {
     };
     let symbols =
         scan::outline(text, sql).into_iter().map(|symbol| fold(symbol.range.start, symbol.inner.end, "region"));
-    let blocks = block_tags(text).into_iter().map(|tags| fold(tags[0].start, tags[tags.len() - 1].start, "region"));
+    let blocks =
+        scan::block_tags(text).into_iter().map(|tags| fold(tags[0].start, tags[tags.len() - 1].start, "region"));
     let tags = scan::tags(text).into_iter().map(|tag| fold(tag.start, closer(&tag), "region"));
     let comments = scan::comments(text).into_iter().filter(|comment| sql || text[comment.clone()].starts_with("{#"));
     let comments = comments.map(|comment| fold(comment.start, closer(&comment), "comment"));
@@ -54,37 +55,6 @@ pub fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> 
     scan::cte_uses(text).into_iter().find(|(cte, uses)| inside(&cte.name_range) || uses.iter().any(inside))
 }
 
-static TAG_KEYWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)\A\{%-?\s*(\w+)(.*?)-?%\}\z").unwrap());
-
-/// The keywords that open a Jinja block, closed by `end` and the keyword.
-const BLOCK_OPENERS: [&str; 12] =
-    ["if", "for", "macro", "call", "filter", "set", "raw", "test", "snapshot", "materialization", "docs", "block"];
-
-/// The tags of each Jinja block of TEXT: its opening tag, its `elif` and
-/// `else` tags, and its closing tag.  The inline `set x = ...` opens none.
-fn block_tags(text: &str) -> Vec<Vec<Range<usize>>> {
-    let mut open: Vec<(String, Vec<Range<usize>>)> = Vec::new();
-    let mut done = Vec::new();
-    for tag in scan::tags(text) {
-        let Some(found) = TAG_KEYWORD.captures(&text[tag.clone()]) else { continue };
-        let (keyword, rest) = (&found[1], &found[2]);
-        let closed = keyword.strip_prefix("end").and_then(|kind| open.iter().rposition(|(opener, _)| opener == kind));
-        match (keyword, closed) {
-            ("elif" | "else", _) => open.last_mut().into_iter().for_each(|(_, tags)| tags.push(tag.clone())),
-            (_, Some(at)) => {
-                let (_, mut tags) = open.remove(at);
-                tags.push(tag);
-                done.push(tags);
-            }
-            (_, None) if BLOCK_OPENERS.contains(&keyword) && !(keyword == "set" && rest.contains('=')) => {
-                open.push((keyword.to_owned(), vec![tag]));
-            }
-            _ => {}
-        }
-    }
-    done
-}
-
 /// The highlights at OFFSET of TEXT: on a CTE of SQL, its definition (write)
 /// and its uses (read); on a tag of a Jinja block, every tag of that block.
 pub fn highlights(text: &str, sql: bool, offset: usize, encoding: Encoding) -> Value {
@@ -96,7 +66,7 @@ pub fn highlights(text: &str, sql: bool, offset: usize, encoding: Encoding) -> V
         return Value::Array(definition.chain(uses.iter().map(|range| highlight(range, 2))).collect());
     }
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
-    let block = block_tags(text).into_iter().find(|tags| tags.iter().any(inside));
+    let block = scan::block_tags(text).into_iter().find(|tags| tags.iter().any(inside));
     block.map_or(Value::Null, |tags| Value::Array(tags.iter().map(|tag| highlight(tag, 1)).collect()))
 }
 
@@ -111,7 +81,7 @@ pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize], encoding: Enco
     for symbol in scan::outline(text, sql) {
         candidates.extend([symbol.inner, symbol.range]);
     }
-    for tags in block_tags(text) {
+    for tags in scan::block_tags(text) {
         let (opening, closing) = (&tags[0], &tags[tags.len() - 1]);
         candidates.extend([opening.end..closing.start, opening.start..closing.end]);
     }

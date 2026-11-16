@@ -253,6 +253,37 @@ pub fn blocks(text: &str) -> Vec<Symbol> {
     done
 }
 
+static TAG_KEYWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)\A\{%-?\s*(\w+)(.*?)-?%\}\z").unwrap());
+
+/// The keywords that open a Jinja block, closed by `end` and the keyword.
+const BLOCK_OPENERS: [&str; 12] =
+    ["if", "for", "macro", "call", "filter", "set", "raw", "test", "snapshot", "materialization", "docs", "block"];
+
+/// The tags of each Jinja block of TEXT: its opening tag, its `elif` and
+/// `else` tags, and its closing tag.  The inline `set x = ...` opens none.
+pub fn block_tags(text: &str) -> Vec<Vec<Range<usize>>> {
+    let mut open: Vec<(String, Vec<Range<usize>>)> = Vec::new();
+    let mut done = Vec::new();
+    for tag in tags(text) {
+        let Some(found) = TAG_KEYWORD.captures(&text[tag.clone()]) else { continue };
+        let (keyword, rest) = (&found[1], &found[2]);
+        let closed = keyword.strip_prefix("end").and_then(|kind| open.iter().rposition(|(opener, _)| opener == kind));
+        match (keyword, closed) {
+            ("elif" | "else", _) => open.last_mut().into_iter().for_each(|(_, tags)| tags.push(tag.clone())),
+            (_, Some(at)) => {
+                let (_, mut tags) = open.remove(at);
+                tags.push(tag);
+                done.push(tags);
+            }
+            (_, None) if BLOCK_OPENERS.contains(&keyword) && !(keyword == "set" && rest.contains('=')) => {
+                open.push((keyword.to_owned(), vec![tag]));
+            }
+            _ => {}
+        }
+    }
+    done
+}
+
 static CTE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?i)(?:\bwith(?:\s+recursive)?|,)\s*([\p{L}_][\p{L}\p{N}_$]*|"[^"]+")(?:\s*\([^()]*\))?\s+as\s*(?:(?:not\s+)?materialized\s*)?\("#,
