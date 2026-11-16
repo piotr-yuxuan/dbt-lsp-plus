@@ -113,6 +113,7 @@ fn alone_with_a_dbt_without_lsp() {
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
     session.wait_for(|m| m["method"] == "client/registerCapability");
     alone_from_the_parse(&mut session, &project);
+    alone_navigates_sql(&mut session, &project);
     alone_the_parse_s_errors(&mut session, &project);
     let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage").count();
     assert_eq!(shown, 0, "a dbt without lsp is no failure");
@@ -138,6 +139,25 @@ fn alone_from_the_parse(session: &mut Session, project: &Path) {
     let callees: Vec<&str> =
         outgoing["result"].as_array().unwrap().iter().map(|c| c["to"]["detail"].as_str().unwrap()).collect();
     assert_eq!(callees, ["model.shop.orders"]);
+}
+
+/// Navigation in SQL once the parse has run, which dbt lsp would answer: a
+/// `ref` to its model's file, a package's macro call to its block, and the
+/// references of a model across files.
+fn alone_navigates_sql(session: &mut Session, project: &Path) {
+    let orders = project.join("models/marts/orders.sql");
+    let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
+    let on_ref = session.request("textDocument/definition", at(4, 28));
+    assert_eq!(on_ref["result"]["uri"], uri(&project.join("models/staging/stg_orders.sql")), "{on_ref}");
+    let on_macro = session.request("textDocument/definition", at(16, 24));
+    let block = uri(&project.join("dbt_packages/shop_utils/macros/is_positive.sql"));
+    assert_eq!(on_macro["result"]["uri"], block, "{on_macro}");
+    let mut params = at(4, 28);
+    params["context"] = json!({"includeDeclaration": false});
+    let found = session.request("textDocument/references", params);
+    let uris: Vec<&str> = found["result"].as_array().into_iter().flatten().filter_map(|l| l["uri"].as_str()).collect();
+    let snapshot = uri(&project.join("snapshots/orders_snapshot.sql"));
+    assert!(uris.contains(&uri(&orders).as_str()) && uris.contains(&snapshot.as_str()), "{found}");
 }
 
 /// A model written outside the editor with an unknown `ref`: the watcher's
