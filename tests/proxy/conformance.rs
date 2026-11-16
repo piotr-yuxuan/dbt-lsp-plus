@@ -91,9 +91,10 @@ fn corpus() {
 /// The oracle: CASE copied to a scratch directory and parsed there by DBT as
 /// the proxy parses it, under a network namespace when NAMESPACE, in an
 /// empty environment but `PATH` and a scratch home; the copy, and the
-/// manifest that dbt wrote.  It fails when dbt exits otherwise than the
-/// case's `expected-error` says (dbt's code, a space, then the start of its
-/// message), runs past the proxy's deadline, or changes the copy.
+/// manifest that dbt wrote.  It fails when dbt runs past the proxy's
+/// deadline, changes the copy, or exits otherwise than the case's
+/// `expected-error` says (dbt's code, a space, then the start of its
+/// message).
 fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
     let name = case.file_name().unwrap().to_string_lossy().into_owned();
     let dir = scratch(&format!("conformance/{name}"));
@@ -126,6 +127,11 @@ fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
         std::thread::sleep(Duration::from_millis(20));
     };
     let printed = std::fs::read_to_string(&log).unwrap_or_default();
+    // A change first: dbt may install packages, and then fail.
+    let after = files(&copy);
+    let changed: BTreeSet<&PathBuf> =
+        before.keys().chain(after.keys()).filter(|path| before.get(*path) != after.get(*path)).collect();
+    assert!(changed.is_empty(), "{name}: dbt parse changed {changed:?} in its project:\n{printed}");
     let expected = std::fs::read_to_string(case.join("expected-error")).unwrap_or_default();
     let (code, message) = expected.trim().split_once(' ').unwrap_or((expected.trim(), ""));
     let as_expected = match code {
@@ -133,10 +139,6 @@ fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
         _ => !status.success() && printed.contains(code) && printed.contains(message),
     };
     assert!(as_expected, "{name}: dbt parse exited {status}, expected {:?}:\n{printed}", expected.trim());
-    let after = files(&copy);
-    let changed: BTreeSet<&PathBuf> =
-        before.keys().chain(after.keys()).filter(|path| before.get(*path) != after.get(*path)).collect();
-    assert!(changed.is_empty(), "{name}: dbt parse changed {changed:?} in its project");
     let manifest = std::fs::read_to_string(dir.join("cache/target/manifest.json")).expect("dbt wrote a manifest");
     (copy, serde_json::from_str(&manifest).expect("a manifest of JSON"))
 }
