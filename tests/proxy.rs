@@ -1240,6 +1240,122 @@ fn a_closed_document_s_unsaved_edits_leave_the_graph() {
     assert!(session.finish().success());
 }
 
+/// A copy of the fixture for test NAME, and a session on it in front of
+/// the fake; the client watches no file, so that nothing tells the proxy
+/// of a change on disk.
+fn on_a_copy(name: &str) -> (PathBuf, Session) {
+    let project = copy_fixture(&format!("{name}-project"));
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with(name, json!({}), &flags, None);
+    session.initialize(&project);
+    (project, session)
+}
+
+/// What the node ID calls, as the proxy's call hierarchy says.
+fn callees(session: &mut Session, id: &str) -> Vec<String> {
+    let outgoing = session.request("callHierarchy/outgoingCalls", json!({"item": {"data": {"uniqueId": id}}}));
+    details(&outgoing["result"], "to")
+}
+
+/// The proxy's workspace symbols for QUERY.
+fn symbols(session: &mut Session, query: &str) -> Value {
+    session.request("workspace/symbol", json!({"query": query}))["result"].clone()
+}
+
+#[test]
+fn an_edit_on_disk_that_no_one_announced_is_read_at_the_next_request() {
+    let (project, mut session) = on_a_copy("edit-on-disk");
+    assert!(callees(&mut session, "model.shop.order_summary").is_empty());
+    let summary = project.join("models/marts/order_summary.sql");
+    std::fs::write(summary, "select * from {{ ref('stg_customers') }}").unwrap();
+    assert_eq!(callees(&mut session, "model.shop.order_summary"), ["model.shop.stg_customers"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn an_open_document_is_read_again_at_each_change_and_each_open() {
+    let (project, mut session) = on_a_copy("open-document");
+    let path = project.join("models/marts/order_summary.sql");
+    let (customers, orders) = ("select * from {{ ref('stg_customers') }}", "select * from {{ ref('stg_orders') }}");
+    session.open(&path, Some(customers));
+    assert_eq!(callees(&mut session, "model.shop.order_summary"), ["model.shop.stg_customers"]);
+    let change = json!({"textDocument": {"uri": uri(&path), "version": 2}, "contentChanges": [{"text": orders}]});
+    session.notify("textDocument/didChange", change);
+    assert_eq!(callees(&mut session, "model.shop.order_summary"), ["model.shop.stg_orders"]);
+    // Closed unsaved: the file on disk, whose upstream is a variable.
+    session.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(&path)}}));
+    assert!(callees(&mut session, "model.shop.order_summary").is_empty());
+    // Each open starts again at version 1, whatever the text.
+    session.open(&path, Some(customers));
+    assert_eq!(callees(&mut session, "model.shop.order_summary"), ["model.shop.stg_customers"]);
+    session.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(&path)}}));
+    session.open(&path, Some(orders));
+    assert_eq!(callees(&mut session, "model.shop.order_summary"), ["model.shop.stg_orders"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_file_created_then_deleted_comes_and_goes() {
+    let (project, mut session) = on_a_copy("created-deleted");
+    assert_eq!(symbols(&mut session, "brand_new"), json!([]));
+    let path = project.join("models/marts/brand_new.sql");
+    std::fs::write(&path, "select 1").unwrap();
+    let found = symbols(&mut session, "brand_new");
+    assert_eq!(names(&found), ["brand_new"]);
+    assert_eq!(found[0]["location"]["uri"], uri(&path));
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(symbols(&mut session, "brand_new"), json!([]));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_project_s_name_and_model_paths_are_read_again() {
+    let (project, mut session) = on_a_copy("project-file");
+    assert_eq!(symbols(&mut session, "stg_orders")[0]["data"]["uniqueId"], "model.shop.stg_orders");
+    let file = project.join("dbt_project.yml");
+    let config = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, config.replace("name: 'shop'", "name: 'store'")).unwrap();
+    assert_eq!(symbols(&mut session, "stg_orders")[0]["data"]["uniqueId"], "model.store.stg_orders");
+    std::fs::write(&file, config.replace(r#"model-paths: ["models"]"#, r#"model-paths: ["models/marts"]"#)).unwrap();
+    assert_eq!(symbols(&mut session, "stg_orders"), json!([]), "outside the model paths");
+    assert_eq!(symbols(&mut session, "order_summary")[0]["data"]["uniqueId"], "model.shop.order_summary");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn an_open_project_file_s_name_is_read_again_once_saved() {
+    let (project, mut session) = on_a_copy("open-project-file");
+    let file = project.join("dbt_project.yml");
+    session.open(&file, None);
+    let renamed = std::fs::read_to_string(&file).unwrap().replace("name: 'shop'", "name: 'store'");
+    let change = json!({"textDocument": {"uri": uri(&file), "version": 2}, "contentChanges": [{"text": renamed}]});
+    session.notify("textDocument/didChange", change);
+    // A request between the edit and the save: the open document's key no
+    // longer changes, though the name on disk does.
+    symbols(&mut session, "stg_orders");
+    std::fs::write(&file, &renamed).unwrap();
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&file)}}));
+    assert_eq!(symbols(&mut session, "stg_orders")[0]["data"]["uniqueId"], "model.store.stg_orders");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_package_unpacked_again_with_the_same_sizes_and_times_is_read_again() {
+    let (project, mut session) = on_a_copy("package-replaced");
+    assert_eq!(names(&symbols(&mut session, "is_positive")), ["is_positive"]);
+    // As an archive unpacks a new version: a new file, its size and time kept.
+    let path = project.join("dbt_packages/shop_utils/macros/is_positive.sql");
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let unpacked = project.with_file_name("unpacked.sql");
+    std::fs::write(&unpacked, std::fs::read_to_string(&path).unwrap().replace("is_positive", "is_negative")).unwrap();
+    std::fs::File::options().write(true).open(&unpacked).unwrap().set_modified(modified).unwrap();
+    std::fs::rename(&unpacked, &path).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(names(&symbols(&mut session, "is_negative")), ["is_negative"]);
+    assert_eq!(symbols(&mut session, "is_positive"), json!([]));
+    assert!(session.finish().success());
+}
+
 #[test]
 fn a_document_under_a_link_inside_the_project_is_found_where_it_was_opened() {
     let project = copy_fixture("link-inside");
