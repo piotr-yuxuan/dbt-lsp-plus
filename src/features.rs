@@ -29,18 +29,20 @@ fn resource_kind(resource_type: &str) -> u32 {
     }
 }
 
-/// LSP's `SymbolKind` and a label of a block or CTE of the outline.
-fn outline_kind(kind: Kind) -> (u32, &'static str) {
-    match kind {
-        Kind::Macro => (12, "macro"),
-        Kind::Test => (12, "test"),
-        Kind::Materialization => (12, "materialization"),
-        Kind::Snapshot => (5, "snapshot"),
-        Kind::Docs => (15, "docs"),
-        Kind::Set => (13, "set"),
-        Kind::Cte => (23, "CTE"),
-    }
-}
+/// LSP's `SymbolKind` and a label of each kind of block or CTE of the
+/// outline.
+const OUTLINE_KINDS: [(Kind, u32, &str); 10] = [
+    (Kind::Macro, 12, "macro"),                     // Function
+    (Kind::Test, 12, "test"),                       // Function
+    (Kind::Materialization, 12, "materialization"), // Function
+    (Kind::Snapshot, 5, "snapshot"),                // Class
+    (Kind::Docs, 15, "docs"),                       // String
+    (Kind::Set, 13, "set"),                         // Variable
+    (Kind::Cte, 23, "CTE"),                         // Struct
+    (Kind::If, 3, "if"),                            // Namespace, as agreed with dbt-mode
+    (Kind::For, 3, "for"),                          // Namespace
+    (Kind::Call, 3, "call"),                        // Namespace
+];
 
 /// LSP's `SymbolKind` of an entry of a properties file, by its label;
 /// any other entry, a model, snapshot, analysis or semantic model, is 5,
@@ -109,10 +111,10 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
         properties::entries(text).into_iter().map(outlined).collect()
     } else {
         let outlined = |symbol: Symbol| {
-            let (kind, detail) = outline_kind(symbol.kind);
-            Outlined { name: symbol.name, kind, detail, range: symbol.range, name_range: symbol.name_range }
+            let (_, kind, detail) = OUTLINE_KINDS.into_iter().find(|(kind, ..)| *kind == symbol.kind)?;
+            Some(Outlined { name: symbol.name, kind, detail, range: symbol.range, name_range: symbol.name_range })
         };
-        scan::outline(text, !uri.ends_with(".md")).into_iter().map(outlined).collect()
+        scan::outline(text, !uri.ends_with(".md"), true).into_iter().filter_map(outlined).collect()
     };
     let mut stack: Vec<(Outlined, Vec<Value>)> = Vec::new();
     let mut roots = Vec::new();
@@ -331,6 +333,32 @@ mod tests {
             symbols[0]["children"][1]["selectionRange"],
             json!({"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 1}})
         );
+    }
+
+    #[test]
+    fn nests_the_control_blocks_with_ctes_and_definitions() {
+        let text = "{% macro m() %}\n{%- if is_incremental() -%}\nwith a as (select 1)\nselect * from a\n\
+                    {%- else %}\nselect 2\n{%- endif %}\n{% for c in cs %}{{ c }}{% endfor %}\n\
+                    {% call statement('main') %}select 1{% endcall %}\n{% endmacro %}\n";
+        let symbols = document_symbols(text, Encoding::Utf16, true, "file:///m.sql");
+        let macro_ = &symbols[0];
+        assert_eq!((&macro_["name"], &macro_["children"][0]["name"]), (&json!("m"), &json!("if is_incremental()")));
+        let branch = &macro_["children"][0];
+        assert_eq!((&branch["kind"], &branch["detail"]), (&json!(3), &json!("if")));
+        assert_eq!(branch["children"][0]["name"], "a", "the CTE inside the if");
+        assert_eq!(
+            branch["selectionRange"],
+            json!({"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 27}})
+        );
+        let others: Vec<(&Value, &Value, &Value)> = macro_["children"].as_array().unwrap()[1..]
+            .iter()
+            .map(|child| (&child["name"], &child["kind"], &child["detail"]))
+            .collect();
+        let expected = [
+            (json!("for c in cs"), json!(3), json!("for")),
+            (json!("call statement('main')"), json!(3), json!("call")),
+        ];
+        assert_eq!(others, expected.iter().map(|(n, k, d)| (n, k, d)).collect::<Vec<_>>(), "no else");
     }
 
     #[test]

@@ -365,7 +365,18 @@ The proxy adds four capabilities that need one document alone, and the
 rename of a CTE, which the server answers with null:
 
 - Outline: in SQL and Markdown, the Jinja blocks and the CTEs, nested by
-  extent.  In a `.yml` or `.yaml` file, where dbt lsp 2.0.9 answers `[]`,
+  extent: the definition blocks (`macro`, `test`, `snapshot`,
+  `materialization`, `docs`, the block `set`) by their name, and the
+  `if`, `for` and `call` blocks by their statement as written, from the
+  keyword, its trim markers dropped and each run of spaces, tabs and line
+  ends one space (`if is_incremental()`, `call(user) dbt_utils.m()`),
+  kind 3 (Namespace) with the detail `if`, `for` or `call`, as agreed with
+  dbt-mode for its breadcrumbs (plan 027); `elif`, `else` and closing tags
+  are no symbols, nor a tag in a raw block.  A control block left open
+  runs to the end of the innermost block or CTE that holds its opening
+  tag, else of the text, so that the nesting holds while it is typed.  Only the outline names
+  the control blocks: a CTE's scope and the project's resources stay the
+  definition blocks'.  In a `.yml` or `.yaml` file, where dbt lsp 2.0.9 answers `[]`,
   the named entries of a properties file: those under `models`, `seeds`,
   `snapshots`, `analyses`, `macros`, `functions`, `data_tests` (or
   `tests`), `sources`, `exposures`, `metrics`, `semantic_models`,
