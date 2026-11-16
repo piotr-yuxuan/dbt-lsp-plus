@@ -44,7 +44,7 @@ src/project.rs                the resources of a project and its packages
 src/cache.rs                  the scan kept between requests, each file by its metadata
 src/graph.rs                  the dependency graph: scanned, then the server's or the manifest's
 src/sources.rs                references and renames of sources
-src/navigation.rs             the targets of definitions in YAML, dbt's lookup
+src/navigation.rs             the targets of definitions and references, dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/packages.rs               whether dbt would install packages before it parses
@@ -124,7 +124,8 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     script makes one life do in place of an answer, apart from `main`'s
     loop over frames;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
-    `Proxy::on_rename`, `Proxy::on_definition` and `Proxy::on_document`: the
+    `Proxy::on_rename`, `Proxy::on_definition`, `Proxy::on_references` and
+    `Proxy::on_document`: the
     routing of a request the proxy may answer itself (by its method, then
     by what its position holds), and one answer per kind of request, as
     for the owned methods;

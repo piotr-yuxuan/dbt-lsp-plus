@@ -29,9 +29,10 @@ method:
   where dbt lsp answers nothing: a
   `ref` to its model, a `source` to its table's entry, a `doc` to its docs
   block, a model's `name:` to its file, a generic test's name to its test
-  block, by dbt 2.0.9's lookup across packages; and from a `source()` in
-  SQL; hover (`textDocument/hover`) there shows the docs text, the test's
-  signature, the node's summary;
+  block, by dbt 2.0.9's lookup across packages, versions included once
+  your `dbt parse` has run; and from a `source()` in SQL; hover
+  (`textDocument/hover`) there shows the docs text, the test's signature,
+  the node's summary;
 - the last run's failures as diagnostics
   (`textDocument/publishDiagnostics`), beside dbt lsp's own: after a
   `dbt build` from anywhere, a model's error at its file, a test's
@@ -53,7 +54,8 @@ method:
 
 Every other message passes unchanged, byte for byte.  A feature that the
 server announces stays the server's, but for references and renames on a
-source; the initialize result names those under `experimental.dbtLspPlus`.
+source and definitions in YAML; the initialize result names those, per
+kind of target and kind of file, under `experimental.dbtLspPlus`.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
 ten minutes, and gives it the open documents as they stand.  Without
 `dbt lsp`, and while it restarts, the proxy keeps serving its own
