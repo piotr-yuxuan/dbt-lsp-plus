@@ -69,6 +69,8 @@ docs/tutorials/               a first session, from the build to the call hierar
 docs/how-to/                  configure an editor or an agent, use it with dbt-oss alone, build and test
 docs/reference/               the features by LSP method, the configuration, the release pipeline
 docs/explanation/design.md    the design, what dbt lsp was observed to do, what is left
+docs/diagrams/                diagram sources, light and dark, in diagram-design's sanityinc-tomorrow profile
+docs/images/                  their PNG exports, by headless Chromium at twice the size
 docs/social-media-preview.png GitHub's preview, from the untracked docs/work/social-preview/
 ```
 
