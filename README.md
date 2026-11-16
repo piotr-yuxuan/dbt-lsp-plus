@@ -46,6 +46,7 @@ of the tests, from Emacs.
 
 - Tutorial: [Your first session](docs/tutorials/first-session.md)
 - How-to: [Configure an editor](docs/how-to/configure-an-editor.md),
+  [Use it with an agent](docs/how-to/use-with-an-agent.md),
   [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md),
   [Build and test](docs/how-to/build-and-test.md)
 - Reference: [The features](docs/reference/features.md), by LSP method;
