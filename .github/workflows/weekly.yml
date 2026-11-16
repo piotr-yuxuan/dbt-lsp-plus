@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+#
+# The corpus, and with the proprietary build the live test, on the latest stable dbt, each
+# week and by hand.  It holds no rule: scripts/fetch-dbt finds the latest build, the checks
+# are in the Makefile, and docs/release-pipeline.md describes this file.  A failure fails the
+# run, which GitHub tells the user who last changed the schedule, if they have Actions
+# notifications on.  It counts for neither CI nor CD.
+name: Weekly
+
+on:
+  schedule:
+    # Monday morning, off the hour, when GitHub drops scheduled runs first.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Each job: no credentials left in the checkout, and the caches restored only, so that a
+# build of dbt that no pin vouches for can never seed CI's.  No continue-on-error: a drift
+# fails the run.
+jobs:
+  dbt-oss:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
+          save: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
+      - run: python3 scripts/fetch-dbt --latest oss "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # That runner's AppArmor otherwise refuses `unshare -r`, which cuts each parse off
+      # the network; and a job without the cut fails rather than pass.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: unshare -rn true
+      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
+        shell: bash
+      # Whatever the corpus said: the build, the corpus's line, and what drifted.
+      - if: always()
+        run: |
+          { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
+            grep -hP '^conformance:|^divergences to fix|^registered, but|\t' "$RUNNER_TEMP/corpus.log" || true
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
+
+  # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
+  # variable DBT_LSP_PLUS_PROPRIETARY to true; trusted through TLS and the SHA-256 that dbt
+  # Labs publishes beside the archive: see the reference.
+  dbt:
+    if: vars.DBT_LSP_PLUS_PROPRIETARY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
+          save: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
+      - run: python3 scripts/fetch-dbt --latest proprietary "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
+        shell: bash
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: unshare -rn true
+      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
+        shell: bash
+      # Built with the network, then the live test with none.
+      - run: nix develop -c cargo test --locked --test proxy --no-run
+      - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/live.log"
+        shell: bash
+      - if: always()
+        run: |
+          { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
+            grep -hP '^conformance:|^divergences to fix|^registered, but|\t|^test live' "$RUNNER_TEMP/corpus.log" "$RUNNER_TEMP/live.log" || true
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
