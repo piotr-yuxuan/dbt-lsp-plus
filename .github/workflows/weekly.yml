@@ -61,7 +61,7 @@ jobs:
         run: |
           { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
             grep -h '^conformance:' "$RUNNER_TEMP/corpus.log" || true
-            sed -n '/panicked at/,/^note: run with/p' "$RUNNER_TEMP/corpus.log" || true
+            sed -n '/panicked at/,/^note: run with\|^failures:$/p' "$RUNNER_TEMP/corpus.log" || true
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
@@ -105,7 +105,7 @@ jobs:
         run: |
           { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
             grep -h '^conformance:' "$RUNNER_TEMP/corpus.log" || true
-            sed -n '/panicked at/,/^note: run with/p' "$RUNNER_TEMP/corpus.log" || true
+            sed -n '/panicked at/,/^note: run with\|^failures:$/p' "$RUNNER_TEMP/corpus.log" || true
             grep -h '^test live' "$RUNNER_TEMP/live.log" || true
-            sed -n '/panicked at/,/^note: run with/p' "$RUNNER_TEMP/live.log" || true
+            sed -n '/panicked at/,/^note: run with\|^failures:$/p' "$RUNNER_TEMP/live.log" || true
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"

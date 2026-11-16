@@ -202,6 +202,8 @@ FROM_HERE = "github.event_name == 'push' || github.event.pull_request.head.repo.
 PROPRIETARY = "vars.DBT_LSP_PLUS_PROPRIETARY == 'true' && github.event_name == 'push'"
 # A job, not one of its steps, that may fail without failing the run.
 JOB_MAY_FAIL = r"(?m)^    continue-on-error: true$"
+# A panic's message whole, to its note, or to the list of failures when no note follows.
+PANIC = "'/panicked at/,/^note: run with\\|^failures:$/p'"
 CARGO_CACHE = ["~/.cargo/registry", "~/.cargo/git", "target"]
 CD_GATE = """    if: >-
       !github.event.repository.fork && (
@@ -457,9 +459,12 @@ class Weekly(unittest.TestCase):
                     self.assertIn(f'| tee "$RUNNER_TEMP/{log}.log"', job)
                     self.assertIn(f'"$RUNNER_TEMP/{log}.log"', last)
                 self.assertIn("grep -h '^conformance:' \"$RUNNER_TEMP/corpus.log\"", last)
-                self.assertIn(
-                    "sed -n '/panicked at/,/^note: run with/p' \"$RUNNER_TEMP/corpus.log\"", last
-                )
+                self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/corpus.log"', last)
+
+    def test_the_proprietary_summary_has_the_live_test_s_result(self):
+        last = self.weekly_jobs["dbt"][self.weekly_jobs["dbt"].rindex("      - ") :]
+        self.assertIn("grep -h '^test live' \"$RUNNER_TEMP/live.log\"", last)
+        self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/live.log"', last)
 
     def test_github_s_listing_gets_the_job_s_token(self):
         fetch = re.search(

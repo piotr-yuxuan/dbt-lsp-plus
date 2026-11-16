@@ -215,6 +215,10 @@ class Latest(unittest.TestCase):
             with self.subTest(archives=archives), self.assertRaises(fetch_dbt.FetchError):
                 fetch_dbt.latest_oss([release("v2.0.12", assets=archives), release("v2.0.11")])
 
+    def test_an_older_release_without_a_digest_does_not_matter(self):
+        old = release("v2.0.1", assets=[{"name": "dbt-core-2.0.1-x86_64-unknown-linux-gnu.tar.gz"}])
+        self.assertEqual(fetch_dbt.latest_oss([release("v2.0.11"), old])[0], "2.0.11")
+
     def test_no_release_with_its_archive_is_an_error(self):
         for releases in (
             [],
