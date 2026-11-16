@@ -1940,6 +1940,30 @@ fn the_summary_alone_follows_the_client_s_first_hover_format() {
     }
 }
 
+#[test]
+fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
+    let (mut session, log) = Session::fake("standalone-hover", json!({"no_lsp": true, "manifest": manifest()}));
+    let capabilities = session.initialize(&fixture())["capabilities"].clone();
+    assert_eq!(capabilities["textDocumentSync"], json!({"openClose": true, "change": 2, "save": {}}));
+    assert_eq!([&capabilities["hoverProvider"], &capabilities["inlayHintProvider"]], [&json!(true), &json!(true)]);
+    let orders = fixture().join("models/marts/orders.sql");
+    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let early = session.request("textDocument/hover", on_ref.clone());
+    assert_eq!((early.get("error"), &early["result"]), (None, &Value::Null), "before a parse: {early}");
+    session.open(&orders, None);
+    let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", on_ref), |result| !result.is_null());
+    let summary = json!({"kind": "plaintext", "value": "model view, \"shop\".\"main\".\"stg_orders\""});
+    assert_eq!(hover["contents"], summary);
+    let hints = hints_of(&mut session, &orders)["result"].clone();
+    assert!(hints.as_array().unwrap().iter().any(|hint| hint["tooltip"] == "model.shop.stg_orders"), "{hints}");
+    let elsewhere = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
+    assert_eq!(session.request("textDocument/hover", elsewhere)["result"], Value::Null);
+    // `ref(var(...))` names no node the scan can see: no hint.
+    assert_eq!(hints_of(&mut session, &fixture().join("models/marts/order_summary.sql"))["result"], json!([]));
+    assert!(lives(&log).is_empty(), "a server started");
+    assert!(session.finish().success());
+}
+
 /// A models properties file for plan 006's navigation.
 const MODELS_YML: &str = "\
 version: 2

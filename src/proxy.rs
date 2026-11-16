@@ -415,6 +415,14 @@ impl<W: Write> Proxy<W> {
         capabilities.insert("referencesProvider".into(), json!(true));
         capabilities.insert("renameProvider".into(), json!(true));
         capabilities.insert("definitionProvider".into(), json!(true));
+        // Alone for good, it wants saves, which start a parse, and answers
+        // hovers and hints from the parse alone.
+        if self.standalone {
+            capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2, "save": {}}));
+            capabilities.insert("hoverProvider".into(), json!(true));
+            capabilities.insert("inlayHintProvider".into(), json!(true));
+            self.owned.extend(["textDocument/hover", "textDocument/inlayHint"]);
+        }
         self.add_capabilities(&mut capabilities);
         self.watch_runs();
         let info = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
@@ -827,10 +835,10 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// Answers a request that the proxy answers itself.  A refusal fails it
-    /// with its reason; a panic while answering fails that request alone,
-    /// never the session.
-    fn answer(&mut self, method: &str, id: &Value, params: &Value) {
+    /// Answers a request that the proxy answers itself, which it remembers as
+    /// PENDING.  A refusal fails it with its reason; a panic while answering
+    /// fails that request alone, never the session.
+    fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
         if method == config::NODE_INFO {
             self.want_index();
         }
@@ -847,6 +855,13 @@ impl<W: Write> Proxy<W> {
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Ok)
+            }
+            // As dbt lsp 2.0.9's answer with nothing of its own gets them,
+            // null for a hover, no hint: the proxy's part, else that.
+            "textDocument/hover" | "textDocument/inlayHint" => {
+                let nothing = json!({"textDocument/hover": null, "textDocument/inlayHint": []});
+                let merged = pending.merged(&json!({"result": nothing[method]}), self.markdown);
+                Some(Ok(merged.map_or_else(|| nothing[method].clone(), |answer| answer["result"].clone())))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1037,7 +1052,7 @@ impl<W: Write> Proxy<W> {
         }
         let pending = self.remember(method, id, params);
         match (self.local_method(method, params), &self.server, method) {
-            (Some(owned), ..) => self.answer(owned, id, params),
+            (Some(owned), ..) => self.answer(owned, id, params, &pending),
             (None, Some(_), _) => {
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
