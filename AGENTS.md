@@ -63,7 +63,7 @@ Makefile                      the checks, which CI runs too
 scripts/check-public          nothing private in the tracked files, an SPDX line in each source
 scripts/check-commits         each commit's title, trailers and text
 scripts/release.py            CD's release: the version commit, the tag and its notes
-scripts/fetch-dbt             CI's dbt, fetched by its pinned SHA-256
+scripts/fetch-dbt             CI's dbt by its pinned SHA-256, or the latest by its published one
 tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands in for gh
 .github/workflows/            CI and CD, and the weekly runs on the latest dbt
 ```
