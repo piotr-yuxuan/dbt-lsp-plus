@@ -65,6 +65,11 @@ scripts/fetch-dbt             CI's dbt by its pinned SHA-256, or the latest by i
 scripts/bench/                synthetic projects and the proxy's times on them
 tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands in for gh
 .github/workflows/            CI and CD, and the weekly runs on the latest dbt
+docs/tutorials/               a first session, from the build to the call hierarchy
+docs/how-to/                  configure an editor, use it with dbt-oss alone, build and test
+docs/reference/               the features by LSP method, the command line, the release pipeline
+docs/explanation/design.md    the design, what dbt lsp was observed to do, what is left
+docs/social-media-preview.png GitHub's preview, from the untracked docs/work/social-preview/
 ```
 
 ## Rules of the code
