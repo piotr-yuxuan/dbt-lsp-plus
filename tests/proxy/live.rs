@@ -1,31 +1,52 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy in front of the real dbt lsp.  Opt-in, since it needs dbt 2:
+//! The proxy in front of the real dbt lsp, or alone with a dbt that has
+//! none.  Opt-in, since it needs dbt 2:
 //!
 //!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
 //!
 //! It runs on a copy of the fixture, from an empty environment with a
 //! scratch home, so that dbt writes nothing into the repository nor the
-//! user's home.
+//! user's home.  Each test says, past the harness's capture, when the dbt
+//! given is not the kind it needs, and passes.
 
 use crate::support::{Session, copy_fixture, uri};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
+
+/// Whether DBT has `lsp`, as the proprietary build has and dbt-oss has not,
+/// run with HOME as its home; when it is not WANTED, says that the test
+/// NAME does not apply.
+fn has_lsp(dbt: &str, home: &Path, wanted: bool, name: &str) -> bool {
+    let mut probe = Command::new(dbt);
+    probe.args(["lsp", "--help"]).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    probe.env("HOME", home).stdout(Stdio::null()).stderr(Stdio::null());
+    let has = probe.status().is_ok_and(|status| status.success());
+    if has != wanted {
+        let _ = writeln!(std::io::stderr(), "{name}: {dbt} has {}lsp: nothing to test", if has { "" } else { "no " });
+    }
+    has
+}
 
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
 fn in_front_of_the_real_dbt_lsp() {
     let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
     let project = copy_fixture("live");
+    let home = project.with_file_name("home");
+    std::fs::create_dir_all(&home).unwrap();
+    if !has_lsp(&dbt, &home, true, "in_front_of_the_real_dbt_lsp") {
+        return;
+    }
     std::fs::write(project.join("models/marts/_models.yml"), LIVE_MODELS).unwrap();
     // The files of a build whose relationships test failed, as dbt 2.0.9 writes them.
     std::fs::create_dir_all(project.join("target")).unwrap();
     std::fs::write(project.join("target/run_results.json"), LIVE_RESULTS).unwrap();
     std::fs::write(project.join("target/manifest.json"), LIVE_MANIFEST).unwrap();
     std::fs::write(project.join("target/sources.json"), LIVE_FRESHNESS).unwrap();
-    let home = project.with_file_name("home");
-    std::fs::create_dir_all(&home).unwrap();
     let project_arg = project.to_string_lossy().into_owned();
     let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
     // DO_NOT_TRACK does not stop the telemetry of dbt 2.0.9; this flag does.
@@ -67,6 +88,75 @@ fn in_front_of_the_real_dbt_lsp() {
     assert!(session.finish().success());
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
+}
+
+/// With a dbt that has no `lsp`, such as dbt-oss: the proxy alone, its
+/// node information, hover and graph from the user's own `dbt parse`, and
+/// that parse's errors as diagnostics.
+#[test]
+#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
+fn alone_with_a_dbt_without_lsp() {
+    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
+    let project = copy_fixture("live-alone");
+    let home = project.with_file_name("home");
+    std::fs::create_dir_all(&home).unwrap();
+    if has_lsp(&dbt, &home, false, "alone_with_a_dbt_without_lsp") {
+        return;
+    }
+    let project_arg = project.to_string_lossy().into_owned();
+    let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
+    let before = paths(&project);
+    let mut session = Session::start(&server, &[("HOME", home.as_path())], Some(&project));
+    session.timeout = Duration::from_secs(120);
+    let capabilities = json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
+    let result = session.initialize_as(&project, capabilities);
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
+    session.wait_for(|m| m["method"] == "client/registerCapability");
+    alone_from_the_parse(&mut session, &project);
+    alone_the_parse_s_errors(&mut session, &project);
+    let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage").count();
+    assert_eq!(shown, 0, "a dbt without lsp is no failure");
+    assert!(session.finish().success());
+    let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
+    assert!(added.is_empty(), "the project gained {added:?}");
+}
+
+/// The information of a node, a hover's summary and the graph, as dbt
+/// resolves them: `order_summary`'s upstream is a variable.
+fn alone_from_the_parse(session: &mut Session, project: &Path) {
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let orders = session.poll(Duration::from_secs(60), request, |result| result.is_object());
+    assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"", "{orders}");
+    let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_ref);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
+    assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
+    let summary = json!({"item": item(project, "models/marts/order_summary.sql", "model.shop.order_summary")});
+    let outgoing = session.request("callHierarchy/outgoingCalls", summary);
+    let callees: Vec<&str> =
+        outgoing["result"].as_array().unwrap().iter().map(|c| c["to"]["detail"].as_str().unwrap()).collect();
+    assert_eq!(callees, ["model.shop.orders"]);
+}
+
+/// A model written outside the editor with an unknown `ref`: the watcher's
+/// event parses, and dbt's error shows on it, until the model goes.
+fn alone_the_parse_s_errors(session: &mut Session, project: &Path) {
+    let broken = project.join("models/marts/broken.sql");
+    std::fs::write(&broken, "select * from {{ ref('nowhere') }}\n").unwrap();
+    let event = |kind: u8| json!({"changes": [{"uri": uri(&broken), "type": kind}]});
+    let on_broken = |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&broken);
+    session.notify("workspace/didChangeWatchedFiles", event(1));
+    let published = session.wait_for(on_broken);
+    let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
+    let unknown = diagnostics.iter().find(|d| d["code"] == "1048").unwrap_or_else(|| panic!("{published}"));
+    assert_eq!((&unknown["source"], &unknown["severity"]), (&json!("dbt parse"), &json!(1)), "{unknown}");
+    assert_eq!(unknown["range"]["start"]["line"], 0, "{unknown}");
+    std::fs::remove_file(&broken).unwrap();
+    session.received.clear();
+    session.notify("workspace/didChangeWatchedFiles", event(3));
+    assert_eq!(session.wait_for(on_broken)["params"]["diagnostics"], json!([]));
 }
 
 /// Every path under DIR, relative to it, but dbt lsp's own `target/` and

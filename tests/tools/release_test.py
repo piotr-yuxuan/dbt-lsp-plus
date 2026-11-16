@@ -253,6 +253,7 @@ class Workflows(unittest.TestCase):
             ("test", "nix develop -c make test"),
             ("macos", "nix develop -c make test"),
             ("dbt-oss", "nix develop -c make conformance"),
+            ("dbt-oss", "nix develop -c unshare -rn make live"),
             ("dbt", "nix develop -c make conformance"),
             ("dbt", "nix develop -c unshare -rn make live"),
         ):
@@ -273,12 +274,20 @@ class Workflows(unittest.TestCase):
                 self.assertNotIn(-1, places)
                 self.assertEqual(places, sorted(places))
 
-    def test_the_proprietary_corpus_runs_before_the_live_test_built_then_cut_off(self):
-        job = self.jobs["dbt"]
-        corpus = job.index("run: nix develop -c make conformance ")
-        built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
-        self.assertLess(corpus, built)
-        self.assertLess(built, job.index("run: nix develop -c unshare -rn make live "))
+    def test_each_corpus_runs_before_the_live_test_built_then_cut_off(self):
+        for name in ("dbt-oss", "dbt"):
+            with self.subTest(name):
+                job = self.jobs[name]
+                corpus = job.index("run: nix develop -c make conformance ")
+                built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
+                self.assertLess(corpus, built)
+                self.assertLess(built, job.index("run: nix develop -c unshare -rn make live "))
+
+    def test_the_test_job_lets_the_proxy_cut_its_parse_off_the_network(self):
+        job = self.jobs["test"]
+        sysctl = "      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
+        sysctl = job.index(sysctl)
+        self.assertLess(sysctl, job.index("      - run: nix develop -c make test"))
 
     def test_no_cache_holds_a_fetched_dbt(self):
         for name, job in self.jobs.items():
@@ -426,24 +435,24 @@ class Weekly(unittest.TestCase):
                 self.assertNotIn(-1, places)
                 self.assertEqual(places, sorted(places))
 
-    def test_the_proprietary_live_test_runs_cut_off_after_its_build_whatever_the_corpus_said(self):
-        job = self.weekly_jobs["dbt"]
-        self.assertIn(
-            "      - id: fetch\n        run: python3 scripts/fetch-dbt --latest proprietary ", job
-        )
-        self.assertIn("      - id: cut\n        run: unshare -rn true\n", job)
-        outcomes = "steps.fetch.outcome == 'success' && steps.cut.outcome == 'success'"
-        condition = f"if: ${{{{ !cancelled() && {outcomes} }}}}"
-        for step in (
-            "run: nix develop -c cargo test --locked --test proxy --no-run",
-            "run: nix develop -c unshare -rn make live ",
-        ):
-            with self.subTest(step):
-                self.assertIn(f"      - {condition}\n        {step}", job)
-        corpus = job.index("run: nix develop -c make conformance ")
-        built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
-        self.assertLess(corpus, built)
-        self.assertLess(built, job.index("run: nix develop -c unshare -rn make live "))
+    def test_each_live_test_runs_cut_off_after_its_build_whatever_the_corpus_said(self):
+        for name, build in (("dbt-oss", "oss"), ("dbt", "proprietary")):
+            job = self.weekly_jobs[name]
+            fetch = f"      - id: fetch\n        run: python3 scripts/fetch-dbt --latest {build} "
+            self.assertIn(fetch, job)
+            self.assertIn("      - id: cut\n        run: unshare -rn true\n", job)
+            outcomes = "steps.fetch.outcome == 'success' && steps.cut.outcome == 'success'"
+            condition = f"if: ${{{{ !cancelled() && {outcomes} }}}}"
+            for step in (
+                "run: nix develop -c cargo test --locked --test proxy --no-run",
+                "run: nix develop -c unshare -rn make live ",
+            ):
+                with self.subTest(name=name, step=step):
+                    self.assertIn(f"      - {condition}\n        {step}", job)
+            corpus = job.index("run: nix develop -c make conformance ")
+            built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
+            self.assertLess(corpus, built)
+            self.assertLess(built, job.index("run: nix develop -c unshare -rn make live "))
 
     def test_every_pipe_fails_with_its_command(self):
         self.assertRegex(self.weekly, r"(?m)^defaults:\n  run:\n    shell: bash\n")
@@ -455,16 +464,13 @@ class Weekly(unittest.TestCase):
                 last = job[job.rindex("      - ") :]
                 self.assertTrue(last.startswith("      - if: always()\n        run: |\n"), last)
                 self.assertIn('>> "$GITHUB_STEP_SUMMARY"', last)
-                for log in ("fetch", "corpus"):
+                for log in ("fetch", "corpus", "live"):
                     self.assertIn(f'| tee "$RUNNER_TEMP/{log}.log"', job)
                     self.assertIn(f'"$RUNNER_TEMP/{log}.log"', last)
                 self.assertIn("grep -h '^conformance:' \"$RUNNER_TEMP/corpus.log\"", last)
-                self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/corpus.log"', last)
-
-    def test_the_proprietary_summary_has_the_live_test_s_result(self):
-        last = self.weekly_jobs["dbt"][self.weekly_jobs["dbt"].rindex("      - ") :]
-        self.assertIn("grep -h '^test live' \"$RUNNER_TEMP/live.log\"", last)
-        self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/live.log"', last)
+                self.assertIn("grep -h '^test live' \"$RUNNER_TEMP/live.log\"", last)
+                for log in ("corpus", "live"):
+                    self.assertIn(f'sed -n {PANIC} "$RUNNER_TEMP/{log}.log"', last)
 
     def test_github_s_listing_gets_the_job_s_token(self):
         fetch = re.search(

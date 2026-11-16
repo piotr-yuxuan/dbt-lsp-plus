@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 #
-# The corpus, and with the proprietary build the live test, on the latest stable dbt, each
-# week and by hand.  It holds no rule: scripts/fetch-dbt finds the latest build, the checks
+# The corpus and the live test on the latest stable dbt, each week and by hand.  It holds no rule: scripts/fetch-dbt finds the latest build, the checks
 # are in the Makefile, and docs/release-pipeline.md describes this file.  A failure fails the
 # run, which GitHub tells the user who last changed the schedule, if they have Actions
 # notifications on.  It counts for neither CI nor CD.
@@ -47,21 +46,31 @@ jobs:
             target
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
-      - run: python3 scripts/fetch-dbt --latest oss "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
+      - id: fetch
+        run: python3 scripts/fetch-dbt --latest oss "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
         env:
           GH_TOKEN: ${{ github.token }}
       # That runner's AppArmor otherwise refuses `unshare -r`, which cuts each parse off
       # the network; and a job without the cut fails rather than pass.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: unshare -rn true
+      - id: cut
+        run: unshare -rn true
       - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
-      # Whatever the corpus said: the build, the corpus's line, and its failure whole, what
-      # drifted or which parse failed.
+      # Built with the network, then the live test with none, whatever the corpus said: the
+      # proxy alone, as dbt-oss has no `dbt lsp`.
+      - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
+        run: nix develop -c cargo test --locked --test proxy --no-run
+      - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
+        run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/live.log"
+      # Whatever came before: the build, the corpus's line, the live test's, and each
+      # failure whole, what drifted or which parse failed.
       - if: always()
         run: |
           { echo '```'; cat "$RUNNER_TEMP/fetch.log" || true
             grep -h '^conformance:' "$RUNNER_TEMP/corpus.log" || true
             sed -n '/panicked at/,/^note: run with\|^failures:$/p' "$RUNNER_TEMP/corpus.log" || true
+            grep -h '^test live' "$RUNNER_TEMP/live.log" || true
+            sed -n '/panicked at/,/^note: run with\|^failures:$/p' "$RUNNER_TEMP/live.log" || true
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
