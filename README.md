@@ -67,7 +67,7 @@ proxy runs `dbt parse` with no network and the project read-only, under
 `unshare -rnm`, where a launcher fails when its cache is cold.
 
 It uses only the server's interface, unlocks nothing that dbt gates behind
-an account, and does not ship dbt.  `docs/design.md` explains how it works
+an account, and does not ship dbt.  `docs/explanation/design.md` explains how it works
 and what it would take to finish.
 
 ## Usage

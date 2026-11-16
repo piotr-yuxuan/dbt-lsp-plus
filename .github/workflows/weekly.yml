@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 #
 # The corpus and the live test on the latest stable dbt, each week and by hand.  It holds no rule: scripts/fetch-dbt finds the latest build, the checks
-# are in the Makefile, and docs/release-pipeline.md describes this file.  A failure fails the
+# are in the Makefile, and docs/reference/release-pipeline.md describes this file.  A failure fails the
 # run, which GitHub tells the user who last changed the schedule, if they have Actions
 # notifications on.  It counts for neither CI nor CD.
 name: Weekly

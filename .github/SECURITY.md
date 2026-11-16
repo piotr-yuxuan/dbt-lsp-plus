@@ -9,7 +9,7 @@ output in a cache of its own. It ships no part of dbt.
 
 ## Existing tooling
 
-GitHub Actions runs [every check](../docs/release-pipeline.md) on every push, the
+GitHub Actions runs [every check](../docs/reference/release-pipeline.md) on every push, the
 conformance corpus included, whose parses of dbt run with the network cut off. No
 vulnerability scanner runs on this repository.
 

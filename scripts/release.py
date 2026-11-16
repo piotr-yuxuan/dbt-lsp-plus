@@ -12,7 +12,7 @@ that a second run finishes a run cut short:
 
 The version and the notes are pure functions, and so is the choice of the writes; the rest
 reads git and calls `gh api`.  It needs Python 3.11 or later, git and gh, and runs at the
-root of a checkout with every tag.  docs/release-pipeline.md describes it.
+root of a checkout with every tag.  docs/reference/release-pipeline.md describes it.
 
 The environment: GH_TOKEN, for gh; GITHUB_REPOSITORY, GITHUB_SERVER_URL and
 GITHUB_EVENT_NAME, from the runner; RELEASE_COMMIT and RELEASE_BUMP, from the workflow.

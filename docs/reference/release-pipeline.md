@@ -94,7 +94,7 @@ targets, other adapters, builds released and superseded within a week, dbt-mode'
 
 To move CI's pins to a new build, one commit changes `scripts/fetch-dbt`'s URL and SHA-256
 (the weekly run's fetch line gives them) and its docstring, `tests/fixtures/conformance/divergences.txt`,
-`docs/design.md`'s statement of the builds and the CI table above, checked by hand with
+`docs/explanation/design.md`'s statement of the builds and the CI table above, checked by hand with
 `make conformance` and `make live` on the new build. One registry holds one set of divergences: if the two builds
 part, a later plan qualifies it by build.
 

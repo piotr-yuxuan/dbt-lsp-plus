@@ -1,8 +1,9 @@
 # Working in this repository
 
 dbt-lsp-plus is a proxy in front of `dbt lsp` that adds LSP features the
-server lacks.  `README.md` describes it for users; `docs/design.md` explains
-its design, what `dbt lsp` was observed to do, and what is left to do.
+server lacks.  `README.md` describes it for users;
+`docs/explanation/design.md` explains its design, what `dbt lsp` was
+observed to do, and what is left to do.
 
 ## Workflow
 
@@ -26,10 +27,10 @@ Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
 test runs in one checkout take turns.
 
 CI and CD run on GitHub Actions once the repository is published
-(`docs/release-pipeline.md`).  `Cargo.toml`'s version, and the package's
-entry in `Cargo.lock`, are written by the pipeline alone; each release adds
-a commit to `origin/main`, so a clone pulls (`git pull --ff-only`) before
-it merges.
+(`docs/reference/release-pipeline.md`).  `Cargo.toml`'s version, and the
+package's entry in `Cargo.lock`, are written by the pipeline alone; each
+release adds a commit to `origin/main`, so a clone pulls (`git pull
+--ff-only`) before it merges.
 
 ## Layout
 
@@ -73,8 +74,8 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
 - The proxy's own requests carry ids `dbt-lsp-plus/N`, and their answers
   never reach the client.
 - What `dbt lsp` does is observed, not documented: record each new
-  observation in `docs/design.md`, make the fake server behave the same,
-  and let the live test check it.
+  observation in `docs/explanation/design.md`, make the fake server
+  behave the same, and let the live test check it.
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
     so that `answer` stays a dispatch;
