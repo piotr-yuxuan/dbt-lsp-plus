@@ -252,6 +252,8 @@ struct Proxy<W: Write> {
     markdown: bool,
     /// Whether the client may be asked to refresh its inlay hints.
     hint_refresh: bool,
+    /// Whether the client lets a server register a watcher of files.
+    watches: bool,
     /// The proxy's own requests to the client, whose answers stay here.
     asked: HashSet<String>,
     diagnostics: Diagnostics,
@@ -350,6 +352,7 @@ impl<W: Write> Proxy<W> {
             shutdown: false,
             markdown: false,
             hint_refresh: false,
+            watches: false,
             asked: HashSet::new(),
             diagnostics: Diagnostics::default(),
             restart: Restart::default(),
@@ -465,6 +468,8 @@ impl<W: Write> Proxy<W> {
             formats.and_then(|formats| formats.iter().find(|format| *format == "markdown" || *format == "plaintext"));
         self.markdown = first.is_some_and(|format| format == "markdown");
         self.hint_refresh = params.pointer("/capabilities/workspace/inlayHint/refreshSupport") == Some(&json!(true));
+        let watched = "/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration";
+        self.watches = params.pointer(watched) == Some(&json!(true));
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         let same = |folder: &Path| fs::canonicalize(folder).ok() == self.canonical_root;
@@ -878,16 +883,25 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Asks a client that can refresh its inlay hints to do so, since they
-    /// show the relations of the index, under an id of the proxy's own,
-    /// whose answer stays here.
+    /// show the relations of the index.
     fn refresh_hints(&mut self) {
         if !self.hint_refresh || self.shutdown {
             return;
         }
+        self.ask_client("workspace/inlayHint/refresh", None);
+    }
+
+    /// Sends the client the proxy's own request METHOD, with PARAMS if any,
+    /// under an id of the proxy's own, whose answer stays here.
+    fn ask_client(&mut self, method: &str, params: Option<Value>) {
         self.next_id += 1;
         let id = json!(format!("{OWN_ID}{}", self.next_id));
         self.asked.insert(key(&id));
-        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "method": "workspace/inlayHint/refresh"}));
+        let mut request = json!({"jsonrpc": "2.0", "id": id, "method": method});
+        if let Some(params) = params {
+            request["params"] = params;
+        }
+        self.send_client(&request);
     }
 
     /// Stops a parse under way and removes this process's cache.
@@ -1039,11 +1053,18 @@ impl<W: Write> Proxy<W> {
 
     /// A notification of the client's, METHOD with PARAMS, BODY as it came:
     /// kept and forwarded; when the graph may have changed, a listing, and,
-    /// alone, a parse, which nothing else would start.
+    /// alone, a parse, which nothing else would start.  Alone, `initialized`
+    /// registers the watcher that dbt lsp would, of every file, for a client
+    /// that lets it: an edit outside the editor changes the graph too.
     fn on_notification(&mut self, method: &str, params: &Value, body: &[u8]) {
         self.track(method, params);
         // The server gets the change before the listing it prompts.
         self.send_server(body);
+        if method == "initialized" && self.standalone && self.watches {
+            let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
+                                 "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
+            self.ask_client("client/registerCapability", Some(json!({"registrations": [watcher]})));
+        }
         let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
         // dbt lsp's output, as spelt and as resolved: a link out of the project included.
         let output = || {

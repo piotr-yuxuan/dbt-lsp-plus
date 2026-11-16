@@ -423,6 +423,8 @@ fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
     // Past what the client would get first.
     session.request("workspace/symbol", json!({"query": "summary"}));
     assert_eq!(show_messages(&session), 0, "no warning");
+    let registered = session.received.iter().any(|m| m["method"] == "client/registerCapability");
+    assert!(!registered, "a watcher, for a client that does not let a server register one");
     assert_eq!(session.received.iter().filter(|m| m["method"] == "window/logMessage").count(), 1);
     assert!(lives(&log).is_empty(), "a server started");
     assert!(session.finish().success());
@@ -495,6 +497,23 @@ fn with_dbt_lsp_the_graph_stays_the_listing_s_after_a_parse() {
     };
     let outgoing = session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", orders), listed);
     assert_eq!(details(&outgoing, "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_the_proxy_watches_the_project_for_a_client_that_lets_it() {
+    let (mut session, log) = Session::fake("standalone-watch", json!({"no_lsp": true, "manifest": manifest()}));
+    session.initialize_as(&fixture(), json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}));
+    let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
+    let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
+                         "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
+    assert_eq!(registered["params"]["registrations"], json!([watcher]));
+    let event = |path: &str| json!({"changes": [{"uri": uri(&fixture().join(path)), "type": 2}]});
+    // dbt writes its own output at each parse: no parse for it.
+    session.notify("workspace/didChangeWatchedFiles", event("target/manifest.json"));
+    parses_stay(&log, 0);
+    session.notify("workspace/didChangeWatchedFiles", event("models/marts/orders.sql"));
+    until_logged(&log, "the parse", |_| parses(&log).len() == 1);
     assert!(session.finish().success());
 }
 
