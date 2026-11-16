@@ -4,12 +4,13 @@
 //! matches the server's, its run in a thread of its own, the index of the
 //! manifest it writes, and the summary of a node.
 
+use crate::graph::ServerNode;
 use crate::parse_log;
 use crate::project;
 use crate::scan::Target;
 use crate::yaml::{self, Node};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -194,6 +195,9 @@ pub struct Index {
     groups: HashMap<String, Value>,
     /// The ids of the nodes of each name, so that a lookup reads a few.
     named: HashMap<String, Vec<String>>,
+    /// The ids of the last manifest laid, whose nodes alone make a listing:
+    /// a failed parse's lacks those deleted since, which the index keeps.
+    latest: HashSet<String>,
 }
 
 /// The ids of NODES by their name.
@@ -240,12 +244,14 @@ impl Index {
             .map_or_else(HashMap::new, |groups| groups.iter().map(|(id, group)| (id.clone(), group.clone())).collect());
         let root_package = manifest.pointer("/metadata/project_name").and_then(Value::as_str).unwrap_or_default();
         let named = by_name(&nodes);
-        Index { root_package: root_package.to_owned(), nodes, groups, named }
+        let latest = nodes.keys().cloned().collect();
+        Index { root_package: root_package.to_owned(), nodes, groups, named, latest }
     }
 
     /// This index with the entries of NEWER laid over it: what a parse that
     /// failed part of the way still found.
     pub fn overlay(&mut self, newer: Index) {
+        self.latest = newer.latest;
         self.nodes.extend(newer.nodes);
         self.groups.extend(newer.groups);
         self.named = by_name(&self.nodes);
@@ -256,6 +262,19 @@ impl Index {
 
     pub fn node(&self, id: &str) -> Option<&Value> {
         self.nodes.get(id)
+    }
+
+    /// The enabled nodes of the last manifest, of the kinds that
+    /// `dbt.listNodes` lists, `*` and `source:*`, by id: what a listing would
+    /// give, from the manifest.
+    pub fn listed(&self) -> Vec<ServerNode> {
+        let kinds = ["model", "seed", "snapshot", "analysis", "test", "source"];
+        let listed =
+            |node: &&Value| node["disabled"] != true && kinds.iter().any(|kind| node["resource_type"] == *kind);
+        let latest = self.latest.iter().filter_map(|id| self.nodes.get(id));
+        let mut nodes: Vec<ServerNode> = latest.filter(listed).filter_map(ServerNode::of).collect();
+        nodes.sort_by(|one, other| one.id.cmp(&other.id));
+        nodes
     }
 
     /// The node that a `ref` or a `source` of TARGET names, as dbt looks it
@@ -663,6 +682,32 @@ mod tests {
         assert_eq!(id(index.of_file("models/marts/orders.sql")).as_deref(), Some("model.shop.orders"));
         assert_eq!(index.of_file("models/marts/_marts.yml").map(|_| ()), Some(()), "one test only");
         assert_eq!(index.of_file("models/orders.sql"), None, "a package's file");
+    }
+
+    #[test]
+    fn lists_the_enabled_nodes_and_sources_as_dbt_lsp_would() {
+        let node = |id: &str, depends_on: &[&str]| {
+            let kind = id.split('.').next().unwrap();
+            json!({"unique_id": id, "name": id.rsplit('.').next().unwrap(), "resource_type": kind,
+                   "package_name": "shop", "original_file_path": "models/x.sql", "depends_on": {"nodes": depends_on}})
+        };
+        let manifest = json!({"metadata": {"project_name": "shop"},
+            "nodes": {"model.shop.a": node("model.shop.a", &["source.shop.raw.b"]),
+                      "test.shop.t": node("test.shop.t", &["model.shop.a"]),
+                      "operation.shop.hook": node("operation.shop.hook", &[])},
+            "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])},
+            "disabled": {"model.shop.off": [node("model.shop.off", &[])]}});
+        let listed = Index::of(&manifest).listed();
+        let ids: Vec<&str> = listed.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["model.shop.a", "source.shop.raw.b", "test.shop.t"], "no disabled node, no hook");
+        assert_eq!(listed[0].depends_on, ["source.shop.raw.b"]);
+        // A failed parse's manifest, laid over, lacks the model deleted since.
+        let mut index = Index::of(&manifest);
+        let newer = json!({"metadata": {"project_name": "shop"}, "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])}});
+        index.overlay(Index::of(&newer));
+        let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
+        assert_eq!(ids, ["source.shop.raw.b"]);
+        assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
     }
 
     #[test]

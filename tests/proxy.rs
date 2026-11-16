@@ -449,6 +449,56 @@ fn alone_the_proxy_s_own_features_answer() {
 }
 
 #[test]
+fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
+    let mut manifest = manifest();
+    let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
+    manifest["nodes"]["model.shop.order_summary"] = summary_node;
+    manifest["nodes"]["model.shop.orders"]["depends_on"] = json!({"nodes": ["model.shop.stg_orders"]});
+    let gate = scratch("standalone-graph-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest, "parse_gate": gate});
+    let (mut session, log) = Session::fake("standalone-graph", script);
+    session.initialize(&fixture());
+    let summary = fixture().join("models/marts/order_summary.sql");
+    let on_select = json!({"textDocument": {"uri": uri(&summary)}, "position": {"line": 1, "character": 2}});
+    // The hierarchy asks for the parse that resolves its graph, and the
+    // scan, which cannot resolve `ref(var(...))`, answers meanwhile.
+    let prepared = session.request("textDocument/prepareCallHierarchy", on_select);
+    let summary_item = json!({"item": prepared["result"][0]});
+    assert_eq!(session.request("callHierarchy/outgoingCalls", summary_item.clone())["result"], json!([]));
+    until_logged(&log, "the parse", |_| parses(&log).len() == 1);
+    std::fs::write(&gate, "").unwrap();
+    let found = |calls: &Value| calls.as_array().is_some_and(|calls| !calls.is_empty());
+    let outgoing = session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", summary_item), found);
+    assert_eq!(details(&outgoing, "to"), ["model.shop.orders"]);
+    // The edges of macros stay the scan's.
+    let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    let outgoing = session.request("callHierarchy/outgoingCalls", orders);
+    assert_eq!(details(&outgoing["result"], "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_the_graph_stays_the_listing_s_after_a_parse() {
+    let all = json!({"error": null, "nodes": [
+        node("model.shop.orders", "models/marts/orders.sql", &["model.shop.stg_orders"])]});
+    let sources = json!({"error": null, "nodes": []});
+    let mut manifest = manifest();
+    manifest["nodes"]["model.shop.orders"]["depends_on"] = json!({"nodes": ["model.shop.stg_customers"]});
+    let script = json!({"answers": {ALL: all, SOURCES: sources}, "manifest": manifest});
+    let (mut session, _) = Session::fake("server-graph-after-parse", script);
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    // The scan finds stg_customers too, until the listing comes.
+    let listed = |calls: &Value| {
+        calls.as_array().is_some_and(|c| c.iter().all(|c| c["to"]["detail"] != "model.shop.stg_customers"))
+    };
+    let outgoing = session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", orders), listed);
+    assert_eq!(details(&outgoing, "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_crash_fails_each_pending_request_exactly_once() {
     // The restarted server never answers: the proxy stays alone.
     let silent = ["textDocument/definition", "textDocument/completion"];

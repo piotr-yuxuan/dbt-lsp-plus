@@ -553,11 +553,12 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The answer to the call hierarchy's METHOD, on the graph of the files
-    /// with the server's nodes once listed.
+    /// with the server's nodes once listed, or, alone, the last parse's.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Value> {
         let Some(project) = self.project() else { return Some(Value::Null) };
         let scanned = Graph::scanned(&project);
-        let graph = match &self.nodes {
+        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::Index::listed);
+        let graph = match parsed.as_ref().or(self.nodes.as_ref()) {
             Some(nodes) => scanned.with_server(nodes, &project),
             None => scanned,
         };
@@ -837,7 +838,9 @@ impl<W: Write> Proxy<W> {
     /// PENDING.  A refusal fails it with its reason; a panic while answering
     /// fails that request alone, never the session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
-        if method == config::NODE_INFO {
+        // nodeInfo needs the index; alone, so does the call hierarchy's graph.
+        let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
+        if method == config::NODE_INFO || (self.standalone && hierarchy) {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {

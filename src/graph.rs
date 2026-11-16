@@ -2,9 +2,10 @@
 //! The dependency graph of a project: which resource calls which.
 //!
 //! The edges between nodes come from `dbt.listNodes` when the server has
-//! answered, since only dbt resolves a `ref(var('x'))`; otherwise from the
-//! scan of the files.  The server lists no macros, so the edges to and from
-//! macros always come from the scan.
+//! answered, or, with no server, from the manifest of the user's `dbt
+//! parse`, since only dbt resolves a `ref(var('x'))`; otherwise from the
+//! scan of the files.  The server lists no macros, and a manifest's are
+//! transitive, so the edges to and from macros always come from the scan.
 
 use crate::project::{Entity, Project};
 use crate::scan::Target;
@@ -47,27 +48,30 @@ impl Listing {
     }
 }
 
+impl ServerNode {
+    /// The node of NODE, as `dbt.listNodes` and a manifest write one; none
+    /// when it lacks a field.
+    pub fn of(node: &Value) -> Option<ServerNode> {
+        let text = |key: &str| node.get(key).and_then(Value::as_str).map(str::to_owned);
+        let depends_on = node
+            .pointer("/depends_on/nodes")
+            .and_then(Value::as_array)
+            .map_or(Vec::new(), |ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect());
+        Some(ServerNode {
+            id: text("unique_id")?,
+            name: text("name")?,
+            resource_type: text("resource_type")?,
+            package: text("package_name")?,
+            original_file_path: text("original_file_path")?,
+            depends_on,
+        })
+    }
+}
+
 /// The listing of a `dbt.listNodes` RESULT.  Nodes missing a field are left out.
 pub fn parse_list_nodes(result: &Value) -> Listing {
-    let text = |node: &Value, key: &str| node.get(key).and_then(Value::as_str).map(str::to_owned);
     let Some(nodes) = result.get("nodes").and_then(Value::as_array) else { return Listing::Failed };
-    let nodes: Vec<ServerNode> = nodes
-        .iter()
-        .filter_map(|node| {
-            let depends_on = node
-                .pointer("/depends_on/nodes")
-                .and_then(Value::as_array)
-                .map_or(Vec::new(), |ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect());
-            Some(ServerNode {
-                id: text(node, "unique_id")?,
-                name: text(node, "name")?,
-                resource_type: text(node, "resource_type")?,
-                package: text(node, "package_name")?,
-                original_file_path: text(node, "original_file_path")?,
-                depends_on,
-            })
-        })
-        .collect();
+    let nodes: Vec<ServerNode> = nodes.iter().filter_map(ServerNode::of).collect();
     match (nodes.is_empty(), result.get("error").and_then(Value::as_str)) {
         (false, _) => Listing::Nodes(nodes),
         (true, None | Some("No nodes found")) => Listing::Empty,
