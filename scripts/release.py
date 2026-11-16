@@ -40,7 +40,9 @@ VERSION = re.compile(NUMBERS)
 # The whole message of a version commit.
 VERSION_MESSAGE = re.compile(rf"Version ({NUMBERS})\n\n\[skip ci\]")
 # Where each file writes the version, its group 2: the `version` key of Cargo.toml's
-# [package] table, and the entry of Cargo.lock that has no `source`, the package's own.
+# [package] table, and the entry of Cargo.lock that has no `source`, the package's own.  A
+# line of a multi-line string in [package] that starts with `version = "` would be taken for
+# the key: this repository's Cargo.toml has none.
 VERSION_LINES = {
     MANIFEST: re.compile(
         rb'^(\[package\]\n(?:[^\[\n][^\n]*\n|\n)*?)version = "([^"\n]*)"$', re.MULTILINE

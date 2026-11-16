@@ -69,6 +69,10 @@ class NextVersion(unittest.TestCase):
 
 
 class CurrentVersion(unittest.TestCase):
+    def test_reads_this_repository_s_own_files(self):
+        found = {path: (ROOT / path).read_bytes() for path in ("Cargo.toml", "Cargo.lock")}
+        self.assertRegex(release.current_version(found), r"\A[0-9]+\.[0-9]+\.[0-9]+\Z")
+
     def test_reads_the_version_that_both_files_hold(self):
         found = {**texts("1.2.3"), "Cargo.lock": lock("1.2.3", other="9.9.9").encode()}
         self.assertEqual(release.current_version(found), "1.2.3")
@@ -525,6 +529,19 @@ class FirstAndNext(Pipeline):
         self.assertNotIn("Cargo", notes)
         self.assertIn("https://github.example/owner/name/compare/0.1.1...0.1.2", notes)
 
+    def test_the_notes_compare_with_the_highest_earlier_version_by_number(self):
+        commit = self.push({**TREE, "Cargo.toml": manifest("0.1.9"), "Cargo.lock": lock("0.1.9")})
+        for tag in ("0.1.1", "0.1.9"):
+            self.git(self.work, "tag", tag, commit)
+            self.git(self.work, "push", "-q", "origin", tag)
+        changed = self.push({"docs/page.md": "Changed.\n"})
+        done = self.release(changed)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        notes = self.release_body()["body"]
+        self.assertIn("https://github.example/owner/name/compare/0.1.9...0.1.10", notes)
+        self.assertIn("| Changed | `docs/page.md` |", notes)
+        self.assertNotIn("Cargo", notes)
+
     def test_a_second_run_finds_nothing_to_do(self):
         commit = self.push(TREE)
         self.release(commit)
@@ -537,15 +554,12 @@ class FirstAndNext(Pipeline):
 
 
 class Bumps(Pipeline):
-    def released(self, version):
-        self.push({**TREE, "Cargo.toml": manifest(version), "Cargo.lock": lock(version)})
-        return self.push({"docs/page.md": "Changed.\n"})
-
     def test_a_manual_run_raises_the_part_it_names(self):
         for bump, expected in (("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")):
             with self.subTest(bump=bump):
                 self.setUp()
-                commit = self.released("1.2.3")
+                self.push({**TREE, "Cargo.toml": manifest("1.2.3"), "Cargo.lock": lock("1.2.3")})
+                commit = self.push({"docs/page.md": "Changed.\n"})
                 self.set_state("ci.json", json.dumps([commit]))
                 done = self.release(commit, event="workflow_dispatch", bump=bump)
                 self.assertEqual(done.returncode, 0, done.stderr)
