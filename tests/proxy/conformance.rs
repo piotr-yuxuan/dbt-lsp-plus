@@ -40,7 +40,7 @@ fn corpus() {
     let entries = std::fs::read_dir(&corpus).expect("read the corpus").flatten();
     let mut cases: Vec<PathBuf> = entries.map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
     cases.sort();
-    let (mut found, mut versions) = (BTreeMap::new(), BTreeSet::new());
+    let (mut found, mut versions) = (BTreeSet::new(), BTreeSet::new());
     for case in &cases {
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         let (copy, manifest) = parse(&dbt, case, namespace);
@@ -52,24 +52,20 @@ fn corpus() {
             entries_compared(&project, &manifest),
         ];
         for (subject, lookup, answers) in compared.into_iter().flatten() {
-            found.insert(format!("{name}\t{subject}\t{lookup}"), answers);
+            found.insert(format!("{name}\t{subject}\t{lookup}\t{answers}"));
         }
     }
     let registry = std::fs::read_to_string(corpus.join("divergences.txt")).expect("read the registry");
     let lines = registry.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#'));
     let registered: BTreeSet<String> = lines
         .map(|line| {
-            let fields: Vec<&str> = line.splitn(4, '\t').collect();
-            assert!(fields.len() == 4 && !fields[3].trim().is_empty(), "a registry line without its reason: {line:?}");
-            fields[..3].join("\t")
+            let fields: Vec<&str> = line.splitn(5, '\t').collect();
+            assert!(fields.len() == 5 && !fields[4].trim().is_empty(), "a registry line without its reason: {line:?}");
+            fields[..4].join("\t")
         })
         .collect();
-    let unregistered: Vec<String> = found
-        .iter()
-        .filter(|(key, _)| !registered.contains(*key))
-        .map(|(key, answers)| format!("{key}\t{answers}"))
-        .collect();
-    let stale: Vec<&str> = registered.iter().filter(|key| !found.contains_key(*key)).map(String::as_str).collect();
+    let unregistered: Vec<&str> = found.difference(&registered).map(String::as_str).collect();
+    let stale: Vec<&str> = registered.difference(&found).map(String::as_str).collect();
     let cut = if namespace { "yes" } else { "no" };
     let versions: Vec<String> = versions.into_iter().collect();
     // Past the harness's capture of `eprintln!`, so that a run that passes says so.
