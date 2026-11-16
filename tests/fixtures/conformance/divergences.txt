@@ -1,3 +1,10 @@
 # Where the proxy resolves otherwise than dbt, one line each:
 # CASE<TAB>SUBJECT<TAB>LOOKUP<TAB>REASON, as the corpus prints it.
 # See tests/proxy/conformance.rs.
+
+flag-FALSE	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.md, known limitations)
+flag-FALSE	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)
+flag-False	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.md, known limitations)
+flag-False	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)
+flag-false	model.pa.pa_m ref('x')	graph	graph::resolve ignores the flag (design.md, known limitations)
+flag-false	model.pa.pa_m source('s', 't')	graph	graph::resolve ignores the flag (design.md, known limitations)

@@ -1,0 +1,8 @@
+version: 2
+models:
+  - name: pam
+    description: "{{ doc('d_all') }}"
+  - name: pam2
+    description: "{{ doc('d_pkgs') }}"
+  - name: pam3
+    description: "{{ doc('d_pb') }}"

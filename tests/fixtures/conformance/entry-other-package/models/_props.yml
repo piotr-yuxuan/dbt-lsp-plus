@@ -1,0 +1,6 @@
+version: 2
+models:
+  - name: rm
+    description: root on root
+  - name: pam
+    description: root on package

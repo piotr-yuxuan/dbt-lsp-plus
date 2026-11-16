@@ -1,0 +1,1 @@
+select {{ mm() }} as v
