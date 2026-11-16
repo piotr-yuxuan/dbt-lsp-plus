@@ -100,7 +100,6 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
     from the hierarchy's answer;
   - `project_dir`: the parsing of the server command, at the boundary;
-  - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
     server's answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its

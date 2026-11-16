@@ -243,8 +243,7 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let written = |target: &scan::Target| match target {
         scan::Target::Ref { package, name, .. } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
-            let named = navigation::Target::Named { kind: "ref", package: package.clone(), name: name.clone() };
-            (format!("ref({})", quoted.join(", ")), Some(named))
+            (format!("ref({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
         }
         scan::Target::Source { source, table } => {
             let table_target = sources::Target::Table { source: source.clone(), table: table.clone() };
@@ -289,7 +288,8 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         let text = project.text(&holder.path).unwrap_or_default();
         let versioned = text.get(call.range.end..).is_some_and(|rest| rest.trim_start().starts_with(','));
         let navigated = target.filter(|_| !versioned).map(|target| {
-            navigation::resolve(project, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
+            let lookup = navigation::Lookup::new(project);
+            navigation::resolve(&lookup, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
         });
         [("graph", Some(graphed)), ("navigation", navigated)]
     };
@@ -342,7 +342,7 @@ static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(
 /// node's own.
 fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let resolved = |path: &Path, target: &navigation::Target| -> BTreeSet<String> {
-        navigation::resolve(project, path, target).into_iter().map(|found| found.id).collect()
+        navigation::resolve(&navigation::Lookup::new(project), path, target).into_iter().map(|found| found.id).collect()
     };
     let ids = |section: &str, keep: &dyn Fn(&Value) -> bool| -> BTreeSet<String> {
         manifest[section].as_object().into_iter().flatten().filter(|(_, e)| keep(e)).map(|(id, _)| id.clone()).collect()

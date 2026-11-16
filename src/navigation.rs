@@ -3,12 +3,13 @@
 //! give: the target at a position, as its document alone shows it, and
 //! what it names in the project, by dbt 2.0.9's lookup.  Pure.
 
-use crate::project::{self, Project};
+use crate::project::{self, Entity, Project};
 use crate::sources;
 use crate::text::LineIndex;
 use crate::yaml::{self, Node};
 use crate::{properties, scan};
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -18,6 +19,8 @@ use std::sync::LazyLock;
 pub enum Target {
     /// A `source()` argument, or a source's or table's `name:`.
     Source(sources::Target),
+    /// A call that dbt resolves, as `Lookup::call` does.
+    Call(scan::Target),
     /// A name that dbt looks up among the resources, as the row KIND of
     /// `LOOKUP` says, in the package it gives, if any.
     Named { kind: &'static str, package: Option<String>, name: String },
@@ -48,9 +51,9 @@ enum Step {
 /// How dbt 2.0.9 looks up a call's name, a `ref` or a `source`.
 const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 
-/// How dbt 2.0.9 looks up each kind of name with no package of its own:
-/// the kind, the resource types it may name, the prefix of the name in
-/// their ids, and the packages searched in turn.  A `ref`, `doc` or
+/// How dbt 2.0.9 looks up each kind of name with no package of its own,
+/// but a call's: the kind, the resource types it may name, the prefix of
+/// the name in their ids, and the packages searched in turn.  A `doc` or
 /// generic test names its kind; the `name:` of an entry, the entry's label;
 /// a unit test's `model:`, `unit test model`.  A `doc` ignores the calling
 /// file's package: past the root, the first package by path, which is the
@@ -58,8 +61,7 @@ const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 /// `dbt_packages/<name>`.  An entry describes a resource of its own package
 /// only: dbt 2.0.9 calls one naming another package's resource unused,
 /// where dbt-core 1.12 patches it.
-const LOOKUP: [(&str, &[&str], &str, &[Step]); 9] = [
-    ("ref", &["model", "seed", "snapshot"], "", CALLS),
+const LOOKUP: [(&str, &[&str], &str, &[Step]); 8] = [
     ("doc", &["doc"], "", &[Step::Root, Step::Any]),
     ("test", &["macro"], "test_", &[Step::Own, Step::Root]),
     ("unit test model", &["model"], "", &[Step::Own]),
@@ -97,7 +99,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     };
     let reference = scan::yaml_calls(text).into_iter().find_map(|call| match call.target {
         scan::Target::Ref { package, name, version: None } if call.arguments.iter().any(inside) => {
-            Some(named("ref", package.as_deref(), &name))
+            Some(Target::Call(scan::Target::Ref { package, name, version: None }))
         }
         _ => None,
     });
@@ -132,24 +134,104 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model)
 }
 
-/// What TARGET, named in the file at PATH, leads to in PROJECT, by dbt
-/// 2.0.9's lookup: in the package the name gives, else as `LOOKUP` says,
-/// where a file's own package is the installed package whose directory
-/// holds it, else the root project.  A source is looked up as a `ref`.  The
-/// first package that has something gives one result, or every
-/// declaration of a source.
-pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
-    let root = project.root_package.as_str();
-    let holders = project.packages.iter().filter(|(_, dir)| path.starts_with(dir));
-    let own = holders.max_by_key(|(_, dir)| dir.as_os_str().len()).map_or(root, |(name, _)| name.as_str());
-    let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));
-    let root_first = config.and_then(yaml::parse).is_some_and(|config| {
-        let value = config.get("flags").and_then(|flags| flags.get("require_ref_searches_node_package_before_root"));
-        // As dbt reads the flag: neither `fAlse` nor a quoted `'false'`.
-        let yaml_false = ["false", "False", "FALSE"];
-        matches!(value, Some(Node::Scalar { value, plain: true, .. }) if yaml_false.contains(&value.as_str()))
-    });
-    let (first, second) = if root_first { (root, own) } else { (own, root) };
+/// dbt 2.0.9's lookup over a project, made once for a request or a graph:
+/// the lookup flag read once, and the resources by id.
+pub struct Lookup<'a> {
+    project: &'a Project,
+    /// Each resource by id, in order, so that a package's macros read as a
+    /// range.
+    by_id: BTreeMap<&'a str, &'a Entity>,
+    /// The packages, the root first, then the others in the byte order of
+    /// their names, which is the order of their paths, since dbt installs
+    /// each at `dbt_packages/<name>`.
+    packages: Vec<&'a str>,
+    /// Whether the lookup flag puts the root project before the calling
+    /// file's package (see `Step`).
+    root_first: bool,
+}
+
+impl<'a> Lookup<'a> {
+    /// The lookup of PROJECT.
+    pub fn new(project: &'a Project) -> Lookup<'a> {
+        let root = project.root_package.as_str();
+        let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));
+        let root_first = config.and_then(yaml::parse).is_some_and(|config| {
+            let value =
+                config.get("flags").and_then(|flags| flags.get("require_ref_searches_node_package_before_root"));
+            // As dbt reads the flag: neither `fAlse` nor a quoted `'false'`.
+            let yaml_false = ["false", "False", "FALSE"];
+            matches!(value, Some(Node::Scalar { value, plain: true, .. }) if yaml_false.contains(&value.as_str()))
+        });
+        let mut packages: Vec<&str> = project.packages.keys().map(String::as_str).collect();
+        packages.sort_by_key(|package| (*package != root, *package));
+        let by_id = project.entities.iter().map(|entity| (entity.id.as_str(), entity)).collect();
+        Lookup { project, by_id, packages, root_first }
+    }
+
+    /// The package of the file at PATH: the installed package whose
+    /// directory holds it, else the root project.
+    pub fn package_of(&self, path: &Path) -> &'a str {
+        let holders = self.project.packages.iter().filter(|(_, dir)| path.starts_with(dir));
+        let deepest = holders.max_by_key(|(_, dir)| dir.as_os_str().len());
+        deepest.map_or(self.project.root_package.as_str(), |(name, _)| name.as_str())
+    }
+
+    /// What a call of TARGET from the package OWN names, by dbt 2.0.9's
+    /// lookup: in the package the call names; else a `ref`, a `source` or a
+    /// dispatch in OWN and the root, in the flag's order, then in any
+    /// package; an unqualified macro in OWN, then the root only, since dbt
+    /// keeps another package's macros behind its name.  Every resource of
+    /// the first of these that has some, in the order of their paths: one,
+    /// but where dbt fails on several (dbt1005), and a dispatch's every
+    /// implementation (`*__name`).
+    pub fn call(&self, own: &str, target: &scan::Target) -> Vec<&'a Entity> {
+        let root = self.project.root_package.as_str();
+        let (first, second) = if self.root_first { (root, own) } else { (own, root) };
+        let steps = match target {
+            scan::Target::Ref { package: Some(package), .. }
+            | scan::Target::Macro { package: Some(package), .. }
+            | scan::Target::Dispatch { package: Some(package), .. } => vec![Some(package.as_str())],
+            scan::Target::Macro { package: None, .. } => vec![Some(own), Some(root)],
+            _ => vec![Some(first), Some(second), None],
+        };
+        let get = |id: String| self.by_id.get(id.as_str()).copied();
+        let in_package = |package: &str| -> Vec<&'a Entity> {
+            match target {
+                scan::Target::Ref { name, .. } => ["model", "seed", "snapshot"]
+                    .iter()
+                    .filter_map(|kind| get(format!("{kind}.{package}.{name}")))
+                    .collect(),
+                scan::Target::Source { source, table } => {
+                    get(format!("source.{package}.{source}.{table}")).into_iter().collect()
+                }
+                scan::Target::Macro { name, .. } => get(format!("macro.{package}.{name}")).into_iter().collect(),
+                scan::Target::Dispatch { name, .. } => {
+                    let (prefix, suffix) = (format!("macro.{package}."), format!("__{name}"));
+                    let in_package = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
+                    in_package.filter(|(id, _)| id.ends_with(&suffix)).map(|(_, entity)| *entity).collect()
+                }
+            }
+        };
+        let in_step = |step: &Option<&str>| {
+            let mut found = match step {
+                Some(package) => in_package(package),
+                None => self.packages.iter().flat_map(|package| in_package(package)).collect(),
+            };
+            found.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
+            found
+        };
+        steps.iter().map(in_step).find(|found| !found.is_empty()).unwrap_or_default()
+    }
+}
+
+/// What TARGET, named in the file at PATH, leads to by LOOKUP, dbt 2.0.9's:
+/// a call as `Lookup::call` resolves it; a source looked up as a `ref`,
+/// every declaration of the first package that has some; any other name in
+/// the package it gives, else as `LOOKUP` says, the first that exists.
+pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
+    let project = lookup.project;
+    let (root, own) = (project.root_package.as_str(), lookup.package_of(path));
+    let (first, second) = if lookup.root_first { (root, own) } else { (own, root) };
     let packages = |steps: &[Step]| -> Vec<Option<&str>> {
         let package = |step: &Step| match step {
             Step::Own => Some(own),
@@ -175,6 +257,14 @@ pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
                 (declared.package.as_str(), Found { id, path: declared.path.clone(), range })
             });
             return first_step(found.collect(), &packages(CALLS), true);
+        }
+        Target::Call(call) => {
+            let found = |entity: &&Entity| Found {
+                id: entity.id.clone(),
+                path: entity.path.clone(),
+                range: entity.name_range.clone(),
+            };
+            return lookup.call(own, call).iter().map(found).collect();
         }
         Target::Named { kind, package, name } => (kind, package, name),
     };
@@ -343,6 +433,11 @@ models:
         target_at(path, text, text.find(needle).unwrap() + delta)
     }
 
+    fn called(package: Option<&str>, name: &str) -> Option<Target> {
+        let (package, name) = (package.map(str::to_owned), name.to_owned());
+        Some(Target::Call(scan::Target::Ref { package, name, version: None }))
+    }
+
     fn named(kind: &'static str, package: Option<&str>, name: &str) -> Option<Target> {
         Some(Target::Named { kind, package: package.map(str::to_owned), name: name.to_owned() })
     }
@@ -352,8 +447,8 @@ models:
     #[test]
     fn finds_the_calls_of_yaml_from_the_document_alone() {
         let yml = Path::new(YML);
-        assert_eq!(at(yml, MODELS, "ref('customers')", 6), named("ref", None, "customers"));
-        assert_eq!(at(yml, MODELS, "ref('pkg', 'orders')", 14), named("ref", Some("pkg"), "orders"));
+        assert_eq!(at(yml, MODELS, "ref('customers')", 6), called(None, "customers"));
+        assert_eq!(at(yml, MODELS, "ref('pkg', 'orders')", 14), called(Some("pkg"), "orders"));
         // A doc's quotes as YAML escapes them in single and double quotes.
         assert_eq!(at(yml, MODELS, "order_status''", 2), named("doc", None, "order_status"));
         assert_eq!(at(yml, MODELS, "pkg_only", 2), named("doc", None, "pkg_only"));
@@ -400,7 +495,7 @@ models:
     /// each id with its file relative to ROOT and the text of its range.
     fn leads(root: &Path, rel: &str, target: Option<Target>) -> Vec<(String, String, String)> {
         let project = project::scan(root, &HashMap::new()).unwrap();
-        let found = resolve(&project, &root.join(rel), &target.unwrap());
+        let found = resolve(&Lookup::new(&project), &root.join(rel), &target.unwrap());
         let text = |found: &Found| project.text(&found.path).unwrap()[found.range.clone()].to_owned();
         let relative = |found: &Found| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
         found.iter().map(|found| (found.id.clone(), relative(found), text(found))).collect()
@@ -416,23 +511,40 @@ models:
         let root_yml = "models/_models.yml";
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         // A model's file is at its start, as dbt lsp answers a ref.
+        assert_eq!(leads(&root, root_yml, called(None, "orders")), lead("model.shop.orders", "models/orders.sql", ""));
         assert_eq!(
-            leads(&root, root_yml, named("ref", None, "orders")),
-            lead("model.shop.orders", "models/orders.sql", "")
-        );
-        assert_eq!(
-            leads(&root, pkg_yml, named("ref", None, "orders")),
+            leads(&root, pkg_yml, called(None, "orders")),
             lead("model.pkg.orders", "dbt_packages/pkg/models/orders.sql", "")
         );
-        assert_eq!(leads(&root, root_yml, named("ref", Some("pkg"), "orders"))[0].0, "model.pkg.orders");
-        assert_eq!(leads(&root, root_yml, named("ref", None, "only_pkg"))[0].0, "model.pkg.only_pkg");
-        assert_eq!(leads(&root, root_yml, named("ref", Some("shop"), "only_pkg")), Vec::new());
+        assert_eq!(leads(&root, root_yml, called(Some("pkg"), "orders"))[0].0, "model.pkg.orders");
+        assert_eq!(leads(&root, root_yml, called(None, "only_pkg"))[0].0, "model.pkg.only_pkg");
+        assert_eq!(leads(&root, root_yml, called(Some("shop"), "only_pkg")), Vec::new());
         let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
         assert_eq!(
             leads(&root, root_yml, table.clone()),
             lead("source.shop.raw.orders", "models/_sources.yml", "orders")
         );
         assert_eq!(leads(&root, pkg_yml, table)[0].0, "source.pkg.raw.orders");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_name_that_two_packages_but_the_caller_s_and_the_root_define_leads_to_both() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/m.sql", "select 1"),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/models/twice.sql", "select 2"),
+            ("dbt_packages/other/dbt_project.yml", "name: other\n"),
+            ("dbt_packages/other/models/twice.sql", "select 3"),
+        ];
+        let root = scratch_project("navigation-ambiguous", &files);
+        let ids = |rel: &str| -> Vec<String> {
+            leads(&root, rel, called(None, "twice")).into_iter().map(|(id, ..)| id).collect()
+        };
+        // dbt fails there (dbt1005): every candidate, in the order of their paths.
+        assert_eq!(ids("models/m.sql"), ["model.other.twice", "model.pkg.twice"]);
+        assert_eq!(ids("dbt_packages/pkg/models/twice.sql"), ["model.pkg.twice"], "the caller's own first");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -457,7 +569,7 @@ models:
         for (i, (value, first)) in values.into_iter().enumerate() {
             let flag = value.map(|value| format!("flags:\n  require_ref_searches_node_package_before_root: {value}\n"));
             let root = shop(&format!("navigation-flag-{i}"), &format!("name: shop\n{}", flag.unwrap_or_default()));
-            let found = leads(&root, pkg_yml, named("ref", None, "orders"));
+            let found = leads(&root, pkg_yml, called(None, "orders"));
             assert_eq!(found[0].0, format!("model.{first}.orders"), "ref with the flag {value:?}");
             let found = leads(&root, pkg_yml, table.clone());
             assert_eq!(found[0].0, format!("source.{first}.raw.orders"), "source with the flag {value:?}");
@@ -560,7 +672,7 @@ models:
         let path = root.join("models/_models.yml");
         let shown = |target: Option<Target>, markdown| {
             let target = target.unwrap();
-            let found = resolve(&project, &path, &target);
+            let found = resolve(&Lookup::new(&project), &path, &target);
             hover(&project, &target, &found[0], markdown)
         };
         assert_eq!(shown(named("doc", None, "order_status"), true).as_deref(), Some("The root's."));
@@ -570,7 +682,7 @@ models:
         assert_eq!(shown(named("test", None, "is_even"), true).as_deref(), Some(signature));
         let plain = "test is_even(model, column_name)\n\nin package shop";
         assert_eq!(shown(named("test", None, "is_even"), false).as_deref(), Some(plain));
-        assert_eq!(shown(named("ref", None, "orders"), true), None);
+        assert_eq!(shown(called(None, "orders"), true), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 

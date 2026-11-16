@@ -717,7 +717,7 @@ impl<W: Write> Proxy<W> {
         let target = navigation::target_at(&path, &text, offset);
         let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
         let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
-        let locations: Vec<Value> = navigation::resolve(&project, &path, &target)
+        let locations: Vec<Value> = navigation::resolve(&navigation::Lookup::new(&project), &path, &target)
             .iter()
             .map(|found| {
                 let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
@@ -796,7 +796,8 @@ impl<W: Write> Proxy<W> {
         });
         if let Some(target) = entry {
             let project = self.project()?;
-            return navigation::resolve(&project, &path, &target).first().and_then(|found| index.node(&found.id));
+            let found = navigation::resolve(&navigation::Lookup::new(&project), &path, &target);
+            return found.first().and_then(|found| index.node(&found.id));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
         index.of_file(&relative.to_string_lossy())
@@ -1187,7 +1188,7 @@ impl<W: Write> Proxy<W> {
                     let target = navigation::target_at(&path, &text, offset)
                         .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
                     let project = self.project()?;
-                    let found = navigation::resolve(&project, &path, &target);
+                    let found = navigation::resolve(&navigation::Lookup::new(&project), &path, &target);
                     navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
                 summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
