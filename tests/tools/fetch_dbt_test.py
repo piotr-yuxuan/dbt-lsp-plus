@@ -7,6 +7,7 @@ import http.client
 import importlib.machinery
 import importlib.util
 import io
+import json
 import os
 import re
 import subprocess
@@ -155,36 +156,45 @@ class Fetch(unittest.TestCase):
                 self.assertEqual(list(self.scratch.iterdir()), [])
 
 
+def asset(name):
+    """An asset as GitHub lists it, with a digest of its own."""
+    return {"name": name, "digest": "sha256:" + hashlib.sha256(name.encode()).hexdigest()}
+
+
 def release(tag, draft=False, prerelease=False, assets=None):
-    """A release as GitHub's API lists it, with the Linux archive and its digest unless ASSETS."""
+    """A release as GitHub's API lists it, with the archives of each target unless ASSETS."""
     version = tag.removeprefix("v")
-    digest = "sha256:" + hashlib.sha256(tag.encode()).hexdigest()
-    linux = [{"name": f"dbt-core-{version}-x86_64-unknown-linux-gnu.tar.gz", "digest": digest}]
-    return {
-        "tag_name": tag,
-        "draft": draft,
-        "prerelease": prerelease,
-        "assets": linux if assets is None else assets,
-    }
+    targets = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ]
+    archives = [asset(f"dbt-core-{version}-{target}.tar.gz") for target in targets]
+    listed = archives + [asset("SHA256SUMS")] if assets is None else assets
+    return {"tag_name": tag, "draft": draft, "prerelease": prerelease, "assets": listed}
+
+
+def digest_of(version):
+    return hashlib.sha256(f"dbt-core-{version}-x86_64-unknown-linux-gnu.tar.gz".encode()).hexdigest()
 
 
 class Latest(unittest.TestCase):
     """The latest builds, from listings in the shapes that GitHub and dbt Labs gave on 2026-11-16."""
 
     def test_the_highest_stable_release_by_number_that_holds_its_archive_and_digest(self):
+        # Newest first, as GitHub lists them, the highest neither the first nor the last valid.
         releases = [
-            release("v1.12.7", assets=[]),
+            release("v2.0.30", assets=[asset("dbt-core-2.0.30-aarch64-apple-darwin.tar.gz")]),
+            release("v2.0.13", prerelease=True),
+            release("v2.0.12", draft=True),
+            release("v2.0.0-dev.44-test-pypi", prerelease=True),
             release("v2.0.8"),
             release("v2.0.11"),
-            release("v2.0.0-dev.44-test-pypi", prerelease=True),
-            release("v2.0.12", draft=True),
-            release("v2.0.13", prerelease=True),
-            release("v2.0.20", assets=[{"name": "dbt-core-2.0.20-x86_64-unknown-linux-gnu.tar.gz"}]),
-            release(
-                "v2.0.30",
-                assets=[{"name": "dbt-core-2.0.30-aarch64-apple-darwin.tar.gz", "digest": "x"}],
-            ),
+            release("v2.0.2-test-pypi", prerelease=True),
+            release("v1.12.7", assets=[asset("dbt_core-1.12.7-py3-none-any.whl")]),
             "not a release",
+            release("v2.0.3"),
         ]
         version, url, digest = fetch_dbt.latest_oss(releases)
         self.assertEqual(version, "2.0.11")
@@ -192,13 +202,26 @@ class Latest(unittest.TestCase):
             url,
             "https://github.com/dbt-labs/dbt/releases/download/v2.0.11/dbt-core-2.0.11-x86_64-unknown-linux-gnu.tar.gz",
         )
-        self.assertEqual(digest, hashlib.sha256(b"v2.0.11").hexdigest())
+        self.assertEqual(digest, digest_of("2.0.11"))
 
-    def test_no_such_release_is_an_error(self):
-        no_digest = [
-            release("v2.0.20", assets=[{"name": "dbt-core-2.0.20-x86_64-unknown-linux-gnu.tar.gz"}])
-        ]
-        for releases in ([], no_digest, [release("v1.12.7", assets=[])], {"message": "API rate limit"}):
+    def test_a_release_whose_archive_has_no_usable_digest_is_an_error(self):
+        name = "dbt-core-2.0.12-x86_64-unknown-linux-gnu.tar.gz"
+        for archives in (
+            [{"name": name}],
+            [{"name": name, "digest": None}],
+            [{"name": name, "digest": "sha512:" + "0" * 128}],
+            [asset(name), asset(name)],
+        ):
+            with self.subTest(archives=archives), self.assertRaises(fetch_dbt.FetchError):
+                fetch_dbt.latest_oss([release("v2.0.12", assets=archives), release("v2.0.11")])
+
+    def test_no_release_with_its_archive_is_an_error(self):
+        for releases in (
+            [],
+            [release("v1.12.7", assets=[])],
+            [release("v2.0.13", prerelease=True)],
+            {"message": "API rate limit"},
+        ):
             with self.subTest(releases=releases), self.assertRaises(fetch_dbt.FetchError):
                 fetch_dbt.latest_oss(releases)
 
@@ -234,27 +257,110 @@ class Latest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(fetch_dbt.FetchError):
                 fetch_dbt.sidecar_digest(text, url)
 
-    def test_latest_prints_what_it_found_then_fetches_it(self):
+
+class Finders(unittest.TestCase):
+    """What the finders ask of GitHub and dbt Labs, with `get` answering recorded bodies."""
+
+    def answering(self, bodies):
+        asked = []
+
+        def get(url, headers=None):
+            asked.append((url, headers or {}))
+            return bodies[url]
+
+        before = fetch_dbt.get
+        fetch_dbt.get = get
+        self.addCleanup(setattr, fetch_dbt, "get", before)
+        return asked
+
+    def test_github_s_listing_is_asked_with_the_token(self):
+        asked = self.answering({fetch_dbt.RELEASES: json.dumps([release("v2.0.11")]).encode()})
+        before = os.environ.get("GH_TOKEN")
+        os.environ["GH_TOKEN"] = "the-token"
+        self.addCleanup(
+            lambda: os.environ.pop("GH_TOKEN") if before is None else os.environ.update(GH_TOKEN=before)
+        )
+        self.assertEqual(fetch_dbt.find_oss()[0], "2.0.11")
+        self.assertEqual(asked[0][0], "https://api.github.com/repos/dbt-labs/dbt/releases?per_page=100")
+        self.assertEqual(asked[0][1].get("Authorization"), "Bearer the-token")
+
+    def test_the_proprietary_digest_is_read_beside_its_archive(self):
+        url = "https://public.cdn.getdbt.com/fs/cli/fs-v2.0.11-x86_64-unknown-linux-gnu.tar.gz"
+        digest = hashlib.sha256(b"archive").hexdigest()
+        asked = self.answering(
+            {
+                "https://public.cdn.getdbt.com/fs/versions.json": b'{"stable": {"tag": "v2.0.11"}}',
+                f"{url}.sha256": f"{digest}  fs-v2.0.11-x86_64-unknown-linux-gnu.tar.gz\n".encode(),
+            }
+        )
+        self.assertEqual(fetch_dbt.find_proprietary(), ("2.0.11", url, digest))
+        self.assertEqual(
+            [url for url, _ in asked],
+            ["https://public.cdn.getdbt.com/fs/versions.json", f"{url}.sha256"],
+        )
+
+
+class LatestCommand(unittest.TestCase):
+    """`--latest` from its command line: the line it prints, and what a failure leaves."""
+
+    def setUp(self):
         scratch = tempfile.TemporaryDirectory(prefix="fetch-dbt-test.")
         self.addCleanup(scratch.cleanup)
-        archive = Path(scratch.name) / "a.tar.gz"
-        with tarfile.open(archive, "w:gz") as tar:
+        self.scratch = Path(scratch.name)
+        self.out = self.scratch / "out"
+        self.archive = self.scratch / "a.tar.gz"
+        with tarfile.open(self.archive, "w:gz") as tar:
             info = tarfile.TarInfo("dbt")
             info.size = 6
             tar.addfile(info, io.BytesIO(b"binary"))
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         before = fetch_dbt.LATEST["oss"]
-        fetch_dbt.LATEST["oss"] = lambda: ("9.9.9", archive.as_uri(), digest)
         self.addCleanup(fetch_dbt.LATEST.__setitem__, "oss", before)
-        printed = io.StringIO()
-        out = Path(scratch.name) / "out"
-        with contextlib.redirect_stdout(printed):
-            self.assertEqual(fetch_dbt.main(["--latest", "oss", str(out)]), 0)
+
+    def run_latest(self, finder):
+        fetch_dbt.LATEST["oss"] = finder
+        printed, complained = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(complained):
+            status = fetch_dbt.main(["--latest", "oss", str(self.out)])
+        return status, printed.getvalue().splitlines(), complained.getvalue().splitlines()
+
+    def test_prints_what_it_found_then_fetches_it(self):
+        digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        status, printed, _ = self.run_latest(lambda: ("9.9.9", self.archive.as_uri(), digest))
+        self.assertEqual(status, 0)
         self.assertEqual(
-            printed.getvalue().splitlines(),
-            [f"oss 9.9.9 {archive.as_uri()} {digest}", str(out / "dbt")],
+            printed, [f"oss 9.9.9 {self.archive.as_uri()} {digest}", str(self.out / "dbt")]
         )
-        self.assertEqual((out / "dbt").read_bytes(), b"binary")
+        self.assertEqual((self.out / "dbt").read_bytes(), b"binary")
+
+    def test_the_line_is_printed_even_when_the_archive_is_not_what_it_found(self):
+        status, printed, complained = self.run_latest(
+            lambda: ("9.9.9", self.archive.as_uri(), "0" * 64)
+        )
+        self.assertEqual((status, printed), (2, [f"oss 9.9.9 {self.archive.as_uri()} {'0' * 64}"]))
+        self.assertEqual(len(complained), 1)
+        self.assertFalse((self.out / "dbt").exists())
+
+    def test_a_failed_lookup_leaves_no_older_binary(self):
+        def failing(error):
+            def finder():
+                raise error
+
+            return finder
+
+        for error in (fetch_dbt.FetchError("no release"), ValueError("not JSON")):
+            with self.subTest(error=error):
+                self.out.mkdir(exist_ok=True)
+                (self.out / "dbt").write_bytes(b"older build")
+                status, printed, complained = self.run_latest(failing(error))
+                self.assertEqual((status, printed, len(complained)), (2, [], 1))
+                self.assertFalse((self.out / "dbt").exists())
+
+    def test_a_listing_nested_too_deep_is_status_2(self):
+        before = fetch_dbt.get
+        fetch_dbt.get = lambda *_: b"[" * 200000
+        self.addCleanup(setattr, fetch_dbt, "get", before)
+        status, _, complained = self.run_latest(fetch_dbt.find_oss)
+        self.assertEqual((status, len(complained)), (2, 1))
 
 
 if __name__ == "__main__":

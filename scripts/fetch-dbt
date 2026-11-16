@@ -8,7 +8,8 @@ BUILD is `oss`, dbt-oss 2.0.11 from GitHub's release of dbt-labs/dbt, or `propri
 2.0.9 from dbt Labs' CDN, under dbt Labs' licence; the pins are those of the owner's Nix
 packages.  With `--latest`, the latest stable build instead, as the weekly runs want it:
 for `oss`, the highest release tag vX.Y.Z of GitHub's, compared as numbers, not a draft nor
-a pre-release, that holds the Linux archive with GitHub's SHA-256 of it; for
+a pre-release, that holds the Linux archive, checked by GitHub's SHA-256 of it, a release
+that holds the archive without one such digest failing the lookup; for
 `proprietary`, the stable tag of dbt Labs' versions.json, as dbt Labs' installer reads it,
 checked by the SHA-256 that dbt Labs publishes beside the archive.  It prints `BUILD VERSION
 URL SHA256` first.  The archive is downloaded into a scratch directory inside DIR, its hash checked
@@ -74,11 +75,14 @@ def latest_oss(releases: object) -> tuple[str, str, str]:
         name = f"dbt-core-{version}-x86_64-unknown-linux-gnu.tar.gz"
         listed = release.get("assets") if isinstance(release.get("assets"), list) else []
         assets = [asset for asset in listed if isinstance(asset, dict) and asset.get("name") == name]
+        if not assets:
+            continue
+        # A release that holds the archive must vouch for it: one still uploading fails the run.
         digest = str(assets[0].get("digest") or "").removeprefix("sha256:") if len(assets) == 1 else ""
-        if DIGEST.fullmatch(digest):
-            found.append(
-                (tuple(map(int, tag.groups())), version, f"{GITHUB}/v{version}/{name}", digest)
-            )
+        if not DIGEST.fullmatch(digest):
+            message = f"{tag.group(0)}: {len(assets)} {name} without one SHA-256 of GitHub's"
+            raise FetchError(message)
+        found.append((tuple(map(int, tag.groups())), version, f"{GITHUB}/v{version}/{name}", digest))
     if not found:
         message = "no release vX.Y.Z of dbt-labs/dbt holds the Linux archive with its SHA-256"
         raise FetchError(message)
@@ -172,13 +176,22 @@ def main(arguments: list[str]) -> int:
         print(f"usage: scripts/fetch-dbt [--latest] {'|'.join(BUILDS)} DIR", file=sys.stderr)
         return 2
     try:
+        # So that a failed lookup leaves no binary either, not even an older one.
+        Path(rest[0], "dbt").unlink(missing_ok=True)
         if latest:
             version, url, sha256 = LATEST[build]()
             print(f"{build} {version} {url} {sha256}", flush=True)
         else:
             url, sha256 = BUILDS[build]
         binary = fetch(url, sha256, Path(rest[0]))
-    except (FetchError, OSError, ValueError, http.client.HTTPException, tarfile.TarError) as error:
+    except (
+        FetchError,
+        OSError,
+        ValueError,
+        RecursionError,
+        http.client.HTTPException,
+        tarfile.TarError,
+    ) as error:
         print(f"fetch-dbt: {error}", file=sys.stderr)
         return 2
     print(binary)
