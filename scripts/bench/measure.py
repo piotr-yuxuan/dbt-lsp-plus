@@ -32,6 +32,8 @@ BUDGET = [
     "workspace symbol",
     "definition of a ref in YAML",
     "references of a source",
+    "references of a model",
+    "references of a macro",
     "rename of a source",
     "prepare hierarchy",
     "incoming calls",
@@ -90,14 +92,14 @@ def requests(root: Path) -> dict[str, tuple[str, dict]]:
     middle = marts[len(marts) // 2]
     mart, properties = min(middle.glob("*.sql")), middle / "_models.yml"
     source = at(staging, "source('", 9)
+    declaration = {"context": {"includeDeclaration": True}}
     found = {
         "workspace symbol": ("workspace/symbol", {"query": "int_15"}),
         "definition of a ref in YAML": ("textDocument/definition", at(properties, "ref('", 6)),
         "definition of a source in SQL": ("textDocument/definition", source),
-        "references of a source": (
-            "textDocument/references",
-            {**source, "context": {"includeDeclaration": True}},
-        ),
+        "references of a source": ("textDocument/references", {**source, **declaration}),
+        "references of a model": ("textDocument/references", {**at(mart, "ref('", 6), **declaration}),
+        "references of a macro": ("textDocument/references", {**at(staging, "m_0(", 1), **declaration}),
         "rename of a source": ("textDocument/rename", {**source, "newName": "renamed"}),
         "prepare hierarchy": ("textDocument/prepareCallHierarchy", at(mart, "ref('", 6)),
         "incoming calls": (
