@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(
             targets,
             [
-                &scan::Target::Ref { package: None, name: "customers".into() },
+                &scan::Target::Ref { package: None, name: "customers".into(), version: None },
                 &scan::Target::Macro { package: None, name: "ref".into() }
             ]
         );

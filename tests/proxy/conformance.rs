@@ -241,7 +241,7 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     };
     // A call as written, and what navigation looks up for it.
     let written = |target: &scan::Target| match target {
-        scan::Target::Ref { package, name } => {
+        scan::Target::Ref { package, name, .. } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
             let named = navigation::Target::Named { kind: "ref", package: package.clone(), name: name.clone() };
             (format!("ref({})", quoted.join(", ")), Some(named))

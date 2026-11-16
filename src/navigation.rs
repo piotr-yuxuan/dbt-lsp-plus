@@ -96,10 +96,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         name: name.to_owned(),
     };
     let reference = scan::yaml_calls(text).into_iter().find_map(|call| match call.target {
-        // A keyword argument after the name, such as `v=2`, names a version.
-        scan::Target::Ref { package, name }
-            if call.arguments.iter().any(inside) && !text[call.range.end..].trim_start().starts_with(',') =>
-        {
+        scan::Target::Ref { package, name, version: None } if call.arguments.iter().any(inside) => {
             Some(named("ref", package.as_deref(), &name))
         }
         _ => None,

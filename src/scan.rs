@@ -37,6 +37,9 @@ pub enum Target {
     Ref {
         package: Option<String>,
         name: String,
+        /// The version that `v=` or `version=` names, as written; empty
+        /// when it is no literal, such as `v=var('x')`.
+        version: Option<String>,
     },
     Source {
         source: String,
@@ -426,9 +429,13 @@ pub fn outline(text: &str, sql: bool, control: bool) -> Vec<Symbol> {
 }
 
 // Its arguments are literals, then `)` or a keyword argument: `'orders' ~ var('sfx')` names another
-// model, and `'pkg', 'm' ~ x` names no model `pkg`.  The call, group 1, ends at its last literal.
+// model, and `'pkg', 'm' ~ x` names no model `pkg`.  The call, group 1, ends at its last literal; a
+// keyword, group 4, has its value in group 5 when that is a literal.
 static REF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?)\s*(?:\)|,\s*\w+\s*=)"#).unwrap()
+    Regex::new(
+        r#"(\bref\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?)\s*(?:\)|,\s*(\w+)\s*=\s*(?:['"]?([\w.\-]+)['"]?\s*[,)])?)"#,
+    )
+    .unwrap()
 });
 // Its arguments are two literals: `'events' ~ var('suffix')` names another table.
 static SOURCE: LazyLock<Regex> =
@@ -456,7 +463,10 @@ fn refs_and_sources(text: &str, at: usize) -> Vec<Call> {
             Some(name) => (Some(call[2].to_owned()), name.as_str().to_owned()),
             None => (None, call[2].to_owned()),
         };
-        found.push(Call { target: Target::Ref { package, name }, range: shift(call.get(1).unwrap()), arguments });
+        let version = matches!(call.get(4).map(|keyword| keyword.as_str()), Some("v" | "version"))
+            .then(|| call.get(5).map_or_else(String::new, |version| version.as_str().to_owned()));
+        let target = Target::Ref { package, name, version };
+        found.push(Call { target, range: shift(call.get(1).unwrap()), arguments });
     }
     for call in SOURCE.captures_iter(text) {
         let target = Target::Source { source: call[1].to_owned(), table: call[2].to_owned() };
@@ -519,9 +529,27 @@ mod tests {
             "{{ ref('orders' ~ var('sfx')) }} {{ ref('dim', v=2) }} {{ ref('pkg', 'm') }} {{ ref('pkg', 'n' ~ x) }}";
         let refs: Vec<Target> =
             calls(text).into_iter().map(|call| call.target).filter(|t| matches!(t, Target::Ref { .. })).collect();
-        let named =
-            |package: Option<&str>, name: &str| Target::Ref { package: package.map(str::to_owned), name: name.into() };
-        assert_eq!(refs, [named(None, "dim"), named(Some("pkg"), "m")]);
+        let named = |package: Option<&str>, name: &str, version: Option<&str>| Target::Ref {
+            package: package.map(str::to_owned),
+            name: name.into(),
+            version: version.map(str::to_owned),
+        };
+        assert_eq!(refs, [named(None, "dim", Some("2")), named(Some("pkg"), "m", None)]);
+    }
+
+    #[test]
+    fn a_ref_names_its_version_as_written() {
+        let text = "{{ ref('a', v=2) }} {{ ref('b', version = '1.5') }} {{ ref('p', 'c', v=\"3\") }} \
+                    {{ ref('d', v=var('x')) }} {{ ref('e') }}";
+        let versions: Vec<Option<String>> = calls(text)
+            .into_iter()
+            .filter_map(|call| match call.target {
+                Target::Ref { version, .. } => Some(version),
+                _ => None,
+            })
+            .collect();
+        let expected = [Some("2"), Some("1.5"), Some("3"), Some(""), None].map(|version| version.map(str::to_owned));
+        assert_eq!(versions, expected);
     }
 
     #[test]
@@ -683,9 +711,9 @@ select * from final
         assert_eq!(
             targets,
             [
-                Target::Ref { package: None, name: "live".into() },
+                Target::Ref { package: None, name: "live".into(), version: None },
                 named(None, "ref"),
-                Target::Ref { package: Some("pkg".into()), name: "b".into() },
+                Target::Ref { package: Some("pkg".into()), name: "b".into(), version: None },
                 named(None, "ref"),
                 Target::Source { source: "raw".into(), table: "orders".into() },
                 named(None, "source"),
