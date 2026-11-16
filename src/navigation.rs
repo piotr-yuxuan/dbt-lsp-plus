@@ -101,8 +101,8 @@ static DOC: LazyLock<Regex> = LazyLock::new(|| {
 
 /// What the position OFFSET of TEXT, the file at PATH, names, from that
 /// text alone: a `source` anywhere; elsewhere than in YAML, a `ref`'s
-/// argument, a macro call's name or package, or a macro's own name in its
-/// tag, which looks itself up; in YAML, a `ref`, a `doc`, a macro call in
+/// argument, a macro call's name or package, or the name in the tag of a
+/// macro or a generic test, which looks itself up; in YAML, a `ref`, a `doc`, a macro call in
 /// the Jinja of a value,
 /// the `name:` of a navigable entry, a generic test's name, or a unit
 /// test's `model:`.
@@ -113,9 +113,15 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         return source;
     }
     if !sources::is_yaml(path) {
-        let macro_named = |block: &scan::Symbol| block.kind == scan::Kind::Macro && inside(&block.name_range);
-        if let Some(block) = scan::blocks(text).into_iter().find(macro_named) {
-            return Some(Target::Call(scan::Target::Macro { package: None, name: block.name }));
+        // A generic test is the macro `test_<name>`, as dbt names it.
+        let macro_named = |block: &scan::Symbol| match block.kind {
+            scan::Kind::Macro => Some(block.name.clone()),
+            scan::Kind::Test => Some(format!("test_{}", block.name)),
+            _ => None,
+        };
+        let blocks = scan::blocks(text).into_iter().filter(|block| inside(&block.name_range));
+        if let Some(name) = blocks.filter_map(|block| macro_named(&block)).next() {
+            return Some(Target::Call(scan::Target::Macro { package: None, name }));
         }
         let named = |call: &scan::Call| match call.target {
             scan::Target::Ref { .. } => call.arguments.iter().any(inside),
@@ -251,12 +257,12 @@ impl<'a> Lookup<'a> {
                 Some(version) => text(&node["version"]).as_deref() == Some(version),
                 None => node["latest_version"].is_null() || node["version"] == node["latest_version"],
             };
-            let dir = self.project.packages.get(package);
-            let at = |node: &Value| {
-                let (id, file) = (node["unique_id"].as_str()?, node["original_file_path"].as_str()?);
-                Some(Found { id: id.to_owned(), path: dir?.join(file), range: 0..0 })
-            };
-            index.resources(package, name).into_iter().filter(named).filter_map(at).collect()
+            index
+                .resources(package, name)
+                .into_iter()
+                .filter(named)
+                .filter_map(|node| parsed_at(self.project, node))
+                .collect()
         };
         let in_package = |package: &str| -> Vec<Found> {
             match target {
@@ -299,10 +305,20 @@ impl<'a> Lookup<'a> {
     }
 }
 
+/// Where the node of the last parse NODE leads in PROJECT: its file's start.
+fn parsed_at(project: &Project, node: &Value) -> Option<Found> {
+    let (id, file) = (node["unique_id"].as_str()?, node["original_file_path"].as_str()?);
+    let dir = project.packages.get(node["package_name"].as_str()?)?;
+    Some(Found { id: id.to_owned(), path: dir.join(file), range: 0..0 })
+}
+
 /// What TARGET, named in the file at PATH, leads to by LOOKUP, dbt 2.0.9's:
 /// a call as `Lookup::call` resolves it; a source looked up as a `ref`,
 /// every declaration of the first package that has some; any other name in
-/// the package it gives, else as `LOOKUP` says, the first that exists.
+/// the package it gives, else as `LOOKUP` says, the first that exists, and
+/// for an entry of a model, seed or snapshot what the last parse knows that
+/// the scan does not, each version of a versioned model, as dbt patches
+/// them all from the entry.
 pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
     let project = lookup.project;
     let (root, own) = (project.root_package.as_str(), lookup.package_of(path));
@@ -346,12 +362,23 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
         let found = Found { id: entity.id.clone(), path: entity.path.clone(), range: entity.name_range.clone() };
         (entity.package.as_str(), found)
     });
-    first_step(found.collect(), &steps, false)
+    let mut found = first_step(found.collect(), &steps, false);
+    let resource = ["model", "seed", "snapshot"].contains(kind) && package.is_none();
+    let parsed = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, name));
+    for node in parsed.into_iter().filter(|node| node["resource_type"] == *kind) {
+        if let Some(parsed) = parsed_at(project, node).filter(|parsed| found.iter().all(|found| found.id != parsed.id))
+        {
+            found.push(parsed);
+        }
+    }
+    found.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
+    found
 }
 
 /// Where what TARGET, named in the file at PATH, is used, by LOOKUP: each
-/// call that resolves to it, as its definition would, at its name, and a
-/// unit test's `model:` naming it; with DECLARATION, where it is declared
+/// call that resolves to it, as its definition would, at its name, a unit
+/// test's `model:` naming it, and a generic test's name in a properties file
+/// for the macro `test_<name>`; with DECLARATION, where it is declared
 /// too: its file's start or its block, and the `name:` of each properties
 /// entry declaring it in its own package.  Each leads to its id, in the
 /// order of their paths.
@@ -392,17 +419,24 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
             .filter_map(|call| Some(Found { id: lead(own, &call.target)?, path: file.to_owned(), range: at(call) }))
             .collect()
     };
-    // A unit test's `model:`, and with DECLARATION an entry's `name:`, looked up as their definitions.
+    // A unit test's `model:`, a generic test, and with DECLARATION an entry's `name:`, looked up as their
+    // definitions, each with the name it stands for.
     let named = |file: &Path, scanned: &project::Scanned| -> Vec<Found> {
-        let models = scanned.models.iter().map(|(model, range)| ("unit test model", model, range));
-        let entries =
-            scanned.entries.iter().filter(|_| declaration).map(|entry| (entry.label, &entry.name, &entry.name_range));
-        let lookups = models.chain(entries).filter(|(_, named, _)| *named == name);
-        let found = |(kind, named, range): (&'static str, &String, &Range<usize>)| {
-            let target = Target::Named { kind, package: None, name: named.clone() };
-            leading(file, range.clone(), resolve(lookup, file, &target))
+        let target = |kind: &'static str, package: &Option<String>, name: &String| Target::Named {
+            kind,
+            package: package.clone(),
+            name: name.clone(),
         };
-        lookups.filter_map(found).collect()
+        let models =
+            scanned.models.iter().map(|(model, range)| (target("unit test model", &None, model), model.clone(), range));
+        let tests = scanned.tests.iter();
+        let tests =
+            tests.map(|test| (target("test", &test.package, &test.name), format!("test_{}", test.name), &test.range));
+        let entries = scanned.entries.iter().filter(|_| declaration);
+        let entries =
+            entries.map(|entry| (target(entry.label, &None, &entry.name), entry.name.clone(), &entry.name_range));
+        let lookups = models.chain(tests).chain(entries).filter(|(_, stands_for, _)| stands_for == name);
+        lookups.filter_map(|(target, _, range)| leading(file, range.clone(), resolve(lookup, file, &target))).collect()
     };
     let files = lookup.project.files.iter().map(|(file, scanned)| (file, &**scanned));
     let mut found: Vec<Found> =
@@ -751,6 +785,11 @@ models:
             "pkg's disabled"
         );
         // Before a parse: no version, and the package's own model, which dbt disables.
+        // An entry of a versioned model leads to each version, as dbt patches them all from it.
+        let entry = Target::Named { kind: "model", package: None, name: "dim".into() };
+        let ids: Vec<String> =
+            resolve(&parsed, &root.join("models/orders.sql"), &entry).into_iter().map(|f| f.id).collect();
+        assert_eq!(ids, ["model.shop.dim.v1", "model.shop.dim.v2"]);
         let scanned = Lookup::new(&project, None);
         assert_eq!(leads(&scanned, "models/orders.sql", "dim", None), Vec::new());
         assert_eq!(
@@ -791,7 +830,7 @@ models:
     }
 
     const USES_YML: &str = "version: 2\nmodels:\n  - name: b\n    description: '{{ m() }}'\n  - name: a\n    data_tests:\n\
-                            \x20     - relationships:\n          to: ref('b')\n          field: id\nunit_tests:\n  - name: t\n\
+                            \x20     - is_even\n      - relationships:\n          to: ref('b')\n          field: id\nunit_tests:\n  - name: t\n\
                             \x20   model: b\n";
 
     /// A project whose model `b` and macro `m` are used in every kind of
@@ -805,6 +844,7 @@ models:
             ("models/_m.yml", USES_YML),
             ("analyses/x.sql", "{{ ref('b') }}"),
             ("macros/m.sql", "{% macro m() %}1{% endmacro %}\n"),
+            ("macros/tests.sql", "{% test is_even(model, column_name) %}\nselect 1\n{% endtest %}\n"),
             ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
             ("dbt_packages/pkg/models/b.sql", "select 2"),
             ("dbt_packages/pkg/models/c.sql", "{{ ref('b') }}"),
@@ -858,6 +898,13 @@ models:
         let mut with_declaration = used(&root, "models/a.sql", "ref('b')", 5, true);
         with_declaration.sort();
         assert_eq!(with_declaration, pairs(&declared));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_generic_test_s_references_are_its_uses_in_properties_files() {
+        let root = uses("navigation-test-uses");
+        assert_eq!(used(&root, "macros/tests.sql", "is_even", 0, false), [("models/_m.yml".into(), "is_even".into())]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -2,7 +2,7 @@
 //! The resources of a dbt project and of its installed packages, read from
 //! their files: what dbt itself would parse, without dbt.
 
-use crate::properties::{self, Entry};
+use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
 use crate::text::{self, Encoding, LineIndex};
@@ -66,6 +66,8 @@ pub struct Scanned {
     pub entries: Vec<Entry>,
     /// The models of a properties file's unit tests, as written.
     pub models: Vec<(String, Range<usize>)>,
+    /// The generic tests that a properties file names.
+    pub tests: Vec<Test>,
 }
 
 impl Scanned {
@@ -85,6 +87,7 @@ impl Scanned {
             tables: source_tables_in("", path, &text, &root),
             entries: properties::entries_in(&text, &root, false).into_iter().filter(resource).collect(),
             models: unit_test_models(&text, &root),
+            tests: properties::tests_in(&text, &root),
             calls,
             text,
             ..Scanned::default()
