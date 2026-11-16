@@ -11,6 +11,7 @@ disabled-package-model	model.pa.pa_m ref('x')	navigation	proxy {"model.pa.x"}, d
 disabled-package-model	node:model.pa.x	scan	only the proxy has it	the scan reads no `+enabled: false` from the root's dbt_project.yml
 dispatch	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn", "macro.pa.duckdb__fn", "macro.pa.postgres__fn"}, dbt {"macro.pa.duckdb__fn"}	the graph names every implementation, dbt the adapter's only
 dispatch	model.r.c2 adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn", "macro.pa.duckdb__fn", "macro.pa.postgres__fn"}, dbt {}	dbt lists nothing for a dispatch called from a node; the graph names every implementation, dbt the adapter's only
+dispatch-ref	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn", "macro.pa.duckdb__fn"}, dbt {"macro.pa.duckdb__fn"}	the graph names every implementation, dbt the adapter's only
 dispatch-search-order	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn"}, dbt {"macro.r.default__fn"}	the graph follows no `dispatch:` search order (design.md, known limitations)
 flag-FALSE	model.pa.pa_m ref('x')	graph	proxy {"model.pa.x"}, dbt {"model.r.x"}	graph::resolve ignores the flag (design.md, known limitations)
 flag-FALSE	model.pa.pa_m source('s', 't')	graph	proxy {"source.pa.s.t"}, dbt {"source.r.s.t"}	graph::resolve ignores the flag (design.md, known limitations)

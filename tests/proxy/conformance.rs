@@ -10,7 +10,7 @@
 //! diverge, so that the registry is the exact list of gaps.
 
 use crate::support::scratch;
-use dbt_lsp_plus::graph::Graph;
+use dbt_lsp_plus::graph::{Edge, Graph};
 use dbt_lsp_plus::project::{self, Project};
 use dbt_lsp_plus::{config, navigation, properties, scan, sources};
 use regex::Regex;
@@ -260,12 +260,21 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
             None,
         ),
     };
-    // ID, then each macro that it reaches through the graph's edges.
-    let reached = |id: &str| -> Vec<String> {
+    // ID, then each macro that it reaches through the graph's edges: through
+    // plain calls only, unless DISPATCHED, since dbt renders only the
+    // implementation that a dispatch picks.
+    let reached = |id: &str, dispatched: bool| -> Vec<String> {
         let mut reached = vec![id.to_owned()];
         let mut next = 0;
         while let Some(from) = reached.get(next).cloned() {
-            for edge in graph.edges.iter().filter(|edge| edge.from == from && edge.to.starts_with("macro.")) {
+            let calls = entities.get(from.as_str()).map_or(&[][..], |holder| holder.calls.as_slice());
+            let plain = |edge: &Edge| {
+                calls
+                    .iter()
+                    .any(|call| matches!(call.target, scan::Target::Macro { .. }) && edge.sites.contains(&call.range))
+            };
+            let edges = graph.edges.iter().filter(|edge| edge.from == from && edge.to.starts_with("macro."));
+            for edge in edges.filter(|edge| dispatched || plain(edge)) {
                 if !reached.contains(&edge.to) {
                     reached.push(edge.to.clone());
                 }
@@ -286,10 +295,10 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         });
         [("graph", Some(graphed)), ("navigation", navigated)]
     };
-    // The subject under which ENTITY compares a call of HOLDER, a `ref` or a
-    // `source` when REFERENCE, if it does: a node, its own calls and the
-    // `ref` and `source` of the macros it reaches; a macro, its own calls of
-    // macros.
+    // The subject under which ENTITY compares a call of HOLDER, if it does,
+    // REFERENCE when the call is a `ref` or a `source` that dbt renders for
+    // ENTITY: a node, its own calls and the `ref` and `source` of the macros
+    // it reaches through plain calls; a macro, its own calls of macros.
     let subject = |entity: &project::Entity, holder: &project::Entity, reference: bool| {
         let own = holder.id == entity.id;
         let compared = if entity.resource_type == "macro" { own && !reference } else { own || reference };
@@ -301,13 +310,15 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
         let dependencies: Vec<(Vec<String>, String)> =
             dependencies(&entity.id).into_iter().map(|dependency| (callers(&dependency), dependency)).collect();
         let mut named = BTreeSet::new();
-        for holder in reached(&entity.id).iter().filter_map(|id| entities.get(id.as_str())) {
+        let rendered = reached(&entity.id, false);
+        for holder in reached(&entity.id, true).iter().filter_map(|id| entities.get(id.as_str())) {
             for call in &holder.calls {
                 let (written, target) = written(&call.target);
                 let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
                 let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
                 named.extend(dbt.iter().cloned());
-                let Some(subject) = subject(entity, holder, target.is_some()) else { continue };
+                let reference = target.is_some() && rendered.contains(&holder.id);
+                let Some(subject) = subject(entity, holder, reference) else { continue };
                 for (lookup, ours) in answers(holder, call, target) {
                     if let Some(ours) = ours.filter(|ours| *ours != dbt) {
                         found.push((format!("{subject} {written}"), lookup, format!("proxy {ours:?}, dbt {dbt:?}")));
