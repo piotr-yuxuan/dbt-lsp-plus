@@ -1,21 +1,60 @@
 # dbt-lsp-plus
 
-A language server that sits in front of `dbt lsp`, the language server of
-dbt 2, and adds what it lacks, for every editor and for agents.
+[![CI](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/ci.yml)
+[![CD](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/cd.yml/badge.svg)](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/cd.yml)
+[![Weekly](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/weekly.yml/badge.svg)](https://github.com/piotr-yuxuan/dbt-lsp-plus/actions/workflows/weekly.yml)
+[![Latest release](https://img.shields.io/github/v/release/piotr-yuxuan/dbt-lsp-plus?sort=semver)](https://github.com/piotr-yuxuan/dbt-lsp-plus/releases/latest)
+[![Licence](https://img.shields.io/github/license/piotr-yuxuan/dbt-lsp-plus)](https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/LICENSE)
+[![Issues](https://img.shields.io/github/issues/piotr-yuxuan/dbt-lsp-plus)](https://github.com/piotr-yuxuan/dbt-lsp-plus/issues)
+[![Minimum Rust](https://img.shields.io/badge/rust-1.89%2B-informational)](https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/Cargo.toml)
 
-[The features](docs/reference/features.md) are listed by LSP method.
+A language server that sits in front of `dbt lsp`, the language server of
+dbt 2, and adds what it lacks, for every editor and for agents: the
+outline of a model, every resource of a project as a workspace symbol, the
+call hierarchy of models, sources and macros, references and renames of
+sources, definitions from YAML, and the last run's failures as
+diagnostics.  With dbt-oss, which has no `dbt lsp`, it works alone, from
+the files and your own `dbt parse`.  It is pre-release.
+
+![](./docs/social-media-preview.png)
 
 It uses only the server's interface, unlocks nothing that dbt gates behind
-an account, and does not ship dbt.  [The
-design](docs/explanation/design.md) explains how it works and what it
-would take to finish.
+an account, and does not ship dbt.
 
-- [Configure an editor](docs/how-to/configure-an-editor.md)
-- [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md)
-- [Build and test](docs/how-to/build-and-test.md)
-- [The command line](docs/reference/command-line.md)
+## Install and run
+
+With Rust 1.89 or later and a C linker (or `nix develop`, which gives
+Rust):
+
+```
+git clone https://github.com/piotr-yuxuan/dbt-lsp-plus
+cd dbt-lsp-plus
+cargo install --locked --path . --bin dbt-lsp-plus
+```
+
+Then have your editor's LSP client start, in place of `dbt lsp`:
+
+```
+dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
+```
+
+Every message passes unchanged, byte for byte; the proxy answers only what
+the server lacks.  [Your first session](docs/tutorials/first-session.md)
+walks through it on the project of the tests, from Emacs.
+
+## Documentation
+
+- Tutorial: [Your first session](docs/tutorials/first-session.md)
+- How-to: [Configure an editor](docs/how-to/configure-an-editor.md),
+  [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md),
+  [Build and test](docs/how-to/build-and-test.md)
+- Reference: [The features](docs/reference/features.md), by LSP method;
+  [The command line](docs/reference/command-line.md);
+  [The release pipeline](docs/reference/release-pipeline.md)
+- Explanation: [The design](docs/explanation/design.md), what `dbt lsp`
+  was observed to do, and what it would take to finish
 
 ## Licence
 
-European Union Public Licence 1.2 (`LICENSE`) or GNU General Public
-License 3.0 or later (`COPYING`).
+European Union Public Licence 1.2 ([`LICENSE`](LICENSE)) or GNU General
+Public License 3.0 or later ([`COPYING`](COPYING)).
