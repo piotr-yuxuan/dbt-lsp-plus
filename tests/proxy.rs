@@ -1719,6 +1719,45 @@ fn one_parse_at_a_time_and_one_more_after_a_change_during_it() {
 }
 
 #[test]
+fn with_dbt_lsp_a_change_during_a_parse_waits_for_a_request() {
+    let gate = scratch("server-lazy-gate-file").join("open");
+    let (mut session, log) = Session::fake("server-lazy", json!({"manifest": manifest(), "parse_gate": gate}));
+    session.initialize_as(&fixture(), json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse", |_| parses(&log).len() == 1);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    std::fs::write(&gate, "").unwrap();
+    // The parse has ended once the client is asked to refresh its hints.
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    parses_stay(&log, 1);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
+    let gate = scratch("standalone-gate-file").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest(), "parse_gate": gate});
+    let (mut session, log) = Session::fake("standalone-parse", script);
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    until_logged(&log, "the parse of the first document", |_| parses(&log).len() == 1);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    parses_stay(&log, 1);
+    std::fs::write(&gate, "").unwrap();
+    until_logged(&log, "the parse after the save", |_| parses(&log).len() == 2);
+    let orders = node_info(&mut session, json!("model.shop.orders"));
+    assert_eq!(orders["result"]["relation"], "\"shop\".\"main\".\"orders\"", "{orders}");
+    parses_stay(&log, 2);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    until_logged(&log, "the parse after the second save", |_| parses(&log).len() == 3);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn no_parse_while_packages_need_the_network() {
     let project = copy_fixture("unsettled-packages");
     std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")

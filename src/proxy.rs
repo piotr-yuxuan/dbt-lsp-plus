@@ -732,9 +732,10 @@ impl<W: Write> Proxy<W> {
         Some(Ok(node.cloned().unwrap_or(Value::Null)))
     }
 
-    /// Starts a parse when the index is stale and dbt can parse: a server
-    /// that compiled since the last change, packages that need no network,
-    /// no parse under way, no shutdown, a server command with `lsp`.
+    /// Starts a parse when the index is stale and dbt can parse: alone, or
+    /// with a server that compiled since the last change; packages that need
+    /// no network, no parse under way, no shutdown, a server command with
+    /// `lsp`.
     fn want_index(&mut self) {
         // A listing makes dbt lsp compile, as the first document opened does.
         if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
@@ -742,7 +743,9 @@ impl<W: Write> Proxy<W> {
         }
         self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
-        let ready = !parsing.fresh && parsing.compiled && parsing.running.is_none() && self.server.is_some();
+        // Alone, no server resolves the packages first: their guard is enough.
+        let can = self.standalone || (parsing.compiled && self.server.is_some());
+        let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
         if !config::packages_settled(&root) {
             return self.log_parse("packages.yml names packages that are not installed: run dbt deps");
@@ -793,6 +796,11 @@ impl<W: Write> Proxy<W> {
         match outcome.failure {
             Some(failure) => self.log_parse(&format!("dbt parse failed: {failure}")),
             None => self.parsing.failure = None,
+        }
+        // Alone, a change during this parse wants the next one now: no
+        // request may come to ask for it.
+        if self.standalone {
+            self.want_index();
         }
     }
 
@@ -940,24 +948,32 @@ impl<W: Write> Proxy<W> {
         let params = message.get("params").unwrap_or(&Value::Null);
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
             (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
-            (Some(method), None) => {
-                self.track(method, params);
-                // The server gets the change before the listing it prompts.
-                self.send_server(&frame.body);
-                let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
-                // dbt lsp's output, as spelt and as resolved: a link out of the project included.
-                let output = || {
-                    let spelt = self.root.iter().flat_map(|root| OUTPUT.map(|dir| root.join(dir)));
-                    spelt.flat_map(|dir| [fs::canonicalize(&dir).ok(), Some(dir)]).flatten().collect()
-                };
-                if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
-                    (self.parsing.fresh, self.parsing.compiled) = (false, false);
-                    self.list_nodes();
-                }
-            }
+            (Some(method), None) => self.on_notification(method, params, &frame.body),
             // The client's answer to the proxy's own request was never the server's.
             (None, Some(id)) if self.asked.remove(&key(id)) => {}
             _ => self.send_server(&frame.body),
+        }
+    }
+
+    /// A notification of the client's, METHOD with PARAMS, BODY as it came:
+    /// kept and forwarded; when the graph may have changed, a listing, and,
+    /// alone, a parse, which nothing else would start.
+    fn on_notification(&mut self, method: &str, params: &Value, body: &[u8]) {
+        self.track(method, params);
+        // The server gets the change before the listing it prompts.
+        self.send_server(body);
+        let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
+        // dbt lsp's output, as spelt and as resolved: a link out of the project included.
+        let output = || {
+            let spelt = self.root.iter().flat_map(|root| OUTPUT.map(|dir| root.join(dir)));
+            spelt.flat_map(|dir| [fs::canonicalize(&dir).ok(), Some(dir)]).flatten().collect()
+        };
+        if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
+            (self.parsing.fresh, self.parsing.compiled) = (false, false);
+            self.list_nodes();
+            if self.standalone {
+                self.want_index();
+            }
         }
     }
 
