@@ -7,3 +7,5 @@ models:
         description: "{{ doc('col_id') }}"
   - name: n
     description: "{{ doc('n_desc') }} Refreshed daily."
+  - name: o
+    description: '{{ doc(''o_desc'') }}'

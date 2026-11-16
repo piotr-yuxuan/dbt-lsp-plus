@@ -333,8 +333,8 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     found
 }
 
-/// `doc('` or `doc("`, YAML's escape included: where navigation reads a doc.
-static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*\\?['"]"#).unwrap());
+/// `doc(` and a quote, as YAML escapes it too: where navigation reads a doc.
+static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(?:''|\\?["'])"#).unwrap());
 
 /// In each properties file, each entry's `name:` that navigation reads, and
 /// each `doc()` in that entry, as navigation resolves them, against what
@@ -362,7 +362,8 @@ fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
             let description =
                 column.map_or(&node["description"], |column| &node["columns"][&column.name]["description"]);
             let description = description.as_str().unwrap_or_default();
-            let literal: String = text[offset..].chars().take_while(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+            let name_on = text[offset..].trim_start_matches(['\'', '"', '\\']);
+            let literal: String = name_on.chars().take_while(|c| !matches!(c, '\'' | '"' | '\\')).collect();
             let (name, ours) = match navigation::target_at(path, text, offset) {
                 Some(navigation::Target::Named { kind: "doc", package, name }) => {
                     let ours = resolved(path, &navigation::Target::Named { kind: "doc", package, name: name.clone() });
