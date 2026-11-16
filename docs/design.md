@@ -741,11 +741,12 @@ library's answers, each named by a lookup:
 A node is compared on its own calls and on the `ref` and `source` of each
 macro it reaches through the graph by plain calls, as `<node> via
 <macro>`, since dbt resolves those for the node; but not through a
-dispatch, of whose implementations dbt renders the one it picks, though
+dispatch: dbt renders the one implementation it picks, which the corpus
+cannot tell, so no implementation's `ref` or `source` is compared, though
 their calls still count for what the node names.  A macro is compared on
-its own calls of macros; a node that dbt dropped, against nothing.  A case may expect dbt to fail, in a
-file `expected-error`, and its manifest is compared all the same; dbt
-must leave the copy as it was.  `divergences.txt` lists every divergence,
+its own calls of macros; a node that dbt dropped, against nothing.  A
+case may expect dbt to fail, in a file `expected-error`, and its manifest
+is compared all the same; dbt must leave the copy as it was.  `divergences.txt` lists every divergence,
 what each side answered and why: one it lacks, or an entry that no longer
 diverges, as when an answer changes, fails the corpus.  dbt 2.0.9 and
 dbt-oss 2.0.11 gave the same divergences on every case.
