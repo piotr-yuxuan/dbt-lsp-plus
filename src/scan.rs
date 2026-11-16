@@ -513,10 +513,16 @@ pub fn calls(text: &str) -> Vec<Call> {
 /// without Jinja delimiters, as in a relationships test's `to:`.  Comments
 /// are left out.
 pub fn yaml_calls(text: &str) -> Vec<Call> {
-    let masked = mask(text, &[("'", "'", false), ("\"", "\"", false), ("#", "\n", true)]);
+    let masked = without_yaml_comments(text);
     let mut found = refs_and_sources(&masked, 0);
     found.sort_by_key(|call| call.range.start);
     found
+}
+
+/// TEXT, YAML, its comments outside quotes blanked, offsets kept: what dbt
+/// renders of it.
+pub fn without_yaml_comments(text: &str) -> String {
+    mask(text, &[("'", "'", false), ("\"", "\"", false), ("#", "\n", true)])
 }
 
 #[cfg(test)]

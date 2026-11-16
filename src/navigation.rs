@@ -166,7 +166,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     };
     let macro_call = || {
         let called = |call: &scan::Call| matches!(call.target, scan::Target::Macro { .. }) && inside(&call.range);
-        scan::calls(text).into_iter().find(called).map(|call| Target::Call(call.target))
+        scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| Target::Call(call.target))
     };
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
 }

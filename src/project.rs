@@ -77,9 +77,9 @@ impl Scanned {
         if !sources::is_yaml(path) {
             return Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() };
         }
-        // Its macro calls too, inside the Jinja of its values, such as hooks.
+        // Its macro calls too, inside the Jinja of its values, such as hooks, but in its comments.
         let macros = |call: &Call| matches!(call.target, scan::Target::Macro { .. } | scan::Target::Dispatch { .. });
-        calls.extend(scan::calls(&text).into_iter().filter(macros));
+        calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
         calls.sort_by_key(|call| call.range.start);
         let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
         let resource = |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro"].contains(&entry.label);
@@ -472,9 +472,10 @@ mod tests {
             calls.iter().any(|call| matches!(&call.target, scan::Target::Macro { name, .. } if name == wanted))
         };
         assert!(macro_named(&scanned.calls, "my_macro"));
-        let hooks =
-            Scanned::of(Path::new("/p/dbt_project.yml"), "name: shop\non-run-start: \"{{ log_start() }}\"\n".into());
+        let hooks = "name: shop\non-run-start: \"{{ log_start() }}\"\n# on-run-end: \"{{ log_end() }}\"\n";
+        let hooks = Scanned::of(Path::new("/p/dbt_project.yml"), hooks.into());
         assert!(macro_named(&hooks.calls, "log_start"), "a hook's macro");
+        assert!(!macro_named(&hooks.calls, "log_end"), "dbt renders no comment");
     }
 
     #[test]
