@@ -15,17 +15,11 @@ make check
 ```
 
 and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming a
-dbt 2 executable: with the proprietary build, which has `dbt lsp`, the live
-test and the conformance corpus,
+dbt 2 executable, once with the proprietary build, which has `dbt lsp`, and
+once with dbt-oss, which has none and runs the proxy alone:
 
 ```
 make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
-```
-
-and with dbt-oss, which has no `dbt lsp`, the corpus alone:
-
-```
-make conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 ```
 
 Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
@@ -46,15 +40,17 @@ src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
 src/project.rs                the resources of a project and its packages
-src/graph.rs                  the dependency graph: scanned, then the server's
+src/graph.rs                  the dependency graph: scanned, then the server's or the manifest's
 src/sources.rs                references and renames of sources
 src/navigation.rs             the targets of definitions in YAML, dbt's lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
+src/packages.rs               whether dbt would install packages before it parses
+src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
-tests/proxy/live.rs           the binary in front of the real dbt lsp, opt-in
+tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
@@ -91,15 +87,22 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
     server's answer, so that `on_server` stays a dispatch;
-  - `Proxy::refresh_hints`: the proxy's one request to the client, its id
-    and the answer it keeps;
+  - `Proxy::refresh_hints`: whether a client may be asked to refresh its
+    hints, apart from the outcome of the parse that changes them;
   - `runs::place`: where a failed node is written, apart from how it
     failed;
   - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
     `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,
-    `Proxy::on_restarted` and `Proxy::on_time`: one handler per kind of
-    message or event, so that `on_server`, `on_own_response`, `serve` and
-    `handle` stay dispatches;
+    `Proxy::on_restarted`, `Proxy::on_time`, `Proxy::on_notification` and
+    `Proxy::on_problems`: one handler per kind of message or event, so that
+    `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
+    `on_parsed` stay dispatches;
+  - `lacks_lsp`: the probe of the user's dbt, at the boundary, with tests
+    of its own;
+  - `packages::install_path`, `packages::read` and `packages::named`: one
+    rule each of how dbt finds a project's packages (where it installs
+    them, which files it reads, which local packages it follows), apart
+    from what `packages::refused` decides;
   - `answered_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: what dbt lsp
     2.0.9 answers, apart from what the script makes it answer;
   - `Fake::misbehaves` in `tests/support/fake_dbt_lsp.rs`: what the
@@ -116,8 +119,8 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     refused; where `dbt_project.yml` configures a source), with tests of
     its own;
   - `sources::argument_naming`: which argument of a call names a target;
-  - `yaml::Node::shares`: a walk of the tree, which needs a function of its
-    own to recurse;
+  - `yaml::Node::shares` and `yaml::Node::repeats`: walks of the tree,
+    which need a function of their own to recurse;
   - `Proxy::node_info`, `Proxy::remember` and `Proxy::handle`: the answer of
     the proxy's command; what the proxy keeps of a forwarded request apart
     from where it goes; one event's dispatch apart from the waiting with

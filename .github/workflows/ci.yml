@@ -71,6 +71,9 @@ jobs:
             target
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
+      # The proxy cuts its parse off the network where `unshare -r` works, and the tests
+      # check it on Linux.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: nix develop -c make test
 
   # A beginning on macOS, whose result counts for neither CI nor a release, though CD waits
@@ -100,8 +103,8 @@ jobs:
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
       - run: nix develop -c make test
 
-  # The corpus on dbt-oss, which has no `dbt lsp`, so no live test.  The binary is fetched
-  # outside the checkout and no cache holds it.
+  # The corpus on dbt-oss, then the live test, which has the proxy alone since dbt-oss has
+  # no `dbt lsp`.  The binary is fetched outside the checkout and no cache holds it.
   dbt-oss:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-24.04
@@ -130,6 +133,9 @@ jobs:
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: unshare -rn true
       - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
+      # Built with the network, then the live test with none.
+      - run: nix develop -c cargo test --locked --test proxy --no-run
+      - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
 
   # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
   # variable DBT_LSP_PLUS_PROPRIETARY to true, and on a push only.  While it is opt-in its

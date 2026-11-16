@@ -59,6 +59,19 @@ impl Node {
         }
     }
 
+    /// Whether a mapping anywhere in this node names a key twice, where a
+    /// reader may take the first value or the last.
+    pub fn repeats(&self) -> bool {
+        match self {
+            Node::Seq(items) => items.iter().any(Node::repeats),
+            Node::Map { entries, .. } => {
+                let mut keys = std::collections::HashSet::new();
+                entries.iter().any(|(key, value)| !keys.insert(key.as_str()) || value.repeats())
+            }
+            _ => false,
+        }
+    }
+
     /// The items of a sequence; nothing for any other node.
     pub fn items(&self) -> &[Node] {
         match self {

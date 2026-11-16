@@ -7,14 +7,15 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, navigation, project, properties, runs, scan, sources};
+use crate::{config, document, features, navigation, packages, parse_log, project, properties, runs, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -137,6 +138,10 @@ struct Diagnostics {
     server: HashMap<PathBuf, (String, Vec<Value>)>,
     /// The failures of the last run.
     failures: HashMap<PathBuf, Vec<runs::Failure>>,
+    /// The errors and warnings of the last parse that ran to its end, alone.
+    parsed: HashMap<PathBuf, Vec<parse_log::Problem>>,
+    /// The messages of the problems in no file that were logged.
+    logged: HashSet<String>,
     /// When the client last changed or saved each document.
     edited: HashMap<PathBuf, SystemTime>,
     /// The URI under which the proxy last published.
@@ -199,12 +204,17 @@ struct Parsing {
     wanted: bool,
     /// Why the last parse failed, or none could start, as logged.
     failure: Option<String>,
+    /// Whether a parse runs cut off the network and from writing the project.
+    cut: bool,
     cache: Option<PathBuf>,
 }
 
 struct Proxy<W: Write> {
     client: W,
     server: Option<Server>,
+    /// Whether the user's dbt has no `lsp`, as dbt-oss: no server runs, and
+    /// the proxy answers alone, from its scan and the user's `dbt parse`.
+    standalone: bool,
     /// Why there is no server, told to the client once it is initialized.
     absent: Option<String>,
     /// The project directory: the server command's `--project-dir`, spelt
@@ -242,11 +252,27 @@ struct Proxy<W: Write> {
     markdown: bool,
     /// Whether the client may be asked to refresh its inlay hints.
     hint_refresh: bool,
+    /// Whether the client lets a server register a watcher of files.
+    watches: bool,
     /// The proxy's own requests to the client, whose answers stay here.
     asked: HashSet<String>,
     diagnostics: Diagnostics,
     restart: Restart,
     parsing: Parsing,
+}
+
+/// PATH with each `..` dropping the component before it, as written: no
+/// link is followed.
+fn lexical(path: &Path) -> PathBuf {
+    path.components().fold(PathBuf::new(), |mut path, component| {
+        match component {
+            Component::ParentDir => {
+                path.pop();
+            }
+            other => path.push(other),
+        }
+        path
+    })
 }
 
 /// The path of a `file:` URI.
@@ -291,21 +317,9 @@ fn key(id: &Value) -> String {
 /// it.  Resolved only when that names another directory, through a link
 /// before a `..`.
 fn project_dir(command: &[String]) -> Option<PathBuf> {
-    let value = command.iter().enumerate().find_map(|(at, arg)| match arg.strip_prefix("--project-dir") {
-        Some("") => command.get(at + 1).cloned(),
-        Some(rest) => rest.strip_prefix('=').map(str::to_owned),
-        None => None,
-    })?;
-    let spelt = std::path::absolute(&value).ok()?.components().fold(PathBuf::new(), |mut path, component| {
-        match component {
-            Component::ParentDir => {
-                path.pop();
-            }
-            other => path.push(other),
-        }
-        path
-    });
-    match fs::canonicalize(&value) {
+    let value = config::flag(command, "--project-dir")?;
+    let spelt = lexical(&std::path::absolute(value).ok()?);
+    match fs::canonicalize(value) {
         Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
         _ => Some(spelt),
     }
@@ -316,6 +330,7 @@ impl<W: Write> Proxy<W> {
         let mut proxy = Proxy {
             client,
             server,
+            standalone: false,
             absent,
             root: None,
             canonical_root: None,
@@ -337,6 +352,7 @@ impl<W: Write> Proxy<W> {
             shutdown: false,
             markdown: false,
             hint_refresh: false,
+            watches: false,
             asked: HashSet::new(),
             diagnostics: Diagnostics::default(),
             restart: Restart::default(),
@@ -410,12 +426,27 @@ impl<W: Write> Proxy<W> {
         capabilities.insert("referencesProvider".into(), json!(true));
         capabilities.insert("renameProvider".into(), json!(true));
         capabilities.insert("definitionProvider".into(), json!(true));
+        // Alone for good, it wants saves, which start a parse, and answers
+        // hovers and hints from the parse alone.
+        if self.standalone {
+            capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2, "save": {}}));
+            capabilities.insert("hoverProvider".into(), json!(true));
+            capabilities.insert("inlayHintProvider".into(), json!(true));
+            self.owned.extend(["textDocument/hover", "textDocument/inlayHint"]);
+        }
         self.add_capabilities(&mut capabilities);
         self.watch_runs();
         let info = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
         self.send_client(
             &json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": capabilities, "serverInfo": info}}),
         );
+        // A dbt without `lsp` is no failure: said once, out of the user's way.
+        if self.standalone {
+            let dbt = self.parsing.server.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>();
+            let text = format!("dbt-lsp-plus: {} has no lsp: dbt-lsp-plus answers alone.", dbt.join(" "));
+            let params = json!({"type": 3, "message": text});
+            return self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+        }
         let why = self.absent.take().unwrap_or_else(|| "dbt lsp is not running".into());
         let text = format!("{why}: dbt-lsp-plus serves only its own features: symbols, lineage, folding, renames.");
         self.send_client(
@@ -437,6 +468,8 @@ impl<W: Write> Proxy<W> {
             formats.and_then(|formats| formats.iter().find(|format| *format == "markdown" || *format == "plaintext"));
         self.markdown = first.is_some_and(|format| format == "markdown");
         self.hint_refresh = params.pointer("/capabilities/workspace/inlayHint/refreshSupport") == Some(&json!(true));
+        let watched = "/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration";
+        self.watches = params.pointer(watched) == Some(&json!(true));
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         let same = |folder: &Path| fs::canonicalize(folder).ok() == self.canonical_root;
@@ -484,7 +517,9 @@ impl<W: Write> Proxy<W> {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
             // A server gone publishes no more: its old set is no reason to wait.
             let server = self.diagnostics.server.get(&path).filter(|_| self.server.is_some());
-            let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
+            // So are the parse's problems, alone.
+            let parsed = self.diagnostics.parsed.get(&path).is_some_and(|problems| !problems.is_empty());
+            let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty()) || parsed;
             if self.diagnostics.failures.remove(&path).is_some() && !ranged {
                 self.publish(&path);
             }
@@ -535,11 +570,12 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The answer to the call hierarchy's METHOD, on the graph of the files
-    /// with the server's nodes once listed.
+    /// with the server's nodes once listed, or, alone, the last parse's.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Value> {
         let Some(project) = self.project() else { return Some(Value::Null) };
         let scanned = Graph::scanned(&project);
-        let graph = match &self.nodes {
+        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::Index::listed);
+        let graph = match parsed.as_ref().or(self.nodes.as_ref()) {
             Some(nodes) => scanned.with_server(nodes, &project),
             None => scanned,
         };
@@ -720,9 +756,10 @@ impl<W: Write> Proxy<W> {
         Some(Ok(node.cloned().unwrap_or(Value::Null)))
     }
 
-    /// Starts a parse when the index is stale and dbt can parse: a server
-    /// that compiled since the last change, packages that need no network,
-    /// no parse under way, no shutdown, a server command with `lsp`.
+    /// Starts a parse when the index is stale and dbt can parse: alone, or
+    /// with a server that compiled since the last change; packages that need
+    /// no network, no parse under way, no shutdown, a server command with
+    /// `lsp`.
     fn want_index(&mut self) {
         // A listing makes dbt lsp compile, as the first document opened does.
         if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
@@ -730,10 +767,12 @@ impl<W: Write> Proxy<W> {
         }
         self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
-        let ready = !parsing.fresh && parsing.compiled && parsing.running.is_none() && self.server.is_some();
+        // Alone, no server resolves the packages first: their guard is enough.
+        let can = self.standalone || (parsing.compiled && self.server.is_some());
+        let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        if !config::packages_settled(&root) {
-            return self.log_parse("packages.yml names packages that are not installed: run dbt deps");
+        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.standalone) {
+            return self.log_parse(&why);
         }
         // An empty or relative base would put the cache in the working directory.
         let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
@@ -744,7 +783,7 @@ impl<W: Write> Proxy<W> {
             config::remove_stale(&cache);
             cache
         });
-        let Some(command) = config::parse_command(server, &root, cache) else {
+        let Some(command) = config::parse_command(server, &root, cache, self.parsing.cut) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };
         let (Some(events), cache) = (self.parsing.events.clone(), cache.clone()) else { return };
@@ -782,19 +821,87 @@ impl<W: Write> Proxy<W> {
             Some(failure) => self.log_parse(&format!("dbt parse failed: {failure}")),
             None => self.parsing.failure = None,
         }
+        self.on_problems(outcome.problems);
+        // Alone, a change during this parse wants the next one now: no
+        // request may come to ask for it.
+        if self.standalone {
+            self.want_index();
+        }
+    }
+
+    /// The errors and warnings of a parse that ran to its end, PROBLEMS, in
+    /// place of the last parse's, alone only, since dbt lsp shows its own:
+    /// each in its file, the root's if it is there, else the one in dbt's
+    /// working directory, else the one package's that holds it; one in no
+    /// such file is logged, once.  Each file with problems, before or now,
+    /// is published again.
+    fn on_problems(&mut self, problems: Option<Vec<parse_log::Problem>>) {
+        let (true, Some(problems)) = (self.standalone, problems) else { return };
+        // The packages, while the project's configuration still reads.
+        let packages: Vec<PathBuf> =
+            self.project().map_or_else(Vec::new, |project| project.packages.into_values().collect());
+        // dbt names a YAML file's error from its working directory, the
+        // proxy's, and a package's file from its package.
+        let cwd = std::env::current_dir().ok();
+        let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
+        for problem in problems {
+            let path = problem.place.as_ref().and_then(|place| {
+                // dbt names a file from a sibling directory with `..`.
+                let file = |dir: &Path| Some(lexical(&dir.join(&place.path))).filter(|path| path.is_file());
+                let in_cwd =
+                    || cwd.as_deref().and_then(file).and_then(|path| self.local_path(Some(&features::uri(&path))));
+                let mut held = packages.iter().filter_map(|dir| file(dir));
+                let one_held = || held.next().filter(|_| held.next().is_none());
+                self.root.as_deref().and_then(file).or_else(in_cwd).or_else(one_held)
+            });
+            match path {
+                Some(path) => placed.entry(path).or_default().push(problem),
+                None if !self.shutdown && self.diagnostics.logged.insert(problem.message.clone()) => {
+                    let text = format!("dbt-lsp-plus: dbt parse: {}", problem.message);
+                    let params = json!({"type": problem.severity, "message": text});
+                    self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+                }
+                None => {}
+            }
+        }
+        let previous = std::mem::replace(&mut self.diagnostics.parsed, placed);
+        // Unchanged too, as an edit may have dropped a file's failures since
+        // and left their publication to this parse; but for a document with
+        // edits unsaved, whose ranges the client has moved.
+        let mut paths: Vec<PathBuf> = previous.keys().chain(self.diagnostics.parsed.keys()).cloned().collect();
+        paths.sort();
+        paths.dedup();
+        paths.retain(|path| previous.get(path) != self.diagnostics.parsed.get(path) || !self.unsaved(path));
+        paths.iter().for_each(|path| self.publish(path));
+    }
+
+    /// Whether the document at PATH is open with edits unsaved, its line
+    /// ends aside: an editor such as Emacs sends a CRLF file's text with LF.
+    fn unsaved(&self, path: &Path) -> bool {
+        let lines = |text: &str| text.replace("\r\n", "\n");
+        self.documents.get(path).is_some_and(|open| text::read(path).is_none_or(|file| lines(&file) != lines(open)))
     }
 
     /// Asks a client that can refresh its inlay hints to do so, since they
-    /// show the relations of the index, under an id of the proxy's own,
-    /// whose answer stays here.
+    /// show the relations of the index.
     fn refresh_hints(&mut self) {
         if !self.hint_refresh || self.shutdown {
             return;
         }
+        self.ask_client("workspace/inlayHint/refresh", None);
+    }
+
+    /// Sends the client the proxy's own request METHOD, with PARAMS if any,
+    /// under an id of the proxy's own, whose answer stays here.
+    fn ask_client(&mut self, method: &str, params: Option<Value>) {
         self.next_id += 1;
         let id = json!(format!("{OWN_ID}{}", self.next_id));
         self.asked.insert(key(&id));
-        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "method": "workspace/inlayHint/refresh"}));
+        let mut request = json!({"jsonrpc": "2.0", "id": id, "method": method});
+        if let Some(params) = params {
+            request["params"] = params;
+        }
+        self.send_client(&request);
     }
 
     /// Stops a parse under way and removes this process's cache.
@@ -807,11 +914,13 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// Answers a request that the proxy answers itself.  A refusal fails it
-    /// with its reason; a panic while answering fails that request alone,
-    /// never the session.
-    fn answer(&mut self, method: &str, id: &Value, params: &Value) {
-        if method == config::NODE_INFO {
+    /// Answers a request that the proxy answers itself, which it remembers as
+    /// PENDING.  A refusal fails it with its reason; a panic while answering
+    /// fails that request alone, never the session.
+    fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
+        // nodeInfo needs the index; alone, so does the call hierarchy's graph.
+        let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
+        if method == config::NODE_INFO || (self.standalone && hierarchy) {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
@@ -827,6 +936,13 @@ impl<W: Write> Proxy<W> {
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Ok)
+            }
+            // As dbt lsp 2.0.9's answer with nothing of its own gets them,
+            // null for a hover, no hint: the proxy's part, else that.
+            "textDocument/hover" | "textDocument/inlayHint" => {
+                let nothing = json!({"textDocument/hover": null, "textDocument/inlayHint": []});
+                let merged = pending.merged(&json!({"result": nothing[method]}), self.markdown);
+                Some(Ok(merged.map_or_else(|| nothing[method].clone(), |answer| answer["result"].clone())))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -928,24 +1044,39 @@ impl<W: Write> Proxy<W> {
         let params = message.get("params").unwrap_or(&Value::Null);
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
             (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
-            (Some(method), None) => {
-                self.track(method, params);
-                // The server gets the change before the listing it prompts.
-                self.send_server(&frame.body);
-                let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
-                // dbt lsp's output, as spelt and as resolved: a link out of the project included.
-                let output = || {
-                    let spelt = self.root.iter().flat_map(|root| OUTPUT.map(|dir| root.join(dir)));
-                    spelt.flat_map(|dir| [fs::canonicalize(&dir).ok(), Some(dir)]).flatten().collect()
-                };
-                if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
-                    (self.parsing.fresh, self.parsing.compiled) = (false, false);
-                    self.list_nodes();
-                }
-            }
+            (Some(method), None) => self.on_notification(method, params, &frame.body),
             // The client's answer to the proxy's own request was never the server's.
             (None, Some(id)) if self.asked.remove(&key(id)) => {}
             _ => self.send_server(&frame.body),
+        }
+    }
+
+    /// A notification of the client's, METHOD with PARAMS, BODY as it came:
+    /// kept and forwarded; when the graph may have changed, a listing, and,
+    /// alone, a parse, which nothing else would start.  Alone, `initialized`
+    /// registers the watcher that dbt lsp would, of every file, for a client
+    /// that lets it: an edit outside the editor changes the graph too.
+    fn on_notification(&mut self, method: &str, params: &Value, body: &[u8]) {
+        self.track(method, params);
+        // The server gets the change before the listing it prompts.
+        self.send_server(body);
+        if method == "initialized" && self.standalone && self.watches {
+            let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
+                                 "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
+            self.ask_client("client/registerCapability", Some(json!({"registrations": [watcher]})));
+        }
+        let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
+        // dbt lsp's output, as spelt and as resolved: a link out of the project included.
+        let output = || {
+            let spelt = self.root.iter().flat_map(|root| OUTPUT.map(|dir| root.join(dir)));
+            spelt.flat_map(|dir| [fs::canonicalize(&dir).ok(), Some(dir)]).flatten().collect()
+        };
+        if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
+            (self.parsing.fresh, self.parsing.compiled) = (false, false);
+            self.list_nodes();
+            if self.standalone {
+                self.want_index();
+            }
         }
     }
 
@@ -1009,7 +1140,7 @@ impl<W: Write> Proxy<W> {
         }
         let pending = self.remember(method, id, params);
         match (self.local_method(method, params), &self.server, method) {
-            (Some(owned), ..) => self.answer(owned, id, params),
+            (Some(owned), ..) => self.answer(owned, id, params, &pending),
             (None, Some(_), _) => {
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
@@ -1197,11 +1328,16 @@ impl<W: Write> Proxy<W> {
         changed.sort();
         changed.dedup();
         changed.retain(|path| previous.get(path) != self.diagnostics.failures.get(path));
+        // A document with edits unsaved keeps the parse's ranges the client
+        // has moved: the next parse publishes it.
+        let parsed = |path: &PathBuf| self.diagnostics.parsed.get(path).is_some_and(|problems| !problems.is_empty());
+        changed.retain(|path| !parsed(path) || !self.unsaved(path));
         changed.iter().for_each(|path| self.publish(path));
     }
 
-    /// Publishes PATH's diagnostics, the server's last and the proxy's own,
-    /// under the server's URI for it, else the client's, else the file's,
+    /// Publishes PATH's diagnostics, the server's last, the last run's
+    /// failures and the last parse's problems, under the server's URI for
+    /// it, else the client's, else the file's,
     /// with no version; the URI last published under, if another, gets
     /// none.  Nothing after `shutdown`.
     fn publish(&mut self, path: &Path) {
@@ -1221,6 +1357,15 @@ impl<W: Write> Proxy<W> {
             let range = runs::locate(&text, &entries, &tests, &failure.place);
             json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
+        }));
+        // At dbt's line and column, from 1 and in code points; a file's start
+        // when dbt gives none.
+        let problems = self.diagnostics.parsed.get(path).map_or(&[][..], Vec::as_slice);
+        diagnostics.extend(problems.iter().map(|problem| {
+            let (line, column) = problem.place.as_ref().and_then(|place| place.at).unwrap_or((1, 1));
+            let at = lines.offset(line.saturating_sub(1), column.saturating_sub(1), Encoding::Utf32);
+            json!({"range": lines.range(at, at, self.encoding), "severity": problem.severity,
+                   "source": "dbt parse", "code": problem.code, "message": problem.message})
         }));
         let publish = |uri: &str, diagnostics: Vec<Value>| {
             json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
@@ -1460,16 +1605,54 @@ fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> 
     Ok(Server { child, stdin, generation })
 }
 
-/// Runs the proxy on the standard input and output, in front of COMMAND.
+/// Whether the dbt of COMMAND, a server command, has no `lsp`, as dbt-oss
+/// 2.0.11: the words before its `lsp` word, then `lsp --help`, exit 2 with
+/// "unrecognized subcommand 'lsp'" on the standard error.  A launcher's own
+/// failure (`uvx dbt` offline exits 2 too), a probe past its deadline, any
+/// other answer, or a command with no word before `lsp` is not.
+fn lacks_lsp(command: &[String]) -> bool {
+    let Some(at) = command.iter().position(|word| word == "lsp").filter(|at| *at > 0) else { return false };
+    let mut probe = Command::new(&command[0]);
+    probe.args(&command[1..at]).args(["lsp", "--help"]).env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
+    let Ok(mut child) = probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() else {
+        return false;
+    };
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (sender, read) = mpsc::channel();
+    // Read apart, so that neither a full pipe nor a launcher's child holding
+    // it open holds the proxy.
+    thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = stderr.take(1 << 16).read_to_end(&mut text);
+        let _ = sender.send(text);
+    });
+    let status = config::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false));
+    let stderr = read.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    status.and_then(|status| status.code()) == Some(2)
+        && String::from_utf8_lossy(&stderr).contains("unrecognized subcommand 'lsp'")
+}
+
+/// Runs the proxy on the standard input and output, in front of COMMAND,
+/// alone when its dbt has no `lsp`.
 pub fn run(command: &[String]) -> ExitCode {
     let (events, inbox) = mpsc::channel();
-    let (server, absent) = match spawn_server(command, &events, 0) {
-        Ok(server) => (Some(server), None),
-        Err(why) => (None, Some(why)),
+    let standalone = lacks_lsp(command);
+    let (server, absent) = match (!standalone).then(|| spawn_server(command, &events, 0)) {
+        Some(Ok(server)) => (Some(server), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
     };
-    let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), ..Parsing::default() };
+    let cut = config::can_cut();
+    if !cut {
+        eprintln!(
+            "dbt-lsp-plus: unshare -rnm cannot cut dbt parse off the network and the project here: \
+             dbt's flags and the guard on packages alone keep it offline and the project as it is"
+        );
+    }
+    let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), cut, ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, project_dir(command));
+    proxy.standalone = standalone;
     proxy.parsing = parsing;
     proxy.serve(inbox);
     proxy.stop_parse();
@@ -1548,6 +1731,28 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn only_a_refusal_of_lsp_by_dbt_itself_means_no_lsp() {
+        // `sh -c SCRIPT lsp --help` runs SCRIPT, as a dbt answering its probe.
+        let dbt = |script: &str| lacks_lsp(&args(&["sh", "-c", script, "lsp", "--project-dir", "/p"]));
+        let refused = "echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2";
+        assert!(dbt(refused), "dbt-oss 2.0.11");
+        assert!(!dbt("echo 'Start the dbt language server'; exit 0"), "2.0.9 prints its help");
+        assert!(!dbt("echo 'error: Failed to fetch the index' >&2; exit 2"), "a launcher offline");
+        assert!(!dbt("echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 1"), "another status");
+        // The probe takes only the words before `lsp`, and adds `--help`.
+        assert!(dbt(
+            "[ \"$0 $1\" = 'lsp --help' ] && [ $# -eq 1 ] && { echo \"unrecognized subcommand 'lsp'\" >&2; exit 2; }"
+        ));
+        // dbt-oss 2.0.11 colours the word under CLICOLOR_FORCE, unless NO_COLOR is set.
+        let coloured =
+            "[ -n \"$NO_COLOR\" ] || { printf \"unrecognized subcommand '\\033[33mlsp\\033[0m'\" >&2; exit 2; }";
+        assert!(dbt(&format!("{coloured}; echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2")));
+        assert!(!lacks_lsp(&args(&["/nonexistent/dbt", "lsp"])), "a dbt that cannot start");
+        assert!(!lacks_lsp(&args(&["sh", "-c", "exit 2"])), "a command with no lsp word");
+        assert!(!lacks_lsp(&args(&["lsp", "--project-dir", "/p"])), "no word before lsp");
     }
 
     #[test]

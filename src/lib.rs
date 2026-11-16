@@ -6,6 +6,8 @@ pub mod document;
 pub mod features;
 pub mod graph;
 pub mod navigation;
+pub mod packages;
+pub mod parse_log;
 pub mod project;
 pub mod properties;
 pub mod proxy;

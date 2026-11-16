@@ -4,10 +4,11 @@
 //! matches the server's, its run in a thread of its own, the index of the
 //! manifest it writes, and the summary of a node.
 
+use crate::graph::ServerNode;
+use crate::parse_log;
 use crate::scan::Target;
-use crate::yaml::{self, Node};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -22,6 +23,10 @@ pub const NODE_INFO: &str = "dbt-lsp-plus.nodeInfo";
 /// How long a parse may run before it is killed.
 pub const PARSE_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long a probe of what a command can do, such as `dbt lsp --help`,
+/// may run before it is killed.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
 /// How long a cache beside this process's may go unwritten before it is
 /// taken for a dead process's.
 const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
@@ -30,14 +35,31 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// reads.
 const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "--packages-install-path"];
 
+/// The cut, before a command and the directory it guards: a user namespace
+/// that no network reaches, where that directory is mounted read-only, so
+/// that dbt's install of packages fails there rather than rewrite it.
+/// Recursive first, as a directory holding a mount point needs, where the
+/// system has it.
+const CUT: [&str; 5] = [
+    "unshare",
+    "-rnm",
+    "sh",
+    "-c",
+    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && exec "$@""#,
+];
+
 /// The `dbt parse` that matches SERVER, the command that runs `dbt lsp`:
 /// every word before `lsp`, as `uvx dbt` or `env X=1 dbt`; the flags of KEPT
-/// after it, as `--flag X` or `--flag=X`; the project at ROOT; and its output
-/// under CACHE, with neither telemetry nor a check of versions.  None when
-/// SERVER has no `lsp` word, as a wrapper of its own.
-pub fn parse_command(server: &[String], root: &Path, cache: &Path) -> Option<Vec<String>> {
+/// after it, as `--flag X` or `--flag=X`; the project at ROOT; its output
+/// under CACHE, its log as JSON, with neither telemetry nor a check of
+/// versions; under the cut when CUT, which guards ROOT.  None when SERVER
+/// has no `lsp` word, as a wrapper of its own.
+pub fn parse_command(server: &[String], root: &Path, cache: &Path, cut: bool) -> Option<Vec<String>> {
     let at = server.iter().position(|word| word == "lsp")?;
-    let mut command: Vec<String> = server[..at].to_vec();
+    let path = |path: &Path| path.to_string_lossy().into_owned();
+    let mut command: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
+    command.extend(cut.then(|| path(root)));
+    command.extend_from_slice(&server[..at]);
     command.push("parse".into());
     let mut rest = server[at + 1..].iter();
     while let Some(word) = rest.next() {
@@ -47,12 +69,24 @@ pub fn parse_command(server: &[String], root: &Path, cache: &Path) -> Option<Vec
             command.extend(value.map(str::to_owned).or_else(|| rest.next().cloned()));
         }
     }
-    let path = |path: &Path| path.to_string_lossy().into_owned();
     command.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
     command.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
+    command.extend(["--log-format".into(), "json".into()]);
     let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
     command.extend(quiet.map(str::to_owned));
     Some(command)
+}
+
+/// Whether this system can run a command under the cut: Linux, where an
+/// unprivileged user may make a user namespace and mount there.  Probed by
+/// `true` under the cut of the system's temporary directory, killed past
+/// PROBE_DEADLINE.
+pub fn can_cut() -> bool {
+    let mut probe = Command::new(CUT[0]);
+    probe.args(&CUT[1..]).arg(std::env::temp_dir()).arg("true");
+    probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let status = probe.spawn().ok().and_then(|child| finish(child, PROBE_DEADLINE, &AtomicBool::new(false)));
+    status.is_some_and(|status| status.success())
 }
 
 /// Where this process keeps its parses of ROOT with the server command
@@ -82,20 +116,12 @@ pub fn remove_stale(cache: &Path) {
     }
 }
 
-/// Whether dbt can parse the project at ROOT without resolving its packages
-/// over the network, which writes `dbt_packages/` and `package-lock.yml`:
-/// every package is local, or the lock is no older than the file that names
-/// the packages.
-pub fn packages_settled(root: &Path) -> bool {
-    let modified = |name: &str| fs::metadata(root.join(name)).and_then(|meta| meta.modified()).ok();
-    let lock = modified("package-lock.yml");
-    ["packages.yml", "dependencies.yml"].into_iter().all(|name| {
-        let Ok(text) = fs::read_to_string(root.join(name)) else { return true };
-        // A file of comments only, or empty, parses to no document: no packages.
-        let local = yaml::parse(&text).is_none_or(|doc| {
-            doc.get("packages").map_or(&[][..], Node::items).iter().all(|package| package.get("local").is_some())
-        });
-        local || lock.is_some_and(|lock| modified(name).is_some_and(|named| lock >= named))
+/// The value of FLAG in COMMAND, as `FLAG X` or `FLAG=X`.
+pub fn flag<'a>(command: &'a [String], flag: &str) -> Option<&'a str> {
+    command.iter().enumerate().find_map(|(at, word)| match word.strip_prefix(flag) {
+        Some("") => command.get(at + 1).map(String::as_str),
+        Some(rest) => rest.strip_prefix('='),
+        None => None,
     })
 }
 
@@ -109,6 +135,9 @@ pub struct Index {
     groups: HashMap<String, Value>,
     /// The ids of the nodes of each name, so that a lookup reads a few.
     named: HashMap<String, Vec<String>>,
+    /// The ids of the last manifest laid, whose nodes alone make a listing:
+    /// a failed parse's lacks those deleted since, which the index keeps.
+    latest: HashSet<String>,
 }
 
 /// The ids of NODES by their name.
@@ -155,12 +184,14 @@ impl Index {
             .map_or_else(HashMap::new, |groups| groups.iter().map(|(id, group)| (id.clone(), group.clone())).collect());
         let root_package = manifest.pointer("/metadata/project_name").and_then(Value::as_str).unwrap_or_default();
         let named = by_name(&nodes);
-        Index { root_package: root_package.to_owned(), nodes, groups, named }
+        let latest = nodes.keys().cloned().collect();
+        Index { root_package: root_package.to_owned(), nodes, groups, named, latest }
     }
 
     /// This index with the entries of NEWER laid over it: what a parse that
     /// failed part of the way still found.
     pub fn overlay(&mut self, newer: Index) {
+        self.latest = newer.latest;
         self.nodes.extend(newer.nodes);
         self.groups.extend(newer.groups);
         self.named = by_name(&self.nodes);
@@ -171,6 +202,19 @@ impl Index {
 
     pub fn node(&self, id: &str) -> Option<&Value> {
         self.nodes.get(id)
+    }
+
+    /// The enabled nodes of the last manifest, of the kinds that
+    /// `dbt.listNodes` lists, `*` and `source:*`, by id: what a listing would
+    /// give, from the manifest.
+    pub fn listed(&self) -> Vec<ServerNode> {
+        let kinds = ["model", "seed", "snapshot", "analysis", "test", "source"];
+        let listed =
+            |node: &&Value| node["disabled"] != true && kinds.iter().any(|kind| node["resource_type"] == *kind);
+        let latest = self.latest.iter().filter_map(|id| self.nodes.get(id));
+        let mut nodes: Vec<ServerNode> = latest.filter(listed).filter_map(ServerNode::of).collect();
+        nodes.sort_by(|one, other| one.id.cmp(&other.id));
+        nodes
     }
 
     /// The node that a `ref` or a `source` of TARGET names, as dbt looks it
@@ -264,12 +308,14 @@ impl Index {
     }
 }
 
-/// What a parse gave: the index of the manifest it wrote, if it wrote one,
-/// and its failure, if it failed.
+/// What a parse gave: the index of the manifest it wrote, if it wrote one;
+/// its failure, if it failed; and the errors and warnings of its log, if it
+/// ran to its end.
 #[derive(Debug)]
 pub struct Outcome {
     pub index: Option<Index>,
     pub failure: Option<String>,
+    pub problems: Option<Vec<parse_log::Problem>>,
 }
 
 /// A parse under way, which its owner stops at the latest when it ends.
@@ -298,7 +344,8 @@ struct Report(Option<ReportFn>);
 impl Drop for Report {
     fn drop(&mut self) {
         if let Some(report) = self.0.take() {
-            report(Outcome { index: None, failure: Some("the parse ended without an outcome".into()) });
+            let failure = Some("the parse ended without an outcome".into());
+            report(Outcome { index: None, failure, problems: None });
         }
     }
 }
@@ -319,22 +366,26 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
             let err = out.try_clone()?;
             Command::new(&command[0]).args(&command[1..]).stdin(Stdio::null()).stdout(out).stderr(err).spawn()
         });
-        // dbt writes a banner of `=` before its `[error]` lines.
-        let first_line = || {
-            let text = fs::read_to_string(&log).ok()?;
-            let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('='));
-            let line = lines().find(|line| line.starts_with("[error]")).or_else(|| lines().next())?;
-            Some(format!("{line} (see {})", log.display()))
-        };
-        let failure = match spawned.map(|child| finish(child, deadline, &stopped)) {
+        let status = spawned.map(|child| finish(child, deadline, &stopped));
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        // dbt's first error, else the first line that is none of its events,
+        // as a launcher's own.
+        let read = parse_log::read(&text);
+        let mut errors = read.problems.iter().filter(|problem| problem.severity == 1);
+        let other = || text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'));
+        let first = errors.next().map(|error| error.message.clone()).or_else(|| other().map(str::to_owned));
+        let failure = match status {
             Ok(Some(status)) if status.success() => None,
-            Ok(Some(status)) => Some(first_line().unwrap_or_else(|| format!("dbt parse {status}"))),
+            Ok(Some(status)) => Some(
+                first.map_or_else(|| format!("dbt parse {status}"), |first| format!("{first} (see {})", log.display())),
+            ),
             Ok(None) => Some("dbt parse was stopped, or ran past its deadline".into()),
             Err(error) => Some(format!("cannot run {}: {error}", command[0])),
         };
         let manifest = fs::read_to_string(&manifest).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if let Some(report) = report.0.take() {
-            report(Outcome { index: manifest.as_ref().map(Index::of), failure });
+            let problems = read.completed.then_some(read.problems);
+            report(Outcome { index: manifest.as_ref().map(Index::of), failure, problems });
         }
     });
     Running { stop, thread: Some(thread) }
@@ -342,7 +393,7 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
 
 /// Waits for CHILD to exit within DEADLINE, unless STOP is set; else kills
 /// and reaps it, and gives none.
-fn finish(mut child: Child, deadline: Duration, stop: &AtomicBool) -> Option<ExitStatus> {
+pub fn finish(mut child: Child, deadline: Duration, stop: &AtomicBool) -> Option<ExitStatus> {
     let end = Instant::now() + deadline;
     while Instant::now() < end && !stop.load(Ordering::Relaxed) {
         if let Ok(Some(status)) = child.try_wait() {
@@ -378,7 +429,7 @@ mod tests {
             "--log-level",
             "debug",
         ]);
-        let command = parse_command(&server, Path::new("/root"), Path::new("/cache")).unwrap();
+        let command = parse_command(&server, Path::new("/root"), Path::new("/cache"), false).unwrap();
         let expected = words(&[
             "dbt",
             "parse",
@@ -393,15 +444,21 @@ mod tests {
             "--log-path",
             "/cache/logs",
             "--write-json",
+            "--log-format",
+            "json",
             "--no-version-check",
             "--no-send-anonymous-usage-stats",
             "--no-manage-state",
             "--quiet",
         ]);
         assert_eq!(command, expected);
-        let wrapped = parse_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c")).unwrap();
+        let wrapped = parse_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), false).unwrap();
         assert_eq!(wrapped[..3], words(&["uvx", "dbt", "parse"]));
-        assert_eq!(parse_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c")), None);
+        let cut = parse_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), true).unwrap();
+        assert_eq!(cut[..2], words(&["unshare", "-rnm"]));
+        assert_eq!(cut[5..9], words(&["/r", "uvx", "dbt", "parse"]), "the root guarded, then the parse");
+        assert_eq!(cut[9..], wrapped[3..]);
+        assert_eq!(parse_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), true), None);
     }
 
     #[test]
@@ -425,26 +482,6 @@ mod tests {
         remove_stale(&own);
         assert!(!dir.join("key/old").exists(), "unwritten for a day");
         assert!(dir.join("key/new").exists() && own.exists(), "recent, or this process's own");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn packages_are_settled_when_local_or_locked() {
-        let dir = scratch_project("settled", &[("packages.yml", "packages:\n  - local: ../utils\n")]);
-        assert!(packages_settled(&dir));
-        fs::write(dir.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
-            .unwrap();
-        assert!(!packages_settled(&dir), "a hub package with no lock");
-        fs::write(dir.join("package-lock.yml"), "packages: []\n").unwrap();
-        assert!(packages_settled(&dir), "a lock no older than packages.yml");
-        let older = std::time::SystemTime::now() - Duration::from_secs(3600);
-        File::options().write(true).open(dir.join("package-lock.yml")).unwrap().set_modified(older).unwrap();
-        assert!(!packages_settled(&dir), "a lock older than packages.yml");
-        fs::write(dir.join("packages.yml"), "# packages:\n#   - package: dbt-labs/dbt_utils\n").unwrap();
-        fs::remove_file(dir.join("package-lock.yml")).unwrap();
-        assert!(packages_settled(&dir), "comments only name no package");
-        fs::write(dir.join("dependencies.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n").unwrap();
-        assert!(!packages_settled(&dir), "a hub package in dependencies.yml");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -527,6 +564,32 @@ mod tests {
     }
 
     #[test]
+    fn lists_the_enabled_nodes_and_sources_as_dbt_lsp_would() {
+        let node = |id: &str, depends_on: &[&str]| {
+            let kind = id.split('.').next().unwrap();
+            json!({"unique_id": id, "name": id.rsplit('.').next().unwrap(), "resource_type": kind,
+                   "package_name": "shop", "original_file_path": "models/x.sql", "depends_on": {"nodes": depends_on}})
+        };
+        let manifest = json!({"metadata": {"project_name": "shop"},
+            "nodes": {"model.shop.a": node("model.shop.a", &["source.shop.raw.b"]),
+                      "test.shop.t": node("test.shop.t", &["model.shop.a"]),
+                      "operation.shop.hook": node("operation.shop.hook", &[])},
+            "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])},
+            "disabled": {"model.shop.off": [node("model.shop.off", &[])]}});
+        let listed = Index::of(&manifest).listed();
+        let ids: Vec<&str> = listed.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["model.shop.a", "source.shop.raw.b", "test.shop.t"], "no disabled node, no hook");
+        assert_eq!(listed[0].depends_on, ["source.shop.raw.b"]);
+        // A failed parse's manifest, laid over, lacks the model deleted since.
+        let mut index = Index::of(&manifest);
+        let newer = json!({"metadata": {"project_name": "shop"}, "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])}});
+        index.overlay(Index::of(&newer));
+        let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
+        assert_eq!(ids, ["source.shop.raw.b"]);
+        assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
+    }
+
+    #[test]
     fn an_enabled_node_wins_over_a_disabled_one_of_the_root() {
         let model = |id: &str, package: &str| {
             json!({"unique_id": id, "name": "customers", "resource_type": "model", "package_name": package,
@@ -595,14 +658,51 @@ mod tests {
         killed.stop();
         start(words(&["sleep", "30"]), dir.clone(), Duration::from_secs(60), report(sender.clone())).stop();
         assert!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap().contains("stopped"));
-        let banner = "echo; echo '======= Errors and Warnings ======='; echo '[error] Compilation failed'; exit 1";
-        let failing = start(words(&["sh", "-c", banner]), dir.clone(), Duration::from_secs(10), report(sender));
+        // dbt's version comes first; its first error says why.
+        let json = r#"echo '{"info": {"code": "A001", "level": "info", "msg": "Running with dbt=2.0.9"}}'
+            echo '{"info": {"code": "1501", "level": "error", "msg": "[error] [JinjaError (dbt1501)]: Failed"}}'
+            echo '{"info": {"code": "1048", "level": "error", "msg": "[error] [DependencyNotFound (dbt1048)]"}}'
+            exit 1"#;
+        let failing = start(words(&["sh", "-c", json]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(
-            failure.starts_with("[error] Compilation failed (see ") && failure.ends_with("parse.log)"),
+            failure.starts_with("[JinjaError (dbt1501)]: Failed (see ") && failure.ends_with("parse.log)"),
             "{failure}"
         );
+        // A launcher fails before dbt says anything.
+        let launcher = "echo; echo 'error: Failed to fetch the index' >&2; exit 2";
+        let failing = start(words(&["sh", "-c", launcher]), dir.clone(), Duration::from_secs(10), report(sender));
+        let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
+        failing.stop();
+        assert!(failure.starts_with("error: Failed to fetch the index (see "), "{failure}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_parse_that_ran_to_its_end_says_what_it_found() {
+        let dir = scratch_project("runner-problems", &[("x", "")]);
+        let (sender, outcomes) = mpsc::channel();
+        let report =
+            |sender: mpsc::Sender<Outcome>| -> ReportFn { Box::new(move |outcome| drop(sender.send(outcome))) };
+        let error =
+            r#"echo '{"info": {"code": "1048", "level": "error", "msg": "[error] [DependencyNotFound (dbt1048)]"}}'"#;
+        let ended =
+            format!(r#"{error}; echo '{{"info": {{"code": "Q039", "level": "info", "msg": "Finished"}}}}'; exit 1"#);
+        let complete =
+            start(words(&["sh", "-c", &ended]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        let found = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems;
+        complete.stop();
+        assert_eq!(found.map(|problems| problems[0].code.clone()), Some("1048".to_owned()));
+        // Dead, or killed, before its end, it says nothing of what it did not reach.
+        let died = format!("{error}; exit 101");
+        let dead = start(words(&["sh", "-c", &died]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        assert_eq!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems, None);
+        dead.stop();
+        let cut = format!("{error}; exec sleep 30");
+        let killed = start(words(&["sh", "-c", &cut]), dir.clone(), Duration::from_millis(300), report(sender));
+        assert_eq!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems, None);
+        killed.stop();
         fs::remove_dir_all(&dir).unwrap();
     }
 }

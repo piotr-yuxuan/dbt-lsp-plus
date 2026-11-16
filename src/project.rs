@@ -249,7 +249,7 @@ fn files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The name and configuration in a package's `dbt_project.yml`.
-fn package_config(dir: &Path) -> Option<(String, Node)> {
+pub fn package_config(dir: &Path) -> Option<(String, Node)> {
     let config = yaml::parse(&text::read(&dir.join("dbt_project.yml"))?)?;
     let name = config.get("name")?.as_str()?.to_owned();
     Some((name, config))

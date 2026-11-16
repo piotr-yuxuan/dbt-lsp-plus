@@ -2,6 +2,7 @@
 //! A scripted stand-in for `dbt lsp`, on the standard input and output,
 //! which behaves as dbt lsp 2.0.9 was seen to:
 //!
+//! - `lsp --help` prints a help and exits, as 2.0.9 does;
 //! - it answers `initialize` with the capabilities of 2.0.9, unless the
 //!   script names others, and after `initialized` asks the client for the
 //!   configuration section "dbt" (request id 1);
@@ -18,6 +19,9 @@
 //!
 //! Environment:
 //! - `FAKE_DBT_LSP_SCRIPT`: a JSON file, optional, with the keys
+//!   - `no_lsp`, true when `lsp` is refused as dbt-oss 2.0.11 refuses it,
+//!     its help included, with status 2 and its message on the standard
+//!     error;
 //!   - `capabilities`;
 //!   - `answers`, keyed by method, or by "workspace/executeCommand COMMAND
 //!     ARGUMENTS..." for a command, and `answers_once`, likewise, each used
@@ -42,10 +46,15 @@
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
 //!     `manifest`, written as `manifest.json` under `--target-path`;
+//!     `parse_log`, a file whose text it writes first on its standard
+//!     output, as dbt's log;
 //!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
 //!     waits for before writing; `parse_hang`, true when it never exits;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
-//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID}`
+//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID,
+//!   "interfaces": NAMES, "wrote": WROTE}`, NAMES those of the network it
+//!   can reach, WROTE whether it could write into its `--project-dir` when
+//!   the script says `parse_write`,
 //!   to that file's name followed by `.parses`, since two processes
 //!   appending to one file could interleave their lines; and each server
 //!   process, a life of the fake, appends its pid to the name followed by
@@ -248,11 +257,38 @@ impl Fake {
     }
 }
 
+/// `dbt lsp ARGUMENTS` answered without serving, exiting: refused when the
+/// script says `no_lsp`, as dbt-oss 2.0.11 refuses it, its help included;
+/// else its help printed, as 2.0.9 does, when asked for it.  A server is
+/// refused only once COUNTED as a life, so that a test sees it started.
+fn refuse_or_help(script: &Value, arguments: &[String], counted: bool) {
+    let help = arguments.iter().any(|argument| argument == "--help");
+    if script["no_lsp"] == json!(true) && (help || counted) {
+        eprintln!("error: unrecognized subcommand 'lsp'\n\nUsage: dbt [OPTIONS] <COMMAND>");
+        std::process::exit(2);
+    }
+    if help {
+        println!("Start the dbt language server");
+        std::process::exit(0);
+    }
+}
+
 /// `dbt parse` as the script plays it, with the arguments ARGUMENTS.
 fn parse(script: &Value, arguments: &[String], log: Option<File>) {
+    let project = arguments.iter().position(|argument| argument == "--project-dir").map(|at| &arguments[at + 1]);
+    let probe = project.filter(|_| script["parse_write"] == json!(true)).map(|dir| Path::new(dir).join(".written"));
+    // Removed at once, so that a parse that could write leaves nothing.
+    let wrote =
+        probe.is_some_and(|probe| std::fs::write(&probe, "").and_then(|()| std::fs::remove_file(&probe)).is_ok());
     if let Some(mut log) = log {
-        let line = json!({"parse": arguments, "pid": std::process::id()});
+        let devices = std::fs::read_to_string("/proc/self/net/dev").unwrap_or_default();
+        let interfaces: Vec<&str> =
+            devices.lines().skip(2).filter_map(|line| Some(line.split_once(':')?.0.trim())).collect();
+        let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces, "wrote": wrote});
         writeln!(log, "{line}").expect("write the log");
+    }
+    if let Some(log) = script["parse_log"].as_str() {
+        print!("{}", std::fs::read_to_string(log).expect("read the parse's log"));
     }
     // dbt writes on both outputs, which must never reach the client: this
     // noise is a frame whose body is not JSON, which a client would show.
@@ -291,6 +327,7 @@ fn main() {
     if parsing {
         return parse(&script, &arguments, log);
     }
+    refuse_or_help(&script, &arguments, false);
     // Each server process of a session is one life of the fake.
     let life = std::env::var("FAKE_DBT_LSP_LOG").map_or(1, |log| {
         let lives = format!("{log}.lives");
@@ -298,6 +335,7 @@ fn main() {
         writeln!(file, "{}", std::process::id()).expect("count a life");
         std::fs::read_to_string(&lives).expect("read the lives").lines().count()
     });
+    refuse_or_help(&script, &arguments, true);
     let mut fake = Fake { script, opened: false, held: Vec::new(), life };
     let mut input = BufReader::new(io::stdin());
     while let Ok(Some(frame)) = rpc::read_frame(&mut input) {
