@@ -1445,6 +1445,16 @@ fn manifest() -> Value {
         "sources": {"source.shop.raw.customers": customers}})
 }
 
+/// A run holds the lock of the test runs from its first scratch directory
+/// on, so that a second run in this checkout waits.  A lock belongs to one
+/// opening of the file: a second opening in this process is refused too.
+#[test]
+fn scratch_holds_the_turn() {
+    scratch("turn");
+    let lock = std::fs::File::open(Path::new(env!("CARGO_TARGET_TMPDIR")).join("turn.lock")).expect("open the lock");
+    assert!(matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)), "the lock is free");
+}
+
 /// The scratch directory of the fake session NAME, as it stands.
 fn scratch_of(name: &str) -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join(name)
