@@ -85,6 +85,8 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     teardown of the server process, each a resource's start or end;
   - `restart_delay`: the decision on a lost server, free of the clock,
     with tests of its own;
+  - `changes_graph`: the decision whether a client's notification may
+    change the graph, free of the file system, with tests of its own;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the

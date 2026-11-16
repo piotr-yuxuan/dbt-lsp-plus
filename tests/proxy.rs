@@ -817,6 +817,37 @@ fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     assert!(session.finish().success());
 }
 
+/// dbt lsp 2.0.9 writes `logs/` and `target/` under its project at each
+/// compilation, and a client that honours its watcher of `**/*` sends an
+/// event for each write: a listing on such an event would never end.
+#[test]
+fn ignores_watched_changes_of_dbt_s_own_output() {
+    let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
+    let (mut session, log) = Session::fake("dbt-output-events", json!({"answers": {ALL: all}}));
+    session.initialize(&fixture());
+    let model = fixture().join("models/marts/orders.sql");
+    session.open(&model, None);
+    until_logged(&log, "the first listing", |_| listings(&log, "source:*") == 1);
+    let written = ["target", "target/compiled/shop/x.sql", "logs/dbt-lsp.log"];
+    let changes: Vec<String> =
+        written.iter().map(|path| format!(r#"{{"uri":"{}","type":2}}"#, uri(&fixture().join(path)))).collect();
+    let output = format!(
+        r#"{{"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{{"changes":[{}]}}}}"#,
+        changes.join(",")
+    );
+    session.send_raw(output.as_bytes());
+    until_logged(&log, "the event, byte for byte", |lines| lines.contains(&output));
+    // A hover after a change of the graph would list or parse again.
+    barrier(&mut session);
+    barrier(&mut session);
+    assert_eq!((listings(&log, "*"), listings(&log, "source:*")), (1, 1));
+    let log_file = uri(&fixture().join("logs/dbt-lsp.log"));
+    let both = json!({"changes": [{"uri": log_file, "type": 2}, {"uri": uri(&model), "type": 2}]});
+    session.notify("workspace/didChangeWatchedFiles", both);
+    until_logged(&log, "a listing after a model's change", |_| listings(&log, "source:*") == 2);
+    assert!(session.finish().success());
+}
+
 #[test]
 fn retries_a_cancelled_listing_at_most_three_times() {
     let cancelled = json!({"error": "Operation cancelled", "grain": "unknown", "nodes": []});

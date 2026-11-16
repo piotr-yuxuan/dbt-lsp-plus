@@ -73,6 +73,9 @@ const CHANGES: [&str; 5] = [
     "workspace/didRenameFiles",
     "workspace/didDeleteFiles",
 ];
+/// The directories under its project where dbt lsp 2.0.9 writes at each
+/// compilation, whatever its `--target-path` and `--log-path` say.
+const OUTPUT: [&str; 2] = ["target", "logs"];
 
 enum Event {
     Client(Frame),
@@ -249,6 +252,32 @@ struct Proxy<W: Write> {
 /// The path of a `file:` URI.
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
     Url::parse(uri?).ok()?.to_file_path().ok()
+}
+
+/// Whether the client's notification METHOD, of PARAMS, may change the
+/// graph: one of `CHANGES`, but a watched-files event whose every change MAP
+/// places in dbt's own output under ROOT, where dbt lsp writes at each
+/// compilation: listing on it would never end, for a client that honours
+/// dbt lsp's watcher of `**/*`.  An event the proxy cannot read is a change.
+fn changes_graph(
+    method: &str,
+    params: &Value,
+    root: Option<&Path>,
+    map: impl Fn(Option<&str>) -> Option<PathBuf>,
+) -> bool {
+    if !CHANGES.contains(&method) {
+        return false;
+    }
+    let changes = params["changes"].as_array().map_or(&[][..], Vec::as_slice);
+    let (Some(root), "workspace/didChangeWatchedFiles", false) = (root, method, changes.is_empty()) else {
+        return true;
+    };
+    let in_output = |change: &Value| {
+        let path = map(change["uri"].as_str())?;
+        let first = path.strip_prefix(root).ok()?.components().next()?;
+        Some(OUTPUT.iter().any(|dir| first.as_os_str() == std::ffi::OsStr::new(dir)))
+    };
+    !changes.iter().all(|change| in_output(change) == Some(true))
 }
 
 fn key(id: &Value) -> String {
@@ -903,7 +932,7 @@ impl<W: Write> Proxy<W> {
                 // The server gets the change before the listing it prompts.
                 self.send_server(&frame.body);
                 let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
-                if CHANGES.contains(&method) || first_open {
+                if changes_graph(method, params, self.root.as_deref(), |uri| self.local_path(uri)) || first_open {
                     (self.parsing.fresh, self.parsing.compiled) = (false, false);
                     self.list_nodes();
                 }
@@ -1445,6 +1474,38 @@ pub fn run(command: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
+        let root = Some(Path::new("/work/a b/shop"));
+        let file = |path: &str| format!("file:///work/a%20b/shop/{path}");
+        let watched = |uris: &[String]| {
+            let changes: Vec<Value> = uris.iter().map(|uri| json!({"uri": uri, "type": 2})).collect();
+            json!({"changes": changes})
+        };
+        let (event, created) = ("workspace/didChangeWatchedFiles", "workspace/didCreateFiles");
+        let log = file("logs/dbt-lsp.log");
+        let cases = [
+            ("target itself", event, watched(&[file("target")]), root, false),
+            ("output only", event, watched(&[file("target/compiled/shop/x.sql"), log.clone()]), root, false),
+            ("output and a model", event, watched(&[log.clone(), file("models/orders.sql")]), root, true),
+            ("another first directory", event, watched(&[file("target2/x")]), root, true),
+            ("a target below the root's top", event, watched(&[file("models/target/x.sql")]), root, true),
+            ("the root itself", event, watched(&[file("")]), root, true),
+            ("outside the root", event, watched(&["file:///else/target/x".into()]), root, true),
+            ("not a file", event, watched(&["untitled:Untitled-1".into()]), root, true),
+            ("no URI", event, json!({"changes": [{"type": 2}]}), root, true),
+            ("no change", event, json!({"changes": []}), root, true),
+            ("no changes", event, json!({}), root, true),
+            ("no root", event, watched(std::slice::from_ref(&log)), None, true),
+            ("a file the client creates", created, json!({"files": [{"uri": file("target/x")}]}), root, true),
+            ("a save", "textDocument/didSave", json!({}), root, true),
+            ("an edit", "textDocument/didChange", json!({}), root, false),
+        ];
+        for (name, method, params, root, expected) in cases {
+            assert_eq!(changes_graph(method, &params, root, uri_path), expected, "{name}");
+        }
+    }
 
     #[test]
     fn a_restart_waits_one_more_second_each_time_and_three_a_window() {
