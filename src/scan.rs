@@ -15,6 +15,10 @@ pub enum Kind {
     Docs,
     Set,
     Cte,
+    /// Jinja's control blocks, which only the outline names.
+    If,
+    For,
+    Call,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -105,8 +109,9 @@ fn mask_jinja_comments(text: &str) -> String {
     mask(text, &[("{#", "#}", true)])
 }
 
-static RAW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A\{%-?\s*raw\s*-?%\}\z").unwrap());
-static END_RAW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{%-?\s*endraw\s*-?%\}").unwrap());
+// Either trim marker, as Jinja's lexer takes them.
+static RAW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A\{%[-+]?\s*raw\s*[-+]?%\}\z").unwrap());
+static END_RAW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{%[-+]?\s*endraw\s*[-+]?%\}").unwrap());
 
 /// The end of a Jinja tag whose content starts at FROM: past the first CLOSE
 /// followed by `}` outside strings and nested braces, else the end of BYTES.
@@ -253,15 +258,27 @@ pub fn blocks(text: &str) -> Vec<Symbol> {
     done
 }
 
-static TAG_KEYWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)\A\{%-?\s*(\w+)(.*?)-?%\}\z").unwrap());
+// Either trim marker, `-` or `+`, on either side.
+static TAG_KEYWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)\A\{%[-+]?\s*(\w+)(.*?)[-+]?%\}\z").unwrap());
 
 /// The keywords that open a Jinja block, closed by `end` and the keyword.
 const BLOCK_OPENERS: [&str; 12] =
     ["if", "for", "macro", "call", "filter", "set", "raw", "test", "snapshot", "materialization", "docs", "block"];
 
-/// The tags of each Jinja block of TEXT: its opening tag, its `elif` and
-/// `else` tags, and its closing tag.  The inline `set x = ...` opens none.
-pub fn block_tags(text: &str) -> Vec<Vec<Range<usize>>> {
+/// A Jinja block of a text, by its tags.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TagBlock {
+    /// What opens it: `if`, `macro` and the others of BLOCK_OPENERS.
+    pub keyword: String,
+    /// Its opening tag, its `elif` and `else` tags, then its closing tag
+    /// when it is CLOSED.
+    pub tags: Vec<Range<usize>>,
+    pub closed: bool,
+}
+
+/// The Jinja blocks of TEXT: those closed, in the order they close, then
+/// those left open.  The inline `set x = ...` opens none.
+pub fn block_tags(text: &str) -> Vec<TagBlock> {
     let mut open: Vec<(String, Vec<Range<usize>>)> = Vec::new();
     let mut done = Vec::new();
     for tag in tags(text) {
@@ -271,9 +288,9 @@ pub fn block_tags(text: &str) -> Vec<Vec<Range<usize>>> {
         match (keyword, closed) {
             ("elif" | "else", _) => open.last_mut().into_iter().for_each(|(_, tags)| tags.push(tag.clone())),
             (_, Some(at)) => {
-                let (_, mut tags) = open.remove(at);
+                let (keyword, mut tags) = open.remove(at);
                 tags.push(tag);
-                done.push(tags);
+                done.push(TagBlock { keyword, tags, closed: true });
             }
             (_, None) if BLOCK_OPENERS.contains(&keyword) && !(keyword == "set" && rest.contains('=')) => {
                 open.push((keyword.to_owned(), vec![tag]));
@@ -281,7 +298,34 @@ pub fn block_tags(text: &str) -> Vec<Vec<Range<usize>>> {
             _ => {}
         }
     }
+    done.extend(open.into_iter().map(|(keyword, tags)| TagBlock { keyword, tags, closed: false }));
     done
+}
+
+/// The `if`, `for` and `call` blocks of TEXT, as symbols: each named by its
+/// opening tag's statement, as written but for its trim markers and with
+/// each run of spaces, tabs and line ends one space, as dbt-mode names them
+/// (`if is_incremental()`); from its opening tag, its name's place, to the
+/// end of its closing tag, else of the text.
+pub fn control_blocks(text: &str) -> Vec<Symbol> {
+    let kinds = [("if", Kind::If), ("for", Kind::For), ("call", Kind::Call)];
+    let symbol = |block: TagBlock| {
+        let kind = kinds.iter().find(|(keyword, _)| *keyword == block.keyword)?.1;
+        let opening = block.tags[0].clone();
+        let statement = text[opening.clone()].trim_start_matches("{%").trim_end_matches("%}");
+        let words = statement.trim_matches(['-', '+']).split([' ', '\t', '\n', '\r']);
+        let name = words.filter(|word| !word.is_empty()).collect::<Vec<_>>().join(" ");
+        let closing = block.tags.last().filter(|_| block.closed);
+        let (end, inner_end) = closing.map_or((text.len(), text.len()), |closing| (closing.end, closing.start));
+        Some(Symbol {
+            kind,
+            name,
+            range: opening.start..end,
+            name_range: opening.clone(),
+            inner: opening.end..inner_end,
+        })
+    };
+    block_tags(text).into_iter().filter_map(symbol).collect()
 }
 
 static CTE: LazyLock<Regex> = LazyLock::new(|| {
@@ -357,11 +401,25 @@ pub fn cte_uses(text: &str) -> Vec<(Symbol, Vec<Range<usize>>)> {
         .collect()
 }
 
-/// The blocks of TEXT, and its CTEs when it is SQL, ordered by start.
-pub fn outline(text: &str, sql: bool) -> Vec<Symbol> {
+/// The blocks of TEXT, its CTEs when it is SQL, and its control blocks
+/// when CONTROL, ordered by start, the longest first.
+pub fn outline(text: &str, sql: bool, control: bool) -> Vec<Symbol> {
     let mut symbols = blocks(text);
     if sql {
         symbols.extend(ctes(text));
+    }
+    if control {
+        // A block left open ends with the innermost symbol that holds its
+        // opening tag, rather than cross it: Jinja refuses that symbol's end
+        // while the block is open, and dbt-mode draws it within.
+        let within = |block: Symbol| {
+            let crossed =
+                |symbol: &&Symbol| symbol.range.contains(&block.range.start) && symbol.range.end < block.range.end;
+            let end = symbols.iter().filter(crossed).map(|symbol| symbol.range.end).min().unwrap_or(block.range.end);
+            Symbol { range: block.range.start..end, inner: block.inner.start..block.inner.end.min(end), ..block }
+        };
+        let control: Vec<Symbol> = control_blocks(text).into_iter().map(within).collect();
+        symbols.extend(control);
     }
     symbols.sort_by_key(|symbol| (symbol.range.start, std::cmp::Reverse(symbol.range.end)));
     symbols
@@ -516,7 +574,7 @@ select * from final
     fn names_may_hold_any_letter() {
         let text = "{% macro métrique() %}{% endmacro %}with résultat as (select 1), 総計 as (select 2) select 1";
         assert_eq!(
-            names(&outline(text, true)),
+            names(&outline(text, true, false)),
             [(Kind::Macro, "métrique"), (Kind::Cte, "résultat"), (Kind::Cte, "総計")]
         );
     }
@@ -524,7 +582,7 @@ select * from final
     #[test]
     fn knows_what_a_block_or_a_cte_holds() {
         let text = "{% macro m() %}body{% endmacro %} with c (x) as (select (1)) select 1";
-        let found = outline(text, true);
+        let found = outline(text, true, false);
         assert_eq!(&text[found[0].inner.clone()], "body");
         assert_eq!(&text[found[1].inner.clone()], "select (1)");
     }
@@ -666,7 +724,41 @@ select * from final
     #[test]
     fn outline_orders_symbols_by_start_then_outermost_first() {
         let text = "{% snapshot s %}with a as (select 1) select * from a{% endsnapshot %}";
-        assert_eq!(names(&outline(text, true)), [(Kind::Snapshot, "s"), (Kind::Cte, "a")]);
-        assert_eq!(names(&outline(text, false)), [(Kind::Snapshot, "s")]);
+        assert_eq!(names(&outline(text, true, false)), [(Kind::Snapshot, "s"), (Kind::Cte, "a")]);
+        assert_eq!(names(&outline(text, false, false)), [(Kind::Snapshot, "s")]);
+    }
+
+    /// As agreed with dbt-mode for its breadcrumbs (plan 027).
+    #[test]
+    fn names_the_control_blocks_by_their_statement_as_written() {
+        let text = "{%- if is_incremental() -%}a{% elif x %}b{% else %}c{%- endif %}\n\
+                    {% for column in\n     columns %}{{ column }}{% endfor %}\n\
+                    {%+ call(user) statement('main', fetch_result=True) %}d{% endcall %}\n\
+                    {% set x = 1 %}{% if open %}e{% else %}f";
+        let found = control_blocks(text);
+        let expected = [
+            (Kind::If, "if is_incremental()"),
+            (Kind::For, "for column in columns"),
+            (Kind::Call, "call(user) statement('main', fetch_result=True)"),
+            (Kind::If, "if open"),
+        ];
+        assert_eq!(names(&found), expected, "elif, else and the closing tags are no symbols");
+        let at = |part: &str| text.find(part).unwrap();
+        assert_eq!(found[0].range, 0..at("\n"), "to the end of its closing tag");
+        assert_eq!(found[0].name_range, 0..at("a{%"), "its opening tag");
+        assert_eq!(found[3].range, at("{% if open")..text.len(), "left open, to the end, past its else");
+        // Within a raw block, a tag is text, whichever trim marker opens it.
+        assert_eq!(control_blocks("{%+ raw %}{% if x %}{% endraw +%}\nselect 1\n"), []);
+    }
+
+    #[test]
+    fn a_control_block_left_open_ends_with_what_holds_it() {
+        let text = "{% macro m() %}\n{% if a %}\nwith c as (select 1)\nselect * from c\n{% endmacro %}\n";
+        let found = outline(text, true, true);
+        assert_eq!(names(&found), [(Kind::Macro, "m"), (Kind::If, "if a"), (Kind::Cte, "c")]);
+        assert_eq!(found[1].range.end, found[0].range.end, "within the macro");
+        let cte = "with src as (\n  select * from t\n  {% if is_incremental() %}\n  where x > 1\n), f as (select 1)\n";
+        let found = outline(cte, true, true);
+        assert_eq!(found[1].range.end, found[0].range.end, "within the CTE: {found:?}");
     }
 }

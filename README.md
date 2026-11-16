@@ -4,7 +4,8 @@ A language server that sits in front of `dbt lsp`, the language server of
 dbt 2, and adds what it lacks, for every editor and for agents:
 
 - `textDocument/documentSymbol`: the CTEs of a model and its Jinja blocks
-  (macro, test, snapshot, materialization, docs, set), nested by extent, as
+  (macro, test, snapshot, materialization, docs, set, by their name; if,
+  for and call, by their statement), nested by extent, as
   the buffer stands, unsaved edits included; in a YAML properties file, its
   models, seeds, snapshots, analyses, macros, functions, data tests,
   sources and their tables, columns, exposures, metrics, semantic models,
