@@ -10,7 +10,7 @@ dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 
 The project is the `--project-dir` of the server command, else the
 client's root folder, else the current directory; [the
-configuration](../reference/configuration.md) gives every option.  Alone, with
+configuration](../reference/features.md#configuration) gives every option.  Alone, with
 dbt-oss, the proxy's `dbt parse` keeps `--profiles-dir`, `--profile`,
 `--target`, `--vars` and `--packages-install-path` from the server
 command: without `--profiles-dir`, dbt looks for `profiles.yml` in the
