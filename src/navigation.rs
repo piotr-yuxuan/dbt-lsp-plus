@@ -34,8 +34,8 @@ pub struct Found {
 
 /// A package searched for a name.  For a call, dbt 2.0.9 searches the
 /// calling file's package first and the root project second, the other
-/// way round under `flags: require_ref_searches_node_package_before_root:
-/// false`.
+/// way round when `flags: require_ref_searches_node_package_before_root` is
+/// a YAML 1.2 false: a plain `false`, `False` or `FALSE`.
 #[derive(Clone, Copy)]
 enum Step {
     Own,
@@ -52,12 +52,15 @@ const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 /// the kind, the resource types it may name, the prefix of the name in
 /// their ids, and the packages searched in turn.  A `ref`, `doc` or
 /// generic test names its kind; the `name:` of an entry, the entry's label;
-/// a unit test's `model:`, `unit test model`.  An entry describes a
-/// resource of its own package only: dbt 2.0.9 calls one naming another
-/// package's resource unused, where dbt-core 1.12 patches it.
+/// a unit test's `model:`, `unit test model`.  A `doc` ignores the calling
+/// file's package: past the root, the first package by path, which is the
+/// byte order of their names, since dbt installs each at
+/// `dbt_packages/<name>`.  An entry describes a resource of its own package
+/// only: dbt 2.0.9 calls one naming another package's resource unused,
+/// where dbt-core 1.12 patches it.
 const LOOKUP: [(&str, &[&str], &str, &[Step]); 9] = [
     ("ref", &["model", "seed", "snapshot"], "", CALLS),
-    ("doc", &["doc"], "", &[Step::Root, Step::Own, Step::Any]),
+    ("doc", &["doc"], "", &[Step::Root, Step::Any]),
     ("test", &["macro"], "test_", &[Step::Own, Step::Root]),
     ("unit test model", &["model"], "", &[Step::Own]),
     ("model", &["model"], "", &[Step::Own]),
@@ -145,7 +148,9 @@ pub fn resolve(project: &Project, path: &Path, target: &Target) -> Vec<Found> {
     let config = project.packages.get(root).and_then(|dir| project.texts.get(&dir.join("dbt_project.yml")));
     let root_first = config.and_then(|text| yaml::parse(text)).is_some_and(|config| {
         let value = config.get("flags").and_then(|flags| flags.get("require_ref_searches_node_package_before_root"));
-        value.and_then(Node::as_str).is_some_and(|value| value.eq_ignore_ascii_case("false"))
+        // As dbt reads the flag: neither `fAlse` nor a quoted `'false'`.
+        let yaml_false = ["false", "False", "FALSE"];
+        matches!(value, Some(Node::Scalar { value, plain: true, .. }) if yaml_false.contains(&value.as_str()))
     });
     let (first, second) = if root_first { (root, own) } else { (own, root) };
     let packages = |steps: &[Step]| -> Vec<Option<&str>> {
@@ -435,18 +440,37 @@ models:
     }
 
     #[test]
-    fn the_flag_set_to_false_puts_the_root_first() {
+    fn only_the_flag_as_a_yaml_false_puts_the_root_first() {
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
-        let flagged =
-            shop("navigation-flag", "name: shop\nflags:\n  require_ref_searches_node_package_before_root: false\n");
-        assert_eq!(leads(&flagged, pkg_yml, named("ref", None, "orders"))[0].0, "model.shop.orders");
-        assert_eq!(leads(&flagged, pkg_yml, table)[0].0, "source.shop.raw.orders");
-        let default =
-            shop("navigation-flag-true", "name: shop\nflags:\n  require_ref_searches_node_package_before_root: true\n");
-        assert_eq!(leads(&default, pkg_yml, named("ref", None, "orders"))[0].0, "model.pkg.orders");
-        for dir in [flagged, default] {
-            std::fs::remove_dir_all(dir).unwrap();
+        let events = Some(Target::Source(sources::Target::Table { source: "ext".into(), table: "events".into() }));
+        // Each value of the flag, if any, and the package searched first, as
+        // dbt 2.0.9 and dbt-oss 2.0.11 read it: a YAML 1.2 boolean.
+        let values = [
+            (Some("false"), "shop"),
+            (Some("False"), "shop"),
+            (Some("FALSE"), "shop"),
+            (Some("fAlse"), "pkg"),
+            (Some("'false'"), "pkg"),
+            (Some("\"false\""), "pkg"),
+            (Some("no"), "pkg"),
+            (Some("true"), "pkg"),
+            (None, "pkg"),
+        ];
+        for (i, (value, first)) in values.into_iter().enumerate() {
+            let flag = value.map(|value| format!("flags:\n  require_ref_searches_node_package_before_root: {value}\n"));
+            let root = shop(&format!("navigation-flag-{i}"), &format!("name: shop\n{}", flag.unwrap_or_default()));
+            let found = leads(&root, pkg_yml, named("ref", None, "orders"));
+            assert_eq!(found[0].0, format!("model.{first}.orders"), "ref with the flag {value:?}");
+            let found = leads(&root, pkg_yml, table.clone());
+            assert_eq!(found[0].0, format!("source.{first}.raw.orders"), "source with the flag {value:?}");
+            // The file's package comes before any other, the root aside; a doc
+            // ignores the flag.
+            let ids: Vec<String> = leads(&root, pkg_yml, events.clone()).into_iter().map(|(id, ..)| id).collect();
+            assert_eq!(ids, ["source.pkg.ext.events"], "source in two packages with the flag {value:?}");
+            let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
+            assert_eq!(found[0].0, "doc.shop.order_status", "doc with the flag {value:?}");
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 
@@ -468,13 +492,46 @@ models:
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
         assert_eq!(found, lead("doc.shop.order_status", "models/docs.md", "order_status"));
-        // From the root, any package that has it; from a package, its own.
+        // From the root or a package, that of the package whose name sorts first.
         assert_eq!(leads(&root, "models/_models.yml", named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
-        assert_eq!(leads(&root, pkg_yml, named("doc", None, "pkg_only"))[0].0, "doc.pkg.pkg_only");
+        assert_eq!(leads(&root, pkg_yml, named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
         assert_eq!(
             leads(&root, "models/_models.yml", named("doc", Some("pkg"), "order_status"))[0].0,
             "doc.pkg.order_status"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_doc_ignores_the_calling_file_s_package() {
+        let calls = "version: 2\nmodels:\n  - name: m\n    description: \"{{ doc('shared') }} {{ doc('both') }}\"\n";
+        let shared = "{% docs shared %}\n{% enddocs %}\n";
+        let both = "{% docs both %}\n{% enddocs %}\n";
+        let root = scratch_project(
+            "navigation-doc-order",
+            &[
+                ("dbt_project.yml", "name: shop\n"),
+                ("models/_models.yml", calls),
+                ("models/docs.md", both),
+                ("dbt_packages/aaa/dbt_project.yml", "name: aaa\n"),
+                ("dbt_packages/aaa/models/_models.yml", calls),
+                ("dbt_packages/aaa/models/docs.md", shared),
+                ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+                ("dbt_packages/pkg/models/_models.yml", calls),
+                ("dbt_packages/pkg/models/docs.md", shared),
+                ("dbt_packages/shop_utils/dbt_project.yml", "name: shop_utils\n"),
+                ("dbt_packages/shop_utils/models/_models.yml", calls),
+                ("dbt_packages/shop_utils/models/docs.md", &format!("{shared}{both}")),
+            ],
+        );
+        // As dbt 2.0.9 gives it from a model of each: the root's, else that of
+        // the package whose name sorts first.
+        for package in ["", "dbt_packages/aaa/", "dbt_packages/pkg/", "dbt_packages/shop_utils/"] {
+            let yml = format!("{package}models/_models.yml");
+            assert_eq!(leads(&root, &yml, named("doc", None, "shared"))[0].0, "doc.aaa.shared", "from {yml}");
+        }
+        let yml = "dbt_packages/shop_utils/models/_models.yml";
+        assert_eq!(leads(&root, yml, named("doc", None, "both")), lead("doc.shop.both", "models/docs.md", "both"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -134,9 +134,11 @@ resolved path.
   then, and for the nodes it did not list, they come from the scan.  The
   server lists no macros, so the edges to and from macros always come from
   the scan.  The scan looks a ref or a source up in the caller's package,
-  the root project, then any package, as dbt 2.0.9 does by default, and
-  an unqualified macro in the caller's package and the root project only, as
-  dbt does: another package's macros need its name.  A dispatch names every
+  the root project, then any package, as dbt 2.0.9 does by default for a
+  node (in a macro, dbt looks in the calling node's package: see "Known
+  limitations"), and an unqualified macro in the caller's package and the
+  root project only, as dbt does: another package's macros need its name.
+  A dispatch names every
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
   found resources; an empty `source:*` does not.  After a crash, the scan
@@ -310,11 +312,16 @@ one of these targets, and forwards every other one, YAML included:
 Lookup follows dbt 2.0.9, probed with `dbt parse`: a package the name gives
 is the only one searched; else a `ref` or a `source` tries the file's own
 package (the installed package whose directory holds it), then the root,
-then any, the root first under `flags:
-require_ref_searches_node_package_before_root: false`; a `doc` tries the
-root, then the file's package, then any, flag or not; an entry describes a
-resource of the file's own package only, since dbt 2.0.9 calls an entry
-naming another package's resource unused (dbt-core 1.12 patches it).  As
+then any, the root first when `flags:
+require_ref_searches_node_package_before_root` is a YAML 1.2 false, as dbt
+2.0.9 and dbt-oss 2.0.11 read it: a plain `false`, `False` or `FALSE`, not
+`fAlse`, `no` nor a quoted `'false'`, and no parse warns of a value it
+ignores; a `doc` tries the root, then any package, whichever file calls
+it and flag or not: the first by the byte order of package names, which
+is the order of their paths, since dbt installs each package at
+`dbt_packages/<name>`; an entry describes a resource of the file's own
+package only, since dbt 2.0.9 calls an entry naming another package's
+resource unused (dbt-core 1.12 patches it).  As
 dbt-core 1.12.6's parser reads them: a generic test, the file's package
 then the root; a unit test's model, the file's package.  The first package
 that has something gives one location, or every
@@ -615,6 +622,17 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - `graph::resolve`, behind the call hierarchy, ignores `flags:
   require_ref_searches_node_package_before_root: false`, which navigation
   reads.
+- Navigation reads that flag as written.  It reads no explicit tag:
+  `!!str false` puts the root first, where dbt keeps the calling node's
+  package first, and `!!bool "false"` does not, where dbt does.  It
+  neither follows an alias nor renders Jinja: dbt 2.0.9 and dbt-oss 2.0.11
+  put the root first for `*no` naming a `false`, for `'{{ False }}'`, and
+  for a comparison of an `env_var` that gives false.
+- A `ref` or a `source` inside a macro resolves in dbt in the package of
+  the node that calls the macro, not in the macro's own; the proxy, which
+  does not know the caller, resolves it in the macro's package.  It shows
+  in the navigation of a `source()` in a macro file, and in the call
+  hierarchy's edges from a macro, which always come from the scan.
 - A versioned model's `ref` (`v=2`) and its versions' files are not
   navigated; a generic test's arguments (`column_name:`, `to:` aside) and
   a `config:` block lead nowhere.
