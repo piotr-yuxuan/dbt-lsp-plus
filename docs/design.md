@@ -697,6 +697,34 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   the server withdrew and makes again is answered by the proxy, and never
   reaches the client.  dbt lsp 2.0.9 was not seen to withdraw one.
 
+## Conformance
+
+The corpus, `tests/fixtures/conformance/`, holds one small dbt project per
+rule of dbt's lookup that the proxy follows or misses.  Each is parsed by a
+real dbt as the proxy parses (`config::parse_command`), on a scratch copy,
+offline (`unshare -rn` where it can, an empty environment but `PATH` and a
+scratch home, the proxy's deadline), and its manifest is compared with the
+library's answers, each named by a lookup:
+
+- `scan`: what dbt knows in the project's packages (nodes but generic
+  tests, sources, functions, macros, docs blocks) against the scan's
+  entities and source tables; and a dependency that no call the scan
+  reads names;
+- `location`: the file of each, against `original_file_path`;
+- `navigation`: each `ref` and `source` of a node, and in a properties
+  file each entry's `name:` and each `doc()` in it, against the
+  dependency of the call's name, the node that dbt patched from that file
+  (`patch_path`), and the docs block it rendered as that node's
+  description;
+- `graph`: each call of a node or a macro, by the edges whose sites hold
+  it, against the dependencies (nodes, and the project's macros) that bear
+  the call's name, a dispatch's being its `*__name` implementations.
+
+A case may expect dbt to fail, in a file `expected-error`, and its
+manifest is compared all the same; dbt must leave the copy as it was.
+`divergences.txt` lists every divergence with its reason: one it lacks, or
+an entry that no longer diverges, fails the corpus.
+
 ## Tests
 
 - Unit tests for each pure module: framing, positions and incremental
@@ -768,6 +796,9 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 - Two runs of the integration tests in one checkout share Cargo's
   temporary directory, so they take turns: a process's first scratch
   directory waits for a lock there, held until the process ends.
+- The conformance corpus, opt-in as the live test (see "Conformance"):
+  `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance
+  -- --ignored`.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
   what this note records of `dbt.listNodes` and of `positionEncoding`:

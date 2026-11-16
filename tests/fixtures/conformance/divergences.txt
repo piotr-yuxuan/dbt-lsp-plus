@@ -1,0 +1,3 @@
+# Where the proxy resolves otherwise than dbt, one line each:
+# CASE<TAB>SUBJECT<TAB>LOOKUP<TAB>REASON, as the corpus prints it.
+# See tests/proxy/conformance.rs.

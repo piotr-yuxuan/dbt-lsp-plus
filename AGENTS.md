@@ -16,11 +16,18 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-and, before a merge, the live test with `DBT_LSP_PLUS_TEST_DBT` naming a
-dbt 2 executable:
+and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming a
+dbt 2 executable: with the proprietary build, which has `dbt lsp`, the live
+test and the conformance corpus,
 
 ```
 DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
+```
+
+and with dbt-oss, which has no `dbt lsp`, the corpus alone:
+
+```
+DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance -- --ignored
 ```
 
 ## Layout
@@ -41,8 +48,10 @@ src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, opt-in
+tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
+tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
 ```
 
 ## Rules of the code
@@ -98,4 +107,9 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
     from where it goes; one event's dispatch apart from the waiting with
     the listing's deadline;
   - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
-    outcome and its end, each the end of a resource, as `stop_server`.
+    outcome and its end, each the end of a resource, as `stop_server`;
+  - `parse` in `tests/proxy/conformance.rs`: dbt's run, the corpus's one
+    effect, apart from the comparisons, which decide;
+  - `nodes_compared`, `calls_compared` and `entries_compared` in
+    `tests/proxy/conformance.rs`: one per kind of answer compared with
+    dbt's, so that `corpus` stays a walk over the cases.
