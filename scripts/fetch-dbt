@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+"""Fetch a build of dbt for CI, checked by its SHA-256, and keep its binary alone.
+
+Usage: scripts/fetch-dbt BUILD DIR
+
+BUILD is `oss`, dbt-oss 2.0.11 from GitHub's release of dbt-labs/dbt, or `proprietary`, dbt
+2.0.9 from dbt Labs' CDN, under dbt Labs' licence; the pins are those of the owner's Nix
+packages.  The archive is downloaded into a scratch directory inside DIR, its hash checked
+before anything is read from it, and only its one regular file named `dbt` is written, as
+DIR/dbt, executable, whichever directory the archive keeps it in.  No path of the archive
+is ever written.  It needs Python 3.11 or later, and runs with the runner's own.
+
+Status 0, with DIR/dbt.  Status 2, with one line on standard error and no DIR/dbt: an
+argument is wrong, the download failed, ran past its time or size, or the archive's hash
+or contents are not what the pin says.
+"""
+
+import hashlib
+import shutil
+import sys
+import tarfile
+import tempfile
+import urllib.request
+from pathlib import Path
+
+BUILDS = {
+    "oss": (
+        "https://github.com/dbt-labs/dbt/releases/download/v2.0.11/"
+        "dbt-core-2.0.11-x86_64-unknown-linux-gnu.tar.gz",
+        "bf468f6f43f6d64eb636c2dd9deb7d1eb17f7c57a09d509c0836b44c60688b4c",
+    ),
+    "proprietary": (
+        "https://public.cdn.getdbt.com/fs/cli/fs-v2.0.9-x86_64-unknown-linux-gnu.tar.gz",
+        "cc57e1f6a40d9d62008d2242c03fc8fbe5cca289c957abf784f9a6267bc4b0ef",
+    ),
+}
+# Seconds that the download may wait for each read, and the bytes it may bring: both
+# archives are about 56 and 107 MB.
+TIMEOUT_SECONDS = 120
+LIMIT_BYTES = 512 * 2**20
+CHUNK_BYTES = 2**20
+
+
+class FetchError(Exception):
+    """A download or an archive that cannot be trusted as the pin describes it."""
+
+
+def fetch(url: str, sha256: str, directory: Path) -> Path:
+    """Download the archive at `url`, check it against `sha256`, and write its `dbt` in `directory`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=directory) as scratch:
+        archive, hashed, size = Path(scratch) / "dbt.tar.gz", hashlib.sha256(), 0
+        with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as reply, archive.open("wb") as out:
+            while chunk := reply.read(CHUNK_BYTES):
+                size += len(chunk)
+                if size > LIMIT_BYTES:
+                    message = f"{url}: more than {LIMIT_BYTES} bytes"
+                    raise FetchError(message)
+                hashed.update(chunk)
+                out.write(chunk)
+        if hashed.hexdigest() != sha256:
+            message = f"{url}: SHA-256 {hashed.hexdigest()}, not the pinned {sha256}"
+            raise FetchError(message)
+        with tarfile.open(archive) as tar:
+            members = [m for m in tar.getmembers() if m.isfile() and Path(m.name).name == "dbt"]
+            if len(members) != 1:
+                message = f"{url}: {len(members)} files named dbt, not one"
+                raise FetchError(message)
+            binary = Path(scratch) / "dbt"
+            with tar.extractfile(members[0]) as source, binary.open("wb") as out:
+                shutil.copyfileobj(source, out)
+        binary.chmod(0o755)
+        return Path(shutil.move(binary, directory / "dbt"))
+
+
+def main(arguments: list[str]) -> int:
+    """Fetch the build that ARGUMENTS name: 0 with its binary, 2 otherwise."""
+    if len(arguments) != 2 or arguments[0] not in BUILDS:
+        print(f"usage: scripts/fetch-dbt {'|'.join(BUILDS)} DIR", file=sys.stderr)
+        return 2
+    url, sha256 = BUILDS[arguments[0]]
+    try:
+        binary = fetch(url, sha256, Path(arguments[1]))
+    except (FetchError, OSError, tarfile.TarError) as error:
+        print(f"fetch-dbt: {error}", file=sys.stderr)
+        return 2
+    print(binary)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
