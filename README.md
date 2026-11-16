@@ -34,8 +34,8 @@ dbt 2, and adds what it lacks, for every editor and for agents:
 - inlay hints after the server's: the relation dbt builds, after each
   `ref` and `source`;
 - `dbt-lsp-plus.nodeInfo`, a command that gives a node's resolved
-  configuration and relation from the user's own `dbt parse`, and a summary
-  of the node first in the server's hover on a `ref` or a `source`;
+  configuration, relation and summary from the user's own `dbt parse`, and
+  that summary first in the server's hover on a `ref` or a `source`;
 - within a document: folding of Jinja blocks, CTEs, tags and comments;
   highlights of a CTE's uses and of a block's tags; selection ranges from a
   word up to the file; the rename of a CTE in its file, refused when a
