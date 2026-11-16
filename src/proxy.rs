@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, navigation, parse_log, project, properties, runs, scan, sources};
+use crate::{config, document, features, navigation, packages, parse_log, project, properties, runs, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -771,7 +771,7 @@ impl<W: Write> Proxy<W> {
         let can = self.standalone || (parsing.compiled && self.server.is_some());
         let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        if let Some(why) = config::packages_refused(&root, &self.parsing.server) {
+        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.standalone) {
             return self.log_parse(&why);
         }
         // An empty or relative base would put the cache in the working directory.

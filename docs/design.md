@@ -501,7 +501,9 @@ So the proxy runs the user's own `dbt parse`.
   user namespace with no network where the root is mounted read-only
   (`mount -o bind,ro`), so that dbt's install of packages fails on
   `package-lock.yml` (dbt1001, "Read-only file system") instead of
-  rewriting the install path, as both builds were seen to; else with
+  rewriting the install path, as both builds were seen to.  The mount is
+  recursive (`rbind,ro=recursive`) where the system has it, as a root
+  holding a mount point needs, else plain.  Else with
   dbt's flags and the guard on packages alone, which the proxy says once
   on its standard error.  A server command with no `lsp` word gets no
   parse.  The working directory
@@ -532,26 +534,37 @@ So the proxy runs the user's own `dbt parse`.
   of the client's that may change the graph, and at a request that finds
   the index stale, with no compilation to wait for; one at a time, and the
   next at the end of one when a change came during it.
-- The packages: a parse is refused, and why logged, when dbt would install
-  them first, which writes `package-lock.yml`, rewrites the install path,
-  deleting what it holds, untracked files included, and reaches the
-  network for a package from it.  dbt does so when a package is missing
-  from the install path, whatever the lock says, so a parse needs: each
-  `local:` package of `packages.yml` and `dependencies.yml` at `<install
-  path>/<its project's name>` (a directory or the link `dbt deps` makes);
-  each package from the network (`package`, `git`, `tarball`, `private`),
-  named there or in a local package's own files, in a `package-lock.yml`
-  no older than the project's files; and each package of the lock, which
-  names them all, local ones included, at `<install path>/<its name>`.
-  The install path is the server command's `--packages-install-path`,
-  else `DBT_PACKAGES_INSTALL_PATH`, else the project's
-  `packages-install-path`, else `dbt_packages`.  Probed on both builds: a
-  `local:` package under the install path in a directory not named after
-  its project, one beside the project not yet installed, a locked hub
-  package missing after `dbt clean`, and a hub package a local package
-  names with no lock each made dbt rewrite the install path, the packages
-  it held included, or try the hub; a lock entry no longer named, which
-  dbt leaves, is refused too.
+- The packages (`packages::refused`): a parse is refused, and why logged,
+  when dbt would install packages first, which writes `package-lock.yml`,
+  rewrites the install path, deleting what it holds, untracked files
+  included, and reaches the network for a package from it.  dbt does so
+  when a package is missing from the install path, whatever the lock
+  says.  So a parse needs: each `local:` package of `packages.yml` and
+  `dependencies.yml`, the project's and, in turn, its local packages',
+  each read from the root as dbt does, at `<install path>/<its project's
+  name>`, a `dbt_project.yml` there (in a directory or the link `dbt
+  deps` makes), as dbt checks; each package from the network (`package`,
+  `git`, `tarball`, `private`) named there in a `package-lock.yml` no
+  older than the project's files; each package of the lock, which names
+  them all, local ones included, installed the same way; and each of
+  those files, with `dbt_project.yml`, read as dbt reads it: a byte order
+  mark aside, refused when yaml-rust2 does not read it (a tab after a key,
+  which dbt reads) or when a file naming packages repeats a key or holds
+  an alias or a merge key (dbt takes the last value, and through them);
+  under the cut, such a file lets the parse run.
+  Alone without the cut, no package from the network at all: a lock as
+  recent as `packages.yml` but stale in content sends dbt to the hub.  The
+  install path is the server command's `--packages-install-path`, else
+  `DBT_PACKAGES_INSTALL_PATH`, set before its `lsp` or in the
+  environment, else the project's `packages-install-path`, else
+  `dbt_packages`.  Probed on both builds: a `local:` package under the
+  install path in a directory not named after its project, one beside the
+  project not yet installed, a local package's own `local:` package, a
+  locked hub package missing after `dbt clean`, a hub package a local
+  package names with no lock, and a `packages.yml` behind a byte order
+  mark each made dbt rewrite the install path, the packages it held
+  included, or try the hub.  Under the cut, these fail harmlessly; the
+  guard then only says why in dbt-lsp-plus's words.
 - The cache: `$XDG_CACHE_HOME/dbt-lsp-plus/<hash of the root and the
   command>/<pid>/`, else under `~/.cache`, an empty or relative value being
   ignored; removed at exit; those beside it that no parse wrote for a day,
@@ -690,7 +703,10 @@ Alone, the proxy:
   document with edits unsaved, whose ranges the client has moved; a
   parse that ends before keeps it.  They are published with the last
   run's failures; an edit that drops a failure leaves their ranges to the
-  client, as the server's, until a parse publishes the file again;
+  client, as the server's, until a parse publishes the file again, and
+  so does a new run for a document with edits unsaved and problems of the
+  parse.  A document counts as unsaved by its text against the file's,
+  line ends aside, as Emacs sends a CRLF file with LF;
 - registers, after `initialized` and for a client that allows dynamic
   registration of watched files, the watcher of `**/*` that dbt lsp would
   (`dbt-lsp-plus-file-watcher`), so that an edit outside the editor
@@ -837,7 +853,17 @@ fails with -32803.
   under the root.  With a client that honours the proxy's watcher, a save
   parses twice: the save, then the watcher's event for the same file.  The
   probe of `lsp` adds one start of dbt before the server's, 12 to 22 ms on
-  both builds.
+  both builds.  The guard judges a lock recent by its time: a comment
+  added to `packages.yml` after it refuses a parse until `dbt deps`, though
+  dbt's own check, a hash of the packages, would let it through; a lock
+  entry no longer named, which dbt leaves, is refused too.  The cut guards
+  the root only: an install path outside it is not read-only; and with
+  `HOME` or the cache under the root, the cut makes every parse fail, as
+  dbt writes its lease and logs there.  The cut is probed once, on the
+  temporary directory: a root holding a mount point, on a system without
+  the recursive mount, fails each parse on the mount.  Without the cut, a
+  change to `packages.yml` in the moments after the guard read it reaches
+  dbt unchecked.
 
 ## Conformance
 

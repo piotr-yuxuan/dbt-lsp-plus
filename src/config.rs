@@ -6,9 +6,7 @@
 
 use crate::graph::ServerNode;
 use crate::parse_log;
-use crate::project;
 use crate::scan::Target;
-use crate::yaml::{self, Node};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -125,64 +123,6 @@ pub fn flag<'a>(command: &'a [String], flag: &str) -> Option<&'a str> {
         Some(rest) => rest.strip_prefix('='),
         None => None,
     })
-}
-
-/// Why dbt cannot parse the project at ROOT, with the server command SERVER,
-/// and leave its packages as they are, if it cannot.  dbt 2.0.9 and dbt-oss
-/// 2.0.11 install the packages first when one is missing, which writes
-/// `package-lock.yml`, rewrites the install path, deleting what it holds,
-/// untracked files included, and reaches the network for a package from
-/// it: a `local:` package whose project has no entry `<install path>/<its
-/// name>`; a package from the network, named by the project or by one of
-/// its local packages, unless the lock names it and is no older than the
-/// project's files that name packages; a package of the lock with no entry.
-/// The install path is SERVER's `--packages-install-path`, else
-/// `DBT_PACKAGES_INSTALL_PATH`, else the project's, else `dbt_packages`.
-pub fn packages_refused(root: &Path, server: &[String]) -> Option<String> {
-    let read = |path: &Path| fs::read_to_string(path).ok().and_then(|text| yaml::parse(&text));
-    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    fn items(doc: &Node) -> &[Node] {
-        doc.get("packages").map_or(&[][..], Node::items)
-    }
-    let files = |dir: &Path| ["packages.yml", "dependencies.yml"].map(|name| dir.join(name));
-    let configured = project::package_config(root)
-        .and_then(|(_, config)| Some(config.get("packages-install-path")?.as_str()?.to_owned()));
-    let variable = std::env::var("DBT_PACKAGES_INSTALL_PATH").ok().filter(|path| !path.is_empty());
-    let install = flag(server, "--packages-install-path").map(str::to_owned).or(variable).or(configured);
-    let install = root.join(install.unwrap_or_else(|| "dbt_packages".into()));
-    // A file of comments only, or empty, parses to no document: no packages.
-    let named: Vec<(PathBuf, Node)> =
-        files(root).into_iter().filter_map(|path| Some((path.clone(), read(&path)?))).collect();
-    let locals: Vec<&str> =
-        named.iter().flat_map(|(_, doc)| items(doc)).filter_map(|p| p.get("local")?.as_str()).collect();
-    let why = "dbt parse would install it, rewriting the install path; run dbt deps";
-    // A package with no name dbt cannot install either.
-    let missing = |dir: &&str| {
-        project::package_config(&root.join(dir)).is_none_or(|(project, _)| !install.join(project).exists())
-    };
-    if let Some(dir) = locals.iter().copied().find(missing) {
-        return Some(format!("the local package {dir} is not installed: {why}"));
-    }
-    // A package from the network is known by its source; dbt's lock names
-    // each with its name, the local ones too.
-    let source = |package: &Node| {
-        let keys = ["package", "git", "tarball", "private"];
-        keys.into_iter().find_map(|key| Some((key, package.get(key)?.as_str()?.to_owned())))
-    };
-    let lock = root.join("package-lock.yml");
-    let locked = read(&lock);
-    let entries = locked.as_ref().map_or(&[][..], items);
-    let fresh =
-        modified(&lock).is_some_and(|lock| named.iter().all(|(path, _)| modified(path).is_some_and(|at| lock >= at)));
-    let theirs: Vec<Node> =
-        locals.iter().flat_map(|dir| files(&root.join(dir))).filter_map(|path| read(&path)).collect();
-    let mut remote = named.iter().map(|(_, doc)| doc).chain(&theirs).flat_map(items).filter_map(source);
-    if remote.any(|known| !fresh || !entries.iter().any(|entry| source(entry).as_ref() == Some(&known))) {
-        return Some(format!("a package from the network is not in a lock as recent as the files naming it: {why}"));
-    }
-    let name = |entry: &Node| entry.get("name").and_then(Node::as_str).map(str::to_owned);
-    let absent = entries.iter().find(|entry| name(entry).is_none_or(|name| !install.join(name).exists()));
-    absent.map(|entry| format!("the locked package {} is not installed: {why}", name(entry).unwrap_or_default()))
 }
 
 /// The nodes of a manifest by `unique_id`, sources and disabled nodes
@@ -542,72 +482,6 @@ mod tests {
         remove_stale(&own);
         assert!(!dir.join("key/old").exists(), "unwritten for a day");
         assert!(dir.join("key/new").exists() && own.exists(), "recent, or this process's own");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn packages_are_settled_when_installed_and_locked() {
-        let files = [
-            ("packages.yml", "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n"),
-            ("dbt_packages/dbt_utils/dbt_project.yml", "name: dbt_utils\n"),
-        ];
-        let dir = scratch_project("settled", &files);
-        let refused = |dir: &Path| packages_refused(dir, &[]).unwrap_or_default();
-        assert!(refused(&dir).starts_with("a package from the network is not in a lock"), "no lock");
-        let lock = "packages:\n- package: dbt-labs/dbt_utils\n  name: dbt_utils\n  version: 1.4.1\nsha1_hash: x\n";
-        fs::write(dir.join("package-lock.yml"), lock).unwrap();
-        assert_eq!(packages_refused(&dir, &[]), None, "locked and installed");
-        let older = std::time::SystemTime::now() - Duration::from_secs(3600);
-        File::options().write(true).open(dir.join("package-lock.yml")).unwrap().set_modified(older).unwrap();
-        assert!(refused(&dir).starts_with("a package from the network"), "a lock older than packages.yml");
-        fs::write(dir.join("package-lock.yml"), "packages: []\n").unwrap();
-        assert!(refused(&dir).starts_with("a package from the network"), "a lock that does not name it");
-        fs::write(dir.join("package-lock.yml"), lock).unwrap();
-        fs::remove_dir_all(dir.join("dbt_packages")).unwrap();
-        assert!(refused(&dir).starts_with("the locked package dbt_utils is not installed"), "after dbt clean");
-        fs::write(dir.join("packages.yml"), "# packages:\n#   - package: dbt-labs/dbt_utils\n").unwrap();
-        fs::remove_file(dir.join("package-lock.yml")).unwrap();
-        assert_eq!(packages_refused(&dir, &[]), None, "comments only name no package");
-        fs::write(dir.join("dependencies.yml"), "packages:\n  - git: https://example.invalid/x.git\n").unwrap();
-        assert!(refused(&dir).starts_with("a package from the network"), "from git, in dependencies.yml");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Each layout that dbt 2.0.9 and dbt-oss 2.0.11 were seen to rewrite,
-    /// deleting what the install path held (plan 011's critic, then 015's
-    /// critic and review).
-    #[test]
-    fn a_local_package_not_installed_is_refused() {
-        let files = [
-            ("dbt_project.yml", "name: shop\n"),
-            ("packages.yml", "packages:\n  - local: dbt_packages/shop_utils\n"),
-            ("dbt_packages/shop_utils/dbt_project.yml", "name: shop_utils\n"),
-            ("dbt_packages/utils_dir/dbt_project.yml", "name: utils\n"),
-            ("vendor/sibling/dbt_project.yml", "name: sibling\n"),
-        ];
-        let dir = scratch_project("local-packages", &files);
-        assert_eq!(packages_refused(&dir, &[]), None, "installed where its name says");
-        let names =
-            |local: &str| fs::write(dir.join("packages.yml"), format!("packages:\n  - local: {local}\n")).unwrap();
-        names("dbt_packages/shop_utils\n  - local: ./dbt_packages/utils_dir");
-        let refused = packages_refused(&dir, &[]).unwrap();
-        assert!(refused.starts_with("the local package ./dbt_packages/utils_dir is not installed"), "{refused}");
-        names("vendor/sibling");
-        assert!(packages_refused(&dir, &[]).is_some(), "a package outside the install path, not installed");
-        // As `dbt deps` installs it: a link under the install path.
-        std::os::unix::fs::symlink(dir.join("vendor/sibling"), dir.join("dbt_packages/sibling")).unwrap();
-        assert_eq!(packages_refused(&dir, &[]), None);
-        // Its own packages: one from the network needs a lock.
-        fs::write(dir.join("vendor/sibling/packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n").unwrap();
-        assert!(packages_refused(&dir, &[]).is_some(), "a package of a local package, with no lock");
-        names("vendor/nothing");
-        assert!(packages_refused(&dir, &[]).is_some(), "a package with no project");
-        // Another install path: the project's, else the server's flag.
-        names("dbt_packages/shop_utils");
-        fs::write(dir.join("dbt_project.yml"), "name: shop\npackages-install-path: deps\n").unwrap();
-        assert!(packages_refused(&dir, &[]).is_some(), "not under the project's install path");
-        let server = ["dbt", "lsp", "--packages-install-path=dbt_packages"].map(String::from);
-        assert_eq!(packages_refused(&dir, &server), None, "under the server's");
         fs::remove_dir_all(&dir).unwrap();
     }
 

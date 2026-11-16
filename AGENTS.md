@@ -45,6 +45,7 @@ src/sources.rs                references and renames of sources
 src/navigation.rs             the targets of definitions in YAML, dbt's lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
+src/packages.rs               whether dbt would install packages before it parses
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
@@ -98,6 +99,10 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     `on_parsed` stay dispatches;
   - `lacks_lsp`: the probe of the user's dbt, at the boundary, with tests
     of its own;
+  - `packages::install_path`, `packages::read` and `packages::named`: one
+    rule each of how dbt finds a project's packages (where it installs
+    them, which files it reads, which local packages it follows), apart
+    from what `packages::refused` decides;
   - `answered_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: what dbt lsp
     2.0.9 answers, apart from what the script makes it answer;
   - `Fake::misbehaves` in `tests/support/fake_dbt_lsp.rs`: what the
@@ -114,8 +119,8 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     refused; where `dbt_project.yml` configures a source), with tests of
     its own;
   - `sources::argument_naming`: which argument of a call names a target;
-  - `yaml::Node::shares`: a walk of the tree, which needs a function of its
-    own to recurse;
+  - `yaml::Node::shares` and `yaml::Node::repeats`: walks of the tree,
+    which need a function of their own to recurse;
   - `Proxy::node_info`, `Proxy::remember` and `Proxy::handle`: the answer of
     the proxy's command; what the proxy keeps of a forwarded request apart
     from where it goes; one event's dispatch apart from the waiting with
