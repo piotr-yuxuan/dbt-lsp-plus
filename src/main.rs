@@ -10,8 +10,10 @@ usage: dbt-lsp-plus [--] [SERVER COMMAND...]
 Runs SERVER COMMAND, by default `dbt lsp`, as a language server behind this
 one, on the standard input and output.  Every message passes unchanged; the
 proxy answers itself documentSymbol, workspace/symbol and the call hierarchy
-when the server does not announce them.  The project is the --project-dir of
-SERVER COMMAND, else the client's root folder, else the current directory.";
+when the server does not announce them.  With a dbt that has no `lsp`, such
+as dbt-oss, it answers alone, from the files and the user's `dbt parse`.
+The project is the --project-dir of SERVER COMMAND, else the client's root
+folder, else the current directory.";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

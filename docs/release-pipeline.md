@@ -31,7 +31,8 @@ Each dbt job runs `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 runner's AppArmor otherwise refuses `unshare -r`, then `unshare -rn true`, so that a job without
 the cut fails rather than passes: the corpus runs each parse under `unshare -rn` when it can, and
 says "network namespace: no" when it cannot. The `test` job runs the same `sysctl`, as the proxy
-cuts its own parse off the network where it can, and a test fails on Linux when it cannot. The
+cuts its own parse off the network and from writing the project where it can, and a test fails on
+Linux when it cannot. The
 live test is built with the network, then runs
 under `unshare -rn`, as `dbt lsp` runs as the user's command gives it, with no flag of the proxy's;
 the proxy's own parse cuts itself again, a namespace within that one.

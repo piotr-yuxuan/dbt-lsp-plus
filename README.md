@@ -49,6 +49,22 @@ ten minutes, and gives it the open documents as they stand.  Without
 `dbt lsp`, and while it restarts, the proxy keeps serving its own
 features.
 
+## With dbt-oss
+
+dbt-oss 2.0.x has no `dbt lsp`.  With it, the proxy is a language server on
+its own: everything above that needs no server, plus, from your own `dbt
+parse`, run offline at each save or change of the project, node
+information, the hover summary, inlay hints, the call hierarchy as dbt
+resolves it, and dbt's errors and warnings as diagnostics (source `dbt
+parse`).  It says so once in the log, and warns of nothing.  Formatting,
+completion, compiled SQL and previews are `dbt lsp`'s, and absent.
+
+The command is the same, `dbt-lsp-plus -- dbt lsp --project-dir
+/path/to/project`: the proxy asks `dbt lsp --help` first.  Point it at the
+dbt executable itself rather than a launcher such as `uvx dbt`: on Linux the
+proxy runs `dbt parse` with no network and the project read-only, under
+`unshare -rnm`, where a launcher fails when its cache is cold.
+
 It uses only the server's interface, unlocks nothing that dbt gates behind
 an account, and does not ship dbt.  `docs/design.md` explains how it works
 and what it would take to finish.
@@ -77,8 +93,10 @@ cargo test
 DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
 ```
 
-The last command runs the opt-in live test against a real dbt 2 (tested
-with 2.0.9), on a copy of `tests/fixtures/shop` with a scratch home.
+The last command runs the opt-in live tests against a real dbt 2, on a copy
+of `tests/fixtures/shop` with a scratch home: the proxy in front of `dbt
+lsp` with the proprietary build (tested with 2.0.9), alone with dbt-oss
+(tested with 2.0.11).
 
 The crate also builds `fake-dbt-lsp`, the scripted server of the tests; to
 install the proxy alone, run `cargo install --path . --bin dbt-lsp-plus`.

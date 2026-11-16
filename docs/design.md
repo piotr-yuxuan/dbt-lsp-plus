@@ -2,7 +2,9 @@
 
 dbt-lsp-plus sits between any LSP client and the proprietary `dbt lsp` of
 dbt 2 (observed on 2.0.9).  It forwards every message unchanged and answers
-itself the requests of the features that the server does not announce.  An
+itself the requests of the features that the server does not announce.
+With a dbt that has no `lsp`, such as dbt-oss 2.0.11, it answers alone
+(see "Standalone mode").  An
 editor gets them through standard LSP, and so does an agent whose LSP tool
 speaks definition, references, hover, document and workspace symbols and the
 call hierarchy.
@@ -15,7 +17,9 @@ call hierarchy.
   server does not expose.
 - It unlocks nothing that dbt gates behind an account.  Column-level
   features stay as the server gives them.
-- It runs the `dbt` the user installed, and ships no part of it.
+- It runs the `dbt` the user installed, and ships no part of it.  `dbt lsp`
+  is optional: without it, the proxy answers alone from its scan and the
+  user's `dbt parse`.
 - Standard LSP is its only contract with an editor.  dbt-mode needs nothing
   specific to it: dbt-mode steps aside, feature by feature, for each
   capability the server announces, and keeps working without the proxy.
@@ -462,7 +466,9 @@ So the proxy runs the user's own `dbt parse`.
   `overrides` (dbt1060, an error) and declares a source of the root's
   own.  An entry naming another package's
   resource warns dbt1089, even with `--quiet`, and leaves that
-  resource's `patch_path` null.
+  resource's `patch_path` null.  In the JSON log, a YAML loader's error
+  (dbt1013, dbt1060) and dbt1001 name their file from dbt's working
+  directory, the others from the project's root.
 - A node's `depends_on` lists what rendering it reached: in `macros`,
   the macros it calls and those they call in turn (dbt's own included),
   but not through a dispatch; in `nodes`, its `ref` and `source` calls
@@ -490,16 +496,26 @@ So the proxy runs the user's own `dbt parse`.
   `--packages-install-path`, in either form; always `--project-dir <root>`,
   `--target-path` and `--log-path` under the cache, `--write-json`,
   `--no-version-check`, `--no-send-anonymous-usage-stats`,
-  `--no-manage-state` and `--quiet`.  A server command with no `lsp` word
-  gets no parse.  The working directory and the environment are the
-  proxy's.
+  `--no-manage-state`, `--quiet` and `--log-format json`, under the cut
+  when a probe of it succeeded at the proxy's start: `unshare -rnm`, a
+  user namespace with no network where the root is mounted read-only
+  (`mount -o bind,ro`), so that dbt's install of packages fails on
+  `package-lock.yml` (dbt1001, "Read-only file system") instead of
+  rewriting the install path, as both builds were seen to; else with
+  dbt's flags and the guard on packages alone, which the proxy says once
+  on its standard error.  A server command with no `lsp` word gets no
+  parse.  The working directory
+  and the environment are the proxy's.  So a launcher (`uvx dbt`) runs
+  with no network too, and fails when its cache is cold: the docs ask for
+  the dbt binary itself, which needs only the C and C++ runtimes.
 - The child: no input; both outputs in `parse.log` in the cache, never on
   the client's channel; a failure names that file and gives dbt's first
-  `[error]` line, past the banner it writes.  A thread waits on it and
+  error's message from its JSON log, else the first line that is none of
+  its events, as a launcher's own.  A thread waits on it and
   reports to the event loop; it is killed past two minutes, and at `exit`
   or when the client closes.  Only the direct child is killed: a launcher's
   grandchild may outlive it.
-- When: lazily.  A change of the client's marks the index stale; a
+- When, with a server: lazily.  A change of the client's marks the index stale; a
   `nodeInfo` or a hover that finds it stale, or an inlay hint request that
   finds no index, starts a parse, and is answered from the last index
   meanwhile.  A parse starts only when the server has compiled since the
@@ -512,7 +528,30 @@ So the proxy runs the user's own `dbt parse`.
   dbt lsp compile: dbt lsp compiles only after a document opens, and an
   agent may ask for a node without opening one.  A reason a parse cannot
   start, or a failure, is logged once with `window/logMessage`, and never
-  after `shutdown`.
+  after `shutdown`.  Alone, eagerly: at the first `didOpen`, at each change
+  of the client's that may change the graph, and at a request that finds
+  the index stale, with no compilation to wait for; one at a time, and the
+  next at the end of one when a change came during it.
+- The packages: a parse is refused, and why logged, when dbt would install
+  them first, which writes `package-lock.yml`, rewrites the install path,
+  deleting what it holds, untracked files included, and reaches the
+  network for a package from it.  dbt does so when a package is missing
+  from the install path, whatever the lock says, so a parse needs: each
+  `local:` package of `packages.yml` and `dependencies.yml` at `<install
+  path>/<its project's name>` (a directory or the link `dbt deps` makes);
+  each package from the network (`package`, `git`, `tarball`, `private`),
+  named there or in a local package's own files, in a `package-lock.yml`
+  no older than the project's files; and each package of the lock, which
+  names them all, local ones included, at `<install path>/<its name>`.
+  The install path is the server command's `--packages-install-path`,
+  else `DBT_PACKAGES_INSTALL_PATH`, else the project's
+  `packages-install-path`, else `dbt_packages`.  Probed on both builds: a
+  `local:` package under the install path in a directory not named after
+  its project, one beside the project not yet installed, a locked hub
+  package missing after `dbt clean`, and a hub package a local package
+  names with no lock each made dbt rewrite the install path, the packages
+  it held included, or try the hub; a lock entry no longer named, which
+  dbt leaves, is refused too.
 - The cache: `$XDG_CACHE_HOME/dbt-lsp-plus/<hash of the root and the
   command>/<pid>/`, else under `~/.cache`, an empty or relative value being
   ignored; removed at exit; those beside it that no parse wrote for a day,
@@ -608,10 +647,64 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   launcher's child holds it, and that end must not stop the server
   started since.
 
+## Standalone mode
+
+Before it spawns the server, the proxy runs the words of its command before
+`lsp`, then `lsp --help`, with `NO_COLOR=1`, killed past ten seconds.  Status
+2 with "unrecognized subcommand 'lsp'" on the standard error, as dbt-oss
+2.0.11 answers, means the dbt has no `lsp`; anything else, `uvx dbt`'s own
+status 2 offline included, spawns the server as before.  A command with no
+`lsp` word is not probed.
+
+Alone, the proxy:
+
+- answers `initialize` itself, with its capabilities without a server and
+  `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`; it logs
+  once that the dbt has no `lsp`, and warns nothing;
+- answers a hover with the summary or the YAML block it would put first,
+  alone, and null elsewhere; inlay hints with its own, or `[]`;
+- answers `nodeInfo` from the parse, which starts at the first `didOpen`
+  (see "How the proxy runs it");
+- takes the graph's edges between nodes from the last parse's manifest,
+  `depends_on.nodes` of its enabled nodes of the kinds `dbt.listNodes`
+  lists, through the same merge as a listing, and starts a parse for a
+  request of the call hierarchy that finds the index stale; a failed
+  parse's manifest lacks the nodes deleted since, which the index keeps for
+  `nodeInfo` but the graph drops; the edges to and from macros
+  stay the scan's, as the manifest's `depends_on.macros` holds every macro
+  rendering reached, dbt's own included, and none through a dispatch;
+- publishes the parse's errors and warnings: each line of the JSON log of
+  level `error` or `warn`, placed by the last line of its message,
+  `  --> PATH[:LINE:COLUMN]`, lines and columns from 1, columns in code
+  points; the path in the root if it is there, else in dbt's working
+  directory, which is the proxy's, else in the one package that holds it,
+  as dbt names a YAML loader's error from its working directory, with
+  `..` from a sibling, resolved as written, and a package's file from its
+  package; `dbt_project.yml` too, when the scan cannot read it; a range of no
+  width there, the file's start when dbt gives no position; severity 1 or
+  2, `source` `dbt parse`, `code` dbt's bare number, the message without
+  its `[error] ` or `[warning] ` prefix, as dbt lsp 2.0.9 shows its own.  A
+  problem in no such file is logged once.  A parse that ran to
+  `CommandCompleted` (Q039) replaces the last one's set, and publishes
+  again each file that has problems, before or now, but an unchanged
+  document with edits unsaved, whose ranges the client has moved; a
+  parse that ends before keeps it.  They are published with the last
+  run's failures; an edit that drops a failure leaves their ranges to the
+  client, as the server's, until a parse publishes the file again;
+- registers, after `initialized` and for a client that allows dynamic
+  registration of watched files, the watcher of `**/*` that dbt lsp would
+  (`dbt-lsp-plus-file-watcher`), so that an edit outside the editor
+  parses again; dbt's own output is filtered as with a server.
+
+It runs no server, so nothing restarts, no `dbt/*` notification or progress
+comes, and any request it does not answer, `dbt.compileFile` among them,
+fails with -32803.
+
 ## Failure modes
 
 | Situation | Behaviour |
 |-----------|-----------|
+| The user's dbt has no `lsp` | Standalone mode, with no warning (see "Standalone mode") |
 | `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for, and fails every other request with -32803 |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, and a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
@@ -739,13 +832,19 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   of a dispatch, where dbt lists the adapter's alone from a macro, and
   nothing from a node; dbt 2 ignores a source's `overrides`, which the
   scan follows.
+- Alone, a problem that dbt places at a path both the root and a package
+  hold goes to the root's file; dbt lsp 2.0.9 puts every package's file
+  under the root.  With a client that honours the proxy's watcher, a save
+  parses twice: the save, then the watcher's event for the same file.  The
+  probe of `lsp` adds one start of dbt before the server's, 12 to 22 ms on
+  both builds.
 
 ## Conformance
 
 The corpus, `tests/fixtures/conformance/`, holds one small dbt project per
 rule of dbt's lookup that the proxy follows or misses.  Each is parsed by a
 real dbt as the proxy parses (`config::parse_command`), on a scratch copy,
-offline (`unshare -rn` where it can, an empty environment but `PATH` and a
+offline (under the proxy's cut where it can, an empty environment but `PATH` and a
 scratch home, the proxy's deadline), and its manifest is compared with the
 library's answers, each named by a lookup:
 
@@ -854,11 +953,26 @@ source's description.
 - Two runs of the integration tests in one checkout share Cargo's
   temporary directory, so they take turns: a process's first scratch
   directory waits for a lock there, held until the process ends.
-- CI runs the same checks on GitHub Actions, and the corpus on dbt-oss
-  2.0.11, and on dbt 2.0.9 with the live test once the owner allows it;
-  each week, the corpus runs on the latest stable dbt-oss, and with the
-  live test on the latest proprietary build when allowed: see
-  `docs/release-pipeline.md`.
+  - standalone mode: the probe of `lsp`, as dbt-oss and 2.0.9 answer it,
+    in colour unless asked not to, a launcher's own failure, a command
+    with no word before `lsp`; the fake refusing `lsp`, with no warning
+    and one log line, the features of the scan, a parse at each change and
+    one more after a change during one, a hover and hints from the parse,
+    the graph from its manifest, a hierarchy request starting the parse,
+    its problems placed (from dbt's working directory, in a broken
+    `dbt_project.yml`, beside the last run's failures, logged when two
+    packages hold the path, logged once) and cleared, left alone by an
+    edit, and the watcher registered; with a server, the problems kept
+    from the client, the graph still the listing's after a parse, and a
+    change during a parse waiting for a request;
+  - the guard on packages: each layout in which dbt was seen to rewrite
+    the install path;
+  - the parse's cut: the fake sees only `lo`, and cannot write into its
+    project.
+- CI runs the same checks on GitHub Actions, and the corpus and the live
+  test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it; each
+  week, the same on the latest stable dbt-oss, and on the latest
+  proprietary build when allowed: see `docs/release-pipeline.md`.
 - The conformance corpus, opt-in as the live test (see "Conformance"):
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance
   -- --ignored`.
@@ -876,6 +990,11 @@ source's description.
   declares dynamic registration, gets dbt's watcher registration once.
   The fake also asks for the configuration after `initialized` and answers
   an empty listing with `{"error": "No nodes found"}`, as 2.0.9 was seen to.
+  With a dbt that has no `lsp`, the same test passes saying so, and a
+  second one runs the proxy alone: its node information, hover and graph
+  from the parse, `order_summary`'s upstream through its variable, and a
+  model written outside the editor with an unknown `ref` shown as dbt1048
+  from the watcher's event, then cleared when it goes.
   The live rename also relies on two observations that no fake-backed test
   needs, so the fake leaves them out: `dbt.compileFile` answers
   `{"file_uri": ...}` and writes the compiled SQL there, where a file from
