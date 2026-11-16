@@ -1825,6 +1825,279 @@ fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
     assert!(session.finish().success());
 }
 
+/// A line of dbt parse's JSON log, as both builds write it.
+fn dbt_event(level: &str, code: &str, msg: &str) -> String {
+    json!({"data": {}, "info": {"code": code, "level": level, "msg": msg, "name": "Event"}}).to_string() + "\n"
+}
+
+#[test]
+fn alone_the_parse_s_problems_are_diagnostics_until_a_parse_without_them() {
+    let log_file = scratch("standalone-problems-log").join("parse.jsonl");
+    let completed = dbt_event("info", "Q039", "Finished 'parse'");
+    let error = "[error] [DependencyNotFound (dbt1048)]: Ref 'nowhere' not found\n  --> models/marts/orders.sql:1:21";
+    let in_package = "[warning] [W (dbt1060)]: a warning\n  --> macros/is_positive.sql";
+    let nowhere = "[warning] [UnusedResourceConfigPath (dbt1097)]: Configuration paths exist";
+    let problems = [dbt_event("error", "1048", error), dbt_event("warn", "1060", in_package)].concat();
+    std::fs::write(&log_file, problems + &dbt_event("warn", "1097", nowhere) + &completed).unwrap();
+    let script = json!({"no_lsp": true, "manifest": manifest(), "parse_log": log_file});
+    let (mut session, _) = Session::fake("standalone-problems", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    // dbt counts code points, the client UTF-16 units: the emoji is two.
+    session.open(&orders, Some("select '\u{1F600}' as x, {{ ref('nowhere') }}\n"));
+    let published = |path: &Path| {
+        let uri = uri(path);
+        move |m: &Value| m["params"]["uri"] == uri
+    };
+    let found = session.wait_for(published(&orders))["params"]["diagnostics"][0].clone();
+    let at = json!({"line": 0, "character": 21});
+    let message = "[DependencyNotFound (dbt1048)]: Ref 'nowhere' not found\n  --> models/marts/orders.sql:1:21";
+    let expected = json!({"range": {"start": at, "end": at}, "severity": 1, "source": "dbt parse", "code": "1048",
+                          "message": message});
+    assert_eq!(found, expected);
+    let macro_file = fixture().join("dbt_packages/shop_utils/macros/is_positive.sql");
+    let warned = session.wait_for(published(&macro_file))["params"]["diagnostics"][0].clone();
+    assert_eq!((&warned["severity"], &warned["range"]["start"]), (&json!(2), &json!({"line": 0, "character": 0})));
+    let logged = session.wait_for(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 2);
+    assert!(logged["params"]["message"].as_str().unwrap().contains("dbt1097"), "{logged}");
+    // A clean parse clears them.
+    std::fs::write(&log_file, &completed).unwrap();
+    session.received.clear();
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
+    let cleared = session.wait_for(published(&orders));
+    assert_eq!(cleared["params"]["diagnostics"], json!([]));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
+    let project = copy_fixture("standalone-broken-project");
+    // dbt still parses, and says where; the scan can no longer read it.
+    let config = std::fs::read_to_string(project.join("dbt_project.yml")).unwrap();
+    std::fs::write(project.join("dbt_project.yml"), config + "models: [\n").unwrap();
+    let log_file = scratch("standalone-broken-project-log").join("parse.jsonl");
+    let nowhere = dbt_event("warn", "1097", "[warning] [UnusedResourceConfigPath (dbt1097)]: Configuration paths");
+    let at =
+        |line: u32| dbt_event("error", "1013", &format!("[error] [YAML (dbt1013)]\n  --> dbt_project.yml:{line}:1"));
+    let completed = dbt_event("info", "Q039", "Finished 'parse'");
+    std::fs::write(&log_file, at(2) + &nowhere + &completed).unwrap();
+    let flags = [Path::new("--project-dir"), &project];
+    let script = json!({"no_lsp": true, "parse_log": log_file});
+    let (mut session, _) = Session::fake_with("standalone-broken-project-session", script, &flags, None);
+    session.initialize(&project);
+    let model = project.join("models/marts/orders.sql");
+    session.open(&model, None);
+    let on_line = |line: u64| move |params: &Value| params["diagnostics"][0]["range"]["start"]["line"] == line;
+    published(&mut session, &project.join("dbt_project.yml"), on_line(1));
+    // The next parse moves the error; the warning stays logged once.
+    std::fs::write(&log_file, at(3) + &nowhere + &completed).unwrap();
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&model)}}));
+    published(&mut session, &project.join("dbt_project.yml"), on_line(2));
+    let warned = |m: &&Value| m["params"]["message"].as_str().is_some_and(|text| text.contains("dbt1097"));
+    assert_eq!(session.received.iter().filter(warned).count(), 1);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_yaml_error_named_from_dbt_s_directory_joins_the_last_run_s_failures() {
+    let project = copy_fixture("standalone-cwd-project");
+    std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
+    write_run(&project, &run_results("build", true), &run_manifest());
+    // A second package holds the macro's path: dbt's place is no longer one file.
+    std::fs::create_dir_all(project.join("dbt_packages/other/macros")).unwrap();
+    std::fs::write(project.join("dbt_packages/other/dbt_project.yml"), "name: other\n").unwrap();
+    std::fs::write(project.join("dbt_packages/other/macros/is_positive.sql"), "").unwrap();
+    // dbt runs where the proxy runs, here the project's parent, as an editor
+    // opened at a repository's top starts it.
+    let error = "[error] [YAML (dbt1013)]\n  --> shop/models/marts/_models.yml:3:5";
+    let twice = dbt_event("warn", "1060", "[warning] [W (dbt1060)]: twice\n  --> macros/is_positive.sql");
+    let log_file = scratch("standalone-cwd-log").join("parse.jsonl");
+    let log = [dbt_event("error", "1013", error), twice, dbt_event("info", "Q039", "Finished")].concat();
+    std::fs::write(&log_file, log).unwrap();
+    let script = json!({"no_lsp": true, "parse_log": log_file});
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with("standalone-cwd", script, &flags, project.parent());
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let both = |params: &Value| params["diagnostics"].as_array().is_some_and(|found| found.len() == 2);
+    let models = project.join("models/marts/_models.yml");
+    let found = published(&mut session, &models, both);
+    let sources: Vec<&Value> = found["diagnostics"].as_array().unwrap().iter().map(|d| &d["source"]).collect();
+    assert_eq!(sources, [&json!("dbt-lsp-plus"), &json!("dbt parse")]);
+    let logged = session.wait_for(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 2);
+    assert!(logged["params"]["message"].as_str().unwrap().contains("twice"), "{logged}");
+    // An edit drops the failure; the client moves the parse's range, which
+    // a publication now would put back where it was.
+    session.received.clear();
+    let edit = json!({"textDocument": {"uri": uri(&models), "version": 2}, "contentChanges": []});
+    session.notify("textDocument/didChange", edit);
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    let on_models = |m: &&Value| m["params"]["uri"] == uri(&models);
+    assert_eq!(session.received.iter().filter(on_models).count(), 0, "{:?}", session.received);
+    // The save's parse finds the same problem: published again, the failure gone.
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&models)}}));
+    let alone =
+        published(&mut session, &models, |params| params["diagnostics"].as_array().is_some_and(|d| d.len() == 1));
+    assert_eq!(alone["diagnostics"][0]["source"], "dbt parse");
+    assert!(session.finish().success());
+}
+
+/// A copy of the fixture for test NAME with `RUN_MODELS`, and a session
+/// alone in front of the fake, whose parses log ERROR at PLACE.
+fn alone_with_a_problem(name: &str, place: &str) -> (PathBuf, Session) {
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
+    let error = format!("[warning] [W (dbt1060)]: x\n  --> {place}");
+    let log_file = scratch(&format!("{name}-log")).join("parse.jsonl");
+    std::fs::write(&log_file, dbt_event("warn", "1060", &error) + &dbt_event("info", "Q039", "Finished")).unwrap();
+    let script = json!({"no_lsp": true, "parse_log": log_file, "manifest": manifest()});
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with(name, script, &flags, None);
+    session.initialize_as(&project, json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    (project, session)
+}
+
+#[test]
+fn alone_a_crlf_file_opened_with_lf_counts_as_saved() {
+    let (project, mut session) = alone_with_a_problem("standalone-crlf", "models/marts/customers.sql:3:1");
+    let customers = project.join("models/marts/customers.sql");
+    let text = std::fs::read_to_string(&customers).unwrap();
+    std::fs::write(&customers, text.replace('\n', "\r\n")).unwrap();
+    // As Emacs sends it: its buffer, with LF.
+    session.open(&customers, Some(&text));
+    published(&mut session, &customers, |params| params["diagnostics"] != json!([]));
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    session.received.clear();
+    session.notify(
+        "textDocument/didSave",
+        json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}}),
+    );
+    published(&mut session, &customers, |params| params["diagnostics"] != json!([]));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_new_run_leaves_an_unsaved_document_s_ranges_to_the_client() {
+    let (project, mut session) = alone_with_a_problem("standalone-run-unsaved", "models/marts/_models.yml:3:5");
+    let models = project.join("models/marts/_models.yml");
+    session.open(&models, None);
+    published(&mut session, &models, |params| params["diagnostics"] != json!([]));
+    let top = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
+    let edit = json!({"textDocument": {"uri": uri(&models), "version": 2},
+                      "contentChanges": [{"range": top, "text": "# a\n# b\n"}]});
+    session.notify("textDocument/didChange", edit);
+    // The edit handled before the build ends: its failures are newer.
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    session.received.clear();
+    // A build fails, on the model and on a test of this file.
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &project.join("models/marts/orders.sql"), |params| params["diagnostics"] != json!([]));
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert!(session.received.iter().all(|m| m["params"]["uri"] != uri(&models)), "{:?}", session.received);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_parse_cut_short_keeps_the_last_problems() {
+    let log_file = scratch("standalone-cut-short-log").join("parse.jsonl");
+    let error = |what: &str| {
+        let message = format!("[error] [DependencyNotFound (dbt1048)]: {what}\n  --> models/marts/orders.sql:1:1");
+        dbt_event("error", "1048", &message)
+    };
+    std::fs::write(&log_file, error("first") + &dbt_event("info", "Q039", "Finished")).unwrap();
+    let script = json!({"no_lsp": true, "parse_log": log_file, "parse_exit": 1});
+    let (mut session, _) = Session::fake("standalone-cut-short", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    published(&mut session, &orders, |params| params["diagnostics"] != json!([]));
+    // A parse that dies before its end: its failure logged, nothing published.
+    std::fs::write(&log_file, error("second")).unwrap();
+    session.received.clear();
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
+    let second = |m: &Value| m["params"]["message"].as_str().is_some_and(|text| text.contains("second"));
+    session.wait_for(second);
+    // Past whatever else the end of that parse sent.
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert!(session.received.iter().all(|m| m["method"] != "textDocument/publishDiagnostics"));
+    assert!(session.finish().success());
+}
+
+/// The URI under which the proxy alone publishes dbt's error at PLACE,
+/// named from the working directory that DIRECTORY gives of a copy of the
+/// fixture, as test NAME.
+fn published_from(name: &str, directory: impl Fn(&Path) -> PathBuf, place: &str) -> (PathBuf, Value) {
+    let project = copy_fixture(&format!("{name}-project"));
+    let cwd = directory(&project);
+    std::fs::create_dir_all(&cwd).unwrap();
+    let error = format!("[error] [DependencyNotFound (dbt1048)]\n  --> {place}:1:1");
+    let log_file = scratch(&format!("{name}-log")).join("parse.jsonl");
+    std::fs::write(&log_file, dbt_event("error", "1048", &error) + &dbt_event("info", "Q039", "Finished")).unwrap();
+    let script = json!({"no_lsp": true, "parse_log": log_file});
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with(name, script, &flags, Some(&cwd));
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let found = |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["diagnostics"] != json!([]);
+    let published = session.wait_for(found)["params"]["uri"].clone();
+    assert!(session.finish().success());
+    (project, published)
+}
+
+#[test]
+fn alone_a_problem_named_through_dot_dot_is_published_as_the_root_spells_it() {
+    // From a sibling, dbt's path reads from the root too.
+    let (project, sibling) =
+        published_from("standalone-sibling", |p| p.with_file_name("elsewhere"), "../shop/models/marts/orders.sql");
+    assert_eq!(sibling, uri(&project.join("models/marts/orders.sql")));
+    // From within the project, only from dbt's working directory.
+    let (project, within) = published_from("standalone-within", |p| p.join("sub"), "../models/marts/orders.sql");
+    assert_eq!(within, uri(&project.join("models/marts/orders.sql")));
+}
+
+#[test]
+fn alone_a_parse_leaves_an_unsaved_document_s_ranges_to_the_client() {
+    let error = "[error] [DependencyNotFound (dbt1048)]: x\n  --> models/marts/customers.sql:3:1";
+    let log_file = scratch("standalone-unsaved-log").join("parse.jsonl");
+    std::fs::write(&log_file, dbt_event("error", "1048", error) + &dbt_event("info", "Q039", "Finished")).unwrap();
+    let script = json!({"no_lsp": true, "parse_log": log_file, "manifest": manifest()});
+    let (mut session, _) = Session::fake("standalone-unsaved", script);
+    session.initialize_as(&fixture(), json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    let customers = fixture().join("models/marts/customers.sql");
+    session.open(&customers, None);
+    published(&mut session, &customers, |params| params["diagnostics"] != json!([]));
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    // Two lines above dbt's, unsaved: the client moves the range itself.
+    let top = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}});
+    let edit = json!({"textDocument": {"uri": uri(&customers), "version": 2},
+                      "contentChanges": [{"range": top, "text": "-- a\n-- b\n"}]});
+    session.notify("textDocument/didChange", edit);
+    session.received.clear();
+    // Another file's save parses again, and dbt finds the same problem on disk.
+    session.notify(
+        "textDocument/didSave",
+        json!({"textDocument": {"uri": uri(&fixture().join("models/marts/orders.sql"))}}),
+    );
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert!(session.received.iter().all(|m| m["params"]["uri"] != uri(&customers)), "{:?}", session.received);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_the_parse_s_problems_stay_its_own() {
+    let log_file = scratch("server-problems-log").join("parse.jsonl");
+    let error = "[error] [DependencyNotFound (dbt1048)]: Ref 'nowhere' not found\n  --> models/marts/orders.sql:1:1";
+    std::fs::write(&log_file, dbt_event("error", "1048", error) + &dbt_event("info", "Q039", "Finished")).unwrap();
+    let (mut session, _) = Session::fake("server-problems", json!({"manifest": manifest(), "parse_log": log_file}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    barrier(&mut session);
+    let published = session.received.iter().filter(|m| m["method"] == "textDocument/publishDiagnostics").count();
+    assert_eq!(published, 0, "dbt lsp publishes its own");
+    assert!(session.finish().success());
+}
+
 #[test]
 fn no_parse_while_packages_need_the_network() {
     let project = copy_fixture("unsettled-packages");

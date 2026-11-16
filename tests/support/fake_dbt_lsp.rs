@@ -46,6 +46,8 @@
 //!     notification `test/compile`;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
 //!     `manifest`, written as `manifest.json` under `--target-path`;
+//!     `parse_log`, a file whose text it writes first on its standard
+//!     output, as dbt's log;
 //!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
 //!     waits for before writing; `parse_hang`, true when it never exits;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
@@ -284,6 +286,9 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
             devices.lines().skip(2).filter_map(|line| Some(line.split_once(':')?.0.trim())).collect();
         let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces, "wrote": wrote});
         writeln!(log, "{line}").expect("write the log");
+    }
+    if let Some(log) = script["parse_log"].as_str() {
+        print!("{}", std::fs::read_to_string(log).expect("read the parse's log"));
     }
     // dbt writes on both outputs, which must never reach the client: this
     // noise is a frame whose body is not JSON, which a client would show.

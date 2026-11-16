@@ -7,7 +7,7 @@ use crate::graph::{self, Graph, ServerNode};
 use crate::project::Project;
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{config, document, features, navigation, project, properties, runs, scan, sources};
+use crate::{config, document, features, navigation, parse_log, project, properties, runs, scan, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -138,6 +138,10 @@ struct Diagnostics {
     server: HashMap<PathBuf, (String, Vec<Value>)>,
     /// The failures of the last run.
     failures: HashMap<PathBuf, Vec<runs::Failure>>,
+    /// The errors and warnings of the last parse that ran to its end, alone.
+    parsed: HashMap<PathBuf, Vec<parse_log::Problem>>,
+    /// The messages of the problems in no file that were logged.
+    logged: HashSet<String>,
     /// When the client last changed or saved each document.
     edited: HashMap<PathBuf, SystemTime>,
     /// The URI under which the proxy last published.
@@ -255,6 +259,20 @@ struct Proxy<W: Write> {
     parsing: Parsing,
 }
 
+/// PATH with each `..` dropping the component before it, as written: no
+/// link is followed.
+fn lexical(path: &Path) -> PathBuf {
+    path.components().fold(PathBuf::new(), |mut path, component| {
+        match component {
+            Component::ParentDir => {
+                path.pop();
+            }
+            other => path.push(other),
+        }
+        path
+    })
+}
+
 /// The path of a `file:` URI.
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
     Url::parse(uri?).ok()?.to_file_path().ok()
@@ -298,15 +316,7 @@ fn key(id: &Value) -> String {
 /// before a `..`.
 fn project_dir(command: &[String]) -> Option<PathBuf> {
     let value = config::flag(command, "--project-dir")?;
-    let spelt = std::path::absolute(value).ok()?.components().fold(PathBuf::new(), |mut path, component| {
-        match component {
-            Component::ParentDir => {
-                path.pop();
-            }
-            other => path.push(other),
-        }
-        path
-    });
+    let spelt = lexical(&std::path::absolute(value).ok()?);
     match fs::canonicalize(value) {
         Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
         _ => Some(spelt),
@@ -502,7 +512,9 @@ impl<W: Write> Proxy<W> {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
             // A server gone publishes no more: its old set is no reason to wait.
             let server = self.diagnostics.server.get(&path).filter(|_| self.server.is_some());
-            let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty());
+            // So are the parse's problems, alone.
+            let parsed = self.diagnostics.parsed.get(&path).is_some_and(|problems| !problems.is_empty());
+            let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty()) || parsed;
             if self.diagnostics.failures.remove(&path).is_some() && !ranged {
                 self.publish(&path);
             }
@@ -804,11 +816,65 @@ impl<W: Write> Proxy<W> {
             Some(failure) => self.log_parse(&format!("dbt parse failed: {failure}")),
             None => self.parsing.failure = None,
         }
+        self.on_problems(outcome.problems);
         // Alone, a change during this parse wants the next one now: no
         // request may come to ask for it.
         if self.standalone {
             self.want_index();
         }
+    }
+
+    /// The errors and warnings of a parse that ran to its end, PROBLEMS, in
+    /// place of the last parse's, alone only, since dbt lsp shows its own:
+    /// each in its file, the root's if it is there, else the one in dbt's
+    /// working directory, else the one package's that holds it; one in no
+    /// such file is logged, once.  Each file with problems, before or now,
+    /// is published again.
+    fn on_problems(&mut self, problems: Option<Vec<parse_log::Problem>>) {
+        let (true, Some(problems)) = (self.standalone, problems) else { return };
+        // The packages, while the project's configuration still reads.
+        let packages: Vec<PathBuf> =
+            self.project().map_or_else(Vec::new, |project| project.packages.into_values().collect());
+        // dbt names a YAML file's error from its working directory, the
+        // proxy's, and a package's file from its package.
+        let cwd = std::env::current_dir().ok();
+        let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
+        for problem in problems {
+            let path = problem.place.as_ref().and_then(|place| {
+                // dbt names a file from a sibling directory with `..`.
+                let file = |dir: &Path| Some(lexical(&dir.join(&place.path))).filter(|path| path.is_file());
+                let in_cwd =
+                    || cwd.as_deref().and_then(file).and_then(|path| self.local_path(Some(&features::uri(&path))));
+                let mut held = packages.iter().filter_map(|dir| file(dir));
+                let one_held = || held.next().filter(|_| held.next().is_none());
+                self.root.as_deref().and_then(file).or_else(in_cwd).or_else(one_held)
+            });
+            match path {
+                Some(path) => placed.entry(path).or_default().push(problem),
+                None if !self.shutdown && self.diagnostics.logged.insert(problem.message.clone()) => {
+                    let text = format!("dbt-lsp-plus: dbt parse: {}", problem.message);
+                    let params = json!({"type": problem.severity, "message": text});
+                    self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+                }
+                None => {}
+            }
+        }
+        let previous = std::mem::replace(&mut self.diagnostics.parsed, placed);
+        // Unchanged too, as an edit may have dropped a file's failures since
+        // and left their publication to this parse; but for a document with
+        // edits unsaved, whose ranges the client has moved.
+        let mut paths: Vec<PathBuf> = previous.keys().chain(self.diagnostics.parsed.keys()).cloned().collect();
+        paths.sort();
+        paths.dedup();
+        paths.retain(|path| previous.get(path) != self.diagnostics.parsed.get(path) || !self.unsaved(path));
+        paths.iter().for_each(|path| self.publish(path));
+    }
+
+    /// Whether the document at PATH is open with edits unsaved, its line
+    /// ends aside: an editor such as Emacs sends a CRLF file's text with LF.
+    fn unsaved(&self, path: &Path) -> bool {
+        let lines = |text: &str| text.replace("\r\n", "\n");
+        self.documents.get(path).is_some_and(|open| text::read(path).is_none_or(|file| lines(&file) != lines(open)))
     }
 
     /// Asks a client that can refresh its inlay hints to do so, since they
@@ -1241,11 +1307,16 @@ impl<W: Write> Proxy<W> {
         changed.sort();
         changed.dedup();
         changed.retain(|path| previous.get(path) != self.diagnostics.failures.get(path));
+        // A document with edits unsaved keeps the parse's ranges the client
+        // has moved: the next parse publishes it.
+        let parsed = |path: &PathBuf| self.diagnostics.parsed.get(path).is_some_and(|problems| !problems.is_empty());
+        changed.retain(|path| !parsed(path) || !self.unsaved(path));
         changed.iter().for_each(|path| self.publish(path));
     }
 
-    /// Publishes PATH's diagnostics, the server's last and the proxy's own,
-    /// under the server's URI for it, else the client's, else the file's,
+    /// Publishes PATH's diagnostics, the server's last, the last run's
+    /// failures and the last parse's problems, under the server's URI for
+    /// it, else the client's, else the file's,
     /// with no version; the URI last published under, if another, gets
     /// none.  Nothing after `shutdown`.
     fn publish(&mut self, path: &Path) {
@@ -1265,6 +1336,15 @@ impl<W: Write> Proxy<W> {
             let range = runs::locate(&text, &entries, &tests, &failure.place);
             json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
+        }));
+        // At dbt's line and column, from 1 and in code points; a file's start
+        // when dbt gives none.
+        let problems = self.diagnostics.parsed.get(path).map_or(&[][..], Vec::as_slice);
+        diagnostics.extend(problems.iter().map(|problem| {
+            let (line, column) = problem.place.as_ref().and_then(|place| place.at).unwrap_or((1, 1));
+            let at = lines.offset(line.saturating_sub(1), column.saturating_sub(1), Encoding::Utf32);
+            json!({"range": lines.range(at, at, self.encoding), "severity": problem.severity,
+                   "source": "dbt parse", "code": problem.code, "message": problem.message})
         }));
         let publish = |uri: &str, diagnostics: Vec<Value>| {
             json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",

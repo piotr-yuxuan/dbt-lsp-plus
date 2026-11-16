@@ -368,12 +368,14 @@ impl Index {
     }
 }
 
-/// What a parse gave: the index of the manifest it wrote, if it wrote one,
-/// and its failure, if it failed.
+/// What a parse gave: the index of the manifest it wrote, if it wrote one;
+/// its failure, if it failed; and the errors and warnings of its log, if it
+/// ran to its end.
 #[derive(Debug)]
 pub struct Outcome {
     pub index: Option<Index>,
     pub failure: Option<String>,
+    pub problems: Option<Vec<parse_log::Problem>>,
 }
 
 /// A parse under way, which its owner stops at the latest when it ends.
@@ -402,7 +404,8 @@ struct Report(Option<ReportFn>);
 impl Drop for Report {
     fn drop(&mut self) {
         if let Some(report) = self.0.take() {
-            report(Outcome { index: None, failure: Some("the parse ended without an outcome".into()) });
+            let failure = Some("the parse ended without an outcome".into());
+            report(Outcome { index: None, failure, problems: None });
         }
     }
 }
@@ -427,9 +430,10 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
         let text = fs::read_to_string(&log).unwrap_or_default();
         // dbt's first error, else the first line that is none of its events,
         // as a launcher's own.
-        let errors = parse_log::read(&text).problems.into_iter().filter(|problem| problem.severity == 1);
+        let read = parse_log::read(&text);
+        let mut errors = read.problems.iter().filter(|problem| problem.severity == 1);
         let other = || text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'));
-        let first = errors.map(|error| error.message).next().or_else(|| other().map(str::to_owned));
+        let first = errors.next().map(|error| error.message.clone()).or_else(|| other().map(str::to_owned));
         let failure = match status {
             Ok(Some(status)) if status.success() => None,
             Ok(Some(status)) => Some(
@@ -440,7 +444,8 @@ pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: R
         };
         let manifest = fs::read_to_string(&manifest).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if let Some(report) = report.0.take() {
-            report(Outcome { index: manifest.as_ref().map(Index::of), failure });
+            let problems = read.completed.then_some(read.problems);
+            report(Outcome { index: manifest.as_ref().map(Index::of), failure, problems });
         }
     });
     Running { stop, thread: Some(thread) }
@@ -797,6 +802,33 @@ mod tests {
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(failure.starts_with("error: Failed to fetch the index (see "), "{failure}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_parse_that_ran_to_its_end_says_what_it_found() {
+        let dir = scratch_project("runner-problems", &[("x", "")]);
+        let (sender, outcomes) = mpsc::channel();
+        let report =
+            |sender: mpsc::Sender<Outcome>| -> ReportFn { Box::new(move |outcome| drop(sender.send(outcome))) };
+        let error =
+            r#"echo '{"info": {"code": "1048", "level": "error", "msg": "[error] [DependencyNotFound (dbt1048)]"}}'"#;
+        let ended =
+            format!(r#"{error}; echo '{{"info": {{"code": "Q039", "level": "info", "msg": "Finished"}}}}'; exit 1"#);
+        let complete =
+            start(words(&["sh", "-c", &ended]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        let found = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems;
+        complete.stop();
+        assert_eq!(found.map(|problems| problems[0].code.clone()), Some("1048".to_owned()));
+        // Dead, or killed, before its end, it says nothing of what it did not reach.
+        let died = format!("{error}; exit 101");
+        let dead = start(words(&["sh", "-c", &died]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        assert_eq!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems, None);
+        dead.stop();
+        let cut = format!("{error}; exec sleep 30");
+        let killed = start(words(&["sh", "-c", &cut]), dir.clone(), Duration::from_millis(300), report(sender));
+        assert_eq!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems, None);
+        killed.stop();
         fs::remove_dir_all(&dir).unwrap();
     }
 }
