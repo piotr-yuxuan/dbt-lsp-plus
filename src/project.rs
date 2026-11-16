@@ -83,7 +83,7 @@ impl Scanned {
         let resource = |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro"].contains(&entry.label);
         Scanned {
             tables: source_tables_in("", path, &text, &root),
-            entries: properties::entries_in(&text, &root).into_iter().filter(resource).collect(),
+            entries: properties::entries_in(&text, &root, false).into_iter().filter(resource).collect(),
             models: unit_test_models(&text, &root),
             calls,
             text,

@@ -60,23 +60,25 @@ const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "
 /// extension; the last column says alone only, with a dbt without `lsp`.
 /// A kind listed at a place is the proxy's at every position of that kind
 /// there, never forwarded; the rows of a kind follow the order of places.
-const ANSWERED: [(&str, &str, &[&str], bool); 10] = [
+const ANSWERED: [(&str, &str, &[&str], bool); 12] = [
     ("definition", "source", &["sql", "yaml", "python"], false),
     ("definition", "ref", &["sql"], true),
     ("definition", "ref", &["yaml"], false),
-    ("definition", "macro", &["sql"], true),
+    ("definition", "macro", &["sql", "yaml"], true),
     ("definition", "doc", &["yaml"], false),
     ("definition", "entry", &["yaml"], false),
     ("definition", "test", &["yaml"], false),
     ("references", "source", &["sql", "yaml", "python"], false),
+    ("references", "ref", &["sql", "yaml"], true),
+    ("references", "macro", &["sql", "yaml"], true),
     ("rename", "source", &["sql", "yaml", "python"], false),
     ("rename", "cte", &["sql"], false),
 ];
 
 /// The requests answered by the proxy that ask for the parse's index, in
-/// both modes: nodeInfo, and a definition for versions and disabled nodes.
-/// A stale index is parsed again, as for a hover.
-const WANT_INDEX: [&str; 2] = [config::NODE_INFO, "textDocument/definition"];
+/// both modes: nodeInfo, and a definition or references for versions and
+/// disabled nodes.  A stale index is parsed again, as for a hover.
+const WANT_INDEX: [&str; 3] = [config::NODE_INFO, "textDocument/definition", "textDocument/references"];
 
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
@@ -733,8 +735,13 @@ impl<W: Write> Proxy<W> {
         let answered = match method {
             "textDocument/definition" => navigation::target_at(&path, &text, offset)
                 .is_some_and(|target| self.claims("definition", &target, &path)),
-            // A CTE lives in its file; a source only the scan sees whole.
+            // A CTE lives in its file; a source only the scan sees whole, and so its references.
             "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            "textDocument/references" => {
+                let claimed = navigation::target_at(&path, &text, offset)
+                    .is_some_and(|target| self.claims("references", &target, &path));
+                claimed && self.project().is_some_and(|project| project.files.contains_key(&path))
+            }
             _ => self.source_at(params).is_some(),
         };
         answered.then_some(method)
@@ -761,21 +768,39 @@ impl<W: Write> Proxy<W> {
         let (path, text, offset) = self.document_at(params)?;
         let target = navigation::target_at(&path, &text, offset);
         let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
-        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
-        let locations: Vec<Value> =
-            navigation::resolve(&navigation::Lookup::new(&project, self.parsing.index.as_ref()), &path, &target)
-                .iter()
-                .map(|found| {
-                    let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
-                    let range = index.range(found.range.start, found.range.end, self.encoding);
-                    json!({"uri": uri_of(&found.path), "range": range})
-                })
-                .collect();
+        let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
+        let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
         Some(Ok(match &locations[..] {
             [] => Value::Null,
             [location] => location.clone(),
             _ => Value::Array(locations),
         }))
+    }
+
+    /// The references of the source, the node or the macro at the request's
+    /// position, with their declaration when the client asks.
+    fn on_references(&self, params: &Value) -> Option<Result<Value, String>> {
+        if self.source_at(params).is_some() {
+            return self.on_source("textDocument/references", params);
+        }
+        let (path, text, offset) = self.document_at(params)?;
+        let target = navigation::target_at(&path, &text, offset);
+        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(json!([]))) };
+        let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
+        let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
+        let found = navigation::references(&lookup, &path, &target, declaration);
+        Some(Ok(Value::Array(self.locations(&project, &found))))
+    }
+
+    /// The locations of FOUND in PROJECT, as the client spelt their URIs.
+    fn locations(&self, project: &Project, found: &[navigation::Found]) -> Vec<Value> {
+        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
+        let location = |found: &navigation::Found| {
+            let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
+            let range = index.range(found.range.start, found.range.end, self.encoding);
+            json!({"uri": uri_of(&found.path), "range": range})
+        };
+        found.iter().map(location).collect()
     }
 
     /// The references or the rename of the source at the request's position.
@@ -1059,7 +1084,7 @@ impl<W: Write> Proxy<W> {
                     .map_or(json!([]), |project| features::workspace_symbols(&project, query, self.encoding)))
             }),
             config::NODE_INFO => self.node_info(params),
-            "textDocument/references" => self.on_source(method, params),
+            "textDocument/references" => self.on_references(params),
             "textDocument/definition" => self.on_definition(params),
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {

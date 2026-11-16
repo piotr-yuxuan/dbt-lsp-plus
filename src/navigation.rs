@@ -10,7 +10,8 @@ use crate::yaml::{self, Node};
 use crate::{properties, scan};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -100,7 +101,9 @@ static DOC: LazyLock<Regex> = LazyLock::new(|| {
 
 /// What the position OFFSET of TEXT, the file at PATH, names, from that
 /// text alone: a `source` anywhere; elsewhere than in YAML, a `ref`'s
-/// argument or a macro call's name or package; in YAML, a `ref`, a `doc`,
+/// argument, a macro call's name or package, or a macro's own name in its
+/// tag, which looks itself up; in YAML, a `ref`, a `doc`, a macro call in
+/// the Jinja of a value,
 /// the `name:` of a navigable entry, a generic test's name, or a unit
 /// test's `model:`.
 pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
@@ -110,6 +113,10 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         return source;
     }
     if !sources::is_yaml(path) {
+        let macro_named = |block: &scan::Symbol| block.kind == scan::Kind::Macro && inside(&block.name_range);
+        if let Some(block) = scan::blocks(text).into_iter().find(macro_named) {
+            return Some(Target::Call(scan::Target::Macro { package: None, name: block.name }));
+        }
         let named = |call: &scan::Call| match call.target {
             scan::Target::Ref { .. } => call.arguments.iter().any(inside),
             scan::Target::Macro { .. } => inside(&call.range),
@@ -151,7 +158,11 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         let (name, _) = project::unit_test_models(text, &root).into_iter().find(|(_, range)| inside(range))?;
         Some(named("unit test model", None, &name))
     };
-    reference.or_else(doc).or_else(entry).or_else(test).or_else(model)
+    let macro_call = || {
+        let called = |call: &scan::Call| matches!(call.target, scan::Target::Macro { .. }) && inside(&call.range);
+        scan::calls(text).into_iter().find(called).map(|call| Target::Call(call.target))
+    };
+    reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
 }
 
 /// dbt 2.0.9's lookup over a project, made once for a request or a graph:
@@ -336,6 +347,70 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
         (entity.package.as_str(), found)
     });
     first_step(found.collect(), &steps, false)
+}
+
+/// Where what TARGET, named in the file at PATH, is used, by LOOKUP: each
+/// call that resolves to it, as its definition would, at its name, and a
+/// unit test's `model:` naming it; with DECLARATION, where it is declared
+/// too: its file's start or its block, and the `name:` of each properties
+/// entry declaring it in its own package.  Each leads to its id, in the
+/// order of their paths.
+pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declaration: bool) -> Vec<Found> {
+    let declared = resolve(lookup, path, target);
+    let ids: HashSet<&str> = declared.iter().map(|found| found.id.as_str()).collect();
+    let name = match target {
+        Target::Call(scan::Target::Ref { name, .. } | scan::Target::Macro { name, .. })
+        | Target::Named { name, .. } => name,
+        _ => return Vec::new(),
+    };
+    // What a use at RANGE of FILE leads to, if it is TARGET's.
+    let leading = |file: &Path, range: Range<usize>, led: Vec<Found>| {
+        let id = led.into_iter().find(|found| ids.contains(found.id.as_str()))?.id;
+        Some(Found { id, path: file.to_owned(), range })
+    };
+    // Calls alike from one package lead alike: each is looked up once.
+    let resolved: RefCell<HashMap<(&str, &scan::Target), Option<String>>> = RefCell::default();
+    let lead = |own: &'a str, target: &'a scan::Target| {
+        let found =
+            || lookup.call(own, target).into_iter().find(|found| ids.contains(found.id.as_str())).map(|found| found.id);
+        resolved.borrow_mut().entry((own, target)).or_insert_with(found).clone()
+    };
+    let calls = |file: &Path, scanned: &'a project::Scanned| -> Vec<Found> {
+        let called = |call: &&scan::Call| match &call.target {
+            scan::Target::Ref { name: called, .. } | scan::Target::Macro { name: called, .. } => called == name,
+            _ => false,
+        };
+        let at = |call: &scan::Call| match &call.target {
+            scan::Target::Ref { .. } => call.arguments.last().cloned().unwrap_or(call.range.clone()),
+            _ => call.range.end - name.len()..call.range.end,
+        };
+        let own = lookup.package_of(file);
+        scanned
+            .calls
+            .iter()
+            .filter(called)
+            .filter_map(|call| Some(Found { id: lead(own, &call.target)?, path: file.to_owned(), range: at(call) }))
+            .collect()
+    };
+    // A unit test's `model:`, and with DECLARATION an entry's `name:`, looked up as their definitions.
+    let named = |file: &Path, scanned: &project::Scanned| -> Vec<Found> {
+        let models = scanned.models.iter().map(|(model, range)| ("unit test model", model, range));
+        let entries =
+            scanned.entries.iter().filter(|_| declaration).map(|entry| (entry.label, &entry.name, &entry.name_range));
+        let lookups = models.chain(entries).filter(|(_, named, _)| *named == name);
+        let found = |(kind, named, range): (&'static str, &String, &Range<usize>)| {
+            let target = Target::Named { kind, package: None, name: named.clone() };
+            leading(file, range.clone(), resolve(lookup, file, &target))
+        };
+        lookups.filter_map(found).collect()
+    };
+    let files = lookup.project.files.iter().map(|(file, scanned)| (file, &**scanned));
+    let mut found: Vec<Found> =
+        files.flat_map(|(file, scanned)| [calls(file, scanned), named(file, scanned)].concat()).collect();
+    found.extend(declared.into_iter().filter(|_| declaration));
+    found.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
+    found.dedup_by(|one, other| one.path == other.path && one.range == other.range);
+    found
 }
 
 /// What a hover on a `doc` or a generic test, TARGET, shows of FOUND, the
@@ -712,6 +787,91 @@ models:
         let package = "dbt_packages/pkg/macros/m.sql";
         let inner = leads(&root, package, at(&root.join(package), PACKAGE, "{{ helper", 4));
         assert_eq!(inner[0].0, "macro.pkg.helper");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    const USES_YML: &str = "version: 2\nmodels:\n  - name: b\n    description: '{{ m() }}'\n  - name: a\n    data_tests:\n\
+                            \x20     - relationships:\n          to: ref('b')\n          field: id\nunit_tests:\n  - name: t\n\
+                            \x20   model: b\n";
+
+    /// A project whose model `b` and macro `m` are used in every kind of
+    /// file, and whose package `pkg` has a `b` of its own.
+    fn uses(name: &str) -> PathBuf {
+        let files = [
+            ("dbt_project.yml", "name: shop\non-run-start: \"{{ m() }}\"\n"),
+            ("models/b.sql", "select 1"),
+            ("models/a.sql", "select * from {{ ref('b') }} {{ m() }}"),
+            ("models/py.py", "def model(dbt, session):\n    return dbt.ref('b')\n"),
+            ("models/_m.yml", USES_YML),
+            ("analyses/x.sql", "{{ ref('b') }}"),
+            ("macros/m.sql", "{% macro m() %}1{% endmacro %}\n"),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/models/b.sql", "select 2"),
+            ("dbt_packages/pkg/models/c.sql", "{{ ref('b') }}"),
+        ];
+        scratch_project(name, &files)
+    }
+
+    /// The references of the target at NEEDLE, DELTA bytes in, in the file
+    /// REL of the project at ROOT: each file relative to ROOT with the text
+    /// of its range.  Without DECLARATION, a definition at each use leads
+    /// back to the same id.
+    fn used(root: &Path, rel: &str, needle: &str, delta: usize, declaration: bool) -> Vec<(String, String)> {
+        let project = project::scan(root, &HashMap::new()).unwrap();
+        let lookup = Lookup::new(&project, None);
+        let path = root.join(rel);
+        let target =
+            target_at(&path, project.text(&path).unwrap(), project.text(&path).unwrap().find(needle).unwrap() + delta);
+        let found = references(&lookup, &path, target.as_ref().unwrap(), declaration);
+        // A declaration is no use: only the calls lead back.
+        for use_ in found.iter().filter(|_| !declaration) {
+            let text = project.text(&use_.path).unwrap();
+            let back =
+                target_at(&use_.path, text, use_.range.start).map(|target| resolve(&lookup, &use_.path, &target));
+            assert!(back.unwrap_or_default().iter().any(|found| found.id == use_.id), "{use_:?} leads elsewhere");
+        }
+        let relative = |found: &Found| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        found
+            .iter()
+            .map(|found| (relative(found), project.text(&found.path).unwrap()[found.range.clone()].to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_model_s_references_are_its_refs_across_files_and_its_unit_tests() {
+        let root = uses("navigation-model-uses");
+        let pairs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs.iter().map(|(path, text)| (path.to_string(), text.to_string())).collect()
+        };
+        let calls = [
+            ("analyses/x.sql", "b"),
+            ("models/_m.yml", "b"),
+            ("models/_m.yml", "b"),
+            ("models/a.sql", "b"),
+            ("models/py.py", "b"),
+        ];
+        // The package's own `b` takes its `ref('b')`: no reference of the root's.
+        assert_eq!(used(&root, "models/a.sql", "ref('b')", 5, false), pairs(&calls));
+        let mut declared = calls.to_vec();
+        declared.extend([("models/_m.yml", "b"), ("models/b.sql", "")]);
+        declared.sort();
+        let mut with_declaration = used(&root, "models/a.sql", "ref('b')", 5, true);
+        with_declaration.sort();
+        assert_eq!(with_declaration, pairs(&declared));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_macro_s_references_are_its_calls_in_sql_yaml_values_and_hooks() {
+        let root = uses("navigation-macro-uses");
+        let calls = ["analyses", "dbt_project.yml", "models/_m.yml", "models/a.sql"];
+        let found = used(&root, "models/a.sql", "m()", 0, false);
+        assert_eq!(found.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), calls[1..]);
+        assert!(found.iter().all(|(_, text)| text == "m"));
+        // From its own tag, with its block.
+        let declared = used(&root, "macros/m.sql", "m()", 0, true);
+        assert_eq!(declared.len(), 4);
+        assert!(declared.contains(&("macros/m.sql".into(), "{% macro m() %}1{% endmacro %}".into())));
         std::fs::remove_dir_all(root).unwrap();
     }
 

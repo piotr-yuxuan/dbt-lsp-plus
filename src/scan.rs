@@ -32,7 +32,7 @@ pub struct Symbol {
     pub inner: Range<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Ref {
         package: Option<String>,

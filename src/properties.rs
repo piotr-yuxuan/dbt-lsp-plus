@@ -74,12 +74,12 @@ fn held<'a>(node: &'a Node, label: &str) -> Vec<(&'a Node, &'static str)> {
 /// The named entries of the properties file TEXT, in the order of the
 /// text, each before those it holds; none when TEXT is not valid YAML.
 pub fn entries(text: &str) -> Vec<Entry> {
-    yaml::parse(text).map_or_else(Vec::new, |root| entries_in(text, &root))
+    yaml::parse(text).map_or_else(Vec::new, |root| entries_in(text, &root, true))
 }
 
 /// The named entries of the properties file TEXT, whose tree is ROOT, as
-/// `entries` gives them.
-pub fn entries_in(text: &str, root: &Node) -> Vec<Entry> {
+/// `entries` gives them: those of the top level only, unless NESTED.
+pub fn entries_in(text: &str, root: &Node, nested: bool) -> Vec<Entry> {
     let index = LineIndex::new(text);
     // Popped from the end: what comes first in the text pops first.
     let mut pending = held(root, "");
@@ -127,7 +127,9 @@ pub fn entries_in(text: &str, root: &Node) -> Vec<Entry> {
             continue;
         }
         found.push(Entry { label, name, range, name_range });
-        pending.extend(held(item, label).into_iter().rev());
+        if nested {
+            pending.extend(held(item, label).into_iter().rev());
+        }
     }
     found
 }

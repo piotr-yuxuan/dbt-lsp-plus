@@ -1576,10 +1576,12 @@ fn answered_itself(alone: bool) -> Value {
     let everywhere = json!(["sql", "yaml", "python"]);
     let mut definition = json!({"source": everywhere, "ref": ["yaml"], "doc": ["yaml"], "entry": ["yaml"],
                                 "test": ["yaml"]});
+    let mut references = json!({"source": everywhere});
     if alone {
-        (definition["ref"], definition["macro"]) = (json!(["sql", "yaml"]), json!(["sql"]));
+        (definition["ref"], definition["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
+        (references["ref"], references["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
     }
-    json!({"version": 2, "definition": definition, "references": {"source": everywhere},
+    json!({"version": 2, "definition": definition, "references": references,
            "rename": {"source": everywhere, "cte": ["sql"]}})
 }
 
@@ -2733,6 +2735,48 @@ fn alone_a_ref_and_a_macro_call_in_sql_lead_where_dbt_resolves_them() {
     let on_dbt = json!({"textDocument": {"uri": uri(&scratch)}, "position": {"line": 0, "character": 14}});
     let answer = session.request("textDocument/definition", on_dbt);
     assert_eq!((answer.get("error"), &answer["result"]), (None, &Value::Null), "{answer}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_the_references_of_a_ref_and_a_macro_span_the_project() {
+    let (mut session, _) = Session::fake("references-alone", json!({"no_lsp": true}));
+    session.initialize(&fixture());
+    let mut references = |file: &str, needle: &str, delta: usize, declaration: bool| {
+        let mut params = position_in(&fixture().join(file), needle, delta);
+        params["context"] = json!({"includeDeclaration": declaration});
+        session.request("textDocument/references", params)["result"].clone()
+    };
+    // Each location as its file, relative to the fixture, its line and its characters.
+    let at = |answer: &Value| -> Vec<(String, u64, u64, u64)> {
+        let root = uri(&fixture());
+        let place = |location: &Value| {
+            let (start, end) = (&location["range"]["start"], &location["range"]["end"]);
+            let file = location["uri"].as_str().unwrap().strip_prefix(&root).unwrap().trim_start_matches('/');
+            let number = |value: &Value| value.as_u64().unwrap();
+            (file.to_owned(), number(&start["line"]), number(&start["character"]), number(&end["character"]))
+        };
+        answer.as_array().unwrap().iter().map(place).collect()
+    };
+    let stg_orders = references("models/marts/orders.sql", "ref('stg_orders')", 6, false);
+    let uses = [("models/marts/orders.sql", 4, 26, 36), ("snapshots/orders_snapshot.sql", 2, 22, 32)];
+    assert_eq!(at(&stg_orders), uses.map(|(file, line, start, end)| (file.to_owned(), line, start, end)));
+    let declared = references("snapshots/orders_snapshot.sql", "stg_orders", 2, true);
+    assert_eq!(at(&declared).len(), 3, "its file's start too: {declared}");
+    let cents = references("macros/money.sql", "cents_to_dollars", 2, false);
+    assert_eq!(at(&cents), [("models/staging/stg_orders.sql".to_owned(), 10, 11, 27)]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_the_references_of_a_ref_reach_the_server() {
+    let (mut session, log) = Session::fake("references-server", json!({}));
+    session.initialize(&fixture());
+    let mut params = position_in(&fixture().join("models/marts/orders.sql"), "ref('stg_orders')", 6);
+    params["context"] = json!({"includeDeclaration": false});
+    let answer = session.request("textDocument/references", params.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/references", "params": params}));
+    assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/references").count(), 1);
     assert!(session.finish().success());
 }
 
