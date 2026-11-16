@@ -40,6 +40,7 @@ src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
 src/project.rs                the resources of a project and its packages
+src/cache.rs                  the scan kept between requests, each file by its metadata
 src/graph.rs                  the dependency graph: scanned, then the server's or the manifest's
 src/sources.rs                references and renames of sources
 src/navigation.rs             the targets of definitions in YAML, dbt's lookup
@@ -60,6 +61,7 @@ scripts/check-public          nothing private in the tracked files, an SPDX line
 scripts/check-commits         each commit's title, trailers and text
 scripts/release.py            CD's release: the version commit, the tag and its notes
 scripts/fetch-dbt             CI's dbt by its pinned SHA-256, or the latest by its published one
+scripts/bench/                synthetic projects and the proxy's times on them
 tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands in for gh
 .github/workflows/            CI and CD, and the weekly runs on the latest dbt
 ```
@@ -83,6 +85,12 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     with tests of its own;
   - `changes_graph`: the decision whether a client's notification may
     change the graph, free of the file system, with tests of its own;
+  - `cache::unchanged`: the decision whether a project is built again,
+    free of the file system, with tests of its own;
+  - `Cache::build`: the reads of a refresh, through `&self`, so that the
+    cache changes only once the project is built;
+  - `Proxy::graph`: the graph kept while what it is made of stays, apart
+    from the hierarchy's answer;
   - `project_dir`: the parsing of the server command, at the boundary;
   - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
@@ -147,6 +155,12 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
     `sidecar_digest`, the pure decisions on what the latest build is and
     its digest, with tests on recorded listings; `find_oss` and
     `find_proprietary`, one per build, behind `LATEST`;
+  - in `scripts/bench/generate.py`: `model_sql`, `column_yaml` and
+    `sources_yaml`, the text of one kind of file; `fixed_files`, `models`,
+    `others` and `big_yaml`, one part of the project each, so that `main`
+    stays the list of the parts; in `scripts/bench/measure.py`: `first`,
+    the session of a first request, apart from the warm one; `saved`, the
+    files a run saves, beside `requests`, the requests it times;
   - `commit_on_branch`, `create_release`, `graphql` and `runs_of_ci` in
     `tests/bin/fake-gh`: one per call of GitHub's, so that `main` stays a
     dispatch.

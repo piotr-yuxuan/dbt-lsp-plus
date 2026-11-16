@@ -112,7 +112,7 @@ resolved path.
 - Open documents: the text of each, kept from `didOpen` and the incremental
   `didChange` (UTF-16, UTF-8 or UTF-32 units), so that the outline follows
   unsaved edits.
-- The project: read on each request from `dbt_project.yml`, its resource
+- The project: found on each request from `dbt_project.yml`, its resource
   paths, through symbolic links, and the packages under
   `packages-install-path`, with the open texts winning over the files on
   disk.  Seeds are found but not read.  This finds:
@@ -130,9 +130,35 @@ resolved path.
     strings, so a CTE that Jinja generates is not one but those after it
     are;
   - names may hold any letter.
-  There is no cache yet.  A workspace symbol or call hierarchy request
-  rescans everything, about 40 ms on 2,000 synthetic models of 40 lines
-  each, in a release build.
+- The scan is kept between requests, on the event loop, which alone owns
+  it (`src/cache.rs`).  A request that needs the project walks the
+  resource paths again and reads each file's metadata before its content:
+  its modification and change times, size, inode and device.  A file whose
+  metadata stays keeps its text and what that text alone gives (blocks,
+  calls, source tables); any other is read again, and a file gone is
+  dropped.  A file that is not UTF-8, such as a `.DS_Store`, counts as
+  empty; one that cannot be read counts as empty too, and is tried again
+  at the next request.  A seed is found but never read, open or not.  An
+  open document is known by the proxy's count of its edits,
+  bumped at each open and change, since a client's version starts again
+  at each open.  No file event is needed: a client may watch nothing.
+  - When no file changed, nor any package's name and paths, which each
+    `dbt_project.yml` gives and the walk reads again, the request shares
+    the last project.  Otherwise the project is assembled again from the
+    kept files, since a file's resources depend on its package and
+    layout.  The call hierarchy's graph is kept while the project, the
+    server's nodes and the last parse's index stay.
+  - `initialize` starts a thread that reads every file once, whose files
+    the cache takes once it is done.  Nothing waits for it: a request
+    that comes before reads the files itself.
+  - Measured on synthetic projects (`scripts/bench/`) of 3,000 and 6,000
+    models with 15 YAML columns each (12.8 and 22.8 MB), on tmpfs, in a
+    release build: a workspace symbol, definition, references, rename or
+    call hierarchy request answers in 14 to 22 ms and 30 to 36 ms with
+    nothing changed, and within 0.17 and 0.25 s as the first request
+    after the save of a model, of the largest properties file or of
+    `dbt_project.yml`.  Each took 0.3 to 1.7 s without the cache.  The
+    proxy then holds 68 and 117 MB.
 - The graph: once the server has listed the graph, the dependencies of each
   node it listed are its own, since only dbt resolves `ref(var('x'))`; until
   then, and for the nodes it did not list, they come from the scan.  The
@@ -822,9 +848,25 @@ fails with -32803.
   a definition leads to the first by path, which may be the disabled one.
 - A `doc` in a project that sets `docs-paths` to a directory outside its
   resource paths finds no docs block (see `docs-paths` above).
-- A hover or a definition in a large properties file reads it several
-  times: about 0.25 s per request on 2.8 MB of YAML, in a release build,
-  on the loop that forwards every message.
+- A hover or a definition in a large properties file parses it several
+  times, since no YAML tree is kept: about 0.2 s per request on 2.8 MB of
+  YAML, in a release build, on the loop that forwards every message.
+- The kept scan misses an edit on disk that keeps the file's size within
+  one tick of the file system's clock after the scan read it: its
+  metadata is the same.  The next change of the file shows it.
+- Each request that needs the project walks it, reads the metadata of
+  every file and each package's `dbt_project.yml`: most of the 30 to
+  36 ms at 6,000 models.
+- A request that comes while the first read of every file is under way
+  reads them all itself, beside that read: 0.4 to 0.55 s and 0.72 to
+  1.06 s on 3,000 and 6,000 synthetic models, where a scan of its own
+  took 0.30 and 0.53 s without the cache, which derived less.  The proxy
+  then holds up to 91 and 162 MB.  Once that read is done, the first
+  request takes 36 and 72 ms.
+- A file that cannot be read, for its permissions or an error of the
+  file system, makes each request that needs the project assemble it
+  again: about 35 ms more at 6,000 models, and the call hierarchy's graph
+  made again, as after a save (0.19 s against 0.035 s warm).
 - The outline of a YAML file that yaml-rust2 does not parse is empty: one
   in the middle of an edit, but also some that dbt reads, being laxer about
   indentation inside flow collections and quoted scalars, such as a flow
@@ -923,8 +965,8 @@ source's description.
 ## Tests
 
 - Unit tests for each pure module: framing, positions and incremental
-  changes, the scan of SQL and Jinja, YAML places, the project, the graph
-  and the shape of each answer.
+  changes, the scan of SQL and Jinja, YAML places, the project, the kept
+  scan, the graph and the shape of each answer.
 - Integration tests run the binary in front of `fake-dbt-lsp`, a scripted
   server that behaves as 2.0.9 was seen to.  They cover:
   - byte-for-byte forwarding both ways: requests, notifications and answers
@@ -937,6 +979,11 @@ source's description.
     properties file, flat and nested, and none for `dbt_project.yml`;
   - workspace symbols, and the call hierarchy through the proxy's own ids;
     the ids of the client's that the proxy skips or refuses;
+  - the kept scan between two requests: an edit on disk that nothing
+    announced, a document changed, closed unsaved and opened again at
+    version 1, a file created then deleted, the project's name and model
+    paths, an open `dbt_project.yml` renaming the project once saved, a
+    package's file replaced with its size and time kept;
   - the root: `--project-dir` first and as spelt, the client's folder or the
     working directory without it, the client's spelling through a link, a
     link inside the project, a document opened through another spelling;
@@ -1048,10 +1095,7 @@ In the order of the feature list agreed with the dbt-mode session:
    004.
 3. Folding ranges (A7), with highlights, selection ranges and CTE rename:
    done in plan 003.
-4. A cache of the scan, keyed by path, modification time and size.  The
-   review of plan 001 measured about 300 ms per scan on 1,500 models with
-   13 MB of YAML properties, every YAML file being parsed whole for its
-   `sources:`; the 40 ms above had no YAML.
+4. A cache of the scan: done in plan 016.
 5. YAML outline (A1): done in plan 005.
 6. Restart of a crashed server, replaying `initialize`, `initialized` and
    the open documents: done in plan 010.
