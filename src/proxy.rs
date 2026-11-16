@@ -200,6 +200,8 @@ struct Parsing {
     wanted: bool,
     /// Why the last parse failed, or none could start, as logged.
     failure: Option<String>,
+    /// Whether a parse runs cut off the network and from writing the project.
+    cut: bool,
     cache: Option<PathBuf>,
 }
 
@@ -763,7 +765,7 @@ impl<W: Write> Proxy<W> {
             config::remove_stale(&cache);
             cache
         });
-        let Some(command) = config::parse_command(server, &root, cache) else {
+        let Some(command) = config::parse_command(server, &root, cache, self.parsing.cut) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };
         let (Some(events), cache) = (self.parsing.events.clone(), cache.clone()) else { return };
@@ -1536,7 +1538,14 @@ pub fn run(command: &[String]) -> ExitCode {
         Some(Err(why)) => (None, Some(why)),
         None => (None, None),
     };
-    let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), ..Parsing::default() };
+    let cut = config::can_cut();
+    if !cut {
+        eprintln!(
+            "dbt-lsp-plus: unshare -rnm cannot cut dbt parse off the network and the project here: \
+             dbt's flags and the guard on packages alone keep it offline and the project as it is"
+        );
+    }
+    let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), cut, ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, project_dir(command));
     proxy.standalone = standalone;

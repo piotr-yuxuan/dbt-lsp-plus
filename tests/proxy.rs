@@ -1672,6 +1672,24 @@ fn a_parse_takes_the_server_s_reading_flags_and_keeps_its_output_in_the_cache() 
 }
 
 #[test]
+fn a_parse_is_cut_off_the_network_and_its_project_where_it_can_be() {
+    let project = copy_fixture("parse-cut-project");
+    let flags = [Path::new("--project-dir"), &project];
+    let script = json!({"manifest": manifest(), "parse_write": true});
+    let (mut session, log) = Session::fake_with("parse-cut", script, &flags, None);
+    session.initialize(&project);
+    parsed_orders(&mut session);
+    // Linux can, CI's runner once its AppArmor allows it; elsewhere, dbt's
+    // flags and the guard on packages alone keep it offline and harmless.
+    let cut = dbt_lsp_plus::config::can_cut();
+    assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
+    let parse = &parses(&log)[0];
+    let expected = if cut { (json!(["lo"]), json!(false)) } else { (parse["interfaces"].clone(), json!(true)) };
+    assert_eq!((parse["interfaces"].clone(), parse["wrote"].clone()), expected);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn node_info_names_a_node_by_id_or_by_position() {
     let (mut session, _) = Session::fake("node-info-at", json!({"manifest": manifest()}));
     session.initialize(&fixture());

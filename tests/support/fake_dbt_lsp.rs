@@ -49,7 +49,10 @@
 //!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
 //!     waits for before writing; `parse_hang`, true when it never exits;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
-//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID}`
+//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID,
+//!   "interfaces": NAMES, "wrote": WROTE}`, NAMES those of the network it
+//!   can reach, WROTE whether it could write into its `--project-dir` when
+//!   the script says `parse_write`,
 //!   to that file's name followed by `.parses`, since two processes
 //!   appending to one file could interleave their lines; and each server
 //!   process, a life of the fake, appends its pid to the name followed by
@@ -270,8 +273,16 @@ fn refuse_or_help(script: &Value, arguments: &[String], counted: bool) {
 
 /// `dbt parse` as the script plays it, with the arguments ARGUMENTS.
 fn parse(script: &Value, arguments: &[String], log: Option<File>) {
+    let project = arguments.iter().position(|argument| argument == "--project-dir").map(|at| &arguments[at + 1]);
+    let probe = project.filter(|_| script["parse_write"] == json!(true)).map(|dir| Path::new(dir).join(".written"));
+    // Removed at once, so that a parse that could write leaves nothing.
+    let wrote =
+        probe.is_some_and(|probe| std::fs::write(&probe, "").and_then(|()| std::fs::remove_file(&probe)).is_ok());
     if let Some(mut log) = log {
-        let line = json!({"parse": arguments, "pid": std::process::id()});
+        let devices = std::fs::read_to_string("/proc/self/net/dev").unwrap_or_default();
+        let interfaces: Vec<&str> =
+            devices.lines().skip(2).filter_map(|line| Some(line.split_once(':')?.0.trim())).collect();
+        let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces, "wrote": wrote});
         writeln!(log, "{line}").expect("write the log");
     }
     // dbt writes on both outputs, which must never reach the client: this

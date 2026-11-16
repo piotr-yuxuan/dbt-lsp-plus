@@ -36,14 +36,31 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// reads.
 const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "--packages-install-path"];
 
+/// The cut, before a command and the directory it guards: a user namespace
+/// that no network reaches, where that directory is mounted read-only, so
+/// that dbt's install of packages fails there rather than rewrite it.
+/// Recursive first, as a directory holding a mount point needs, where the
+/// system has it.
+const CUT: [&str; 5] = [
+    "unshare",
+    "-rnm",
+    "sh",
+    "-c",
+    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && exec "$@""#,
+];
+
 /// The `dbt parse` that matches SERVER, the command that runs `dbt lsp`:
 /// every word before `lsp`, as `uvx dbt` or `env X=1 dbt`; the flags of KEPT
 /// after it, as `--flag X` or `--flag=X`; the project at ROOT; its output
 /// under CACHE, its log as JSON, with neither telemetry nor a check of
-/// versions.  None when SERVER has no `lsp` word, as a wrapper of its own.
-pub fn parse_command(server: &[String], root: &Path, cache: &Path) -> Option<Vec<String>> {
+/// versions; under the cut when CUT, which guards ROOT.  None when SERVER
+/// has no `lsp` word, as a wrapper of its own.
+pub fn parse_command(server: &[String], root: &Path, cache: &Path, cut: bool) -> Option<Vec<String>> {
     let at = server.iter().position(|word| word == "lsp")?;
-    let mut command: Vec<String> = server[..at].to_vec();
+    let path = |path: &Path| path.to_string_lossy().into_owned();
+    let mut command: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
+    command.extend(cut.then(|| path(root)));
+    command.extend_from_slice(&server[..at]);
     command.push("parse".into());
     let mut rest = server[at + 1..].iter();
     while let Some(word) = rest.next() {
@@ -53,13 +70,24 @@ pub fn parse_command(server: &[String], root: &Path, cache: &Path) -> Option<Vec
             command.extend(value.map(str::to_owned).or_else(|| rest.next().cloned()));
         }
     }
-    let path = |path: &Path| path.to_string_lossy().into_owned();
     command.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
     command.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
     command.extend(["--log-format".into(), "json".into()]);
     let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
     command.extend(quiet.map(str::to_owned));
     Some(command)
+}
+
+/// Whether this system can run a command under the cut: Linux, where an
+/// unprivileged user may make a user namespace and mount there.  Probed by
+/// `true` under the cut of the system's temporary directory, killed past
+/// PROBE_DEADLINE.
+pub fn can_cut() -> bool {
+    let mut probe = Command::new(CUT[0]);
+    probe.args(&CUT[1..]).arg(std::env::temp_dir()).arg("true");
+    probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let status = probe.spawn().ok().and_then(|child| finish(child, PROBE_DEADLINE, &AtomicBool::new(false)));
+    status.is_some_and(|status| status.success())
 }
 
 /// Where this process keeps its parses of ROOT with the server command
@@ -437,7 +465,7 @@ mod tests {
             "--log-level",
             "debug",
         ]);
-        let command = parse_command(&server, Path::new("/root"), Path::new("/cache")).unwrap();
+        let command = parse_command(&server, Path::new("/root"), Path::new("/cache"), false).unwrap();
         let expected = words(&[
             "dbt",
             "parse",
@@ -460,9 +488,13 @@ mod tests {
             "--quiet",
         ]);
         assert_eq!(command, expected);
-        let wrapped = parse_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c")).unwrap();
+        let wrapped = parse_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), false).unwrap();
         assert_eq!(wrapped[..3], words(&["uvx", "dbt", "parse"]));
-        assert_eq!(parse_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c")), None);
+        let cut = parse_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), true).unwrap();
+        assert_eq!(cut[..2], words(&["unshare", "-rnm"]));
+        assert_eq!(cut[5..9], words(&["/r", "uvx", "dbt", "parse"]), "the root guarded, then the parse");
+        assert_eq!(cut[9..], wrapped[3..]);
+        assert_eq!(parse_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), true), None);
     }
 
     #[test]
