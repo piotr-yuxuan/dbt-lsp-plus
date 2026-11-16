@@ -10,6 +10,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -191,6 +192,151 @@ class WithVersion(unittest.TestCase):
         ):
             with self.subTest(path=path), self.assertRaises(release.ReleaseError):
                 release.with_version(path, text, "1.2.3")
+
+
+FROM_HERE = "github.event_name == 'push' || github.event.pull_request.head.repo.fork"
+PROPRIETARY = "vars.DBT_LSP_PLUS_PROPRIETARY == 'true' && github.event_name == 'push'"
+
+
+def jobs(workflow):
+    """Each job of the text of a workflow, by name: the lines indented under it."""
+    body = workflow[workflow.index("\njobs:\n") :]
+    return {
+        match[1]: match[2] for match in re.finditer(r"(?m)^  ([\w-]+):\n((?:(?:    .*)?\n)*)", body)
+    }
+
+
+class Workflows(unittest.TestCase):
+    """What ties the workflows to the script and to the checks, as no local run can trigger them."""
+
+    def setUp(self):
+        self.cd = (ROOT / ".github/workflows/cd.yml").read_text()
+        self.ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.jobs = jobs(self.ci)
+
+    def test_ci_has_the_jobs_of_plan_024(self):
+        self.assertEqual(sorted(self.jobs), ["dbt", "dbt-oss", "macos", "static", "test"])
+
+    def test_ci_checks_a_push_or_a_fork_s_pull_request_and_the_proprietary_build_when_asked(self):
+        for name, job in self.jobs.items():
+            with self.subTest(name):
+                condition = PROPRIETARY if name == "dbt" else FROM_HERE
+                self.assertRegex(job, rf"(?m)^    if: {re.escape(condition)}$")
+
+    def test_ci_lets_only_macos_and_the_proprietary_build_fail(self):
+        failing = sorted(name for name, job in self.jobs.items() if "continue-on-error: true" in job)
+        self.assertEqual(failing, ["dbt", "macos"])
+        self.assertEqual(self.ci.count("continue-on-error"), 2)
+
+    def test_ci_runs_the_checks_of_the_makefile(self):
+        for name, command in (
+            ("static", "nix develop -c make check-static"),
+            ("static", "nix develop -c make commits BASE=origin/main"),
+            ("test", "nix develop -c make test"),
+            ("macos", "nix develop -c make test"),
+            ("dbt-oss", "nix develop -c make conformance"),
+            ("dbt", "nix develop -c make conformance"),
+            ("dbt", "nix develop -c unshare -rn make live"),
+        ):
+            with self.subTest(name=name, command=command):
+                self.assertIn(f"run: {command}", self.jobs[name])
+
+    def test_each_dbt_job_cuts_the_network_before_its_corpus(self):
+        for name, build in (("dbt-oss", "oss"), ("dbt", "proprietary")):
+            with self.subTest(name):
+                job = self.jobs[name]
+                steps = [
+                    f"run: python3 scripts/fetch-dbt {build} ",
+                    "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+                    "run: unshare -rn true",
+                    "make conformance",
+                ]
+                places = [job.find(step) for step in steps]
+                self.assertNotIn(-1, places)
+                self.assertEqual(places, sorted(places))
+
+    def test_the_live_test_runs_cut_off_after_its_build(self):
+        job = self.jobs["dbt"]
+        built = job.index("run: nix develop -c cargo test --locked --test proxy --no-run")
+        self.assertLess(built, job.index("unshare -rn make live"))
+
+    def test_no_cache_holds_a_fetched_dbt(self):
+        for name, job in self.jobs.items():
+            with self.subTest(name):
+                cached = re.search(r"path: \|\n((?: {12}.*\n)+)", job)[1].split()
+                self.assertEqual(cached, ["~/.cargo/registry", "~/.cargo/git", "target"])
+
+    def test_ci_keys_each_cargo_cache_on_its_job_and_its_lock_files(self):
+        for name, job in self.jobs.items():
+            with self.subTest(name):
+                key = re.search(r"(?m)^          key: (.+)$", job)[1]
+                prefix = re.search(r"restore-keys: (.+)", job)[1]
+                self.assertIn("github.job", key)
+                self.assertIn("hashFiles('Cargo.lock', 'flake.lock')", key)
+                self.assertTrue(key.startswith(prefix))
+
+    def test_cd_gives_the_script_what_the_runner_does_not(self):
+        for name in (
+            "GH_TOKEN",
+            *(name for name in release.SETTINGS if not name.startswith("GITHUB_")),
+        ):
+            with self.subTest(name):
+                self.assertRegex(self.cd, rf"(?m)^ +{name}: ")
+
+    def test_cd_raises_the_patch_part_unless_asked_by_hand(self):
+        self.assertIn("RELEASE_BUMP: ${{ inputs.bump || 'patch' }}", self.cd)
+
+    def test_cd_goes_on_only_after_a_success_of_a_push_here_or_by_hand_on_main(self):
+        for clause in (
+            "!github.event.repository.fork",
+            "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+            "github.event.workflow_run.conclusion == 'success'",
+            "github.event.workflow_run.event == 'push'",
+            "github.event.workflow_run.head_repository.full_name == github.repository",
+        ):
+            with self.subTest(clause):
+                self.assertIn(clause, self.cd)
+
+    def test_cd_may_read_the_runs_of_ci_and_write_a_release(self):
+        self.assertRegex(self.cd, r"(?m)^  actions: read$")
+        self.assertRegex(self.cd, r"(?m)^  contents: write$")
+
+    def test_cd_checks_out_what_ci_checked_and_follows_the_workflow_named_ci(self):
+        self.assertRegex(
+            self.cd, r"ref: \$\{\{ github\.event\.workflow_run\.head_sha \|\| github\.sha \}\}"
+        )
+        self.assertRegex(self.cd, r"workflows: \[CI\]")
+        self.assertRegex(self.ci, r"(?m)^name: CI$")
+
+    def test_every_action_is_pinned_by_a_full_commit(self):
+        for text in (self.ci, self.cd):
+            uses = re.findall(r"uses: (\S+)( # v\S+)?", text)
+            self.assertTrue(uses)
+            for action, version in uses:
+                with self.subTest(action):
+                    self.assertRegex(action, r"@[0-9a-f]{40}$")
+                    self.assertTrue(version)
+
+    def test_ci_trusts_no_other_cache(self):
+        for word in ("substituters", "accept-flake-config"):
+            with self.subTest(word):
+                self.assertNotIn(word, self.ci)
+
+    def test_ci_restores_the_store_between_the_installer_and_the_first_shell(self):
+        for name, job in self.jobs.items():
+            with self.subTest(name):
+                installer = job.index("uses: cachix/install-nix-action@")
+                cache = job.index("uses: nix-community/cache-nix-action@")
+                self.assertLess(installer, cache)
+                self.assertLess(cache, job.index("run: nix develop"))
+
+    def test_ci_keys_the_store_on_the_flake_and_on_a_prefix_of_that_key(self):
+        for name, job in self.jobs.items():
+            with self.subTest(name):
+                key = re.search(r"primary-key: (.+)", job)[1]
+                prefix = re.search(r"restore-prefixes-first-match: (.+)", job)[1]
+                self.assertIn("hashFiles('flake.nix', 'flake.lock')", key)
+                self.assertTrue(key.startswith(prefix))
 
 
 class Bounds(unittest.TestCase):

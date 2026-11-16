@@ -13,11 +13,11 @@ CARGO_TEST := cargo test --locked -j $(CARGO_JOBS)
 PYTHON := scripts/release.py scripts/fetch-dbt tests/tools tests/bin/fake-gh
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check check-static fmt clippy public python test-python test conformance live commits
+.PHONY: check check-static fmt clippy public python test-python workflows test conformance live commits
 
 check: check-static test
 
-check-static: fmt clippy public python test-python
+check-static: fmt clippy public python test-python workflows
 
 fmt:
 	@cargo fmt --check
@@ -34,6 +34,9 @@ python:
 
 test-python:
 	@python3 -m unittest discover -s tests/tools -p '*_test.py'
+
+workflows:
+	@actionlint
 
 test:
 	@$(CARGO_TEST) -- --test-threads=$(TEST_THREADS)
