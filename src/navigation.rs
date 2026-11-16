@@ -443,6 +443,7 @@ models:
     fn only_the_flag_as_a_yaml_false_puts_the_root_first() {
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
         let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
+        let events = Some(Target::Source(sources::Target::Table { source: "ext".into(), table: "events".into() }));
         // Each value of the flag, if any, and the package searched first, as
         // dbt 2.0.9 and dbt-oss 2.0.11 read it: a YAML 1.2 boolean.
         let values = [
@@ -463,6 +464,12 @@ models:
             assert_eq!(found[0].0, format!("model.{first}.orders"), "ref with the flag {value:?}");
             let found = leads(&root, pkg_yml, table.clone());
             assert_eq!(found[0].0, format!("source.{first}.raw.orders"), "source with the flag {value:?}");
+            // The file's package comes before any other, the root aside; a doc
+            // ignores the flag.
+            let ids: Vec<String> = leads(&root, pkg_yml, events.clone()).into_iter().map(|(id, ..)| id).collect();
+            assert_eq!(ids, ["source.pkg.ext.events"], "source in two packages with the flag {value:?}");
+            let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
+            assert_eq!(found[0].0, "doc.shop.order_status", "doc with the flag {value:?}");
             std::fs::remove_dir_all(root).unwrap();
         }
     }
