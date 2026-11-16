@@ -41,16 +41,20 @@ fn corpus() {
     let entries = std::fs::read_dir(&corpus).expect("read the corpus").flatten();
     let mut cases: Vec<PathBuf> = entries.map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
     cases.sort();
-    let (mut found, mut versions) = (BTreeSet::new(), BTreeSet::new());
+    let (mut found, mut versions, mut missed) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
     for case in &cases {
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         let (copy, manifest) = parse(&dbt, case, namespace);
         versions.insert(manifest["metadata"]["dbt_version"].as_str().unwrap_or("of no version").to_owned());
         let project = project::scan(&copy, &HashMap::new()).expect("scan the case");
+        // Navigation as the proxy runs it once a parse exists.
+        let index = config::Index::of(&manifest);
+        let lookup = navigation::Lookup::new(&project, Some(&index));
+        missed.extend(references_missed(&project, &lookup).into_iter().map(|call| format!("{name}\t{call}")));
         let compared = [
             nodes_compared(&project, &manifest),
-            calls_compared(&project, &manifest),
-            entries_compared(&project, &manifest),
+            calls_compared(&project, &manifest, &lookup),
+            entries_compared(&project, &manifest, &lookup),
         ];
         for (subject, lookup, answers) in compared.into_iter().flatten() {
             found.insert(format!("{name}\t{subject}\t{lookup}\t{answers}"));
@@ -77,6 +81,7 @@ fn corpus() {
         cases.len(),
         found.len()
     );
+    assert!(missed.is_empty(), "calls that the references of what they lead to miss:\n{}", missed.join("\n"));
     assert!(
         unregistered.is_empty() && stale.is_empty(),
         "divergences to fix, or to register with a reason:\n{}\nregistered, but no longer diverging:\n{}",
@@ -206,7 +211,7 @@ fn nodes_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
 /// reaches through the graph; a macro, on its own calls of macros.  Then
 /// each dependency that no call of the caller, or of a macro it reaches,
 /// names.
-fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
+fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Lookup) -> Vec<Divergence> {
     let graph = Graph::scanned(project);
     let entities: HashMap<&str, &project::Entity> = project.entities.iter().map(|e| (e.id.as_str(), e)).collect();
     let field = |id: &str, key: &str| {
@@ -250,7 +255,8 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
             (format!("source('{source}', '{table}')"), Some(navigation::Target::Source(table_target)))
         }
         scan::Target::Macro { package, name } => {
-            (format!("{}{name}()", package.iter().map(|p| format!("{p}.")).collect::<String>()), None)
+            let written = format!("{}{name}()", package.iter().map(|p| format!("{p}.")).collect::<String>());
+            (written, Some(navigation::Target::Call(target.clone())))
         }
         scan::Target::Dispatch { package, name } => (
             format!("adapter.dispatch('{name}'{})", package.iter().map(|p| format!(", '{p}'")).collect::<String>()),
@@ -284,12 +290,8 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let answers = |holder: &project::Entity, call: &scan::Call, target: Option<navigation::Target>| {
         let edges = graph.edges.iter().filter(|edge| edge.from == holder.id && edge.sites.contains(&call.range));
         let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
-        // A keyword argument after a ref's name, as `v=2`, names a version, which navigation forwards.
-        let text = project.text(&holder.path).unwrap_or_default();
-        let versioned = text.get(call.range.end..).is_some_and(|rest| rest.trim_start().starts_with(','));
-        let navigated = target.filter(|_| !versioned).map(|target| {
-            let lookup = navigation::Lookup::new(project, None);
-            navigation::resolve(&lookup, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
+        let navigated = target.map(|target| {
+            navigation::resolve(lookup, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
         });
         [("graph", Some(graphed)), ("navigation", navigated)]
     };
@@ -331,6 +333,31 @@ fn calls_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     found
 }
 
+/// Each call that navigation resolves whose place the references of its
+/// target miss: a definition at a call must find that call among the
+/// references of what it leads to.
+fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<String> {
+    let mut missed = Vec::new();
+    for (path, file) in &project.files {
+        for call in &file.calls {
+            let at = match &call.target {
+                scan::Target::Ref { .. } => call.arguments.last().cloned().unwrap_or(call.range.clone()),
+                scan::Target::Macro { name, .. } => call.range.end - name.len()..call.range.end,
+                _ => continue,
+            };
+            let target = navigation::Target::Call(call.target.clone());
+            if navigation::resolve(lookup, path, &target).is_empty() {
+                continue;
+            }
+            let references = navigation::references(lookup, path, &target, false);
+            if !references.iter().any(|found| found.path == *path && found.range == at) {
+                missed.push(format!("{} {:?}", path.display(), call.target));
+            }
+        }
+    }
+    missed
+}
+
 /// `doc(` and a quote, as YAML escapes it too: where navigation reads a doc.
 static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(?:''|\\?["'])"#).unwrap());
 
@@ -340,12 +367,9 @@ static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(
 /// patched from there, and the docs block of the doc's name whose text it
 /// rendered in the description that holds the call, a column's or the
 /// node's own.
-fn entries_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
+fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lookup) -> Vec<Divergence> {
     let resolved = |path: &Path, target: &navigation::Target| -> BTreeSet<String> {
-        navigation::resolve(&navigation::Lookup::new(project, None), path, target)
-            .into_iter()
-            .map(|found| found.id)
-            .collect()
+        navigation::resolve(lookup, path, target).into_iter().map(|found| found.id).collect()
     };
     let ids = |section: &str, keep: &dyn Fn(&Value) -> bool| -> BTreeSet<String> {
         manifest[section].as_object().into_iter().flatten().filter(|(_, e)| keep(e)).map(|(id, _)| id.clone()).collect()
