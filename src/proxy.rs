@@ -3,6 +3,7 @@
 //! byte for byte, and answers itself the requests of the features that the
 //! server does not announce.
 
+use crate::commands::{self, Via};
 use crate::graph::{self, Graph, ServerNode};
 use crate::modes::{self, Mode};
 use crate::project::{self, Project};
@@ -13,7 +14,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -71,6 +72,8 @@ enum Route {
     Answer(Value),
     /// By the server.
     Forward,
+    /// As this command of the proxy's for clients.
+    Command(&'static str),
 }
 
 /// The requests that the proxy answers itself on some targets, since dbt
@@ -151,6 +154,8 @@ enum Event {
     /// when their file was written; none for results of a command that
     /// builds nothing.
     Runs(&'static str, Option<Vec<runs::Failure>>, SystemTime),
+    /// The answer of a run of dbt's CLI to the client's request of that id.
+    Ran(Value, Value),
 }
 
 /// The project's files that a thread reads before the first request needs
@@ -394,6 +399,13 @@ struct Proxy<W: Write> {
     /// The shadow, on from the server's answer to `initialize` when the user
     /// set it.
     shadow: Option<shadow::Session>,
+    /// The commands that the server listed in its answer to `initialize`.
+    server_commands: HashSet<String>,
+    /// The runs of dbt's CLI that clients asked for, one at a time: those
+    /// waiting, with the client's id, their command line and their
+    /// directory, and the one under way.
+    runs: VecDeque<(Value, commands::Job, Vec<String>, PathBuf)>,
+    run: Option<config::Running>,
 }
 
 /// PATH with each `..` dropping the component before it, as written: no
@@ -519,6 +531,9 @@ impl<W: Write> Proxy<W> {
             changes: 0,
             graph: RefCell::default(),
             shadow: None,
+            server_commands: HashSet::new(),
+            runs: VecDeque::new(),
+            run: None,
         };
         if let Some(root) = root {
             proxy.set_root(root);
@@ -591,12 +606,15 @@ impl<W: Write> Proxy<W> {
         if let Some(experimental) = experimental.as_object_mut() {
             experimental.insert("dbtLspPlus".into(), self.table.flag(&ANSWERED));
         }
-        // The proxy's own commands, beside the server's.
-        let own = [Some(config::NODE_INFO), self.shadow.as_ref().map(|_| shadow::SUMMARY)];
+        // The proxy's own commands, beside the server's, which it may forward its commands for clients to.
         let provider = capabilities.entry("executeCommandProvider").or_insert_with(|| json!({}));
+        let listed = provider.get("commands").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+        self.server_commands = listed.map(str::to_owned).collect();
+        let clients = commands::announced(&|dbt| self.server_commands.contains(dbt), self.runs_cli());
+        let own = [Some(config::NODE_INFO), self.shadow.as_ref().map(|_| shadow::SUMMARY)];
         if let Some(commands) = provider.as_object_mut().map(|provider| provider.entry("commands").or_insert(json!([])))
         {
-            let own: Vec<Value> = own.into_iter().flatten().map(|command| json!(command)).collect();
+            let own: Vec<Value> = own.into_iter().flatten().chain(clients).map(|command| json!(command)).collect();
             commands.as_array_mut().into_iter().for_each(|commands| commands.extend(own.iter().cloned()));
         }
     }
@@ -876,6 +894,9 @@ impl<W: Write> Proxy<W> {
         if let (Some(shadow::SUMMARY), Some(shadow)) = (command, &self.shadow) {
             return Route::Answer(shadow.counts.summary());
         }
+        if let Some(own) = command.and_then(commands::own) {
+            return Route::Command(own);
+        }
         // In `dbt`, the proxy looks at nothing.
         let mine = self.table.mode(method) != Mode::Dbt;
         if let Some(targeted) = mine.then(|| self.targeted(method, params)).flatten() {
@@ -1084,19 +1105,113 @@ impl<W: Write> Proxy<W> {
         if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.standalone) {
             return self.log_parse(&why);
         }
-        let server = &self.parsing.server;
-        let cache = self.parsing.cache.get_or_insert_with(|| {
-            let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &root, server);
-            config::remove_stale(&cache);
-            cache
-        });
-        let Some(command) = config::parse_command(server, &root, cache, self.parsing.cut) else {
+        let cache = self.cache(&root);
+        let parse = config::PARSE.map(str::to_owned);
+        let Some(command) = config::dbt_command(&self.parsing.server, &root, &cache, self.parsing.cut, &parse) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };
-        let (Some(events), cache) = (self.parsing.events.clone(), cache.clone()) else { return };
+        let Some(events) = self.parsing.events.clone() else { return };
         self.parsing.fresh = true;
         let report = Box::new(move |outcome| drop(events.send(Event::Parsed(outcome))));
         self.parsing.running = Some(config::start(command, cache, config::PARSE_DEADLINE, report));
+    }
+
+    /// This process's cache of ROOT, under the user's, made at its first
+    /// use, the caches beside it that no parse wrote for a day removed then.
+    fn cache(&mut self, root: &Path) -> PathBuf {
+        let server = &self.parsing.server;
+        let cache = self.parsing.cache.get_or_insert_with(|| {
+            let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), root, server);
+            config::remove_stale(&cache);
+            cache
+        });
+        cache.clone()
+    }
+
+    /// A request of one of the proxy's commands for clients, COMMAND with
+    /// PARAMS, kept as PENDING: sent to dbt lsp as its own command, queued
+    /// for dbt's CLI, or refused, as `commands::route` decides.
+    fn on_command(&mut self, command: &'static str, id: &Value, params: &Value, pending: Pending) {
+        if self.shutdown {
+            return self.reply_error(id, INVALID_REQUEST, "the client asked for shutdown");
+        }
+        let Some(arguments) = commands::arguments(command, params) else {
+            return self.reply_error(id, INVALID_PARAMS, "invalid parameters");
+        };
+        let serves = |dbt: &str| self.server.is_some() && self.server_commands.contains(dbt);
+        match commands::route(command, &serves, self.runs_cli()) {
+            Via::Server(dbt) => {
+                let params = json!({"command": dbt, "arguments": arguments});
+                let request =
+                    json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
+                self.forwarded.insert(key(id), (id.clone(), pending));
+                self.send_server(&serde_json::to_vec(&request).unwrap_or_default());
+            }
+            Via::Run => self.run_command(command, id, &arguments[0]),
+            Via::Refused(failure) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure})),
+        }
+    }
+
+    /// Whether dbt's CLI can do a command for clients: under the cut, by a
+    /// server command with `lsp`, from which the run's is made.
+    fn runs_cli(&self) -> bool {
+        self.parsing.cut && self.parsing.server.iter().any(|word| word == "lsp")
+    }
+
+    /// Queues the run of COMMAND by dbt's CLI, under the cut, for the
+    /// client's request ID with ARGUMENT; or answers why it cannot run: a
+    /// file it cannot compile, packages that need the network, a server
+    /// command with no `lsp`.
+    fn run_command(&mut self, command: &'static str, id: &Value, argument: &Value) {
+        let root = self.root.clone().unwrap_or_default();
+        let job = match command {
+            commands::COMPILE => {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                commands::compile_job(
+                    self.local_path(argument.as_str()).as_deref(),
+                    &root,
+                    self.project().as_deref(),
+                    cwd,
+                )
+            }
+            _ => Ok(commands::nodes_job(argument.as_str().unwrap_or_default())),
+        };
+        let refused = packages::refused(&root, &self.parsing.server, true, self.standalone);
+        let dir = self.cache(&root).join("run");
+        let line =
+            job.as_ref().ok().and_then(|job| config::dbt_command(&self.parsing.server, &root, &dir, true, &job.words));
+        let failure = match (job, refused, line) {
+            (Ok(job), None, Some(line)) => {
+                self.runs.push_back((id.clone(), job, line, dir));
+                return self.next_run();
+            }
+            (Err(failure), ..) => failure,
+            (_, Some(why), _) => commands::failure(command, &why),
+            (_, _, None) => commands::failure(command, "the server command has no lsp, so dbt-lsp-plus runs no dbt"),
+        };
+        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure}));
+    }
+
+    /// Starts the next run waiting, unless one is under way.
+    fn next_run(&mut self) {
+        if self.run.is_some() {
+            return;
+        }
+        let (Some(events), Some((id, job, line, dir))) = (self.parsing.events.clone(), self.runs.pop_front()) else {
+            return;
+        };
+        let report = Box::new(move |result| drop(events.send(Event::Ran(id, result))));
+        self.run = Some(commands::start(job, line, dir, config::PARSE_DEADLINE, report));
+    }
+
+    /// A run's RESULT, the answer to the client's request ID; then the next
+    /// run.
+    fn on_ran(&mut self, id: &Value, result: &Value) {
+        if let Some(run) = self.run.take() {
+            run.stop();
+        }
+        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        self.next_run();
     }
 
     /// Logs WHY a parse failed or could not start, out of the user's way,
@@ -1217,11 +1332,10 @@ impl<W: Write> Proxy<W> {
         self.send_client(&request);
     }
 
-    /// Stops a parse under way and removes this process's cache.
+    /// Stops a parse and a run under way and removes this process's cache.
     fn stop_parse(&mut self) {
-        if let Some(running) = self.parsing.running.take() {
-            running.stop();
-        }
+        let under_way = [self.parsing.running.take(), self.run.take()];
+        under_way.into_iter().flatten().for_each(config::Running::stop);
         if let Some(cache) = self.parsing.cache.take() {
             let _ = fs::remove_dir_all(cache);
         }
@@ -1427,7 +1541,7 @@ impl<W: Write> Proxy<W> {
                 self.shutdown = true;
                 Pending::Shutdown
             }
-            (_, Some("dbt.listNodes")) => Pending::Listing,
+            (_, Some("dbt.listNodes" | commands::NODES)) => Pending::Listing,
             ("textDocument/hover", _) if self.table.mode(method) != Mode::Dbt => {
                 let index = self.parsing.index.as_ref();
                 let summary =
@@ -1491,6 +1605,7 @@ impl<W: Write> Proxy<W> {
         match (self.route(method, params), &self.server, method) {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
             (Route::Answer(result), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
+            (Route::Command(command), ..) => self.on_command(command, id, params, pending),
             (Route::Forward, Some(_), _) => {
                 // dbt lsp adds to the proxy's part, but never holds it up.
                 let late = pending.alone(self.markdown).map(|_| (Instant::now() + MERGE_DEADLINE, method.to_owned()));
@@ -2006,6 +2121,7 @@ impl<W: Write> Proxy<W> {
             Event::ServerClosed(_) => self.on_server_closed(),
             Event::Parsed(outcome) => self.on_parsed(outcome),
             Event::Runs(code, found, written) => self.on_runs(code, found, written),
+            Event::Ran(id, result) => self.on_ran(&id, &result),
         }
         false
     }

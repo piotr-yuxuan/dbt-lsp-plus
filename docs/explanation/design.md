@@ -267,6 +267,111 @@ definition on `ref('stg_orders')` and on `shop_utils.is_positive(...)`
 in `orders.sql` is `equal`; references on that `ref` are `oursAdds`,
 dbt lsp leaving out the `ref` of `snapshots/orders_snapshot.sql`.
 
+## Commands for clients
+
+The proxy's commands for clients (`src/commands.rs`, plan 022) do what
+dbt lsp's undocumented commands do, so that a client speaks only the
+proxy's, with or without dbt lsp.  Their answers are dbt lsp 2.0.9's
+shapes, the contract:
+
+| Command | Arguments | Answer |
+|---|---|---|
+| `dbt-lsp-plus.compile` | `[URI]` | `{"file_uri": URI or null, "error": TEXT or null}` |
+| `dbt-lsp-plus.show` | `[{"uri": URI, "limit": N}]` or `[{"inline": SQL, "limit": N}]` | `{"columns": [NAME] or null, "data": [{NAME: VALUE}] or null, "error": TEXT or null}` |
+| `dbt-lsp-plus.nodes` | `[SELECTOR]`, dbt's syntax | `{"nodes": [NODE], "error": TEXT or null}`, each node with at least `unique_id`, `name`, `resource_type`, `package_name`, `original_file_path`, `depends_on.nodes` |
+
+A show's limit is a positive integer, 10 when the client gives none, `dbt
+show`'s documented default; a selection of no node is `{"nodes": [],
+"error": "No nodes found"}`.  The first argument alone counts, as dbt lsp
+reads its commands'.  The proxy's own failures hold these keys alone,
+`error` set and the rest null (`[]` for nodes); arguments it cannot read
+are -32602, a request after `shutdown` -32600.  Each request goes, as
+`commands::route` decides:
+
+- when a server runs whose answer to `initialize` listed the command's
+  counterpart (`dbt.compileFile`, `dbt.show`, `dbt.listNodes`), to it,
+  under the client's id, the command renamed, the arguments as they came
+  but a show's limit; its answer reaches the client as it came, other keys
+  included (`grain`, `error_kind`), its error too; a `nodes` counts as the
+  client's listing, which the proxy never cancels; one in flight when dbt
+  lsp dies is answered -32803, as any forwarded request;
+- else `compile` and `nodes` by dbt's CLI, cut off the network, and `show`
+  answers an error naming dbt lsp: `dbt show` alone would reach the
+  network (the driver's download, the warehouse);
+- else, where the system cannot cut, or the server command has no `lsp`
+  from which a run's is made, `compile` and `nodes` answer an error.
+
+"Else" is a session with no backend, a server that could not start, died
+or is restarting, or one that did not list the counterpart.  `initialize`
+announces `compile` when the server lists `dbt.compileFile` or dbt's CLI
+can do it (the cut, a server command with `lsp`), `nodes` likewise with
+`dbt.listNodes`, `show` only when the
+server lists `dbt.show`; dbt lsp's own commands stay listed and forwarded
+as they come.  The code lens stays dbt lsp's (see below): a client
+previews a CTE by `compile`, then `show` with `inline`.
+
+The runs go one at a time, in the order asked, in `CACHE/run/`, apart
+from the parse's target, its manifest removed before each run so that only
+this run's counts, the compiled files of earlier runs kept for the
+session; under the cut, with the parse's flags, working directory,
+environment and guard on packages; each killed past two minutes, at `exit`
+and when the client closes; a run that ends with no answer, as on a panic,
+is answered with a failure.  A compile runs `dbt compile
+--select path:R --log-format json`, R the file's path from the root, the
+root's own path never counted; a file outside the root, in a package, or
+whose R holds a space or a comma (dbt's selector would split it) is
+refused.  Its answer is the `compiled_path` of the node of the root package
+whose `original_file_path` is R, a test's never (as of a properties file),
+in the manifest the run wrote, resolved from the working directory; none
+answers dbt lsp's "Compiled file path not
+found."; a failed run, dbt's first error from its JSON log.  `nodes` runs
+`dbt list --select=SELECTOR --output json` with dbt's text log and
+`--quiet`, and answers its JSON lines with a `unique_id`; a failed run, its
+first `[error]` line; else, for either, the first line that is none of
+dbt's events, as a launcher's own, with how the run ended.  The compiled
+file lives while the session does, as the cache.
+
+### What dbt does for these commands, observed on 2026-11-17
+
+Offline (`unshare -rn`), a scratch home, a copy of the fixture, both builds
+alike unless said:
+
+- dbt lsp 2.0.9: `dbt.compileFile [URI]` answers `{"error": null,
+  "file_uri": "file:///…/target/compiled/shop/models/marts/orders.sql"}`,
+  and on a file of no node `{"error": "Compiled file path not found.",
+  "file_uri": null}`; `dbt.show` fails as `{"columns": null, "data": null,
+  "error": TEXT}`, offline on the driver, with or without a limit;
+  `dbt.listNodes ["+stg_orders+"]` answers `{"error": null, "error_kind":
+  null, "grain": "project", "nodes": [...]}`, each node with its
+  `unique_id`, `name`, `resource_type`, `package_name`,
+  `original_file_path`, `depends_on.nodes` and `config` (`access`, `group`,
+  `materialized`), and an empty selection `{"error": "No nodes found",
+  "error_kind": "lineage_query_failed", "grain": "unknown", "nodes": [],
+  "root_project": "shop"}`; `textDocument/codeLens` gives each CTE of a
+  model `{"command": {"command": "dbt.previewCte", "title": "Preview CTE",
+  "arguments": [PATH, {"name", "compiled_path", "compiled_start",
+  "compiled_stop", "start", "stop", "start_location"}]}, "range"}`, PATH a
+  path, not a URI.
+- `dbt compile --select path:R`, with the proxy's flags under its cut
+  (the root read-only, the working directory elsewhere), compiles
+  statically and writes the node and the tests on it (`*.sql`,
+  `*.macro_spans.json`); its manifest records the node's `compiled_path`
+  relative to the working directory.  A snapshot's file is
+  `compiled/shop/snapshots/orders_snapshot.sql/orders_snapshot.sql`; a
+  version's, `compiled/shop/models/versioned/dim_v2.sql`; a seed has no
+  `compiled_path`; a disabled model, a macro's file, a file of no node and
+  a file under `dbt_packages/` select nothing (a warning, status 0).  A
+  model with `run_query` under `execute`, and a Python model, try the
+  driver and fail with the network cut.
+- `dbt list --select=S --output json --quiet` prints one JSON object per
+  node; `*` gives models, seeds, snapshots, analyses and tests, no source,
+  as `dbt.listNodes` does, `source:*` the sources, `+dim.v2+` the version
+  alone, an empty selection nothing, a broken project `[error] [CODE]:
+  MESSAGE`; with `--log-format json` every line is a log event.
+- `dbt show` and `dbt build` fail offline: dbt fetches the DuckDB driver
+  from its CDN when the home has none.  `dbt show --help` (2.0.11) gives
+  `--limit` "[default: 10]".
+
 ## Root
 
 The project directory is the server command's `--project-dir` (`--project-dir
@@ -1033,6 +1138,10 @@ fails with -32803.
 
 ## Known limitations
 
+- Without dbt lsp, the commands for clients run only where the system can
+  cut a run off the network (Linux); a file of a package, or whose path
+  from the root holds a space or a comma, does not compile; `show` needs
+  dbt lsp.
 - `docs-paths` is ignored: docs blocks are read from every resource path.
 - JSON-RPC batches are forwarded as they are; a batched `exit` does not stop
   the proxy.  LSP clients do not send batches.

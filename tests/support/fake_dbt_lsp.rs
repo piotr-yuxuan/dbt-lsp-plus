@@ -50,13 +50,26 @@
 //!     output, as dbt's log;
 //!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
 //!     waits for before writing; `parse_hang`, true when it never exits;
+//!   - for `fake-dbt-lsp compile ...` and `list ...`, as dbt-lsp-plus runs
+//!     dbt's CLI for its commands: `compiled`, the text that a compile
+//!     writes for the file its `--select path:R` names, at
+//!     `compile_writes` under `--target-path` (`compiled/shop/R` by
+//!     default), with a manifest whose node of R in the package shop names
+//!     that file as its `compiled_path`, from the working directory as dbt
+//!     does when it can; `list`, values that a list prints,
+//!     one JSON line each; `run_log`, text that either prints first, as
+//!     dbt's log; `run_exit`, the status of either; `run_gate`, a file
+//!     either waits for first; `run_hang`, true when either never exits;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
 //!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID,
 //!   "interfaces": NAMES, "wrote": WROTE}`, NAMES those of the network it
 //!   can reach, WROTE whether it could write into its `--project-dir` when
 //!   the script says `parse_write`,
 //!   to that file's name followed by `.parses`, since two processes
-//!   appending to one file could interleave their lines; and each server
+//!   appending to one file could interleave their lines, and a compile or a
+//!   list `{"run": ARGUMENTS, "pid": PID, "interfaces": NAMES}` to its name
+//!   followed by `.runs`, and `{"ended": PID}` there as it exits; and each
+//!   server
 //!   process, a life of the fake, appends its pid to the name followed by
 //!   `.lives`, by which it knows its life.
 
@@ -281,10 +294,7 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
     let wrote =
         probe.is_some_and(|probe| std::fs::write(&probe, "").and_then(|()| std::fs::remove_file(&probe)).is_ok());
     if let Some(mut log) = log {
-        let devices = std::fs::read_to_string("/proc/self/net/dev").unwrap_or_default();
-        let interfaces: Vec<&str> =
-            devices.lines().skip(2).filter_map(|line| Some(line.split_once(':')?.0.trim())).collect();
-        let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces, "wrote": wrote});
+        let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces(), "wrote": wrote});
         writeln!(log, "{line}").expect("write the log");
     }
     if let Some(log) = script["parse_log"].as_str() {
@@ -311,6 +321,59 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
     std::process::exit(script["parse_exit"].as_i64().unwrap_or(0) as i32);
 }
 
+/// The names of the network interfaces this process can reach.
+fn interfaces() -> Vec<String> {
+    let devices = std::fs::read_to_string("/proc/self/net/dev").unwrap_or_default();
+    devices.lines().skip(2).filter_map(|line| Some(line.split_once(':')?.0.trim().to_owned())).collect()
+}
+
+/// The value of FLAG in ARGUMENTS, the word after it.
+fn flag<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
+    arguments.iter().position(|argument| argument == flag).map(|at| arguments[at + 1].as_str())
+}
+
+/// `dbt compile` or `dbt list`, ARGUMENTS' first word, as the script plays
+/// it.
+fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
+    if let Some(log) = &mut log {
+        let line = json!({"run": arguments, "pid": std::process::id(), "interfaces": interfaces()});
+        writeln!(log, "{line}").expect("write the log");
+    }
+    if let Some(gate) = script["run_gate"].as_str() {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !Path::new(gate).exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    while script["run_hang"] == json!(true) {
+        std::thread::park();
+    }
+    print!("{}", script["run_log"].as_str().unwrap_or_default());
+    let selected = flag(arguments, "--select").and_then(|selector| selector.strip_prefix("path:"));
+    if let (Some(target), Some(relative), Some(text)) =
+        (flag(arguments, "--target-path"), selected, script["compiled"].as_str())
+    {
+        let written =
+            script["compile_writes"].as_str().map_or_else(|| format!("compiled/shop/{relative}"), str::to_owned);
+        let file = Path::new(target).join(written);
+        std::fs::create_dir_all(file.parent().unwrap()).expect("create the compiled file's directory");
+        std::fs::write(&file, text).expect("write the compiled file");
+        let cwd = std::env::current_dir().expect("the working directory");
+        let compiled_path = file.strip_prefix(&cwd).unwrap_or(&file);
+        let node = json!({"original_file_path": relative, "package_name": "shop", "compiled_path": compiled_path});
+        let manifest = json!({"nodes": {"model.shop.compiled": node}});
+        std::fs::write(Path::new(target).join("manifest.json"), manifest.to_string()).expect("write the manifest");
+    }
+    let listing = arguments.first().map(String::as_str) == Some("list");
+    for node in script["list"].as_array().into_iter().flatten().filter(|_| listing) {
+        println!("{node}");
+    }
+    if let Some(log) = &mut log {
+        writeln!(log, "{}", json!({"ended": std::process::id()})).expect("write the log");
+    }
+    std::process::exit(script["run_exit"].as_i64().unwrap_or(0) as i32);
+}
+
 fn main() {
     let script: Value = std::env::var("FAKE_DBT_LSP_SCRIPT")
         .ok()
@@ -319,13 +382,19 @@ fn main() {
         })
         .unwrap_or(json!({}));
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let parsing = arguments.first().map(String::as_str) == Some("parse");
+    let verb = arguments.first().map_or("", String::as_str);
     let mut log = std::env::var("FAKE_DBT_LSP_LOG").ok().map(|path| {
-        let path = if parsing { format!("{path}.parses") } else { path };
+        let path = match verb {
+            "parse" => format!("{path}.parses"),
+            "compile" | "list" => format!("{path}.runs"),
+            _ => path,
+        };
         OpenOptions::new().create(true).append(true).open(path).expect("open the log")
     });
-    if parsing {
-        return parse(&script, &arguments, log);
+    match verb {
+        "parse" => return parse(&script, &arguments, log),
+        "compile" | "list" => return run(&script, &arguments, log),
+        _ => {}
     }
     refuse_or_help(&script, &arguments, false);
     // Each server process of a session is one life of the fake.

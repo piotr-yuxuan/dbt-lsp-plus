@@ -83,6 +83,7 @@ fn in_front_of_the_real_dbt_lsp() {
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
     recorded_observations(&mut session, &result);
     node_information(&mut session, &project);
+    commands(&mut session, &project);
     rename_a_source_table_and_compile(&mut session, &project);
     restart(&mut session, &project);
     assert!(session.finish().success());
@@ -160,6 +161,7 @@ fn alone_with_a_dbt_without_lsp() {
     alone_from_the_parse(&mut session, &project);
     alone_navigates_sql(&mut session, &project);
     alone_the_parse_s_errors(&mut session, &project);
+    alone_commands(&mut session, &project);
     let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage").count();
     assert_eq!(shown, 0, "a dbt without lsp is no failure");
     assert!(session.finish().success());
@@ -222,6 +224,62 @@ fn alone_the_parse_s_errors(session: &mut Session, project: &Path) {
     session.received.clear();
     session.notify("workspace/didChangeWatchedFiles", event(3));
     assert_eq!(session.wait_for(on_broken)["params"]["diagnostics"], json!([]));
+}
+
+/// The proxy's commands for clients, by dbt lsp's own: a compile whose file
+/// dbt lsp writes in the project's target, and the nodes of a selector.
+/// No show: it would fetch the warehouse's driver.
+fn commands(session: &mut Session, project: &Path) {
+    let orders = project.join("models/marts/orders.sql");
+    let compiled = execute(session, "dbt-lsp-plus.compile", json!([uri(&orders)]));
+    let (file, text) = compiled_file(&compiled);
+    assert_eq!(file, project.join("target/compiled/shop/models/marts/orders.sql"), "{compiled}");
+    assert!(!text.contains("{{"), "{text}");
+    let nodes = execute(session, "dbt-lsp-plus.nodes", json!(["+stg_orders+"]));
+    assert!(ids(&nodes).contains(&"model.shop.orders".to_owned()), "{nodes}");
+}
+
+/// Alone, the proxy's commands for clients by dbt's CLI, cut off the
+/// network: a model's compiled file in its cache, a snapshot's in the
+/// directory named after its file, and the nodes of a selector.
+fn alone_commands(session: &mut Session, project: &Path) {
+    let compile =
+        |session: &mut Session, file: &str| execute(session, "dbt-lsp-plus.compile", json!([uri(&project.join(file))]));
+    if !dbt_lsp_plus::config::can_cut() {
+        let refused = compile(session, "models/marts/orders.sql");
+        assert!(refused["result"]["error"].as_str().unwrap().contains("cut off the network"), "{refused}");
+        return;
+    }
+    let (file, text) = compiled_file(&compile(session, "models/marts/orders.sql"));
+    assert!(
+        file.ends_with("run/target/compiled/shop/models/marts/orders.sql") && !text.contains("{{"),
+        "{file:?}: {text}"
+    );
+    let (snapshot, _) = compiled_file(&compile(session, "snapshots/orders_snapshot.sql"));
+    assert!(snapshot.ends_with("snapshots/orders_snapshot.sql/orders_snapshot.sql"), "{snapshot:?}");
+    let nodes = execute(session, "dbt-lsp-plus.nodes", json!(["+stg_orders+"]));
+    assert!(ids(&nodes).contains(&"model.shop.orders".to_owned()), "{nodes}");
+    let orders =
+        nodes["result"]["nodes"].as_array().unwrap().iter().find(|n| n["unique_id"] == "model.shop.orders").unwrap();
+    assert!(orders["depends_on"]["nodes"].as_array().unwrap().contains(&json!("model.shop.stg_orders")), "{orders}");
+}
+
+fn execute(session: &mut Session, command: &str, arguments: Value) -> Value {
+    session.request("workspace/executeCommand", json!({"command": command, "arguments": arguments}))
+}
+
+/// The file that a compile's ANSWER names, and its text.
+fn compiled_file(answer: &Value) -> (PathBuf, String) {
+    let file_uri = answer["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("no file in {answer}"));
+    let path = url::Url::parse(file_uri).unwrap().to_file_path().unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    (path, text)
+}
+
+/// The ids of the nodes in a `nodes` ANSWER.
+fn ids(answer: &Value) -> Vec<String> {
+    let nodes = answer["result"]["nodes"].as_array().into_iter().flatten();
+    nodes.filter_map(|node| node["unique_id"].as_str()).map(str::to_owned).collect()
 }
 
 /// Every path under DIR, relative to it, but dbt lsp's own `target/` and
