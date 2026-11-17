@@ -105,7 +105,8 @@ fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
     assert!(copied.success(), "copy {case:?}");
     let before = files(&copy);
     let server = [dbt.to_owned(), "lsp".into(), "--profiles-dir".into(), copy.to_string_lossy().into_owned()];
-    let words = config::parse_command(&server, &copy, &dir.join("cache"), namespace).expect("the proxy's parse");
+    let parse = config::PARSE.map(str::to_owned);
+    let words = config::dbt_command(&server, &copy, &dir.join("cache"), namespace, &parse).expect("the proxy's parse");
     let (home, log) = (dir.join("home"), dir.join("parse.log"));
     std::fs::create_dir_all(&home).expect("create the scratch home");
     let output = std::fs::File::create(&log).expect("create the parse's log");

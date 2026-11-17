@@ -1090,7 +1090,8 @@ impl<W: Write> Proxy<W> {
             config::remove_stale(&cache);
             cache
         });
-        let Some(command) = config::parse_command(server, &root, cache, self.parsing.cut) else {
+        let parse = ["parse", "--log-format", "json"].map(str::to_owned);
+        let Some(command) = config::dbt_command(server, &root, cache, self.parsing.cut, &parse) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };
         let (Some(events), cache) = (self.parsing.events.clone(), cache.clone()) else { return };
