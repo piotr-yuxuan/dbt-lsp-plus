@@ -143,11 +143,39 @@ position, every row of `experimental.dbtLspPlus` listed, and with null or
 `[]` elsewhere; a hover or hints are the proxy's part alone; diagnostics,
 what the proxy publishes in `merge` without the server's part.
 
+dbt lsp adds to the proxy's part, but never holds it up: a hover or inlay
+hints to which the proxy adds a part (a summary, a docs block, a test's
+signature, its hints) get that part alone when dbt lsp has not answered
+within 300 ms of the forwarding (`MERGE_DEADLINE`), and dbt lsp's late
+answer is dropped, logged once per method (`window/logMessage`, type 4);
+its error, or its exit before it answers, keeps the part too.  A request
+with no part of the proxy's (a forwarded definition or references, a hover
+before the first parse) waits for dbt lsp as long as it takes.  dbt lsp
+2.0.9 answered a hover in 107 ms during its compilation on the fixture; on
+a project of 2,000 models from `scripts/bench/generate.py`, the first hover
+after `didOpen` waited for the whole compilation, 1.9 s; every other one
+took under 1 ms.  It ignores `$/cancelRequest`: a hover cancelled at once
+during its compilation was answered with its result 110 ms later.
+
+Plan 020 narrowed the roadmap's merge table.  Definition and references
+stay per kind of target: the kinds the flag lists are the proxy's alone,
+dbt lsp answering nothing there; the alone-only kinds go to dbt lsp, whose
+answer passes as it came, null on a package's `ref` or on a name two
+packages hold, references from the asking file only.  Filling dbt lsp's
+empty answers from the proxy, or the full union, waits for shadow mode's
+evidence (plan 021) and a change announced to dbt-mode.  The union of
+workspace symbols and the call hierarchy by unique id waits for a server
+that announces them, and the rows where the proxy has no answer
+(completion, code lenses and actions, prepareRename, formatting,
+signature help, semantic tokens) are dbt lsp's.
+
 The backend is fixed for the session: none with `--backend never` or a dbt
 without `lsp`, else the server, which stays the backend through a failed
 start, a crash and its restarts.  With no backend, `merge` is the proxy
-alone (see "Standalone mode"), and a method in `dbt` gets null or `[]`,
-its rows left out of the flag, one warning naming it after `initialize`.
+alone (see "Standalone mode"), and a method in `dbt` is not announced, its
+rows left out of the flag, one warning naming it after `initialize`, and
+null or `[]` to a request that comes anyway (plan 020, at dbt-mode's
+request: it reads announcements as the truth).
 A method's mode is the user's for it, else the user's default, which
 reaches only these methods, else the shipped one: the command line's
 `--mode` and `--default-mode`, then `initializationOptions.dbtLspPlus`'s
@@ -771,7 +799,8 @@ So the proxy runs the user's own `dbt parse`.
 dbt lsp 2.0.9 announces inlay hints and answers `[]` on a model, null on a
 macro file and on a properties file.  The proxy forwards each request and
 puts its own hints after the server's (appended to an array, alone in
-place of null; an error passes as it came): after each `ref` or `source`
+place of null, of an error, and of an answer later than 300 ms; see
+"Modes"): after each `ref` or `source`
 whose arguments are literals, right after its closing parenthesis, the
 relation dbt builds for its node, from the last parse's index, or
 `ephemeral` by the node's materialization; none for a disabled node, an
@@ -914,7 +943,7 @@ fails with -32803.
 |-----------|-----------|
 | The user's dbt has no `lsp` | Standalone mode, with no warning (see "Standalone mode") |
 | `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for, and fails every other request with -32803 |
-| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, and a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph |
+| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but those to which the proxy adds a part, which get that part, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A YAML file is not valid | Its sources are left out |
@@ -1202,10 +1231,10 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     and its others byte for byte, a new run replacing, a `compile`
     keeping, an edit clearing, a change of URI clearing the old one,
     nothing after `shutdown`;
-  - inlay hints: after the server's, alone for its null, its error byte
-    for byte; a first parse from a hint request, none more once an index
-    exists; the refresh asked of a client that can, its answer kept from
-    the server;
+  - inlay hints: after the server's, alone for its null and its error, the
+    server's error byte for byte where the proxy has none; a first parse
+    from a hint request, none more once an index exists; the refresh asked
+    of a client that can, its answer kept from the server;
   - navigation: each kind of target and its location, dbt's own test
     null, the server never asked; a column's name and `dbt_project.yml`
     forwarded, and with a server a SQL `ref` and its references; a
@@ -1218,6 +1247,11 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     with a server both forwarded, a `functions:` entry's name the proxy's;
     hover on a doc, a test and an entry's name; nodeInfo on an entry's
     name; without a server;
+  - the merges: a hover's summary or hints alone past a late dbt lsp's
+    deadline and its late answer dropped, a hover with no part awaited, a
+    refused or lost hover keeping its summary, a hover answered at its
+    deadline answered once through a cancel and an exit, one log line per
+    method;
   - the modes: one method left to dbt lsp and the rest as before, a hover
     in `dbt` byte for byte with no parse, `ours` for every method,
     `merge` in front of a server that announces an outline, a method in
