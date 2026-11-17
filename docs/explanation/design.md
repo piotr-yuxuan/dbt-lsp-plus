@@ -53,8 +53,10 @@ owns all state and writes both outputs.
 
 - Client to server: every frame is forwarded as it arrived, its bytes
   untouched, a body that is not JSON included.  The exceptions are the
-  requests of an owned method, which the proxy answers itself, and the
-  client's answers to the proxy's own requests (`workspace/inlayHint/refresh`).
+  requests that the proxy answers itself, by their method's mode (see
+  "Modes"), the client's answers to the proxy's own requests
+  (`workspace/inlayHint/refresh`), and the client's `initialize`, from
+  which the proxy removes its own `initializationOptions.dbtLspPlus`.
 - Server to client: every frame is forwarded as it arrived, except:
   - the answer to `initialize`, to which the proxy adds the capabilities
     the server lacks (`documentSymbolProvider`, `workspaceSymbolProvider`,
@@ -88,20 +90,22 @@ owns all state and writes both outputs.
   every position of that kind there, possibly null or `[]`, never
   forwarded, in any file under the root: references come from the scan
   whichever file asks, while a rename needs a file the scan holds, since
-  it would leave the asking file as it is.  The kinds
-  are by position: `entry` is the `name:` of an entry, a function's under
-  `functions:` included, `test` a generic test's name, `ref` in YAML a
-  unit test's `model:` too, `function` either argument of `function()`,
-  and `macro` the `ref` and `function` keywords themselves, which a
-  project's macro may replace, and the name in the tag of a macro or a
-  generic test.  dbt-mode steps aside for exactly those (its plan 014,
-  agreed with plans 017 and 018), and reads version 2 only: it asks only
-  for the kinds it knows, and maps only `.sql`, `.yml` and `.yaml` to
-  places, so plan 018's `function` and `python` changed nothing for it.
-- A method is owned only when the server does not announce it.  dbt lsp
-  2.0.9 announces `documentSymbolProvider: false` but answers that request
-  with a flat list of tokens, so the proxy owns it.  A later server that
-  announces a feature gets its requests back.
+  it would leave the asking file as it is.  The kinds are by position, and
+  the lists follow the modes (see "Modes"): `entry` is the `name:` of an
+  entry, a function's under `functions:` included, `test` a generic test's
+  name, `ref` in YAML a unit test's `model:` too, `function` either
+  argument of `function()`, and `macro` the `ref` and `function` keywords
+  themselves, which a project's macro may replace, and the name in the tag
+  of a macro or a generic test.  dbt-mode steps aside for exactly those
+  (its plan 014, agreed with plans 017 and 018), and reads version 2 only:
+  it asks only for the kinds it knows, and maps only `.sql`, `.yml` and
+  `.yaml` to places, so plan 018's `function` and `python` changed nothing
+  for it.
+- Who answers a method is its mode (see "Modes").  By default, the proxy
+  takes the methods it adds only when the server does not announce them:
+  dbt lsp 2.0.9 announces `documentSymbolProvider: false` but answers that
+  request with a flat list of tokens, so the proxy takes it.  A later
+  server that announces a feature gets its requests back.
 - Request ids: the client's ids and the server's ids pass unchanged.  The
   proxy's own requests carry string ids `dbt-lsp-plus/N`, never one that a
   pending request of the client's carries; an answer is the proxy's own only
@@ -110,6 +114,53 @@ owns all state and writes both outputs.
   refused with -32600, since the server would get two requests under one id.
 - A panic while the proxy answers a request fails that request with -32603;
   the session goes on.  No input is known to cause one, so no test does.
+
+## Modes
+
+Each method the proxy answers has a mode (`src/modes.rs`): `ours`, the
+proxy alone, nothing sent to the server for it; `dbt`, the server alone,
+answered byte for byte, the proxy computing nothing for it; `merge`, both,
+as the proxy merges them.  The methods are `textDocument/documentSymbol`,
+`workspace/symbol`, `textDocument/prepareCallHierarchy` (whose two
+followers take its mode), `textDocument/foldingRange`,
+`textDocument/documentHighlight`, `textDocument/selectionRange`,
+`textDocument/hover`, `textDocument/inlayHint`, `textDocument/definition`,
+`textDocument/references`, `textDocument/rename` and
+`textDocument/publishDiagnostics`; any other method is `dbt`.  The shipped
+defaults are the behaviour before modes:
+
+| Methods | Shipped default |
+|---|---|
+| documentSymbol, workspace/symbol, the call hierarchy, folding, highlights, selection ranges | `ours` when the first server does not announce the capability, else `dbt` |
+| hover, inlay hints, definition, references, rename, diagnostics | `merge` |
+
+In `merge`, a hover gets the node's summary first, the hints come after
+the server's, the diagnostics are per file the server's and the proxy's,
+and definitions, references and renames go by the kind of target (see
+"Navigation"); the methods the proxy adds are its own.  In `ours`, a
+definition, references or a rename is answered where the proxy claims the
+position, every row of `experimental.dbtLspPlus` listed, and with null or
+`[]` elsewhere; a hover or hints are the proxy's part alone; diagnostics,
+what the proxy publishes in `merge` without the server's part.
+
+The backend is fixed for the session: none with `--backend never` or a dbt
+without `lsp`, else the server, which stays the backend through a failed
+start, a crash and its restarts.  With no backend, `merge` is the proxy
+alone (see "Standalone mode"), and a method in `dbt` gets null or `[]`,
+its rows left out of the flag, one warning naming it after `initialize`.
+A method's mode is the user's for it, else the user's default, which
+reaches only these methods, else the shipped one: the command line's
+`--mode` and `--default-mode`, then `initializationOptions.dbtLspPlus`'s
+`modes` and `defaultMode` over them, method by method.  The table is
+fixed when `initialize` is answered, from the first server's
+capabilities, and kept across restarts; capabilities and the flag follow
+it.  `workspace/didChangeConfiguration` is forwarded but not read, since
+the flag that dbt-mode reads at `initialize` could not follow a change:
+a change applies at the next session.  A refused setting of
+`initializationOptions` is ignored and shown once in a warning; a bad
+option on the command line is a usage error.  dbt lsp 2.0.9 ignores
+`initializationOptions`, whatever its shape (probed by plan 019); the
+proxy removes its section all the same.
 
 ## Root
 
@@ -1167,6 +1218,14 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     with a server both forwarded, a `functions:` entry's name the proxy's;
     hover on a doc, a test and an entry's name; nodeInfo on an entry's
     name; without a server;
+  - the modes: one method left to dbt lsp and the rest as before, a hover
+    in `dbt` byte for byte with no parse, `ours` for every method,
+    `merge` in front of a server that announces an outline, a method in
+    `dbt` with no backend, `initializationOptions` read, refused and left
+    out of the server's `initialize`, a later setting forwarded and said
+    once to be no mode, diagnostics in `dbt` and in `ours`, a bad option
+    and `--backend never`; a server that cannot start keeping today's
+    capabilities;
   - the restart: the client's `initialize`, `initialized` and the open
     documents as they stand, edits, opens and closes during the delay
     included, then a request reaching the new server, four documents

@@ -47,6 +47,7 @@ src/sources.rs                references and renames of sources
 src/navigation.rs             the targets of definitions and references, dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
+src/modes.rs                  who answers each method: the user's settings and the session's table
 src/packages.rs               whether dbt would install packages before it parses
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
@@ -77,7 +78,9 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
 ## Rules of the code
 
 - Forward what the proxy does not own byte for byte; never re-serialise it.
-- Own a method only when the server does not announce it.
+- Route a method by its mode (`src/modes.rs`); unset, a mode is the
+  behaviour before modes: the methods the proxy adds its own only when
+  the server does not announce them.
 - The proxy's own requests carry ids `dbt-lsp-plus/N`, and their answers
   never reach the client.
 - What `dbt lsp` does is observed, not documented: record each new
