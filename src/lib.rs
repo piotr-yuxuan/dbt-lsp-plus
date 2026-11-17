@@ -16,6 +16,7 @@ pub mod proxy;
 pub mod rpc;
 pub mod runs;
 pub mod scan;
+pub mod shadow;
 pub mod sources;
 pub mod text;
 pub mod yaml;
