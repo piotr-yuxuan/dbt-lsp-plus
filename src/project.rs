@@ -184,6 +184,17 @@ pub struct SourceTable {
     pub anchored: bool,
 }
 
+impl Entity {
+    /// Its name as shown, as dbt's selectors write it: `orders.v2` for a
+    /// version.
+    pub fn shown(&self) -> String {
+        match &self.version {
+            Some(version) => format!("{}.v{version}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 impl From<&SourceTable> for Entity {
     fn from(table: &SourceTable) -> Entity {
         Entity {

@@ -20,12 +20,12 @@ pub const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 /// LSP's `SymbolKind` of a dbt resource type.
 fn resource_kind(resource_type: &str) -> u32 {
     match resource_type {
-        "seed" => 23,   // Struct
-        "source" => 11, // Interface
-        "macro" => 12,  // Function
-        "test" => 24,   // Event
-        "doc" => 15,    // String
-        _ => 5,         // Class: model, snapshot, analysis, and what dbt adds
+        "seed" => 23,               // Struct
+        "source" => 11,             // Interface
+        "macro" | "function" => 12, // Function
+        "test" => 24,               // Event
+        "doc" => 15,                // String
+        _ => 5,                     // Class: model, snapshot, analysis, and what dbt adds
     }
 }
 
@@ -150,11 +150,11 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
     };
     let mut indexes: HashMap<&Path, LineIndex> = HashMap::new();
     let mut symbols = Vec::new();
-    for entity in project.entities.iter().filter(|entity| matches(&entity.name)).take(MAX_WORKSPACE_SYMBOLS) {
+    for entity in project.entities.iter().filter(|entity| matches(&entity.shown())).take(MAX_WORKSPACE_SYMBOLS) {
         let text = project.text(&entity.path).unwrap_or_default();
         let index = indexes.entry(&entity.path).or_insert_with(|| LineIndex::new(text));
         symbols.push(json!({
-            "name": entity.name,
+            "name": entity.shown(),
             "kind": resource_kind(entity.resource_type),
             "location": {"uri": uri(&entity.path), "range": index.range(entity.name_range.start, entity.name_range.end, encoding)},
             "containerName": entity.package,
@@ -468,6 +468,57 @@ mod tests {
         assert_eq!(symbols[0]["location"]["range"]["start"], json!({"line": 13, "character": 15}));
         let all = workspace_symbols(&project, "", Encoding::Utf16);
         assert_eq!(all.as_array().unwrap().len(), project.entities.len());
+    }
+
+    #[test]
+    fn symbols_and_the_hierarchy_show_what_dbt_added() {
+        let files = [
+            ("dbt_project.yml", "name: r\n"),
+            ("models/_v.yml", "models:\n  - name: m\n    versions:\n      - v: 1\n      - v: 2\n"),
+            ("models/m_v1.sql", "select 1"),
+            ("models/m_v2.sql", "select {{ function('f') }}(1)"),
+            ("models/py.py", "def model(dbt, session):\n    return dbt.ref('m')\n"),
+            ("functions/f.sql", "x * 2"),
+            ("snapshots/_s.yml", "snapshots:\n  - name: snap\n    relation: ref('m')\n"),
+        ];
+        let root = crate::project::scratch_project("features-what-dbt-added", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        let symbols = |query: &str| -> Vec<(String, u64, String)> {
+            let found = workspace_symbols(&project, query, Encoding::Utf16);
+            let mut found: Vec<(String, u64, String)> = found
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    (
+                        s["name"].as_str().unwrap().to_owned(),
+                        s["kind"].as_u64().unwrap(),
+                        s["data"]["uniqueId"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+            found.sort();
+            found
+        };
+        let symbol = |name: &str, kind: u64, id: &str| (name.to_owned(), kind, id.to_owned());
+        // A version as dbt's selectors write it, which a query matches.
+        assert_eq!(symbols("m.v2"), [symbol("m.v2", 5, "model.r.m.v2")]);
+        assert_eq!(symbols("m"), [symbol("m.v1", 5, "model.r.m.v1"), symbol("m.v2", 5, "model.r.m.v2")]);
+        assert_eq!(symbols("f"), [symbol("f", 12, "function.r.f")]);
+        assert_eq!(symbols("py"), [symbol("py", 5, "model.r.py")]);
+        let snap = workspace_symbols(&project, "snap", Encoding::Utf16);
+        assert_eq!(snap[0]["location"]["range"]["start"], json!({"line": 1, "character": 10}), "at its name");
+        let graph = Graph::scanned(&project);
+        assert_eq!(graph.items["model.r.m.v1"].name, "m.v1");
+        // At column 0 of a YAML snapshot's `name:` line, where dbt-mode's lineage asks.
+        let yml = root.join("snapshots/_s.yml");
+        let line_start = project.text(&yml).unwrap().find("  - name: snap").unwrap();
+        let prepared = prepare_call_hierarchy(&project, &graph, &yml, line_start, Encoding::Utf16);
+        assert_eq!(prepared[0]["data"]["uniqueId"], "snapshot.r.snap");
+        let incoming = calls(&project, &graph, "function.r.f", true, Encoding::Utf16);
+        assert_eq!(incoming[0]["from"]["data"]["uniqueId"], "model.r.m.v2");
+        assert_eq!(incoming.as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

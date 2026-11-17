@@ -118,7 +118,7 @@ impl Graph {
         let items = project.entities.iter().map(|e| {
             let item = Item {
                 id: e.id.clone(),
-                name: e.name.clone(),
+                name: e.shown(),
                 resource_type: e.resource_type.to_owned(),
                 path: e.path.clone(),
                 range: e.range.clone(),
@@ -151,9 +151,12 @@ impl Graph {
                 project.packages.get(&node.package).or_else(|| project.packages.get(&project.root_package));
             let path = package_dir.map_or_else(PathBuf::new, |dir| dir.join(&node.original_file_path));
             let resource_type = node.resource_type.clone();
+            // A version, which the listing names as its model, is shown as its id ends: `orders.v2`.
+            let own = node.id.strip_prefix(&format!("{resource_type}.{}.", node.package));
+            let version = own.filter(|shown| shown.starts_with(&format!("{}.v", node.name)));
             let item = Item {
                 id: node.id.clone(),
-                name: node.name.clone(),
+                name: version.map_or_else(|| node.name.clone(), str::to_owned),
                 resource_type,
                 path,
                 range: 0..0,
@@ -304,10 +307,12 @@ mod tests {
             {"unique_id": "test.shop.not_null_orders_id.abc", "name": "not_null_orders_id", "resource_type": "test",
              "package_name": "shop", "original_file_path": "models/marts/_marts.yml",
              "depends_on": {"nodes": ["model.shop.orders"]}},
+            {"unique_id": "model.shop.z.v3", "name": "z", "resource_type": "model",
+             "package_name": "shop", "original_file_path": "models/z_v3.sql", "depends_on": {"nodes": []}},
             {"name": "no unique_id"}
         ]});
         let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
-        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.len(), 4);
         let graph = Graph::scanned(&project).with_server(&nodes, &project);
         let edges = pairs(&graph);
         assert!(edges.contains(&("model.shop.order_summary", "model.shop.orders")));
@@ -322,6 +327,10 @@ mod tests {
         let text = project.text(&graph.items["model.shop.orders"].path).unwrap();
         assert_eq!(&text[stg.sites[0].clone()], "ref('stg_orders'");
         assert!(graph.items["test.shop.not_null_orders_id.abc"].path.ends_with("models/marts/_marts.yml"));
+        assert_eq!(
+            graph.items["model.shop.z.v3"].name, "z.v3",
+            "a version the scan missed, as dbt's selectors write it"
+        );
     }
 
     #[test]

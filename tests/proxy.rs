@@ -2856,6 +2856,30 @@ fn with_dbt_lsp_a_function_call_reaches_the_server_but_its_entry_is_the_proxy_s(
     assert!(session.finish().success());
 }
 
+#[test]
+fn with_dbt_lsp_a_function_keeps_its_callers_after_the_listing() {
+    for named in [false, true] {
+        let project = with_a_function(&format!("function-listing-{named}"));
+        // Only the server says that uses_f depends on orders: once it shows, the listing is applied.
+        let mut depends_on = vec!["model.shop.orders"];
+        depends_on.extend(named.then_some("function.shop.f"));
+        let all = json!({"error": null, "nodes": [node("model.shop.uses_f", "models/marts/uses_f.sql", &depends_on)]});
+        let sources = json!({"error": null, "nodes": []});
+        let flags = [Path::new("--project-dir"), &project];
+        let script = json!({"answers": {ALL: all, SOURCES: sources}});
+        let (mut session, _) = Session::fake_with(&format!("function-listing-{named}"), script, &flags, None);
+        session.initialize(&project);
+        session.open(&project.join("models/marts/uses_f.sql"), None);
+        let uses_f = item("models/marts/uses_f.sql", "model.shop.uses_f");
+        let listed = |calls: &Value| calls.as_array().unwrap().iter().any(|c| c["to"]["detail"] == "model.shop.orders");
+        session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", json!({"item": uses_f})), listed);
+        let f = item("functions/f.sql", "function.shop.f");
+        let incoming = session.request("callHierarchy/incomingCalls", json!({"item": f}));
+        assert_eq!(details(&incoming["result"], "from"), ["model.shop.uses_f"], "named by the listing: {named}");
+        assert!(session.finish().success());
+    }
+}
+
 /// A copy of the fixture for test NAME with a model `dim` in two versions,
 /// v1 the latest, and a properties file whose test refs its version 2; and
 /// the manifest that dbt parses there.
