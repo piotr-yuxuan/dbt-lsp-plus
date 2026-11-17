@@ -1585,8 +1585,8 @@ fn answered_itself(alone: bool) -> Value {
                                 "test": ["yaml"]});
     let mut references = json!({"source": everywhere});
     if alone {
-        (definition["ref"], definition["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
-        (references["ref"], references["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
+        (definition["ref"], definition["macro"]) = (everywhere.clone(), json!(["sql", "yaml"]));
+        (references["ref"], references["macro"]) = (everywhere.clone(), json!(["sql", "yaml"]));
         (definition["function"], references["function"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
     }
     json!({"version": 2, "definition": definition, "references": references,
@@ -2876,6 +2876,34 @@ fn with_dbt_lsp_a_function_keeps_its_callers_after_the_listing() {
         let f = item("functions/f.sql", "function.shop.f");
         let incoming = session.request("callHierarchy/incomingCalls", json!({"item": f}));
         assert_eq!(details(&incoming["result"], "from"), ["model.shop.uses_f"], "named by the listing: {named}");
+        assert!(session.finish().success());
+    }
+}
+
+#[test]
+fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_the_server_s_with_dbt_lsp() {
+    let python = "def model(dbt, session):\n    return dbt.ref('stg_orders')\n";
+    for alone in [true, false] {
+        let project = copy_fixture(&format!("python-ref-{alone}-project"));
+        std::fs::write(project.join("models/marts/py_orders.py"), python).unwrap();
+        let flags = [Path::new("--project-dir"), &project];
+        let (mut session, _) =
+            Session::fake_with(&format!("python-ref-{alone}"), json!({"no_lsp": alone}), &flags, None);
+        session.initialize(&project);
+        let on_ref = position_in(&project.join("models/marts/py_orders.py"), "ref('stg_orders')", 6);
+        let found = session.request("textDocument/definition", on_ref.clone());
+        let mut params = on_ref.clone();
+        params["context"] = json!({"includeDeclaration": false});
+        let used = session.request("textDocument/references", params.clone());
+        if alone {
+            assert_eq!(found["result"], location(&project, "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
+            let files: Vec<&str> =
+                used["result"].as_array().unwrap().iter().map(|l| l["uri"].as_str().unwrap()).collect();
+            assert!(files.contains(&uri(&project.join("models/marts/py_orders.py")).as_str()), "{used}");
+        } else {
+            assert_eq!(found["result"], json!({"echo": "textDocument/definition", "params": on_ref}));
+            assert_eq!(used["result"], json!({"echo": "textDocument/references", "params": params}));
+        }
         assert!(session.finish().success());
     }
 }
