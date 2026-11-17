@@ -39,13 +39,14 @@ const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "-
 /// that no network reaches, where that directory is mounted read-only, so
 /// that dbt's install of packages fails there rather than rewrite it.
 /// Recursive first, as a directory holding a mount point needs, where the
-/// system has it.
+/// system has it.  The working directory is then entered again, through
+/// the mount: one in that directory would still reach what lies under it.
 const CUT: [&str; 5] = [
     "unshare",
     "-rnm",
     "sh",
     "-c",
-    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && exec "$@""#,
+    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && { cd -- "$(pwd -P 2>/dev/null)" 2>/dev/null; exec "$@"; }"#,
 ];
 
 /// The words of the proxy's `dbt parse`, as `dbt_command` takes them.
@@ -506,6 +507,22 @@ mod tests {
             dbt_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), true, &parse),
             None
         );
+    }
+
+    #[test]
+    fn under_the_cut_its_directory_is_read_only_from_within_too() {
+        let cut = can_cut();
+        assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
+        if !cut {
+            return;
+        }
+        let dir = scratch_project("cut-within", &[("x", "")]);
+        let write = r#"touch relative 2>/dev/null; touch "$(pwd)/absolute" 2>/dev/null; exit 0"#;
+        let mut command = Command::new(CUT[0]);
+        command.args(&CUT[1..]).arg(&dir).args(["sh", "-c", write]).current_dir(&dir);
+        assert!(command.status().unwrap().success());
+        assert!(!dir.join("relative").exists() && !dir.join("absolute").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -978,7 +978,10 @@ So the proxy runs the user's own `dbt parse`.
   `package-lock.yml` (dbt1001, "Read-only file system") instead of
   rewriting the install path, as both builds were seen to.  The mount is
   recursive (`rbind,ro=recursive`) where the system has it, as a root
-  holding a mount point needs, else plain.  Else with
+  holding a mount point needs, else plain.  The shell then enters its
+  working directory again by its path: a working directory in the root
+  would still reach the writable directory under the mount, as a
+  relative write from it showed.  Else with
   dbt's flags and the guard on packages alone, which the proxy says once
   on its standard error.  A server command with no `lsp` word gets no
   parse.  The working directory
