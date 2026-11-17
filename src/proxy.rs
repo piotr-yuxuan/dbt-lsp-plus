@@ -113,6 +113,10 @@ const SELECTORS: [&str; 2] = ["*", "source:*"];
 const MAX_ATTEMPTS: u32 = 3;
 /// A listing unanswered for this long is abandoned.
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
+/// A request to which the proxy adds a part is answered with it alone if the
+/// server has not answered within this long: three times what dbt lsp 2.0.9
+/// took on the fixture during a compilation.
+const MERGE_DEADLINE: Duration = Duration::from_millis(300);
 /// At most this many restarts of a server that died, within the window.
 const RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
@@ -229,17 +233,35 @@ enum Pending {
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
+    /// Answered with the proxy's part alone once the server was late: its
+    /// answer, when it comes, is dropped.
+    Answered,
 }
 
 impl Pending {
     /// The server's answer, MESSAGE, as this kind of request makes it, for a
     /// client that reads markdown when MARKDOWN; none to pass it unchanged.
+    /// An error to a request with a part of the proxy's gives that part.
     fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
+        if message.get("error").is_some() {
+            return self.alone(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
+        }
         match self {
             Pending::Hover(text, hard) => features::merge_hover(message, text, *hard, markdown),
             Pending::Hints(hints) => features::merge_hints(message, hints),
             _ => None,
         }
+    }
+
+    /// The proxy's part alone, as the answer when the server gives none: a
+    /// hover's text, the hints; none for a request with no part.
+    fn alone(&self, markdown: bool) -> Option<Value> {
+        let nothing = match self {
+            Pending::Hover(..) => json!({"result": null}),
+            Pending::Hints(_) => json!({"result": []}),
+            _ => return None,
+        };
+        self.merged(&nothing, markdown).map(|merged| merged["result"].clone())
     }
 }
 
@@ -308,6 +330,11 @@ struct Proxy<W: Write> {
     initialize: Option<Value>,
     /// The client's requests that the server has yet to answer.
     forwarded: HashMap<String, (Value, Pending)>,
+    /// When each forwarded request with a part of the proxy's is answered
+    /// with it alone, and its method.
+    deadlines: HashMap<String, (Instant, String)>,
+    /// The methods whose late answer the proxy logged.
+    late: HashSet<String>,
     documents: HashMap<PathBuf, String>,
     /// The URI under which the client opened each of them, which an edit
     /// of it must name.
@@ -437,6 +464,8 @@ impl<W: Write> Proxy<W> {
             initialized: false,
             initialize: None,
             forwarded: HashMap::new(),
+            deadlines: HashMap::new(),
+            late: HashSet::new(),
             documents: HashMap::new(),
             uris: HashMap::new(),
             opened: false,
@@ -1189,8 +1218,7 @@ impl<W: Write> Proxy<W> {
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
                 let nothing = json!({"textDocument/hover": null, "textDocument/inlayHint": []});
-                let merged = pending.merged(&json!({"result": nothing[method]}), self.markdown);
-                Some(Ok(merged.map_or_else(|| nothing[method].clone(), |answer| answer["result"].clone())))
+                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| nothing[method].clone())))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1416,6 +1444,9 @@ impl<W: Write> Proxy<W> {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
             (Route::Empty(nothing), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": nothing})),
             (Route::Forward, Some(_), _) => {
+                // dbt lsp adds to the proxy's part, but never holds it up.
+                let late = pending.alone(self.markdown).map(|_| (Instant::now() + MERGE_DEADLINE, method.to_owned()));
+                self.deadlines.extend(late.map(|late| (key(id), late)));
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
             }
@@ -1485,6 +1516,11 @@ impl<W: Write> Proxy<W> {
     /// proxy's own, kept.
     fn on_server_response(&mut self, id: &Value, message: &Value, body: &[u8]) {
         let pending = self.forwarded.remove(&key(id));
+        self.deadlines.remove(&key(id));
+        // The client had the proxy's part alone: the late answer is no one's.
+        if let Some((_, Pending::Answered)) = pending {
+            return;
+        }
         if let (None, Some(own)) = (&pending, id.as_str())
             && own.starts_with(OWN_ID)
         {
@@ -1671,9 +1707,13 @@ impl<W: Write> Proxy<W> {
         if let Some(id) = &self.initialize {
             self.forwarded.remove(&key(id));
         }
+        self.deadlines.clear();
         for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
-            match pending {
-                Pending::Shutdown => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+            let part = pending.alone(self.markdown);
+            match (pending, part) {
+                (Pending::Shutdown, _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+                (Pending::Answered, _) => {}
+                (_, Some(part)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
                 _ => self.reply_error(&id, REQUEST_FAILED, &why),
             }
         }
@@ -1770,6 +1810,21 @@ impl<W: Write> Proxy<W> {
     fn on_time(&mut self) {
         self.expire_listing();
         let now = Instant::now();
+        // A merge past its deadline: the proxy's part alone, the server's late answer dropped.
+        let due: Vec<(String, String)> =
+            self.deadlines.iter().filter(|(_, (at, _))| *at <= now).map(|(k, (_, m))| (k.clone(), m.clone())).collect();
+        for (late, method) in due {
+            self.deadlines.remove(&late);
+            let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
+            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).alone(self.markdown));
+            self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
+            if !self.shutdown && self.late.insert(method.clone()) {
+                let ms = MERGE_DEADLINE.as_millis();
+                let text = format!("dbt lsp did not answer {method} within {ms} ms: dbt-lsp-plus answered alone");
+                self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
+                                         "params": {"type": 4, "message": text}}));
+            }
+        }
         if self.restart.due.take_if(|due| *due <= now).is_some() {
             self.start_restart();
         }
@@ -1786,7 +1841,8 @@ impl<W: Write> Proxy<W> {
         loop {
             let listing = self.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
             let replay = self.restart.starting.as_ref().map(|(.., deadline)| *deadline);
-            let next = [listing, self.restart.due, replay].into_iter().flatten().min();
+            let merge = self.deadlines.values().map(|(at, _)| *at).min();
+            let next = [listing, self.restart.due, replay, merge].into_iter().flatten().min();
             let wait = next.map_or(Duration::MAX, |at| at.saturating_duration_since(Instant::now()));
             let event = match inbox.recv_timeout(wait) {
                 Ok(event) => event,
