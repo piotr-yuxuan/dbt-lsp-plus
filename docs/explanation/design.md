@@ -873,7 +873,9 @@ fails with -32803.
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the
   customers`, can unmask a later comment: a call commented out after it
-  counts as a reference, and a rename edits it.
+  counts as a reference, and a rename edits it.  A `#` that follows no
+  space, as in `tags: a#b` or a Jinja comment `{# #}`, hides the rest of
+  its line as a YAML comment would.
 - `selectors.yml` and selectors on the command line name a source as
   `source:s.t`; a rename leaves them on the old name.
 - A `ref` with no package names the root project's node first, then any,

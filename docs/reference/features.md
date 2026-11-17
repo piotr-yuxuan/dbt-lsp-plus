@@ -53,9 +53,10 @@ method:
   SQL.
 
 Every other message passes unchanged, byte for byte.  A feature that the
-server announces stays the server's, but for references and renames on a
-source and definitions in YAML; the initialize result names those, per
-kind of target and kind of file, under `experimental.dbtLspPlus`.
+server announces stays the server's, but for a source's definition,
+references and rename, a CTE's rename, and the definitions of refs, docs,
+entries and tests in YAML; the initialize result names those, per kind of
+target and kind of file, under `experimental.dbtLspPlus`.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
 ten minutes, and gives it the open documents as they stand.  Without
 `dbt lsp`, and while it restarts, the proxy keeps serving its own
