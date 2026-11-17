@@ -414,6 +414,42 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
 }
 
 #[test]
+fn the_backend_never_starts_no_server_and_the_proxy_answers_alone() {
+    let options = ["--backend", "never"];
+    let flags = [Path::new("--project-dir"), &fixture()];
+    let (mut session, log) = Session::fake_options("backend-never", json!({}), &options, &flags, None);
+    let result = session.initialize(&fixture());
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
+    assert_eq!(result["capabilities"]["hoverProvider"], true, "alone in full");
+    let logged = session.wait_for(|m| m["method"] == "window/logMessage");
+    assert!(logged["params"]["message"].as_str().unwrap().contains("never"), "{logged}");
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    until_logged(&log.with_extension("jsonl.parses"), "a parse", |parses| !parses.is_empty());
+    assert!(lives(&log).is_empty(), "a server started");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_bad_option_is_a_usage_error_and_starts_nothing() {
+    let scratch = scratch("bad-option");
+    let log = scratch.join("log.jsonl");
+    for bad in [&["--mode", "hover=dbt"][..], &["--backend", "nevr"], &["--mode"]] {
+        let fake = env!("CARGO_BIN_EXE_fake-dbt-lsp");
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"))
+            .args(bad)
+            .args(["--", fake, "lsp"])
+            .env_clear()
+            .env("FAKE_DBT_LSP_LOG", &log)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{bad:?}");
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(said.starts_with("dbt-lsp-plus: ") && said.contains("usage:"), "{said}");
+        assert!(!log.exists(), "{bad:?} started the server");
+    }
+}
+
+#[test]
 fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
     let (mut session, log) = Session::fake("standalone", json!({"no_lsp": true}));
     let result = session.initialize(&fixture());

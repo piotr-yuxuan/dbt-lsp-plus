@@ -77,8 +77,14 @@ impl Session {
     /// Starts the proxy in front of SERVER, in DIR when given, from an empty
     /// environment but for PATH and ENV.
     pub fn start(server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
+        Session::start_with(&[], server, env, dir)
+    }
+
+    /// The same, with the proxy's OPTIONS before the server command.
+    pub fn start_with(options: &[&str], server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
-        command.arg("--").args(server).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        command.args(options).arg("--").args(server);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         command.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
         for (name, value) in env {
             command.env(name, value);
@@ -112,6 +118,17 @@ impl Session {
     /// Starts the proxy in front of the fake server, `lsp ARGUMENTS...` with
     /// SCRIPT, in DIR when given; returns the session and the fake's log.
     pub fn fake_with(name: &str, script: Value, arguments: &[&Path], dir: Option<&Path>) -> (Session, PathBuf) {
+        Session::fake_options(name, script, &[], arguments, dir)
+    }
+
+    /// The same, with the proxy's OPTIONS.
+    pub fn fake_options(
+        name: &str,
+        script: Value,
+        options: &[&str],
+        arguments: &[&Path],
+        dir: Option<&Path>,
+    ) -> (Session, PathBuf) {
         let scratch = scratch(name);
         let (script_path, log) = (scratch.join("script.json"), scratch.join("log.jsonl"));
         std::fs::write(&script_path, script.to_string()).unwrap();
@@ -125,7 +142,7 @@ impl Session {
             ("FAKE_DBT_LSP_LOG", log.as_path()),
             ("XDG_CACHE_HOME", cache.as_path()),
         ];
-        (Session::start(&server, &env, dir), log)
+        (Session::start_with(options, &server, &env, dir), log)
     }
 
     /// The same, with the fixture as --project-dir.

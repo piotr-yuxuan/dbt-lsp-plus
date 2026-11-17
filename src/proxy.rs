@@ -4,6 +4,7 @@
 //! server does not announce.
 
 use crate::graph::{self, Graph, ServerNode};
+use crate::modes::{self, Mode};
 use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
@@ -46,6 +47,17 @@ const ADDED: [(&str, &[&str]); 6] = [
     ("foldingRangeProvider", &["textDocument/foldingRange"]),
     ("documentHighlightProvider", &["textDocument/documentHighlight"]),
     ("selectionRangeProvider", &["textDocument/selectionRange"]),
+];
+
+/// The capabilities of the requests that the proxy answers in `ours`
+/// whatever the server announces, and whether it then answers them as a
+/// whole, as a hover, rather than by target.
+const PROVIDERS: [(&str, &str, bool); 5] = [
+    ("hoverProvider", "textDocument/hover", true),
+    ("inlayHintProvider", "textDocument/inlayHint", true),
+    ("definitionProvider", "textDocument/definition", false),
+    ("referencesProvider", "textDocument/references", false),
+    ("renameProvider", "textDocument/rename", false),
 ];
 
 /// The requests that the proxy answers itself on some targets, since dbt
@@ -266,8 +278,14 @@ struct Proxy<W: Write> {
     canonical_root: Option<PathBuf>,
     encoding: Encoding,
     hierarchical: bool,
-    /// The methods that the proxy answers, fixed by the server's capabilities.
+    /// The methods that the proxy answers, fixed by the modes and the server's capabilities.
     owned: HashSet<&'static str>,
+    /// The user's settings, from the command line, then `initializationOptions`.
+    settings: modes::Settings,
+    /// The mode of each method, fixed when `initialize` is answered.
+    table: modes::Table,
+    /// Whether the backend is `never`, which the proxy says once alone.
+    never: bool,
     /// Whether the client sent `initialize`, before which LSP lets the proxy send nothing.
     initialized: bool,
     /// The id of the client's `initialize` while the server has not answered it.
@@ -395,6 +413,9 @@ impl<W: Write> Proxy<W> {
             encoding: Encoding::Utf16,
             hierarchical: false,
             owned: HashSet::new(),
+            settings: modes::Settings::default(),
+            table: modes::Table::default(),
+            never: false,
             initialized: false,
             initialize: None,
             forwarded: HashMap::new(),
@@ -456,11 +477,27 @@ impl<W: Write> Proxy<W> {
 
     /// Adds to CAPABILITIES each capability of ADDED that it lacks, and owns its methods.
     fn add_capabilities(&mut self, capabilities: &mut serde_json::Map<String, Value>) {
-        for (capability, methods) in ADDED {
-            if capabilities.get(capability).is_none_or(|value| value.is_null() || *value == json!(false)) {
-                capabilities.insert(capability.to_owned(), json!(true));
-                self.owned.extend(methods);
+        let lacks = |capabilities: &serde_json::Map<String, Value>, capability: &str| {
+            capabilities.get(capability).is_none_or(|value| value.is_null() || *value == json!(false))
+        };
+        let announced = |method: &str| {
+            ADDED.iter().any(|(capability, methods)| methods.contains(&method) && !lacks(capabilities, capability))
+        };
+        self.table = modes::Table::new(&self.settings, &announced, self.standalone);
+        // A method the proxy answers is announced; one left to the server, as the server announced it.
+        for (capability, methods) in ADDED.iter().filter(|(_, methods)| self.table.mode(methods[0]) != Mode::Dbt) {
+            if lacks(capabilities, capability) {
+                capabilities.insert((*capability).to_owned(), json!(true));
             }
+            self.owned.extend(*methods);
+        }
+        for (capability, method, owned) in
+            PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Ours)
+        {
+            if lacks(capabilities, capability) {
+                capabilities.insert((*capability).to_owned(), json!(true));
+            }
+            self.owned.extend(owned.then_some(*method));
         }
         // Which requests the proxy answers itself, project-wide, on which kinds
         // of target, beside the server's own experimental capabilities: a
@@ -470,14 +507,7 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            let mut answered = json!({"version": 2});
-            for (request, kind, places, _) in ANSWERED.iter().filter(|(.., alone)| self.standalone || !alone) {
-                let mut listed: Vec<Value> =
-                    serde_json::from_value(answered[*request][*kind].take()).unwrap_or_default();
-                listed.extend(places.iter().map(|place| json!(place)));
-                answered[*request][*kind] = json!(listed);
-            }
-            experimental.insert("dbtLspPlus".into(), answered);
+            experimental.insert("dbtLspPlus".into(), self.table.flag(&ANSWERED));
         }
         // The proxy's own command, beside the server's.
         let provider = capabilities.entry("executeCommandProvider").or_insert_with(|| json!({}));
@@ -513,7 +543,10 @@ impl<W: Write> Proxy<W> {
         // A dbt without `lsp` is no failure: said once, out of the user's way.
         if self.standalone {
             let dbt = self.parsing.server.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>();
-            let text = format!("dbt-lsp-plus: {} has no lsp: dbt-lsp-plus answers alone.", dbt.join(" "));
+            let text = match self.never {
+                true => "dbt-lsp-plus: the backend is never: dbt-lsp-plus answers alone.".to_owned(),
+                false => format!("dbt-lsp-plus: {} has no lsp: dbt-lsp-plus answers alone.", dbt.join(" ")),
+            };
             let params = json!({"type": 3, "message": text});
             return self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
         }
@@ -761,7 +794,8 @@ impl<W: Write> Proxy<W> {
             _ => return false,
         };
         let listed = |(answered, kind, places, alone): &&(&str, &str, &[&str], bool)| {
-            *answered == request && *kind == target.kind() && places.contains(&place) && (self.standalone || !alone)
+            let listed = self.table.lists(&format!("textDocument/{answered}"), *alone);
+            *answered == request && *kind == target.kind() && places.contains(&place) && listed
         };
         ANSWERED.iter().any(|row| listed(&row))
     }
@@ -1803,9 +1837,11 @@ fn lacks_lsp(command: &[String]) -> bool {
 
 /// Runs the proxy on the standard input and output, in front of COMMAND,
 /// alone when its dbt has no `lsp`.
-pub fn run(command: &[String]) -> ExitCode {
+pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backend) -> ExitCode {
     let (events, inbox) = mpsc::channel();
-    let standalone = lacks_lsp(command);
+    // With `never`, nothing of the user's dbt runs but its parse.
+    let never = backend == modes::Backend::Never;
+    let standalone = never || lacks_lsp(command);
     let (server, absent) = match (!standalone).then(|| spawn_server(command, &events, 0)) {
         Some(Ok(server)) => (Some(server), None),
         Some(Err(why)) => (None, Some(why)),
@@ -1822,6 +1858,7 @@ pub fn run(command: &[String]) -> ExitCode {
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, project_dir(command));
     proxy.standalone = standalone;
+    (proxy.never, proxy.settings) = (never, settings);
     proxy.parsing = parsing;
     proxy.serve(inbox);
     proxy.stop_parse();
