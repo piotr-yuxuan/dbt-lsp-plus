@@ -97,7 +97,7 @@ impl Scanned {
     /// The file at PATH as it is now, OPEN being its text if the editor has
     /// it open, and what that gives.  A seed's text is not read: its entity
     /// needs none, and a seed can be large.  A file that is not UTF-8, such
-    /// as a `.DS_Store`, gives nothing.  None when the file cannot be read.
+    /// as a `Thumbs.db`, gives nothing.  None when the file cannot be read.
     pub fn read(path: &Path, open: Option<&str>) -> Option<Scanned> {
         let seed = path.extension().is_some_and(|extension| extension == "csv");
         let text = match open {
@@ -311,10 +311,13 @@ static SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A'(?:[^']
 
 /// Every file below DIR with its metadata, in a stable order, through
 /// symbolic links but once per directory; nothing when DIR does not exist.
+/// A file whose name starts with a dot is left out, as dbt leaves it out,
+/// but not the files of a directory whose name does.
 fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     let mut pending = vec![dir.to_owned()];
     let mut seen = HashSet::new();
     let mut found = Vec::new();
+    let hidden = |path: &Path| path.file_name().is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
     while let Some(dir) = pending.pop() {
         if !seen.insert(fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
             continue;
@@ -323,7 +326,7 @@ fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
         for path in entries.flatten().map(|entry| entry.path()) {
             match fs::metadata(&path) {
                 Ok(kind) if kind.is_dir() => pending.push(path),
-                Ok(kind) if kind.is_file() => found.push((path, kind)),
+                Ok(kind) if kind.is_file() && !hidden(&path) => found.push((path, kind)),
                 _ => {}
             }
         }
@@ -511,6 +514,26 @@ mod tests {
             ]
         );
         assert_eq!(project.packages["shop_utils"], fixture().join("dbt_packages/shop_utils"));
+    }
+
+    #[test]
+    fn a_file_whose_name_starts_with_a_dot_is_no_resource() {
+        let source = "sources:\n  - name: hidden\n    tables:\n      - name: t\n";
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/.hidden.sql", "select 1"),
+            ("models/.p.yml", source),
+            ("models/.dir/inner.sql", "select 1"),
+            ("macros/.m.sql", "{% macro m() %}1{% endmacro %}"),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/models/.ph.sql", "select 1"),
+        ];
+        let root = scratch_project("project-dot-files", &files);
+        let project = scan(&root, &HashMap::new()).unwrap();
+        let ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
+        // As both builds parse it: the file in a dotted directory alone.
+        assert_eq!(ids, ["model.shop.inner"]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
