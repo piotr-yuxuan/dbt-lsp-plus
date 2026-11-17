@@ -21,6 +21,8 @@ folder, else the current directory.
   --default-mode MODE   the mode of every method the proxy answers but
                         those set with --mode
   --backend auto|never  never: no dbt lsp, the proxy alone
+  --shadow              compare the proxy's definitions and references
+                        with dbt lsp's, in a local log
   -h, --help            this text
   -V, --version         the version
 

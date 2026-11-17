@@ -8,7 +8,9 @@ use crate::modes::{self, Mode};
 use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineIndex};
-use crate::{cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, sources};
+use crate::{
+    cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, shadow, sources,
+};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -64,8 +66,9 @@ const PROVIDERS: [(&str, &str, bool); 5] = [
 enum Route {
     /// Itself, as this method.
     Here(&'static str),
-    /// Itself, with nothing: null, or `[]` for a list.
-    Empty(Value),
+    /// Itself, with this result: nothing, null or `[]` for a list, or the
+    /// shadow's counts.
+    Answer(Value),
     /// By the server.
     Forward,
 }
@@ -236,6 +239,13 @@ enum Pending {
     /// Answered with the proxy's part alone once the server was late: its
     /// answer, when it comes, is dropped.
     Answered,
+    /// A definition or references that the shadow follows: its method and
+    /// parameters, and the count of the client's changes when it came.
+    Shadow {
+        method: String,
+        params: Value,
+        changes: u64,
+    },
 }
 
 impl Pending {
@@ -376,8 +386,14 @@ struct Proxy<W: Write> {
     /// it, and the count so far.
     edits: HashMap<PathBuf, u64>,
     edited: u64,
+    /// The count of the client's changes and closes of a document, after
+    /// which the shadow compares no answer to an earlier request.
+    changes: u64,
     /// The graph, with the generations it was made of.
     graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
+    /// The shadow, on from the server's answer to `initialize` when the user
+    /// set it.
+    shadow: Option<shadow::Session>,
 }
 
 /// PATH with each `..` dropping the component before it, as written: no
@@ -392,6 +408,17 @@ fn lexical(path: &Path) -> PathBuf {
         }
         path
     })
+}
+
+/// The place of the file at PATH in `experimental.dbtLspPlus`, by its
+/// extension: `sql`, `yaml` or `python`.
+fn place(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("sql") => Some("sql"),
+        Some("yml" | "yaml") => Some("yaml"),
+        Some("py") => Some("python"),
+        _ => None,
+    }
 }
 
 /// The path of a `file:` URI.
@@ -489,7 +516,9 @@ impl<W: Write> Proxy<W> {
             epoch: 0,
             edits: HashMap::new(),
             edited: 0,
+            changes: 0,
             graph: RefCell::default(),
+            shadow: None,
         };
         if let Some(root) = root {
             proxy.set_root(root);
@@ -562,17 +591,19 @@ impl<W: Write> Proxy<W> {
         if let Some(experimental) = experimental.as_object_mut() {
             experimental.insert("dbtLspPlus".into(), self.table.flag(&ANSWERED));
         }
-        // The proxy's own command, beside the server's.
+        // The proxy's own commands, beside the server's.
+        let own = [Some(config::NODE_INFO), self.shadow.as_ref().map(|_| shadow::SUMMARY)];
         let provider = capabilities.entry("executeCommandProvider").or_insert_with(|| json!({}));
         if let Some(commands) = provider.as_object_mut().map(|provider| provider.entry("commands").or_insert(json!([])))
         {
-            commands.as_array_mut().into_iter().for_each(|commands| commands.push(json!(config::NODE_INFO)));
+            let own: Vec<Value> = own.into_iter().flatten().map(|command| json!(command)).collect();
+            commands.as_array_mut().into_iter().for_each(|commands| commands.extend(own.iter().cloned()));
         }
     }
 
     /// Says once, after `initialize` is answered, what of the user's settings
-    /// cannot take effect: each refusal, and the methods set to `dbt` that no
-    /// backend answers.
+    /// cannot take effect: each refusal, the methods set to `dbt` that no
+    /// backend answers, and a shadow with no dbt lsp to compare with.
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
         if !said.is_empty() {
@@ -582,6 +613,8 @@ impl<W: Write> Proxy<W> {
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
         }
+        let off = self.settings.shadow && self.shadow.is_none();
+        said.extend(off.then(|| "the shadow compares with dbt lsp, which does not run: it is off".to_owned()));
         if !said.is_empty() {
             let text = format!("dbt-lsp-plus: {}.", said.join("; "));
             self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
@@ -721,6 +754,7 @@ impl<W: Write> Proxy<W> {
             }
             "textDocument/didChange" => {
                 self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
+                self.changes += 1;
                 self.edited += 1;
                 self.edits.insert(path.clone(), self.edited);
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
@@ -729,6 +763,8 @@ impl<W: Write> Proxy<W> {
                 }
             }
             "textDocument/didClose" => {
+                // An unsaved text gives way to the file's.
+                self.changes += 1;
                 self.restart.languages.remove(&path);
                 self.restart.versions.remove(&path);
                 self.documents.remove(&path);
@@ -826,15 +862,19 @@ impl<W: Write> Proxy<W> {
     }
 
     /// How the proxy answers the client's request METHOD: itself, as an owned
-    /// method, its own command, or a targeted request on one of its targets
+    /// method, its own commands, or a targeted request on one of its targets
     /// in its mode; with nothing, where the mode says so, and without a
     /// server for a definition and `shutdown`; else by forwarding it.
     fn route(&self, method: &str, params: &Value) -> Route {
         if let Some(owned) = self.owned.get(method) {
             return Route::Here(owned);
         }
-        if method == "workspace/executeCommand" && params["command"] == config::NODE_INFO {
+        let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
+        if command == Some(config::NODE_INFO) {
             return Route::Here(config::NODE_INFO);
+        }
+        if let (Some(shadow::SUMMARY), Some(shadow)) = (command, &self.shadow) {
+            return Route::Answer(shadow.counts.summary());
         }
         // In `dbt`, the proxy looks at nothing.
         let mine = self.table.mode(method) != Mode::Dbt;
@@ -844,7 +884,7 @@ impl<W: Write> Proxy<W> {
         // Without a server, a definition with no target is null, not a failure, and `shutdown` is null as LSP asks.
         let lifecycle = ["textDocument/definition", "shutdown"].contains(&method);
         let unserved = (lifecycle && self.server.is_none()).then_some(Value::Null);
-        self.table.nothing(method).or(unserved).map_or(Route::Forward, Route::Empty)
+        self.table.nothing(method).or(unserved).map_or(Route::Forward, Route::Answer)
     }
 
     /// A request of `TARGETED` that the proxy answers itself, by what its
@@ -873,12 +913,7 @@ impl<W: Write> Proxy<W> {
     /// Whether the proxy answers REQUEST itself on TARGET in the file at
     /// PATH, as `ANSWERED` says.
     fn claims(&self, request: &str, target: &navigation::Target, path: &Path) -> bool {
-        let place = match path.extension().and_then(|extension| extension.to_str()) {
-            Some("sql") => "sql",
-            Some("yml" | "yaml") => "yaml",
-            Some("py") => "python",
-            _ => return false,
-        };
+        let Some(place) = place(path) else { return false };
         let listed = |(answered, kind, places, alone): &&(&str, &str, &[&str], bool)| {
             let listed = self.table.lists(&format!("textDocument/{answered}"), *alone);
             *answered == request && *kind == target.kind() && places.contains(&place) && listed
@@ -1376,9 +1411,10 @@ impl<W: Write> Proxy<W> {
 
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
-    /// proxy must not cancel, the summary that a hover's answer gets; and
-    /// whether, once routed, it asks for a fresh index: a hover keeps the
-    /// index fresh, an inlay hint only makes one, and in `dbt` neither.
+    /// proxy must not cancel, the summary that a hover's answer gets, a
+    /// request that the shadow follows; and whether, once routed, it asks for
+    /// a fresh index: a hover keeps the index fresh, an inlay hint only makes
+    /// one, and in `dbt` neither; a shadowed request wants what `ours` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
@@ -1428,6 +1464,17 @@ impl<W: Write> Proxy<W> {
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 return (hints.map_or(Pending::Request, Pending::Hints), self.parsing.index.is_none());
             }
+            // Followed only once forwarded: one the proxy answers is no one's to compare, and `ours` forwards none.
+            ("textDocument/definition" | "textDocument/references", _) => {
+                let changes = self.changes;
+                let shadowed = self
+                    .shadow
+                    .as_ref()
+                    .filter(|_| self.table.mode(method) != Mode::Ours)
+                    .map(|_| Pending::Shadow { method: method.to_owned(), params: params.clone(), changes });
+                let fresh = shadowed.is_some();
+                return (shadowed.unwrap_or(Pending::Request), fresh);
+            }
             _ => Pending::Request,
         };
         (pending, false)
@@ -1443,7 +1490,7 @@ impl<W: Write> Proxy<W> {
         let (pending, fresh) = self.remember(method, id, params);
         match (self.route(method, params), &self.server, method) {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
-            (Route::Empty(nothing), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": nothing})),
+            (Route::Answer(result), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
             (Route::Forward, Some(_), _) => {
                 // dbt lsp adds to the proxy's part, but never holds it up.
                 let late = pending.alone(self.markdown).map(|_| (Instant::now() + MERGE_DEADLINE, method.to_owned()));
@@ -1538,14 +1585,91 @@ impl<W: Write> Proxy<W> {
             let mut message = message.clone();
             let encoding = message.pointer("/result/capabilities/positionEncoding").and_then(Value::as_str);
             self.encoding = Encoding::parse(encoding);
+            // The shadow follows the server that answered; its log is under the user's cache, if any.
+            self.shadow = self.settings.shadow.then(|| {
+                let log =
+                    config::cache_base().zip(self.root.as_ref()).map(|(base, root)| shadow::Log::open(&base, root));
+                shadow::Session::new(log)
+            });
             if let Some(capabilities) = message.pointer_mut("/result/capabilities").and_then(Value::as_object_mut) {
                 self.add_capabilities(capabilities);
             }
             self.send_client(&message);
             self.tell_settings();
+            self.shadow_line(&shadow::start(&message["result"]["serverInfo"], &self.table));
             return self.watch_runs();
         }
         self.send_client_body(body);
+        if let Some((_, Pending::Shadow { method, params, changes })) = pending {
+            self.compare(&method, &params, changes, message);
+        }
+    }
+
+    /// Compares dbt lsp's answer MESSAGE, which the client already has, to a
+    /// request that the shadow follows, METHOD with PARAMS after CHANGES
+    /// changes, with what the proxy answers there whatever the flag lists,
+    /// but for references outside the root, which it never answers; then
+    /// counts it and logs it.  A panic costs the comparison alone.
+    fn compare(&mut self, method: &str, params: &Value, changes: u64, message: &Value) {
+        let record = panic::catch_unwind(AssertUnwindSafe(|| {
+            let root = self.root.as_deref().unwrap_or(Path::new(""));
+            // Outside the root, each side may spell a file its own way.
+            let path_of = |uri: &str| {
+                let path = self.local_path(Some(uri))?;
+                Some(if path.starts_with(root) { path } else { fs::canonicalize(&path).unwrap_or(path) })
+            };
+            let file = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
+            let inside = file.as_deref().is_some_and(|file| file.starts_with(root));
+            let compared = match shadow::read(message, self.changes != changes, &path_of, &|path| path.is_file()) {
+                shadow::Answer::Apart(relation) => {
+                    shadow::Compared { relation, ours_only: Vec::new(), dbt_only: Vec::new(), both: 0 }
+                }
+                shadow::Answer::Locations(dbt) => {
+                    let ours = match method {
+                        "textDocument/references" if inside => self.on_references(params),
+                        "textDocument/references" => None,
+                        _ => self.on_definition(params),
+                    };
+                    shadow::compare(&shadow::locations(&ours.and_then(Result::ok).unwrap_or_default(), &path_of), &dbt)
+                }
+            };
+            let read = self.document_at(params);
+            let target = read.and_then(|(path, text, offset)| navigation::target_at(&path, &text, offset));
+            let relative = file.as_deref().and_then(|file| file.strip_prefix(root).ok());
+            let known = self.parsing.index.as_ref().zip(self.project()).zip(relative.zip(target.as_ref()));
+            let oracle = known.and_then(|((index, project), (relative, target))| {
+                shadow::oracle(index, &project, &relative.to_string_lossy(), target)
+            });
+            let parsing = &self.parsing;
+            let index = json!({"present": parsing.index.is_some(), "fresh": parsing.fresh,
+                               "running": parsing.running.is_some()});
+            shadow::Record {
+                method: method.trim_start_matches("textDocument/").to_owned(),
+                kind: target.as_ref().map_or("none", navigation::Target::kind),
+                place: file.as_deref().and_then(place).unwrap_or("other"),
+                target: target.as_ref().map_or(Value::Null, shadow::target),
+                file,
+                compared,
+                index,
+                oracle,
+            }
+        }));
+        let Ok(record) = record else { return };
+        let line = record.line(self.root.as_deref().unwrap_or(Path::new("")));
+        if let Some(shadow) = &mut self.shadow {
+            shadow.counts.add(&record);
+        }
+        self.shadow_line(&line);
+    }
+
+    /// Logs LINE in the shadow, if on; a log that cannot be written is said
+    /// once, out of the user's way, and the shadow goes on counting.
+    fn shadow_line(&mut self, line: &str) {
+        let failed = self.shadow.as_mut().and_then(|shadow| shadow.write(line));
+        if let (Some(text), false) = (failed, self.shutdown) {
+            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
+                                     "params": {"type": 2, "message": text}}));
+        }
     }
 
     /// The server's diagnostics of a file, BODY as it came: forwarded as
@@ -1997,6 +2121,10 @@ pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backen
     (proxy.never, proxy.settings) = (never, settings);
     proxy.parsing = parsing;
     proxy.serve(inbox);
+    // The shadow's last line: the session's counts.
+    if let Some(end) = proxy.shadow.as_ref().map(|shadow| shadow.counts.end()) {
+        proxy.shadow_line(&end);
+    }
     proxy.stop_parse();
     proxy.stop_server();
     if proxy.shutdown { ExitCode::SUCCESS } else { ExitCode::FAILURE }

@@ -75,12 +75,14 @@ static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// The user's settings: a mode per method of `METHODS`, and a default for
-/// them all.
+/// The user's settings: a mode per method of `METHODS`, a default for them
+/// all, and whether the shadow compares the proxy's definitions and
+/// references with dbt lsp's.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub modes: BTreeMap<String, Mode>,
     pub default: Option<Mode>,
+    pub shadow: bool,
 }
 
 impl Settings {
@@ -109,8 +111,8 @@ impl Settings {
 
     /// These settings with those of OPTIONS, an `initialize`'s
     /// `initializationOptions`, over them: its `dbtLspPlus` section's
-    /// `modes`, method by method, and its `defaultMode`; and the reason of
-    /// each refusal.  Null, at any level, is unset.
+    /// `modes`, method by method, its `defaultMode` and its `shadow`; and the
+    /// reason of each refusal.  Null, at any level, is unset.
     pub fn over(&self, options: &Value) -> (Settings, Vec<String>) {
         let mut settings = self.clone();
         let mut refused = Vec::new();
@@ -129,12 +131,16 @@ impl Settings {
             let set = mode.as_str().ok_or_else(|| "defaultMode is no string".to_owned());
             refused.extend(set.and_then(|mode| settings.set_default(mode)).err());
         }
-        let known = |key: &str| ["modes", "defaultMode"].contains(&key);
+        if let Some(shadow) = entries.get("shadow").filter(|shadow| !shadow.is_null()) {
+            let set = shadow.as_bool().map(|on| settings.shadow = on);
+            refused.extend(set.ok_or_else(|| "dbtLspPlus.shadow is no boolean".to_owned()).err());
+        }
+        let known = |key: &str| ["modes", "defaultMode", "shadow"].contains(&key);
         let unknown = entries.iter().filter(|(key, value)| !known(key) || (*key == "modes" && !value.is_object()));
         refused.extend(unknown.filter(|(_, value)| !value.is_null()).map(|(key, _)| match key.as_str() {
             "modes" => "dbtLspPlus.modes is no object".to_owned(),
             "backend" => "dbtLspPlus.backend is read from the command line only (--backend)".to_owned(),
-            key => format!("dbtLspPlus.{key} is not read: modes and defaultMode are"),
+            key => format!("dbtLspPlus.{key} is not read: modes, defaultMode and shadow are"),
         }));
         (settings, refused)
     }
@@ -178,8 +184,8 @@ const BACKENDS: [(&str, Backend); 2] = [("auto", Backend::Auto), ("never", Backe
 
 /// The proxy's command line, WORDS, after its name: its options, read from
 /// the first word for as long as one starts with `-` and is not `--`, each
-/// value the next word or after the first `=`; then the server command,
-/// `dbt lsp` when none.  Or why it cannot be read.
+/// value the next word or after the first `=`, `--shadow` with none; then
+/// the server command, `dbt lsp` when none.  Or why it cannot be read.
 pub fn arguments(words: &[String]) -> Result<Arguments, String> {
     let (mut settings, mut backend) = (Settings::default(), Backend::Auto);
     let mut rest = words.iter().peekable();
@@ -189,13 +195,25 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
         if let Some(help) = asked {
             return Ok(if help { Arguments::Help } else { Arguments::Version });
         }
-        let value = attached.or_else(|| rest.next().cloned()).ok_or(format!("{option} needs a value"))?;
-        let assigned = || value.split_once('=').ok_or(format!("--mode {value}: METHOD=MODE"));
-        let named = BACKENDS.iter().find(|(name, _)| *name == value).map(|(_, named)| *named);
+        // Read only by the options that take a value: `--shadow` takes none.
+        let mut value = || attached.clone().or_else(|| rest.next().cloned()).ok_or(format!("{option} needs a value"));
         let set = match option {
-            "--mode" => assigned().and_then(|(method, mode)| settings.set(method, mode)),
-            "--default-mode" => settings.set_default(&value),
-            "--backend" => named.map(|named| backend = named).ok_or(format!("{value} is no backend: auto or never")),
+            "--shadow" => attached.as_ref().map_or_else(
+                || {
+                    settings.shadow = true;
+                    Ok(())
+                },
+                |value| Err(format!("--shadow takes no value: {value}")),
+            ),
+            "--mode" => value().and_then(|value| {
+                let (method, mode) = value.split_once('=').ok_or(format!("--mode {value}: METHOD=MODE"))?;
+                settings.set(method, mode)
+            }),
+            "--default-mode" => value().and_then(|value| settings.set_default(&value)),
+            "--backend" => value().and_then(|value| {
+                let named = BACKENDS.iter().find(|(name, _)| *name == value).map(|(_, named)| *named);
+                named.map(|named| backend = named).ok_or(format!("{value} is no backend: auto or never"))
+            }),
             other => Err(format!("{other} is no option of dbt-lsp-plus")),
         };
         set?;
@@ -394,6 +412,28 @@ mod tests {
         {
             assert!(arguments(&words(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_shadow_is_an_option_without_a_value_and_a_boolean_setting() {
+        let run = |words: &[&str]| match arguments(&super::tests::words(words)) {
+            Ok(Arguments::Run { settings, command, .. }) => (settings.shadow, command),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(run(&["--shadow", "dbt", "lsp"]), (true, words(&["dbt", "lsp"])), "it takes no word after it");
+        assert!(run(&["--mode", "textDocument/hover=dbt", "--shadow"]).0);
+        assert!(!run(&[]).0, "off by default");
+        assert!(arguments(&words(&["--shadow=yes"])).unwrap_err().contains("no value"));
+        let on = |options: Value| Settings::default().over(&options);
+        assert_eq!(
+            on(json!({"dbtLspPlus": {"shadow": true}})),
+            (Settings { shadow: true, ..Settings::default() }, vec![])
+        );
+        let command_line = Settings { shadow: true, ..Settings::default() };
+        assert!(!command_line.over(&json!({"dbtLspPlus": {"shadow": false}})).0.shadow, "over the command line");
+        assert!(command_line.over(&json!({"dbtLspPlus": {"shadow": null}})).0.shadow, "null is unset");
+        let (kept, refused) = on(json!({"dbtLspPlus": {"shadow": "yes"}}));
+        assert_eq!((kept.shadow, refused), (false, vec!["dbtLspPlus.shadow is no boolean".to_owned()]));
     }
 
     #[test]

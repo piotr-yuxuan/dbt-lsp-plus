@@ -6,6 +6,8 @@
 mod conformance;
 #[path = "proxy/live.rs"]
 mod live;
+#[path = "proxy/shadow.rs"]
+mod shadow;
 mod support;
 
 use serde_json::{Value, json};
