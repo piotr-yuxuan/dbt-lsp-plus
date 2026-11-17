@@ -532,13 +532,17 @@ impl<W: Write> Proxy<W> {
         };
         self.table = modes::Table::new(&self.settings, &announced, self.standalone);
         // A method the proxy answers is announced; one left to the server, as the server announced it,
-        // and with no backend announced, its answer nothing.
-        for (capability, methods) in ADDED {
-            let mine = self.table.mode(methods[0]) != Mode::Dbt;
-            if (mine || self.standalone) && lacks(capabilities, capability) {
-                capabilities.insert(capability.to_owned(), json!(true));
+        // and with no backend, not at all.
+        for (capability, methods) in ADDED.iter().filter(|(_, methods)| self.table.mode(methods[0]) != Mode::Dbt) {
+            if lacks(capabilities, capability) {
+                capabilities.insert((*capability).to_owned(), json!(true));
             }
-            self.owned.extend(methods.iter().filter(|_| mine));
+            self.owned.extend(*methods);
+        }
+        let unanswered =
+            PROVIDERS.iter().filter(|(_, method, _)| self.standalone && self.table.mode(method) == Mode::Dbt);
+        for (capability, ..) in unanswered {
+            capabilities.remove(*capability);
         }
         for (capability, method, owned) in
             PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Ours)

@@ -3050,6 +3050,7 @@ fn with_no_backend_a_method_left_to_dbt_gets_nothing_and_is_said_once() {
     let options = ["--backend", "never", "--mode", "textDocument/references=dbt"];
     let (mut session, _) = with_options("mode-no-backend", json!({}), &options);
     let result = session.initialize(&fixture());
+    assert!(result["capabilities"].get("referencesProvider").is_none(), "not announced alone (plan 020)");
     assert!(result["capabilities"]["experimental"]["dbtLspPlus"].get("references").is_none(), "{result}");
     let warning = session.wait_for(|m| m["method"] == "window/showMessage");
     assert!(warning["params"]["message"].as_str().unwrap().contains("textDocument/references"), "{warning}");
@@ -3214,7 +3215,9 @@ fn with_no_backend_every_method_left_to_dbt_gets_nothing() {
     let (mut session, _) = with_options("mode-every-none", json!({}), &["--backend", "never", "--default-mode", "dbt"]);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], json!({"version": 2}), "no row");
-    assert_eq!(result["capabilities"]["documentSymbolProvider"], true, "announced, its answer nothing");
+    let announced =
+        ["documentSymbolProvider", "hoverProvider", "referencesProvider"].map(|c| result["capabilities"].get(c));
+    assert_eq!(announced, [None, None, None], "no backend answers them (plan 020)");
     for (method, params) in requests_of_every_mode() {
         let answer = session.request(method, params);
         assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing(method)), "{method}");
