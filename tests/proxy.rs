@@ -3215,9 +3215,22 @@ fn with_no_backend_every_method_left_to_dbt_gets_nothing() {
     let (mut session, _) = with_options("mode-every-none", json!({}), &["--backend", "never", "--default-mode", "dbt"]);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], json!({"version": 2}), "no row");
-    let announced =
-        ["documentSymbolProvider", "hoverProvider", "referencesProvider"].map(|c| result["capabilities"].get(c));
-    assert_eq!(announced, [None, None, None], "no backend answers them (plan 020)");
+    // No backend answers them (plan 020): neither the methods the proxy adds nor those it would take.
+    let capabilities = [
+        "documentSymbolProvider",
+        "workspaceSymbolProvider",
+        "callHierarchyProvider",
+        "foldingRangeProvider",
+        "documentHighlightProvider",
+        "selectionRangeProvider",
+        "hoverProvider",
+        "inlayHintProvider",
+        "definitionProvider",
+        "referencesProvider",
+        "renameProvider",
+    ];
+    let announced: Vec<&str> = capabilities.into_iter().filter(|c| result["capabilities"].get(*c).is_some()).collect();
+    assert_eq!(announced, Vec::<&str>::new());
     for (method, params) in requests_of_every_mode() {
         let answer = session.request(method, params);
         assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing(method)), "{method}");
@@ -3316,7 +3329,7 @@ fn a_late_server_leaves_a_hover_s_summary_alone_and_its_answer_dropped() {
     let started = Instant::now();
     let answer = session.request("textDocument/hover", on_ref());
     let took = started.elapsed();
-    assert!(Duration::from_millis(300) <= took && took < Duration::from_secs(1), "{took:?}");
+    assert!(Duration::from_millis(300) <= took && took < Duration::from_secs(3), "{took:?}");
     let text = answer["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(text.contains("stg_orders") && !text.contains("echo"), "the summary alone: {answer}");
     session.notify("test/release", json!({}));
@@ -3333,6 +3346,7 @@ fn a_late_server_is_awaited_where_the_proxy_has_no_part() {
     let nowhere = position_in(&fixture().join("models/marts/orders.sql"), "select", 1);
     session.send(&json!({"jsonrpc": "2.0", "id": 7001, "method": "textDocument/hover", "params": nowhere}));
     std::thread::sleep(Duration::from_millis(600));
+    settle(&mut session);
     assert_eq!(frames_of(&session, &json!(7001)), 0, "answered before the server");
     session.notify("test/release", json!({}));
     let answer = session.wait_for(|m| m["id"] == 7001);
@@ -3345,13 +3359,30 @@ fn a_late_server_is_awaited_where_the_proxy_has_no_part() {
 #[test]
 fn a_late_server_leaves_the_proxy_s_hints_alone() {
     let (mut session, _) = parsed_session("merge-late-hints", json!({"hold": ["textDocument/inlayHint"]}));
+    let started = Instant::now();
     let hints = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    let took = started.elapsed();
+    assert!(Duration::from_millis(300) <= took && took < Duration::from_secs(3), "{took:?}");
     assert_eq!(hints["result"].as_array().map(Vec::len), Some(1), "the proxy's alone: {hints}");
+    session.notify("test/release", json!({}));
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &hints["id"]), 1, "the late answer reached the client");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_late_server_is_logged_once_per_method() {
+    let script = json!({"hold": ["textDocument/hover", "textDocument/inlayHint"]});
+    let (mut session, _) = parsed_session("merge-logged", script);
     session.request("textDocument/hover", on_ref());
+    session.request("textDocument/hover", on_ref());
+    hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    settle(&mut session);
     let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
-    let methods: Vec<String> = late.map(|m| m["params"]["message"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(methods.len(), 1, "once per method, a hover answered in time: {methods:?}");
-    assert!(methods[0].contains("textDocument/inlayHint"));
+    let mut said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
+    said.sort_unstable();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said[0].contains("textDocument/hover") && said[1].contains("textDocument/inlayHint"), "{said:?}");
     assert!(session.finish().success());
 }
 

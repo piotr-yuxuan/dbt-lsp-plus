@@ -992,6 +992,15 @@ fails with -32803.
 - A client that reuses the id of a listing the proxy abandoned after two
   minutes gets the server's late answer to that listing.  Only a client
   whose ids start with `dbt-lsp-plus/` can.
+- A client that reuses the id of a request the proxy answered at its
+  deadline, before dbt lsp's late answer comes, gets that late answer for
+  its new request, and dbt lsp gets two requests under one id; no client
+  is known to reuse an id.  A request answered at its deadline stays
+  recorded until dbt lsp answers it or exits, a hung dbt lsp keeping one
+  record per such request.
+- The deadline holds while a server runs: between restarts and after the
+  give-up, a hover or hints with a part of the proxy's fail with -32803,
+  as every request that would go to the server (plan 019's backend).
 - Once the server has listed the graph, an unsaved edit of a `ref` in a node
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the
