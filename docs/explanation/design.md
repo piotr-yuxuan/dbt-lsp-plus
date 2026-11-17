@@ -173,11 +173,12 @@ resolved path.
   - Measured on synthetic projects (`scripts/bench/`) of 3,000 and 6,000
     models with 15 YAML columns each (12.8 and 22.8 MB), on tmpfs, in a
     release build: a workspace symbol, definition, references, rename or
-    call hierarchy request answers in 14 to 22 ms and 30 to 36 ms with
-    nothing changed, and within 0.17 and 0.25 s as the first request
-    after the save of a model, of the largest properties file or of
-    `dbt_project.yml`.  Each took 0.3 to 1.7 s without the cache.  The
-    proxy then holds 68 and 117 MB.
+    call hierarchy request answers in 15 to 23 ms and 30 to 40 ms with
+    nothing changed, but the references of a macro that every model
+    calls (see "Known limitations"), and within 0.20 and 0.31 s as the
+    first request after the save of a model, of the largest properties
+    file or of `dbt_project.yml`.  Each took 0.3 to 1.7 s without the
+    cache.  The proxy then holds 79 and 142 MB.
 - The graph: once the server has listed the graph, the dependencies of each
   node it listed are its own, since only dbt resolves `ref(var('x'))`; until
   then, and for the nodes it did not list, they come from the scan.  The
@@ -942,13 +943,17 @@ fails with -32803.
   metadata is the same.  The next change of the file shows it.
 - Each request that needs the project walks it, reads the metadata of
   every file and each package's `dbt_project.yml`: most of the 30 to
-  36 ms at 6,000 models.
+  40 ms at 6,000 models.
+- The references of a macro that each of 6,000 synthetic models calls,
+  6,001 locations and 1.5 MB of JSON, take about 86 ms: the walk above,
+  about 25 ms to find and place them, and the rest to encode the answer
+  and for the client to read it.  At 3,000 models, 41 ms.
 - A request that comes while the first read of every file is under way
   reads them all itself, beside that read: 0.4 to 0.55 s and 0.72 to
   1.06 s on 3,000 and 6,000 synthetic models, where a scan of its own
   took 0.30 and 0.53 s without the cache, which derived less.  The proxy
-  then holds up to 91 and 162 MB.  Once that read is done, the first
-  request takes 36 and 72 ms.
+  then holds up to 115 and 208 MB.  Once that read is done, the first
+  request takes 36 and 77 ms.
 - A file that cannot be read, for its permissions or an error of the
   file system, makes each request that needs the project assemble it
   again: about 35 ms more at 6,000 models, and the call hierarchy's graph
