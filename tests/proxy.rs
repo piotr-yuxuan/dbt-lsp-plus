@@ -2899,7 +2899,8 @@ fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_the_server_s_with_dbt_lsp() 
             assert_eq!(found["result"], location(&project, "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
             let files: Vec<&str> =
                 used["result"].as_array().unwrap().iter().map(|l| l["uri"].as_str().unwrap()).collect();
-            assert!(files.contains(&uri(&project.join("models/marts/py_orders.py")).as_str()), "{used}");
+            let uses = ["models/marts/orders.sql", "models/marts/py_orders.py", "snapshots/orders_snapshot.sql"];
+            assert_eq!(files, uses.map(|file| uri(&project.join(file))), "{used}");
         } else {
             assert_eq!(found["result"], json!({"echo": "textDocument/definition", "params": on_ref}));
             assert_eq!(used["result"], json!({"echo": "textDocument/references", "params": params}));

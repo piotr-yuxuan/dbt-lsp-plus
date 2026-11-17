@@ -30,8 +30,8 @@ pub enum Target {
 
 impl Target {
     /// The kind of this target in `experimental.dbtLspPlus`: `source`, `ref`
-    /// (a unit test's `model:` too), `macro`, `doc`, `test`, or `entry`, the
-    /// `name:` of an entry.
+    /// (a unit test's `model:` too), `macro`, `function`, `doc`, `test`, or
+    /// `entry`, the `name:` of an entry, a function's included.
     pub fn kind(&self) -> &'static str {
         match self {
             Target::Source(_) => "source",
@@ -796,20 +796,26 @@ models:
                 "snapshots/_s.yml",
                 "snapshots:\n  - name: other\n    relation: ref('x')\n  - name: ys\n    relation: ref('x')\n",
             ),
+            ("snapshots/old.sql", "{% snapshot old %}\nselect 1\n{% endsnapshot %}\n"),
         ];
         let root = scratch_project("navigation-yaml-snapshot", &files);
         let project = project::scan(&root, &HashMap::new()).unwrap();
-        let ys = Target::Call(scan::Target::Ref { package: None, name: "ys".into(), version: None });
-        let at = |lookup: &Lookup| -> Vec<(String, String)> {
-            let found = resolve(lookup, &root.join("models/c.sql"), &ys);
+        let named = |name: &str| Target::Call(scan::Target::Ref { package: None, name: name.into(), version: None });
+        let at = |lookup: &Lookup, name: &str| -> Vec<(String, String)> {
+            let found = resolve(lookup, &root.join("models/c.sql"), &named(name));
             found.iter().map(|f| (f.id.clone(), project.text(&f.path).unwrap()[f.range.clone()].to_owned())).collect()
         };
-        let expected = [("snapshot.shop.ys".to_owned(), "ys".to_owned())];
-        assert_eq!(at(&Lookup::new(&project, None)), expected);
-        let node = json!({"unique_id": "snapshot.shop.ys", "name": "ys", "resource_type": "snapshot",
-                          "package_name": "shop", "original_file_path": "snapshots/_s.yml"});
-        let index = Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {"snapshot.shop.ys": node}}));
-        assert_eq!(at(&Lookup::new(&project, Some(&index))), expected, "its name, not its file's start");
+        let expected = |name: &str| vec![(format!("snapshot.shop.{name}"), name.to_owned())];
+        assert_eq!(at(&Lookup::new(&project, None), "ys"), expected("ys"));
+        let node = |name: &str, file: &str| {
+            json!({"unique_id": format!("snapshot.shop.{name}"), "name": name, "resource_type": "snapshot",
+                   "package_name": "shop", "original_file_path": file})
+        };
+        let nodes = json!({"snapshot.shop.ys": node("ys", "snapshots/_s.yml"), "snapshot.shop.old": node("old", "snapshots/old.sql")});
+        let index = Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": nodes}));
+        let parsed = Lookup::new(&project, Some(&index));
+        assert_eq!(at(&parsed, "ys"), expected("ys"), "its name, not its file's start");
+        assert_eq!(at(&parsed, "old"), expected("old"), "a snapshot's block at its name, as before the parse");
         std::fs::remove_dir_all(root).unwrap();
     }
 

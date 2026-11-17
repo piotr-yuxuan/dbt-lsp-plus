@@ -227,16 +227,18 @@ pub struct Versioned {
 /// that names its file, as dbt finds them (a version's `defined_in`, else
 /// `<name>_v<N>`, and for the latest without one, `<name>` too unless a
 /// `defined_in` names it), else ENTITY itself.  The latest is the
-/// `latest_version`, else the highest version: two numbers compare as
-/// numbers, anything else as text.  A decision on the files already read,
-/// so that the versions of a package are linked once all are.
+/// `latest_version`, else the highest version: as numbers when all are
+/// numbers, else all as text.  A decision on the files already read, so
+/// that the versions of a package are linked once all are.
 pub fn versions_of(entity: Entity, declared: &[&Versioned]) -> Vec<Entity> {
-    let order = |one: &&String, other: &&String| match (one.parse::<f64>(), other.parse::<f64>()) {
-        (Ok(one), Ok(other)) => one.total_cmp(&other),
-        _ => one.cmp(other),
-    };
+    let number = |version: &String| version.parse::<f64>().ok().filter(|number| number.is_finite());
     let mut found = Vec::new();
     for model in declared.iter().filter(|_| entity.resource_type == "model") {
+        let numbers = model.versions.iter().all(|(version, _)| number(version).is_some());
+        let order = |one: &&String, other: &&String| match numbers {
+            true => number(one).unwrap_or_default().total_cmp(&number(other).unwrap_or_default()),
+            false => one.cmp(other),
+        };
         let latest = model.latest.as_ref().or_else(|| model.versions.iter().map(|(version, _)| version).max_by(order));
         let named = model.versions.iter().any(|(_, defined_in)| defined_in.as_ref() == Some(&model.name));
         for (version, defined_in) in &model.versions {
@@ -569,11 +571,17 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
         }
         project.files.insert(file.path.clone(), scanned);
     }
-    // The versions of each package, once all its properties files are read.
+    // The versions of each package, once all its properties files are read; a model that two files
+    // declare, which dbt rejects, by the first.
     let mut declared: HashMap<&str, Vec<&Versioned>> = HashMap::new();
     for file in &listing.found {
         let versions = project.files.get(&file.path).map_or(&[][..], |scanned| scanned.versions.as_slice());
-        declared.entry(packages[file.package].0.as_str()).or_default().extend(versions);
+        let known = declared.entry(packages[file.package].0.as_str()).or_default();
+        for versioned in versions {
+            if known.iter().all(|other| other.name != versioned.name) {
+                known.push(versioned);
+            }
+        }
     }
     let entities = std::mem::take(&mut project.entities).into_iter();
     let of = |entity: Entity| {
@@ -744,6 +752,10 @@ mod tests {
             at("model.shared.s_m", "models/s_m.sql"),
         ];
         assert_eq!(ids("proj"), expected);
+        let project = scan(&dir.join("proj"), &HashMap::new()).unwrap();
+        let graph = crate::graph::Graph::scanned(&project);
+        let edges: Vec<(&str, &str)> = graph.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect();
+        assert_eq!(edges, [("model.r.c", "model.shared.s_m")], "as dbt resolves it once installed");
         let deps = scan(&dir.join("deps"), &HashMap::new()).unwrap();
         assert_eq!(deps.packages["shared"], dir.join("deps/dbt_packages/shared"), "the installed one, once");
         assert_eq!(ids("deps").len(), 1);
@@ -897,12 +909,19 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_version_is_the_highest_two_numbers_compared_as_numbers() {
-        // As both builds order them.
-        for (versions, latest) in
-            [(["9", "10"], "10"), (["alpha", "beta"], "beta"), (["2", "alpha"], "alpha"), (["10", "9a"], "9a")]
-        {
-            let ordered = declared("a", None, &[(versions[0], None), (versions[1], None)]);
+    fn the_latest_version_is_the_highest_as_numbers_when_all_are_else_as_text() {
+        // As both builds order them, whatever the order of the list.
+        let cases: [(&[&str], &str); 6] = [
+            (&["9", "10"], "10"),
+            (&["alpha", "beta"], "beta"),
+            (&["2", "alpha"], "alpha"),
+            (&["10", "9a"], "9a"),
+            (&["2", "10", "1a"], "2"),
+            (&["1a", "10", "2"], "2"),
+        ];
+        for (versions, latest) in cases {
+            let listed: Vec<(&str, Option<&str>)> = versions.iter().map(|version| (*version, None)).collect();
+            let ordered = declared("a", None, &listed);
             let expected = vec![(format!("model.r.a.v{latest}"), true)];
             assert_eq!(version_ids(&format!("a_v{latest}"), &ordered), expected, "{versions:?}");
         }
@@ -925,6 +944,8 @@ mod tests {
                 "dbt_packages/pa/models/_m.yml",
                 "models:\n  - name: m\n    latest_version: 3\n    versions:\n      - v: 3\n",
             ),
+            // A second declaration, which dbt rejects, makes no second entity.
+            ("models/zz_again.yml", "models:\n  - name: m\n    versions:\n      - v: 1\n      - v: 2\n"),
         ];
         let root = scratch_project("project-versions", &files);
         let project = scan(&root, &HashMap::new()).unwrap();

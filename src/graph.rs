@@ -151,8 +151,8 @@ impl Graph {
                 project.packages.get(&node.package).or_else(|| project.packages.get(&project.root_package));
             let path = package_dir.map_or_else(PathBuf::new, |dir| dir.join(&node.original_file_path));
             let resource_type = node.resource_type.clone();
-            // A version, which the listing names as its model, is shown as its id ends: `orders.v2`.
-            let own = node.id.strip_prefix(&format!("{resource_type}.{}.", node.package));
+            // A model's version, which the listing names as its model, is shown as its id ends: `orders.v2`.
+            let own = node.id.strip_prefix(&format!("model.{}.", node.package)).filter(|_| resource_type == "model");
             let version = own.filter(|shown| shown.starts_with(&format!("{}.v", node.name)));
             let item = Item {
                 id: node.id.clone(),
