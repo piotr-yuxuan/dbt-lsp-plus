@@ -267,12 +267,7 @@ impl<'a> Lookup<'a> {
                 Some(version) => text(&node["version"]).as_deref() == Some(version),
                 None => node["latest_version"].is_null() || node["version"] == node["latest_version"],
             };
-            index
-                .resources(package, name)
-                .into_iter()
-                .filter(named)
-                .filter_map(|node| parsed_at(self.project, node))
-                .collect()
+            index.resources(package, name).into_iter().filter(named).filter_map(|node| self.parsed_at(node)).collect()
         };
         let in_package = |package: &str| -> Vec<Found> {
             match target {
@@ -315,13 +310,17 @@ impl<'a> Lookup<'a> {
         };
         steps.iter().map(in_step).find(|found| !found.is_empty()).unwrap_or_default()
     }
-}
 
-/// Where the node of the last parse NODE leads in PROJECT: its file's start.
-fn parsed_at(project: &Project, node: &Value) -> Option<Found> {
-    let (id, file) = (node["unique_id"].as_str()?, node["original_file_path"].as_str()?);
-    let dir = project.packages.get(node["package_name"].as_str()?)?;
-    Some(Found { id: id.to_owned(), path: dir.join(file), range: 0..0 })
+    /// Where the node of the last parse NODE leads: its name where the scan
+    /// holds its id in its file, as a snapshot declared in a properties
+    /// file, else its file's start, as dbt lsp answers a `ref`.
+    fn parsed_at(&self, node: &Value) -> Option<Found> {
+        let (id, file) = (node["unique_id"].as_str()?, node["original_file_path"].as_str()?);
+        let path = self.project.packages.get(node["package_name"].as_str()?)?.join(file);
+        let scanned = self.by_id.get(id).into_iter().flatten().find(|entity| entity.path == path);
+        let range = scanned.map_or(0..0, |entity| entity.name_range.clone());
+        Some(Found { id: id.to_owned(), path, range })
+    }
 }
 
 /// What TARGET, named in the file at PATH, leads to by LOOKUP, dbt 2.0.9's:
@@ -380,7 +379,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
     let resource = ["model", "seed", "snapshot"].contains(&resource_type) && package.is_none();
     let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, name));
     let typed = nodes.into_iter().filter(|node| node["resource_type"] == resource_type);
-    let mut parsed: Vec<Found> = typed.filter_map(|node| parsed_at(project, node)).collect();
+    let mut parsed: Vec<Found> = typed.filter_map(|node| lookup.parsed_at(node)).collect();
     if parsed.is_empty() {
         return first_step(found.collect(), &steps, false);
     }
@@ -764,6 +763,33 @@ models:
         let root = scratch_project("navigation-functions-flag", &flagged.each_ref().map(|(p, t)| (*p, t.as_str())));
         assert_eq!(ids(&root, pm, function(None, "f")), ["function.r.f"]);
         assert_eq!(ids(&root, pm, function(None, "g")), ["function.pa.g"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_snapshot_declared_in_yaml_leads_to_its_name_before_and_after_a_parse() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/x.sql", "select 1 as id"),
+            ("models/c.sql", "select * from {{ ref('ys') }}"),
+            (
+                "snapshots/_s.yml",
+                "snapshots:\n  - name: other\n    relation: ref('x')\n  - name: ys\n    relation: ref('x')\n",
+            ),
+        ];
+        let root = scratch_project("navigation-yaml-snapshot", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        let ys = Target::Call(scan::Target::Ref { package: None, name: "ys".into(), version: None });
+        let at = |lookup: &Lookup| -> Vec<(String, String)> {
+            let found = resolve(lookup, &root.join("models/c.sql"), &ys);
+            found.iter().map(|f| (f.id.clone(), project.text(&f.path).unwrap()[f.range.clone()].to_owned())).collect()
+        };
+        let expected = [("snapshot.shop.ys".to_owned(), "ys".to_owned())];
+        assert_eq!(at(&Lookup::new(&project, None)), expected);
+        let node = json!({"unique_id": "snapshot.shop.ys", "name": "ys", "resource_type": "snapshot",
+                          "package_name": "shop", "original_file_path": "snapshots/_s.yml"});
+        let index = Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {"snapshot.shop.ys": node}}));
+        assert_eq!(at(&Lookup::new(&project, Some(&index))), expected, "its name, not its file's start");
         std::fs::remove_dir_all(root).unwrap();
     }
 

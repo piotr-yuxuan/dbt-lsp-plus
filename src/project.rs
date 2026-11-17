@@ -69,6 +69,10 @@ pub struct Scanned {
     pub models: Vec<(String, Range<usize>)>,
     /// The generic tests that a properties file names.
     pub tests: Vec<Test>,
+    /// The snapshots that a properties file declares: each entry of
+    /// `snapshots:` with a `relation:`, and that relation as written.  One
+    /// without patches a snapshot of SQL, or names nothing.
+    pub snapshots: Vec<(Entry, Range<usize>)>,
 }
 
 impl Scanned {
@@ -90,9 +94,22 @@ impl Scanned {
         let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
         let resource =
             |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
+        let entries: Vec<Entry> = properties::entries_in(&text, &root, false).into_iter().filter(resource).collect();
+        let index = LineIndex::new(&text);
+        let relation = |item: &Node| {
+            Some((written(&text, &index, item.get("name")?)?.1, written(&text, &index, item.get("relation")?)?.1))
+        };
+        let relations: Vec<_> =
+            root.get("snapshots").map_or(&[][..], Node::items).iter().filter_map(relation).collect();
+        let declared = |entry: &Entry| {
+            let (_, relation) =
+                relations.iter().find(|(name, _)| entry.label == "snapshot" && *name == entry.name_range)?;
+            Some((entry.clone(), relation.clone()))
+        };
         Scanned {
             tables: source_tables_in("", path, &text, &root),
-            entries: properties::entries_in(&text, &root, false).into_iter().filter(resource).collect(),
+            snapshots: entries.iter().filter_map(declared).collect(),
+            entries,
             models: unit_test_models(&text, &root),
             tests: properties::tests_in(&text, &root),
             calls,
@@ -441,6 +458,25 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
                 let tables: Vec<SourceTable> = scanned.tables.iter().map(package).collect();
                 project.entities.extend(tables.iter().map(Entity::from));
                 project.sources.extend(tables);
+                let within = |range: &Range<usize>| {
+                    let calls = scanned
+                        .calls
+                        .iter()
+                        .filter(|call| range.start <= call.range.start && call.range.end <= range.end);
+                    calls.cloned().collect()
+                };
+                let snapshot = |(entry, relation): &(Entry, Range<usize>)| Entity {
+                    id: format!("snapshot.{name}.{}", entry.name),
+                    name: entry.name.clone(),
+                    resource_type: "snapshot",
+                    package: name.clone(),
+                    path: file.path.clone(),
+                    // From its first line's start, so that a request at its `name:` line's start is inside.
+                    range: scanned.text[..entry.range.start].rfind('\n').map_or(0, |at| at + 1)..entry.range.end,
+                    name_range: entry.name_range.clone(),
+                    calls: within(relation),
+                };
+                project.entities.extend(scanned.snapshots.iter().map(snapshot));
             }
             Some(layout) => project.entities.extend(file_entities(name, &LAYOUT[layout], &file.path, &scanned)),
             None => {}
@@ -652,6 +688,52 @@ mod tests {
         assert_eq!(targets, [&reference, &source]);
         assert_eq!(ids("udfs").0, ["function.u.d"], "the configured paths only");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_snapshots_entry_with_a_relation_is_a_snapshot_of_its_properties_file() {
+        let snapshots = "snapshots:\n  - name: old\n    description: patches the SQL one\n  - name: orphan\n\
+                         \x20   description: names nothing\n  - name: ys\n    relation: ref('x')\n    columns:\n\
+                         \x20     - name: id\n        data_tests:\n          - relationships:\n\
+                         \x20             arguments:\n                to: ref('y')\n                field: id\n";
+        let sources = "sources:\n  - name: s\n    tables:\n      - name: t\nsnapshots:\n  - name: in_models\n\
+                       \x20   relation: source('s', 't')\n";
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/x.sql", "select 1 as id"),
+            ("models/y.sql", "select 1 as id"),
+            ("models/_src.yml", sources),
+            ("snapshots/old.sql", "{% snapshot old %}\nselect * from {{ ref('x') }}\n{% endsnapshot %}\n"),
+            ("snapshots/_s.yml", snapshots),
+        ];
+        let root = scratch_project("project-yaml-snapshots", &files);
+        let project = scan(&root, &HashMap::new()).unwrap();
+        let snapshot = |id: &str| project.entities.iter().find(|e| e.id == id).unwrap();
+        let mut found: Vec<(&str, &Path)> = project
+            .entities
+            .iter()
+            .filter(|e| e.resource_type == "snapshot")
+            .map(|e| (e.id.as_str(), e.path.strip_prefix(&root).unwrap()))
+            .collect();
+        found.sort();
+        // As both builds parse them: one `old`, at its SQL; no `orphan`; each relation's at its properties file.
+        let expected = [
+            ("snapshot.shop.in_models", Path::new("models/_src.yml")),
+            ("snapshot.shop.old", Path::new("snapshots/old.sql")),
+            ("snapshot.shop.ys", Path::new("snapshots/_s.yml")),
+        ];
+        assert_eq!(found, expected);
+        let ys = snapshot("snapshot.shop.ys");
+        let targets: Vec<&scan::Target> = ys.calls.iter().map(|call| &call.target).collect();
+        let x = scan::Target::Ref { package: None, name: "x".into(), version: None };
+        assert_eq!(targets, [&x], "its relation's, not its column test's");
+        assert_eq!(&snapshots[ys.name_range.clone()], "ys");
+        assert!(snapshots[ys.range.clone()].starts_with("  - name: ys\n"), "from its first line's start");
+        assert!(snapshots[ys.range.clone()].trim_end().ends_with("field: id"));
+        let in_models = snapshot("snapshot.shop.in_models");
+        let source = scan::Target::Source { source: "s".into(), table: "t".into() };
+        assert_eq!(in_models.calls.iter().map(|call| &call.target).collect::<Vec<_>>(), [&source]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
