@@ -158,39 +158,47 @@ impl From<&SourceTable> for Entity {
 }
 
 /// A kind of resource directory: its key in `dbt_project.yml` and dbt's
-/// default, the resource each file of an extension is, and the blocks it
-/// holds as (block, extension, resource type, prefix of the name in the id).
+/// default, the resource each file of an extension is, as (extension,
+/// resource type), and the blocks it holds as (block, extension, resource
+/// type, prefix of the name in the id).
 struct Layout {
     key: &'static str,
     default: &'static str,
-    file: Option<(&'static str, &'static str)>,
+    files: &'static [(&'static str, &'static str)],
     blocks: &'static [(Kind, &'static str, &'static str, &'static str)],
 }
 
 const DOCS: (Kind, &str, &str, &str) = (Kind::Docs, "md", "doc", "");
 const GENERIC_TEST: (Kind, &str, &str, &str) = (Kind::Test, "sql", "macro", "test_");
 
-const LAYOUT: [Layout; 6] = [
-    Layout { key: "model-paths", default: "models", file: Some(("sql", "model")), blocks: &[DOCS] },
-    Layout { key: "seed-paths", default: "seeds", file: Some(("csv", "seed")), blocks: &[DOCS] },
+const LAYOUT: [Layout; 7] = [
+    Layout { key: "model-paths", default: "models", files: &[("sql", "model"), ("py", "model")], blocks: &[DOCS] },
+    Layout { key: "seed-paths", default: "seeds", files: &[("csv", "seed")], blocks: &[DOCS] },
     Layout {
         key: "snapshot-paths",
         default: "snapshots",
-        file: None,
+        files: &[],
         blocks: &[(Kind::Snapshot, "sql", "snapshot", ""), DOCS],
     },
-    Layout { key: "analysis-paths", default: "analyses", file: Some(("sql", "analysis")), blocks: &[DOCS] },
+    Layout { key: "analysis-paths", default: "analyses", files: &[("sql", "analysis")], blocks: &[DOCS] },
     // A file of generic tests is no singular test: see `file_entities`.
-    Layout { key: "test-paths", default: "tests", file: Some(("sql", "test")), blocks: &[GENERIC_TEST, DOCS] },
+    Layout { key: "test-paths", default: "tests", files: &[("sql", "test")], blocks: &[GENERIC_TEST, DOCS] },
     Layout {
         key: "macro-paths",
         default: "macros",
-        file: None,
+        files: &[],
         blocks: &[(Kind::Macro, "sql", "macro", ""), GENERIC_TEST, DOCS],
+    },
+    // Each file is a function, with or without its `functions:` entry.
+    Layout {
+        key: "function-paths",
+        default: "functions",
+        files: &[("sql", "function"), ("py", "function")],
+        blocks: &[],
     },
 ];
 
-/// The entities of one file of SQL, Markdown or CSV of PACKAGE, found in a
+/// The entities of one file of SQL, Python, Markdown or CSV of PACKAGE, found in a
 /// directory of LAYOUT, from what its text gives, SCANNED.
 fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned) -> Vec<Entity> {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
@@ -218,8 +226,7 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
             found.push(entity(resource_type, id, &block.name, block.range.clone(), block.name_range.clone()));
         }
     }
-    if let Some((ext, resource_type)) = layout.file
-        && ext == extension
+    if let Some((_, resource_type)) = layout.files.iter().find(|(ext, _)| *ext == extension)
         && found.iter().all(|e| e.resource_type == "doc")
     {
         let whole = 0..scanned.text.len();
@@ -596,6 +603,43 @@ mod tests {
         assert_eq!(deps.packages["shared"], dir.join("deps/dbt_packages/shared"), "the installed one, once");
         assert_eq!(ids("deps").len(), 1);
         assert_eq!(ids("tab"), Vec::new(), "a packages file dbt-lsp-plus cannot read names none");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn python_models_and_functions_are_resources() {
+        let entry = "functions:\n  - name: f\n    returns:\n      data_type: integer\n";
+        let python = "def model(dbt, session):\n    a = dbt.ref('x')\n    b = dbt.source('s', 't')\n    return a\n";
+        let files = [
+            ("shop/dbt_project.yml", "name: shop\n"),
+            ("shop/models/x.sql", "select 1 as id"),
+            ("shop/models/py_m.py", python),
+            ("shop/functions/f.sql", "x * 2"),
+            ("shop/functions/_f.yml", entry),
+            ("shop/functions/sub/g.py", "def main(x):\n    return x\n"),
+            ("shop/dbt_packages/pa/dbt_project.yml", "name: pa\n"),
+            ("shop/dbt_packages/pa/functions/pf.sql", "x + 1"),
+            ("udfs/dbt_project.yml", "name: u\nfunction-paths: ['udfs']\n"),
+            ("udfs/udfs/d.sql", "x * 2"),
+            ("udfs/functions/not_one.sql", "x"),
+        ];
+        let dir = scratch_project("project-python-functions", &files);
+        let ids = |root: &str| {
+            let project = scan(&dir.join(root), &HashMap::new()).unwrap();
+            let mut ids: Vec<String> = project.entities.iter().map(|e| e.id.clone()).collect();
+            ids.sort();
+            (ids, project)
+        };
+        let (shop, project) = ids("shop");
+        // As both builds parse them: each file under `function-paths` a function, its entry or none.
+        let expected = ["function.pa.pf", "function.shop.f", "function.shop.g", "model.shop.py_m", "model.shop.x"];
+        assert_eq!(shop, expected);
+        let python_model = project.entities.iter().find(|e| e.id == "model.shop.py_m").unwrap();
+        let targets: Vec<&scan::Target> = python_model.calls.iter().map(|call| &call.target).collect();
+        let reference = scan::Target::Ref { package: None, name: "x".into(), version: None };
+        let source = scan::Target::Source { source: "s".into(), table: "t".into() };
+        assert_eq!(targets, [&reference, &source]);
+        assert_eq!(ids("udfs").0, ["function.u.d"], "the configured paths only");
         fs::remove_dir_all(dir).unwrap();
     }
 
