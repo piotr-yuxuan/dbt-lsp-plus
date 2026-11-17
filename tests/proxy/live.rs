@@ -208,7 +208,10 @@ fn node_information(session: &mut Session, project: &Path) {
     assert_eq!(orders["config"]["materialized"], "table", "{orders}");
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
-    let hover = session.request("textDocument/hover", on_ref);
+    // Once dbt lsp has compiled: during a compilation, its hover may miss the deadline, the summary alone.
+    let merged =
+        |result: &Value| result["contents"]["value"].as_str().is_some_and(|value| value.contains("\n\n---\n\n"));
+    let hover = json!({"result": session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), merged)});
     let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
     let kept = value.split_once("\n\n---\n\n").map(|(_, server)| server.trim());

@@ -3050,6 +3050,7 @@ fn with_no_backend_a_method_left_to_dbt_gets_nothing_and_is_said_once() {
     let options = ["--backend", "never", "--mode", "textDocument/references=dbt"];
     let (mut session, _) = with_options("mode-no-backend", json!({}), &options);
     let result = session.initialize(&fixture());
+    assert!(result["capabilities"].get("referencesProvider").is_none(), "not announced alone (plan 020)");
     assert!(result["capabilities"]["experimental"]["dbtLspPlus"].get("references").is_none(), "{result}");
     let warning = session.wait_for(|m| m["method"] == "window/showMessage");
     assert!(warning["params"]["message"].as_str().unwrap().contains("textDocument/references"), "{warning}");
@@ -3214,7 +3215,22 @@ fn with_no_backend_every_method_left_to_dbt_gets_nothing() {
     let (mut session, _) = with_options("mode-every-none", json!({}), &["--backend", "never", "--default-mode", "dbt"]);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], json!({"version": 2}), "no row");
-    assert_eq!(result["capabilities"]["documentSymbolProvider"], true, "announced, its answer nothing");
+    // No backend answers them (plan 020): neither the methods the proxy adds nor those it would take.
+    let capabilities = [
+        "documentSymbolProvider",
+        "workspaceSymbolProvider",
+        "callHierarchyProvider",
+        "foldingRangeProvider",
+        "documentHighlightProvider",
+        "selectionRangeProvider",
+        "hoverProvider",
+        "inlayHintProvider",
+        "definitionProvider",
+        "referencesProvider",
+        "renameProvider",
+    ];
+    let announced: Vec<&str> = capabilities.into_iter().filter(|c| result["capabilities"].get(*c).is_some()).collect();
+    assert_eq!(announced, Vec::<&str>::new());
     for (method, params) in requests_of_every_mode() {
         let answer = session.request(method, params);
         assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing(method)), "{method}");
@@ -3278,6 +3294,131 @@ fn with_no_backend_diagnostics_left_to_dbt_publish_nothing() {
     session.request("workspace/symbol", json!({"query": "orders"}));
     let published = session.received.iter().filter(|m| m["method"] == "textDocument/publishDiagnostics").count();
     assert_eq!(published, 0);
+    assert!(session.finish().success());
+}
+
+/// A session in front of the fake with SCRIPT, the fixture's index parsed.
+fn parsed_session(name: &str, script: Value) -> (Session, PathBuf) {
+    let mut script = script;
+    script["manifest"] = manifest();
+    let (mut session, log) = Session::fake(name, script);
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    (session, log)
+}
+
+/// The frames that SESSION received for the request ID.
+fn frames_of(session: &Session, id: &Value) -> usize {
+    session.received.iter().filter(|m| m["id"] == *id && m.get("method").is_none()).count()
+}
+
+/// A request the fake answers at once, after which every earlier frame has come.
+fn settle(session: &mut Session) {
+    let elsewhere =
+        json!({"textDocument": {"uri": "file:///elsewhere/x.sql"}, "position": {"line": 0, "character": 0}});
+    session.request("textDocument/definition", elsewhere);
+}
+
+fn on_ref() -> Value {
+    position_in(&fixture().join("models/marts/orders.sql"), "ref('stg_orders')", 6)
+}
+
+#[test]
+fn a_late_server_leaves_a_hover_s_summary_alone_and_its_answer_dropped() {
+    let (mut session, _) = parsed_session("merge-late", json!({"hold": ["textDocument/hover"]}));
+    let started = Instant::now();
+    let answer = session.request("textDocument/hover", on_ref());
+    let took = started.elapsed();
+    assert!(Duration::from_millis(300) <= took && took < Duration::from_secs(3), "{took:?}");
+    let text = answer["result"]["contents"]["value"].as_str().unwrap_or_default();
+    assert!(text.contains("stg_orders") && !text.contains("echo"), "the summary alone: {answer}");
+    session.notify("test/release", json!({}));
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &answer["id"]), 1, "the late answer reached the client");
+    let logged = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
+    assert!(logged.clone().any(|m| m["params"]["message"].as_str().unwrap().contains("textDocument/hover")));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_late_server_is_awaited_where_the_proxy_has_no_part() {
+    let (mut session, _) = parsed_session("merge-no-part", json!({"hold": ["textDocument/hover"]}));
+    let nowhere = position_in(&fixture().join("models/marts/orders.sql"), "select", 1);
+    session.send(&json!({"jsonrpc": "2.0", "id": 7001, "method": "textDocument/hover", "params": nowhere}));
+    std::thread::sleep(Duration::from_millis(600));
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &json!(7001)), 0, "answered before the server");
+    session.notify("test/release", json!({}));
+    let answer = session.wait_for(|m| m["id"] == 7001);
+    assert_eq!(answer["result"]["echo"], "textDocument/hover", "{answer}");
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &json!(7001)), 1);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_late_server_leaves_the_proxy_s_hints_alone() {
+    let (mut session, _) = parsed_session("merge-late-hints", json!({"hold": ["textDocument/inlayHint"]}));
+    let started = Instant::now();
+    let hints = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    let took = started.elapsed();
+    assert!(Duration::from_millis(300) <= took && took < Duration::from_secs(3), "{took:?}");
+    assert_eq!(hints["result"].as_array().map(Vec::len), Some(1), "the proxy's alone: {hints}");
+    session.notify("test/release", json!({}));
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &hints["id"]), 1, "the late answer reached the client");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_late_server_is_logged_once_per_method() {
+    let script = json!({"hold": ["textDocument/hover", "textDocument/inlayHint"]});
+    let (mut session, _) = parsed_session("merge-logged", script);
+    session.request("textDocument/hover", on_ref());
+    session.request("textDocument/hover", on_ref());
+    hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    settle(&mut session);
+    let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
+    let mut said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
+    said.sort_unstable();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said[0].contains("textDocument/hover") && said[1].contains("textDocument/inlayHint"), "{said:?}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_refused_or_lost_hover_keeps_the_proxy_s_summary() {
+    let (mut session, _) = parsed_session("merge-refused", json!({"refuse_on": "textDocument/hover"}));
+    let kept = session.request("textDocument/hover", on_ref());
+    assert!(
+        kept.get("error").is_none() && kept["result"]["contents"]["value"].as_str().unwrap().contains("stg_orders")
+    );
+    let nowhere = position_in(&fixture().join("models/marts/orders.sql"), "select", 1);
+    let refused = session.request("textDocument/hover", nowhere);
+    assert!(refused.get("error").is_some(), "no part: the server's error as it came: {refused}");
+    assert!(session.finish().success());
+    let script = json!({"exit_on": "textDocument/hover", "exit_life": 1});
+    let (mut lost, _) = parsed_session("merge-lost", script);
+    let answer = lost.request("textDocument/hover", on_ref());
+    assert!(answer.get("error").is_none(), "{answer}");
+    settle(&mut lost);
+    assert_eq!(frames_of(&lost, &answer["id"]), 1);
+    assert!(lost.finish().success());
+}
+
+#[test]
+fn a_hover_answered_at_its_deadline_is_answered_once_whatever_follows() {
+    let script = json!({"hold": ["textDocument/hover"], "exit_on": "textDocument/completion", "exit_life": 1});
+    let (mut session, log) = parsed_session("merge-once", script);
+    let answer = session.request("textDocument/hover", on_ref());
+    session.notify("$/cancelRequest", json!({"id": answer["id"]}));
+    let position = json!({"textDocument": {"uri": "file:///elsewhere/x.sql"}, "position": {"line": 0, "character": 0}});
+    session.send(&json!({"jsonrpc": "2.0", "id": 7101, "method": "textDocument/completion", "params": position}));
+    session.wait_for(|m| m["id"] == 7101);
+    until_initialized(&log, 2);
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &answer["id"]), 1, "answered again after the deadline");
+    assert!(methods(&log).iter().any(|method| method == "$/cancelRequest"), "the cancel reached the server");
     assert!(session.finish().success());
 }
 
@@ -3403,7 +3544,10 @@ fn the_server_s_null_or_error_for_hints_passes_unless_the_proxy_has_some() {
     let (mut session, _) = Session::fake("hints-error", script);
     session.initialize(&fixture());
     parsed_orders(&mut session);
-    let failed = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    // The server's error leaves the proxy's hints where it has some (plan 020), else passes as it came.
+    let kept = hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    assert_eq!((kept.get("error"), kept["result"].as_array().map(Vec::len)), (None, Some(1)), "{kept}");
+    let failed = hints_of(&mut session, &fixture().join("models/marts/order_summary.sql"));
     let expected = error.replace("$ID", &failed["id"].to_string());
     assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "{failed}");
     assert!(session.finish().success());
