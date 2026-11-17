@@ -231,6 +231,16 @@ impl Session {
         response["result"].clone()
     }
 
+    /// Initializes the session on ROOT with `initializationOptions` OPTIONS;
+    /// returns the result.
+    pub fn initialize_options(&mut self, root: &Path, options: Value) -> Value {
+        let params = json!({"processId": null, "rootUri": uri(root), "capabilities": {},
+                            "workspaceFolders": [{"uri": uri(root), "name": "shop"}], "initializationOptions": options});
+        let response = self.request("initialize", params);
+        self.notify("initialized", json!({}));
+        response["result"].clone()
+    }
+
     /// Opens the file at PATH, with TEXT or its content on disk.
     pub fn open(&mut self, path: &Path, text: Option<&str>) {
         let text = text.map_or_else(|| std::fs::read_to_string(path).unwrap(), str::to_owned);

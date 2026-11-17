@@ -60,6 +60,16 @@ const PROVIDERS: [(&str, &str, bool); 5] = [
     ("renameProvider", "textDocument/rename", false),
 ];
 
+/// How the proxy answers a request of the client's.
+enum Route {
+    /// Itself, as this method.
+    Here(&'static str),
+    /// Itself, with nothing: null, or `[]` for a list.
+    Empty(Value),
+    /// By the server.
+    Forward,
+}
+
 /// The requests that the proxy answers itself on some targets, since dbt
 /// lsp 2.0.9 answers them with nothing there: references and renames of a
 /// source, a rename of a CTE, a definition that `navigation` finds;
@@ -286,6 +296,12 @@ struct Proxy<W: Write> {
     table: modes::Table,
     /// Whether the backend is `never`, which the proxy says once alone.
     never: bool,
+    /// The user's settings that `initializationOptions` held and the proxy
+    /// refused, said once `initialize` is answered.
+    refused: Vec<String>,
+    /// Whether the proxy said that it reads no `dbtLspPlus` setting of
+    /// `workspace/didChangeConfiguration`.
+    ignored: bool,
     /// Whether the client sent `initialize`, before which LSP lets the proxy send nothing.
     initialized: bool,
     /// The id of the client's `initialize` while the server has not answered it.
@@ -416,6 +432,8 @@ impl<W: Write> Proxy<W> {
             settings: modes::Settings::default(),
             table: modes::Table::default(),
             never: false,
+            refused: Vec::new(),
+            ignored: false,
             initialized: false,
             initialize: None,
             forwarded: HashMap::new(),
@@ -517,6 +535,22 @@ impl<W: Write> Proxy<W> {
         }
     }
 
+    /// Says once, after `initialize` is answered, what of the user's settings
+    /// cannot take effect: each refusal, and the methods set to `dbt` that no
+    /// backend answers.
+    fn tell_settings(&mut self) {
+        let mut said = std::mem::take(&mut self.refused);
+        let unanswered = self.table.unanswered();
+        if !unanswered.is_empty() {
+            said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
+        }
+        if !said.is_empty() {
+            let text = format!("dbt-lsp-plus: {}.", said.join("; "));
+            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
+                                     "params": {"type": 2, "message": text}}));
+        }
+    }
+
     /// Answers `initialize` without a server: the proxy's own features only.
     fn initialize_alone(&mut self, id: &Value) {
         let mut capabilities = serde_json::Map::new();
@@ -540,6 +574,7 @@ impl<W: Write> Proxy<W> {
         self.send_client(
             &json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": capabilities, "serverInfo": info}}),
         );
+        self.tell_settings();
         // A dbt without `lsp` is no failure: said once, out of the user's way.
         if self.standalone {
             let dbt = self.parsing.server.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>();
@@ -561,7 +596,10 @@ impl<W: Write> Proxy<W> {
     /// root when the server command named none, or the client's spelling of
     /// the one it named.
     fn on_initialize(&mut self, params: &Value) {
-        self.restart.initialize = Some(params.clone());
+        let options = params.get("initializationOptions").unwrap_or(&Value::Null);
+        (self.settings, self.refused) = self.settings.over(options);
+        // As the server got it before modes, at a restart too.
+        self.restart.initialize = Some(modes::without_section(params));
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
@@ -749,16 +787,26 @@ impl<W: Write> Proxy<W> {
         Some((project, target))
     }
 
-    /// The method under which the proxy answers a request itself: an owned
-    /// method, its own command, or a targeted request on one of its targets.
-    fn local_method(&self, method: &str, params: &Value) -> Option<&'static str> {
+    /// How the proxy answers the client's request METHOD: itself, as an owned
+    /// method, its own command, or a targeted request on one of its targets
+    /// in its mode; with nothing, where the mode says so, and without a
+    /// server for a definition and `shutdown`; else by forwarding it.
+    fn route(&self, method: &str, params: &Value) -> Route {
         if let Some(owned) = self.owned.get(method) {
-            return Some(owned);
+            return Route::Here(owned);
         }
         if method == "workspace/executeCommand" && params["command"] == config::NODE_INFO {
-            return Some(config::NODE_INFO);
+            return Route::Here(config::NODE_INFO);
         }
-        self.targeted(method, params)
+        // In `dbt`, the proxy looks at nothing.
+        let mine = self.table.mode(method) != Mode::Dbt;
+        if let Some(targeted) = mine.then(|| self.targeted(method, params)).flatten() {
+            return Route::Here(targeted);
+        }
+        // Without a server, a definition with no target is null, not a failure, and `shutdown` is null as LSP asks.
+        let lifecycle = ["textDocument/definition", "shutdown"].contains(&method);
+        let unserved = (lifecycle && self.server.is_none()).then_some(Value::Null);
+        self.table.nothing(method).or(unserved).map_or(Route::Forward, Route::Empty)
     }
 
     /// A request of `TARGETED` that the proxy answers itself, by what its
@@ -1239,6 +1287,12 @@ impl<W: Write> Proxy<W> {
         let Some(message) = &frame.value else { return self.send_server(&frame.body) };
         let params = message.get("params").unwrap_or(&Value::Null);
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
+            // The server gets the client's `initialize` without the proxy's own section.
+            (Some("initialize"), Some(id)) if params.pointer("/initializationOptions/dbtLspPlus").is_some() => {
+                let body = json!({"jsonrpc": "2.0", "id": id, "method": "initialize",
+                                  "params": modes::without_section(params)});
+                self.on_request("initialize", id, params, body.to_string().as_bytes())
+            }
             (Some(method), Some(id)) => self.on_request(method, id, params, &frame.body),
             (Some(method), None) => self.on_notification(method, params, &frame.body),
             // The client's answer to the proxy's own request was never the server's.
@@ -1254,6 +1308,16 @@ impl<W: Write> Proxy<W> {
     /// that lets it: an edit outside the editor changes the graph too.
     fn on_notification(&mut self, method: &str, params: &Value, body: &[u8]) {
         self.track(method, params);
+        // The modes are fixed with the flag that the client read at `initialize`.
+        let setting = params.pointer("/settings/dbtLspPlus").is_some();
+        if let ("workspace/didChangeConfiguration", true, false) = (method, setting, self.ignored) {
+            self.ignored = true;
+            let text =
+                "dbt-lsp-plus reads dbtLspPlus from initializationOptions and its command line only, at the start";
+            self.send_client(
+                &json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": {"type": 3, "message": text}}),
+            );
+        }
         // The server gets the change before the listing it prompts.
         self.send_server(body);
         if method == "initialized" && self.standalone && self.watches {
@@ -1278,9 +1342,11 @@ impl<W: Write> Proxy<W> {
 
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
-    /// proxy must not cancel, the summary that a hover's answer gets.
-    fn remember(&mut self, method: &str, id: &Value, params: &Value) -> Pending {
-        match (method, params["command"].as_str()) {
+    /// proxy must not cancel, the summary that a hover's answer gets; and
+    /// whether, once routed, it asks for a fresh index: a hover keeps the
+    /// index fresh, an inlay hint only makes one, and in `dbt` neither.
+    fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
+        let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
                 self.on_initialize(params);
                 self.initialized = true;
@@ -1292,7 +1358,7 @@ impl<W: Write> Proxy<W> {
                 Pending::Shutdown
             }
             (_, Some("dbt.listNodes")) => Pending::Listing,
-            ("textDocument/hover", _) => {
+            ("textDocument/hover", _) if self.table.mode(method) != Mode::Dbt => {
                 let index = self.parsing.index.as_ref();
                 let summary =
                     index.and_then(|index| self.node_at(index, params, false).map(|node| (index.summary(node), true)));
@@ -1309,9 +1375,12 @@ impl<W: Write> Proxy<W> {
                     );
                     navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
-                summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
+                return (
+                    summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard)),
+                    true,
+                );
             }
-            ("textDocument/inlayHint", _) => {
+            ("textDocument/inlayHint", _) if self.table.mode(method) != Mode::Dbt => {
                 // A panic leaves the server's answer as it is.
                 let hints = panic::catch_unwind(AssertUnwindSafe(|| {
                     let index = self.parsing.index.as_ref()?;
@@ -1323,41 +1392,36 @@ impl<W: Write> Proxy<W> {
                     Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
-                hints.map_or(Pending::Request, Pending::Hints)
+                return (hints.map_or(Pending::Request, Pending::Hints), self.parsing.index.is_none());
             }
             _ => Pending::Request,
-        }
+        };
+        (pending, false)
     }
 
-    /// A request of the client: answered here when the proxy owns its method,
-    /// else forwarded; without a server, the lifecycle requests are answered
-    /// as LSP asks, a definition with no target gets null, and any other
-    /// fails.
+    /// A request of the client: routed by `route`; without a server,
+    /// `initialize` is answered here, and any other forwarded request fails.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         // The server would get two requests under one id.
         if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) {
             return self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id");
         }
-        let pending = self.remember(method, id, params);
-        match (self.local_method(method, params), &self.server, method) {
-            (Some(owned), ..) => self.answer(owned, id, params, &pending),
-            (None, Some(_), _) => {
+        let (pending, fresh) = self.remember(method, id, params);
+        match (self.route(method, params), &self.server, method) {
+            (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
+            (Route::Empty(nothing), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": nothing})),
+            (Route::Forward, Some(_), _) => {
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
             }
-            (None, None, "initialize") => {
+            (Route::Forward, None, "initialize") => {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            // Alone, a definition with no target is null, not a failure.
-            (None, None, "shutdown" | "textDocument/definition") => {
-                self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null}))
-            }
-            (None, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
+            (Route::Forward, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
         }
-        // Once the request is forwarded, so that a listing takes no id of the
-        // client's: a hover keeps the index fresh, an inlay hint only makes one.
-        if method == "textDocument/hover" || (method == "textDocument/inlayHint" && self.parsing.index.is_none()) {
+        // Once the request is forwarded, so that a listing takes no id of the client's.
+        if fresh {
             self.want_index();
         }
     }
@@ -1436,6 +1500,7 @@ impl<W: Write> Proxy<W> {
                 self.add_capabilities(capabilities);
             }
             self.send_client(&message);
+            self.tell_settings();
             return self.watch_runs();
         }
         self.send_client_body(body);
@@ -1444,6 +1509,11 @@ impl<W: Write> Proxy<W> {
     /// The server's diagnostics of a file, BODY as it came: forwarded as
     /// they are, unless the last run failed there too.
     fn on_server_diagnostics(&mut self, message: &Value, body: &[u8]) {
+        match self.table.mode("textDocument/publishDiagnostics") {
+            Mode::Dbt => return self.send_client_body(body),
+            Mode::Ours => return,
+            Mode::Merge => {}
+        }
         let uri = message.pointer("/params/uri").and_then(Value::as_str);
         let Some(path) = self.local_path(uri) else { return self.send_client_body(body) };
         let diagnostics = message.pointer("/params/diagnostics").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -1461,6 +1531,10 @@ impl<W: Write> Proxy<W> {
     /// failures to the loop.
     fn watch_runs(&mut self) {
         let (Some(root), Some(events)) = (self.root.clone(), self.parsing.events.clone()) else { return };
+        // In `dbt`, the diagnostics are the server's alone.
+        if self.table.mode("textDocument/publishDiagnostics") == Mode::Dbt {
+            return;
+        }
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
         let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
         let watched: [(&str, &'static str, ReadFailures); 2] =
@@ -1541,7 +1615,7 @@ impl<W: Write> Proxy<W> {
     /// with no version; the URI last published under, if another, gets
     /// none.  Nothing after `shutdown`.
     fn publish(&mut self, path: &Path) {
-        if self.shutdown {
+        if self.shutdown || self.table.mode("textDocument/publishDiagnostics") == Mode::Dbt {
             return;
         }
         let server = self.diagnostics.server.get(path);

@@ -65,7 +65,7 @@ const ADDED: [&str; 6] = [
 ];
 
 /// The methods whose empty answer is `[]` rather than null.
-pub const LISTS: [&str; 3] = ["textDocument/references", "textDocument/inlayHint", "workspace/symbol"];
+const LISTS: [&str; 3] = ["textDocument/references", "textDocument/inlayHint", "workspace/symbol"];
 
 /// A method of LSP: a namespace of the protocol's and a name.
 static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
@@ -250,11 +250,13 @@ impl Table {
         }
     }
 
-    /// Whether the proxy answers METHOD empty where it has nothing of its
-    /// own: in `ours`, and in `dbt` with no backend.
-    pub fn answers_empty(&self, method: &str) -> bool {
+    /// What the proxy answers METHOD where it has nothing of its own, if it
+    /// answers it: null, or `[]` for a list, in `ours`, and in `dbt` with no
+    /// backend; none where the server answers.
+    pub fn nothing(&self, method: &str) -> Option<Value> {
         let mode = self.mode(method);
-        METHODS.contains(&method) && (mode == Mode::Ours || (self.none && mode == Mode::Dbt))
+        let empty = METHODS.contains(&method) && (mode == Mode::Ours || (self.none && mode == Mode::Dbt));
+        empty.then(|| if LISTS.contains(&method) { json!([]) } else { Value::Null })
     }
 
     /// `experimental.dbtLspPlus`, version 2, from ROWS (request, kind,
@@ -407,10 +409,10 @@ mod tests {
         let user = settings(&[("textDocument/definition", "ours"), ("textDocument/references", "dbt")], None);
         let table = Table::new(&user, &|_| false, false);
         assert_eq!(table.flag(&rows), json!({"version": 2, "definition": {"source": ["sql", "yaml"], "ref": ["sql"]}}));
-        assert!(table.answers_empty("textDocument/definition"));
-        assert!(!table.answers_empty("textDocument/references"), "dbt with a backend is forwarded");
+        assert_eq!(table.nothing("textDocument/definition"), Some(Value::Null));
+        assert_eq!(table.nothing("textDocument/references"), None, "dbt with a backend is forwarded");
         let none = Table::new(&user, &|_| false, true);
-        assert!(none.answers_empty("textDocument/references"), "dbt with no backend");
+        assert_eq!(none.nothing("textDocument/references"), Some(json!([])), "dbt with no backend");
         assert_eq!(none.unanswered(), ["textDocument/references"]);
         assert!(table.unanswered().is_empty());
     }
