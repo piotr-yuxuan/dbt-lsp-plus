@@ -8,6 +8,8 @@ mod commands;
 mod conformance;
 #[path = "proxy/live.rs"]
 mod live;
+#[path = "proxy/locate.rs"]
+mod locate;
 #[path = "proxy/shadow.rs"]
 mod shadow;
 mod support;

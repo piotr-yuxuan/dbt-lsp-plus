@@ -5,6 +5,7 @@
 
 use crate::commands::{self, Via};
 use crate::graph::{self, Graph, ServerNode};
+use crate::locate;
 use crate::modes::{self, Mode};
 use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
@@ -16,13 +17,12 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -2184,40 +2184,13 @@ fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> 
     Ok(Server { child, stdin, generation })
 }
 
-/// Whether the dbt of COMMAND, a server command, has no `lsp`, as dbt-oss
-/// 2.0.11: the words before its `lsp` word, then `lsp --help`, exit 2 with
-/// "unrecognized subcommand 'lsp'" on the standard error.  A launcher's own
-/// failure (`uvx dbt` offline exits 2 too), a probe past its deadline, any
-/// other answer, or a command with no word before `lsp` is not.
-fn lacks_lsp(command: &[String]) -> bool {
-    let Some(at) = command.iter().position(|word| word == "lsp").filter(|at| *at > 0) else { return false };
-    let mut probe = Command::new(&command[0]);
-    probe.args(&command[1..at]).args(["lsp", "--help"]).env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
-    let Ok(mut child) = probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() else {
-        return false;
-    };
-    let stderr = child.stderr.take().expect("piped stderr");
-    let (sender, read) = mpsc::channel();
-    // Read apart, so that neither a full pipe nor a launcher's child holding
-    // it open holds the proxy.
-    thread::spawn(move || {
-        let mut text = Vec::new();
-        let _ = stderr.take(1 << 16).read_to_end(&mut text);
-        let _ = sender.send(text);
-    });
-    let status = config::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false));
-    let stderr = read.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
-    status.and_then(|status| status.code()) == Some(2)
-        && String::from_utf8_lossy(&stderr).contains("unrecognized subcommand 'lsp'")
-}
-
 /// Runs the proxy on the standard input and output, in front of COMMAND,
 /// alone when its dbt has no `lsp`.
 pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backend) -> ExitCode {
     let (events, inbox) = mpsc::channel();
     // With `never`, nothing of the user's dbt runs but its parse.
     let never = backend == modes::Backend::Never;
-    let standalone = never || lacks_lsp(command);
+    let standalone = never || locate::probe(command, None) == locate::Probe::NoLsp;
     let (server, absent) = match (!standalone).then(|| spawn_server(command, &events, 0)) {
         Some(Ok(server)) => (Some(server), None),
         Some(Err(why)) => (None, Some(why)),
@@ -2328,28 +2301,6 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
-    }
-
-    #[test]
-    fn only_a_refusal_of_lsp_by_dbt_itself_means_no_lsp() {
-        // `sh -c SCRIPT lsp --help` runs SCRIPT, as a dbt answering its probe.
-        let dbt = |script: &str| lacks_lsp(&args(&["sh", "-c", script, "lsp", "--project-dir", "/p"]));
-        let refused = "echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2";
-        assert!(dbt(refused), "dbt-oss 2.0.11");
-        assert!(!dbt("echo 'Start the dbt language server'; exit 0"), "2.0.9 prints its help");
-        assert!(!dbt("echo 'error: Failed to fetch the index' >&2; exit 2"), "a launcher offline");
-        assert!(!dbt("echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 1"), "another status");
-        // The probe takes only the words before `lsp`, and adds `--help`.
-        assert!(dbt(
-            "[ \"$0 $1\" = 'lsp --help' ] && [ $# -eq 1 ] && { echo \"unrecognized subcommand 'lsp'\" >&2; exit 2; }"
-        ));
-        // dbt-oss 2.0.11 colours the word under CLICOLOR_FORCE, unless NO_COLOR is set.
-        let coloured =
-            "[ -n \"$NO_COLOR\" ] || { printf \"unrecognized subcommand '\\033[33mlsp\\033[0m'\" >&2; exit 2; }";
-        assert!(dbt(&format!("{coloured}; echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2")));
-        assert!(!lacks_lsp(&args(&["/nonexistent/dbt", "lsp"])), "a dbt that cannot start");
-        assert!(!lacks_lsp(&args(&["sh", "-c", "exit 2"])), "a command with no lsp word");
-        assert!(!lacks_lsp(&args(&["lsp", "--project-dir", "/p"])), "no word before lsp");
     }
 
     #[test]

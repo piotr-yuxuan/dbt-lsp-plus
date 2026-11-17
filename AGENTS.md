@@ -51,6 +51,7 @@ src/modes.rs                  who answers each method: the user's settings and t
 src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
+src/locate.rs                 the project of a document, the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
@@ -59,6 +60,7 @@ tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone 
 tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
+tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
@@ -122,8 +124,10 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     `Proxy::on_problems`: one handler per kind of message or event, so that
     `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
     `on_parsed` stay dispatches;
-  - `lacks_lsp`: the probe of the user's dbt, at the boundary, with tests
-    of its own;
+  - `locate::repository`: the one run of git that finds a project's
+    repository, at the boundary, its program and environment given;
+    `locate::candidates`: the decision where a project's dbt may be, from
+    git's answers, with tests of its own;
   - `Proxy::on_command`, `Proxy::run_command` and `Proxy::on_ran`: a
     request of a command for clients, its run by dbt's CLI, and the run's
     answer, one handler each, so that `on_request` and `handle` stay
