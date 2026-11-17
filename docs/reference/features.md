@@ -11,12 +11,13 @@ method:
   sources and their tables, columns, exposures, metrics, semantic models,
   saved queries, unit tests and groups;
 - `workspace/symbol`: every model, seed, snapshot, analysis, singular test,
-  macro, generic test, source table and docs block, installed packages
-  included;
+  macro, generic test, function, source table and docs block, installed
+  and local packages included, Python models and snapshots declared in
+  YAML too, each version of a model as `orders.v2`;
 - the call hierarchy (`textDocument/prepareCallHierarchy`,
   `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`): what a
-  model, source or macro is used by, and what it
-  uses, macros included, with the place of each call.  The dependencies of
+  model, source, macro or function is used by, and what it
+  uses, macros and functions included, with the place of each call.  The dependencies of
   the nodes are those of `dbt.listNodes` once the server has compiled, so
   that `ref(var('x'))` resolves; the edges of macros come from the files;
 - references and renames of sources (`textDocument/references`,
@@ -28,9 +29,9 @@ method:
 - go to definition (`textDocument/definition`) from a properties file,
   where dbt lsp answers nothing: a
   `ref` to its model, a `source` to its table's entry, a `doc` to its docs
-  block, a model's `name:` to its file, a generic test's name to its test
-  block, by dbt 2.0.9's lookup across packages, versions included once
-  your `dbt parse` has run; and from a `source()` in SQL; hover
+  block, a model's or a function's `name:` to its file, a generic test's
+  name to its test block, by dbt 2.0.9's lookup across packages, versions
+  included; and from a `source()` in SQL; hover
   (`textDocument/hover`) there shows the docs text, the test's signature,
   the node's summary;
 - the last run's failures as diagnostics
