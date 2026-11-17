@@ -392,6 +392,83 @@ included, since the scan walks them so.  A document reached through another
 spelling of its directory is mapped onto the root by that directory's
 resolved path.
 
+### What Claude Code does with a language server, observed on 2.1.317
+
+A logging language server in a plugin, and Claude Code driven by a local
+stand-in for the Messages API that plays a script of tool calls, in a
+scratch home and configuration, on Linux, from the command line: at a
+repository's root whose dbt project is in `dbt/`, in a linked worktree,
+in `dbt/models`, with no capability announced, an `Edit` first, and the
+proxy 0.1.5 in front of dbt 2.0.9.  What was read from the 2.1.317
+bundle's code rather than seen in a session says "(bundle)".
+
+- A server starts late: nothing starts with the session.  The first call
+  of the LSP tool on a file whose extension the plugin maps starts it, and
+  so does the first `Edit` of such a file; `Read` does not.  The LSP tool
+  is deferred: an agent loads it with ToolSearch first.
+- Its process runs in the session's directory (or a host's
+  `projectConfigRoot`, or `.lsp.json`'s `workspaceFolder`, when set
+  (bundle)); `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PROJECT_DIR}` are
+  expanded in `args`; its environment is Claude Code's, plus
+  `CLAUDE_PROJECT_DIR` (the session's directory), `CLAUDE_PLUGIN_ROOT` and
+  `CLAUDE_PLUGIN_DATA`.  The desktop app's was not observed.
+- `initialize` names one workspace folder, `rootUri` and `rootPath`, all
+  the session's directory: a repository's root, a worktree's root or
+  `dbt/models`, never the nested project.  `initializationOptions` is `{}`.
+  The client offers `didSave`, hover in markdown, definition links,
+  hierarchical document symbols, the call hierarchy and
+  `positionEncodings: ["utf-16"]`; `workspace.workspaceFolders` false,
+  `didChangeWatchedFiles` without dynamic registration; no rename, inlay
+  hints, code lens, code actions, completion, `executeCommand` or
+  `window.workDoneProgress`.
+- The first `didOpen` comes at once: `initialized`, the `didOpen` of the
+  file that started the server, then its request, within a millisecond of
+  the answer to `initialize`.  Each new file is opened before its request.
+  The first document can lie outside every dbt project: an `Edit` of a
+  repository's `ci.yml` opened it before any model.
+- Announced capabilities are not read: to a server that announced none,
+  it sent hover, `workspace/symbol`, `textDocument/implementation` and
+  `prepareCallHierarchy`.
+- What it drops: `window/showMessage` and `window/logMessage` leave no
+  trace; a line on the server's standard error goes to the debug log,
+  written only with `--debug` or `--debug-file`, as `[LSP SERVER
+  plugin:<plugin>:<server>] <line>`; `client/registerCapability` is
+  answered null and ignored (bundle); `didChangeWatchedFiles` never comes.
+- An `Edit` of a file not yet open sends `didOpen` with the new text and
+  no `didSave`; of an open file, `didChange` with the whole text, then
+  `didSave`.  Past 50 open files it closes the oldest (bundle).
+- References outside the session's directory, or under a path git
+  ignores, reach the agent; a null reads "No symbols found", "No
+  definition found".  A request waits 60 s by default (`requestTimeout`);
+  a crashed server is restarted up to three times (bundle).
+- `.lsp.json` (bundle): `command` (no space unless absolute), `args`,
+  `extensionToLanguage` (required), `transport`, `env`,
+  `initializationOptions`, `settings`, `workspaceFolder`,
+  `startupTimeout`, `shutdownTimeout`, `requestTimeout`, `restartOnCrash`,
+  `maxRestarts`, `diagnostics` (default true: diagnostics pushed into the
+  agent's context after its edits).  An extension maps to one server: a
+  second plugin claiming `.yml` is not used for it.  With `--plugin-dir`, a
+  directory with `.lsp.json` at its top is one plugin (observed).
+- The proxy 0.1.5 in front of dbt 2.0.9 offline, the session in the
+  fixture's folder: a hover on `ref('stg_orders')` answered dbt lsp's
+  parents and children, then, once the parse had run, the proxy's summary
+  above them; the definition, one reference, eight workspace symbols.
+  Claude Code answered dbt lsp's `window/workDoneProgress/create`,
+  `workspace/configuration` and refresh requests, and took 143 empty sets
+  of diagnostics.
+
+So a plugin cannot name the project, and when the client's folder holds
+none, the proxy answers `initialize` before it can know it.
+
+### dbt lsp under a parent `rootUri`, observed on 2.0.9
+
+Started in a repository's root, the fixture copied to `dbt/`, with
+`rootUri` the repository's root: with `--project-dir dbt` and without it,
+dbt lsp compiled `dbt/` on the `didOpen` of `dbt/models/marts/orders.sql`,
+answered the definition of `ref('stg_orders')` with its file and its hover
+with the parents and children.  `dbt lsp --help` exits 0 on 2.0.9;
+dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
+
 ## State
 
 - Open documents: the text of each, kept from `didOpen` and the incremental
