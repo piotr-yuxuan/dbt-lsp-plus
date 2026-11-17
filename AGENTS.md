@@ -48,6 +48,7 @@ src/navigation.rs             the targets of definitions and references, dbt's o
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/modes.rs                  who answers each method: the user's settings and the session's table
+src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
@@ -56,6 +57,7 @@ src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
 tests/proxy/shadow.rs         the shadow in front of the fake server
+tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
@@ -122,6 +124,15 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     `on_parsed` stay dispatches;
   - `lacks_lsp`: the probe of the user's dbt, at the boundary, with tests
     of its own;
+  - `Proxy::on_command`, `Proxy::run_command` and `Proxy::on_ran`: a
+    request of a command for clients, its run by dbt's CLI, and the run's
+    answer, one handler each, so that `on_request` and `handle` stay
+    dispatches;
+  - `commands::route`, `commands::announced`, `commands::own`,
+    `commands::arguments`, `commands::compiled` and `commands::listed`: the
+    decisions on a command's request and on a run's output, with tests of
+    their own; `commands::compile_job` and `commands::nodes_job`: one run
+    per command, its words and its reader;
   - `Proxy::compare`: the shadow's work on a followed request's answer,
     once the client has it, so that `on_server_response` stays a dispatch;
   - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's

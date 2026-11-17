@@ -41,6 +41,12 @@ method:
   source table at its name;
 - inlay hints (`textDocument/inlayHint`) after the server's: the relation
   dbt builds, after each `ref` and `source`;
+- `dbt-lsp-plus.compile`, `dbt-lsp-plus.show` and `dbt-lsp-plus.nodes`
+  (`workspace/executeCommand`), commands for clients that do what dbt
+  lsp's `dbt.compileFile`, `dbt.show` and `dbt.listNodes` do, in their
+  shapes: by them when dbt lsp runs; without it, `compile` and `nodes` by
+  dbt's CLI, cut off the network where the system can (Linux), and
+  `show` not at all, since `dbt show` reaches the network;
 - `dbt-lsp-plus.nodeInfo` (`workspace/executeCommand`), a command that
   gives a node's resolved
   configuration, relation and summary from the user's own `dbt parse`, and
