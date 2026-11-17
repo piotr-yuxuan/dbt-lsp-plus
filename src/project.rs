@@ -2,6 +2,7 @@
 //! The resources of a dbt project and of its installed packages, read from
 //! their files: what dbt itself would parse, without dbt.
 
+use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
 use crate::text::{self, Encoding, LineIndex};
@@ -60,17 +61,36 @@ pub struct Scanned {
     pub calls: Vec<Call>,
     /// The source tables of a properties file, their package left empty.
     pub tables: Vec<SourceTable>,
+    /// The entries of a properties file that declare a resource, which a
+    /// reference's declaration names.
+    pub entries: Vec<Entry>,
+    /// The models of a properties file's unit tests, as written.
+    pub models: Vec<(String, Range<usize>)>,
+    /// The generic tests that a properties file names.
+    pub tests: Vec<Test>,
 }
 
 impl Scanned {
     /// What TEXT, the content of the file at PATH, gives.
     pub fn of(path: &Path, text: String) -> Scanned {
-        let calls = sources::file_calls(path, &text);
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("yml" | "yaml") => {
-                Scanned { tables: source_tables("", path, &text), calls, text, ..Scanned::default() }
-            }
-            _ => Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() },
+        let mut calls = sources::file_calls(path, &text);
+        if !sources::is_yaml(path) {
+            return Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() };
+        }
+        // Its macro calls too, inside the Jinja of its values, such as hooks, but in its comments.
+        let macros = |call: &Call| matches!(call.target, scan::Target::Macro { .. } | scan::Target::Dispatch { .. });
+        calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
+        calls.sort_by_key(|call| call.range.start);
+        let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
+        let resource = |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro"].contains(&entry.label);
+        Scanned {
+            tables: source_tables_in("", path, &text, &root),
+            entries: properties::entries_in(&text, &root, false).into_iter().filter(resource).collect(),
+            models: unit_test_models(&text, &root),
+            tests: properties::tests_in(&text, &root),
+            calls,
+            text,
+            ..Scanned::default()
         }
     }
 
@@ -207,6 +227,14 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
     found
 }
 
+/// The models of the unit tests of the properties file TEXT, whose tree is
+/// ROOT: each `model:` as written.
+pub fn unit_test_models(text: &str, root: &Node) -> Vec<(String, Range<usize>)> {
+    let index = LineIndex::new(text);
+    let models = root.get("unit_tests").map_or(&[][..], Node::items).iter().filter_map(|unit| unit.get("model"));
+    models.filter_map(|model| written(text, &index, model)).collect()
+}
+
 /// The value of the scalar NODE of TEXT and its range as written: inside
 /// its quotes, escapes included, else as long as its value, else to the end
 /// of its line.
@@ -243,7 +271,12 @@ fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(St
 /// that is not valid YAML has none, and a source that `overrides` a
 /// package's has none of its own: dbt patches the package's.
 pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable> {
-    let Some(root) = yaml::parse(text) else { return Vec::new() };
+    yaml::parse(text).map_or_else(Vec::new, |root| source_tables_in(package, path, text, &root))
+}
+
+/// The tables of the `sources:` of the properties file TEXT of PACKAGE,
+/// whose tree is ROOT, as `source_tables` gives them.
+pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Node) -> Vec<SourceTable> {
     let index = LineIndex::new(text);
     // An anchor anywhere in the file may hold a name, a schema or an identifier.
     let anchored = root.shares();
@@ -425,6 +458,27 @@ mod tests {
     }
 
     #[test]
+    fn a_properties_file_keeps_its_resources_unit_tests_and_macro_calls() {
+        let text = "version: 2\nmodels:\n  - name: orders\n    description: '{{ doc(\"d\") }} {{ my_macro() }}'\n\
+                    \x20   columns:\n      - name: id\nunit_tests:\n  - name: t\n    model: orders\n";
+        let scanned = Scanned::of(Path::new("/p/models/_m.yml"), text.into());
+        let entries: Vec<(&str, &str)> =
+            scanned.entries.iter().map(|entry| (entry.label, entry.name.as_str())).collect();
+        assert_eq!(entries, [("model", "orders")], "a column is no resource");
+        let models: Vec<(&str, &str)> =
+            scanned.models.iter().map(|(name, range)| (name.as_str(), &text[range.clone()])).collect();
+        assert_eq!(models, [("orders", "orders")]);
+        let macro_named = |calls: &[Call], wanted: &str| {
+            calls.iter().any(|call| matches!(&call.target, scan::Target::Macro { name, .. } if name == wanted))
+        };
+        assert!(macro_named(&scanned.calls, "my_macro"));
+        let hooks = "name: shop\non-run-start: \"{{ log_start() }}\"\n# on-run-end: \"{{ log_end() }}\"\n";
+        let hooks = Scanned::of(Path::new("/p/dbt_project.yml"), hooks.into());
+        assert!(macro_named(&hooks.calls, "log_start"), "a hook's macro");
+        assert!(!macro_named(&hooks.calls, "log_end"), "dbt renders no comment");
+    }
+
+    #[test]
     fn finds_every_resource_of_the_project_and_its_packages() {
         let project = scan(&fixture(), &HashMap::new()).unwrap();
         let mut ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
@@ -479,7 +533,7 @@ mod tests {
         assert_eq!(
             targets,
             [
-                &scan::Target::Ref { package: None, name: "customers".into() },
+                &scan::Target::Ref { package: None, name: "customers".into(), version: None },
                 &scan::Target::Macro { package: None, name: "ref".into() }
             ]
         );

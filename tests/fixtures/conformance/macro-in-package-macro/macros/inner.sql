@@ -1,0 +1,1 @@
+{% macro inner() %}'root'{% endmacro %}

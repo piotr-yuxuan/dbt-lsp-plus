@@ -204,6 +204,23 @@ impl Index {
         self.nodes.get(id)
     }
 
+    /// The enabled models, seeds and snapshots of the last manifest named
+    /// NAME in PACKAGE, each version of a versioned model apart.
+    pub fn resources(&self, package: &str, name: &str) -> Vec<&Value> {
+        let latest = self.named.get(name).into_iter().flatten().filter(|id| self.latest.contains(*id));
+        let resource = |node: &&Value| {
+            matches!(node["resource_type"].as_str(), Some("model" | "seed" | "snapshot"))
+                && node["package_name"] == package
+                && node["disabled"] != true
+        };
+        latest.filter_map(|id| self.nodes.get(id)).filter(resource).collect()
+    }
+
+    /// Whether the last manifest disables the node ID.
+    pub fn disabled(&self, id: &str) -> bool {
+        self.latest.contains(id) && self.nodes.get(id).is_some_and(|node| node["disabled"] == true)
+    }
+
     /// The enabled nodes of the last manifest, of the kinds that
     /// `dbt.listNodes` lists, `*` and `source:*`, by id: what a listing would
     /// give, from the manifest.
@@ -222,7 +239,7 @@ impl Index {
     /// root project first, then any.
     pub fn named(&self, target: &Target) -> Option<&Value> {
         let names = |node: &&Value| match target {
-            Target::Ref { package, name } => {
+            Target::Ref { package, name, .. } => {
                 matches!(node["resource_type"].as_str(), Some("model" | "seed" | "snapshot"))
                     && node["name"] == name.as_str()
                     && package.as_deref().is_none_or(|package| node["package_name"] == package)
@@ -550,13 +567,13 @@ mod tests {
     fn finds_a_named_node_as_dbt_looks_it_up_and_the_node_of_a_file() {
         let index = Index::of(&manifest());
         let id = |node: Option<&Value>| node.map(|node| node["unique_id"].as_str().unwrap().to_owned());
-        let orders = Target::Ref { package: None, name: "orders".into() };
+        let orders = Target::Ref { package: None, name: "orders".into(), version: None };
         assert_eq!(id(index.named(&orders)).as_deref(), Some("model.shop.orders"), "the root project first");
-        let theirs = Target::Ref { package: Some("utils".into()), name: "orders".into() };
+        let theirs = Target::Ref { package: Some("utils".into()), name: "orders".into(), version: None };
         assert_eq!(id(index.named(&theirs)).as_deref(), Some("model.utils.orders"));
         let customers = Target::Source { source: "raw".into(), table: "customers".into() };
         assert_eq!(id(index.named(&customers)).as_deref(), Some("source.shop.raw.customers"));
-        let dim = Target::Ref { package: None, name: "dim".into() };
+        let dim = Target::Ref { package: None, name: "dim".into(), version: None };
         assert_eq!(id(index.named(&dim)).as_deref(), Some("model.shop.dim.v2"), "the latest version");
         assert_eq!(id(index.of_file("models/marts/orders.sql")).as_deref(), Some("model.shop.orders"));
         assert_eq!(index.of_file("models/marts/_marts.yml").map(|_| ()), Some(()), "one test only");
@@ -599,14 +616,14 @@ mod tests {
             "nodes": {"model.utils.customers": model("model.utils.customers", "utils")},
             "disabled": {"model.shop.customers": [model("model.shop.customers", "shop")]}});
         let mut index = Index::of(&manifest);
-        let customers = Target::Ref { package: None, name: "customers".into() };
+        let customers = Target::Ref { package: None, name: "customers".into(), version: None };
         assert_eq!(index.named(&customers).unwrap()["unique_id"], "model.utils.customers");
         // A newer manifest's names are found too.
         let newer = json!({"metadata": {"project_name": "shop"},
             "nodes": {"model.shop.fresh": {"unique_id": "model.shop.fresh", "name": "fresh", "resource_type": "model",
                                            "package_name": "shop", "config": {}}}});
         index.overlay(Index::of(&newer));
-        let fresh = Target::Ref { package: None, name: "fresh".into() };
+        let fresh = Target::Ref { package: None, name: "fresh".into(), version: None };
         assert_eq!(index.named(&fresh).unwrap()["unique_id"], "model.shop.fresh");
     }
 

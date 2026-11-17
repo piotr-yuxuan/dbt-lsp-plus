@@ -7,10 +7,10 @@
 //! scan of the files.  The server lists no macros, and a manifest's are
 //! transitive, so the edges to and from macros always come from the scan.
 
-use crate::project::{Entity, Project};
-use crate::scan::Target;
+use crate::navigation::Lookup;
+use crate::project::Project;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -103,54 +103,15 @@ pub struct Graph {
     pub edges: Vec<Edge>,
 }
 
-/// The ids of the resources that a call of TARGET from ENTITY names, by
-/// dbt's lookup: a package named in the call, else the entity's own package,
-/// then the packages of SEARCH, the root project first; an unqualified macro
-/// only in the entity's package and the root project, since dbt keeps the
-/// others' macros behind their package's name.  A ref, source or macro names
-/// the first that exists; a dispatch names every implementation (`*__name`)
-/// of the first package that has one.
-fn resolve(known: &BTreeSet<&str>, search: &[&str], entity: &Entity, target: &Target) -> Vec<String> {
-    let packages: Vec<&str> = match target {
-        Target::Ref { package: Some(package), .. }
-        | Target::Macro { package: Some(package), .. }
-        | Target::Dispatch { package: Some(package), .. } => vec![package],
-        Target::Macro { package: None, .. } => {
-            vec![entity.package.as_str(), search.first().copied().unwrap_or_default()]
-        }
-        _ => std::iter::once(entity.package.as_str()).chain(search.iter().copied()).collect(),
-    };
-    let candidates = packages.into_iter().map(|p| match target {
-        Target::Ref { name, .. } => ["model", "seed", "snapshot"].map(|t| format!("{t}.{p}.{name}")).to_vec(),
-        Target::Source { source, table } => vec![format!("source.{p}.{source}.{table}")],
-        Target::Macro { name, .. } => vec![format!("macro.{p}.{name}")],
-        Target::Dispatch { name, .. } => {
-            let prefix = format!("macro.{p}.");
-            let in_package = known.range(prefix.as_str()..).take_while(|id| id.starts_with(&prefix));
-            in_package.filter(|id| id.ends_with(&format!("__{name}"))).map(|id| (*id).to_owned()).collect()
-        }
-    });
-    let mut found = candidates
-        .map(|ids| ids.into_iter().filter(|id| known.contains(id.as_str()) && *id != entity.id).collect::<Vec<_>>())
-        .find(|ids| !ids.is_empty())
-        .unwrap_or_default();
-    if !matches!(target, Target::Dispatch { .. }) {
-        found.truncate(1);
-    }
-    found
-}
-
 impl Graph {
     /// The graph that the files of PROJECT give.
     pub fn scanned(project: &Project) -> Graph {
-        let known: BTreeSet<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
-        let mut search: Vec<&str> = project.packages.keys().map(String::as_str).collect();
-        search.sort_by_key(|package| (*package != project.root_package, *package));
+        let lookup = Lookup::new(project, None);
         let mut sites: BTreeMap<(String, String), Vec<Range<usize>>> = BTreeMap::new();
         for entity in &project.entities {
             for call in &entity.calls {
-                for to in resolve(&known, &search, entity, &call.target) {
-                    sites.entry((entity.id.clone(), to)).or_default().push(call.range.clone());
+                for to in lookup.call(&entity.package, &call.target).iter().filter(|to| to.id != entity.id) {
+                    sites.entry((entity.id.clone(), to.id.clone())).or_default().push(call.range.clone());
                 }
             }
         }
@@ -264,6 +225,40 @@ mod tests {
         let spine = graph.edges.iter().find(|e| e.to == "macro.utils.date_spine").unwrap();
         assert_eq!((spine.from.as_str(), spine.sites.len()), ("model.shop.report", 1));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_ref_follows_the_lookup_flag_and_an_ambiguous_one_names_every_candidate() {
+        let files = |flags: &str| {
+            [
+                ("dbt_project.yml".to_owned(), format!("name: shop\n{flags}")),
+                ("models/orders.sql".into(), "select 1".into()),
+                ("models/report.sql".into(), "{{ ref('twice') }}".into()),
+                ("dbt_packages/pkg/dbt_project.yml".into(), "name: pkg\n".into()),
+                ("dbt_packages/pkg/models/orders.sql".into(), "select 2".into()),
+                ("dbt_packages/pkg/models/uses.sql".into(), "{{ ref('orders') }}".into()),
+                ("dbt_packages/pkg/models/twice.sql".into(), "select 3".into()),
+                ("dbt_packages/other/dbt_project.yml".into(), "name: other\n".into()),
+                ("dbt_packages/other/models/twice.sql".into(), "select 4".into()),
+            ]
+        };
+        let graph = |name: &str, flags: &str| {
+            let files = files(flags);
+            let borrowed: Vec<(&str, &str)> = files.iter().map(|(path, text)| (path.as_str(), text.as_str())).collect();
+            let dir = project::scratch_project(name, &borrowed);
+            let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap());
+            fs::remove_dir_all(&dir).unwrap();
+            graph
+        };
+        let own = graph("graph-flag-own", "");
+        assert!(pairs(&own).contains(&("model.pkg.uses", "model.pkg.orders")));
+        let flag = "flags:\n  require_ref_searches_node_package_before_root: false\n";
+        let root_first = graph("graph-flag-root", flag);
+        assert!(pairs(&root_first).contains(&("model.pkg.uses", "model.shop.orders")));
+        // dbt fails on a name that two packages but the caller's and the root define (dbt1005).
+        let to: Vec<&str> =
+            pairs(&own).into_iter().filter(|(from, _)| *from == "model.shop.report").map(|(_, to)| to).collect();
+        assert_eq!(to, ["model.other.twice", "model.pkg.twice"]);
     }
 
     #[test]

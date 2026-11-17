@@ -44,7 +44,7 @@ src/project.rs                the resources of a project and its packages
 src/cache.rs                  the scan kept between requests, each file by its metadata
 src/graph.rs                  the dependency graph: scanned, then the server's or the manifest's
 src/sources.rs                references and renames of sources
-src/navigation.rs             the targets of definitions in YAML, dbt's lookup
+src/navigation.rs             the targets of definitions and references, dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/packages.rs               whether dbt would install packages before it parses
@@ -100,7 +100,6 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
     from the hierarchy's answer;
   - `project_dir`: the parsing of the server command, at the boundary;
-  - `graph::resolve`: dbt's lookup rule, in one place;
   - `Pending::merged`: what each kind of forwarded request does to the
     server's answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
@@ -125,7 +124,8 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     script makes one life do in place of an answer, apart from `main`'s
     loop over frames;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
-    `Proxy::on_rename`, `Proxy::on_definition` and `Proxy::on_document`: the
+    `Proxy::on_rename`, `Proxy::on_definition`, `Proxy::on_references` and
+    `Proxy::on_document`: the
     routing of a request the proxy may answer itself (by its method, then
     by what its position holds), and one answer per kind of request, as
     for the owned methods;
@@ -151,7 +151,9 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     effect, apart from the comparisons, which decide;
   - `nodes_compared`, `calls_compared` and `entries_compared` in
     `tests/proxy/conformance.rs`: one per kind of answer compared with
-    dbt's, so that `corpus` stays a walk over the cases;
+    dbt's, so that `corpus` stays a walk over the cases; `references_missed`
+    there, the check of definitions against references, which no registry
+    excuses;
   - in `scripts/release.py`, ported from imprimeur: `next_version`,
     `current_version`, `release_notes`, `with_version` and `decide`, the
     pure decisions, each with tests of its own, apart from the effects;

@@ -71,14 +71,28 @@ owns all state and writes both outputs.
 - References and renames stay the server's, but on a source the server
   answers them with nothing: the proxy answers those requests itself, when
   the position is on a `source()` argument or on a source's or table's
-  `name:` under `sources:`, in a file the scan holds, and forwards every
-  other one.  Definitions likewise, where the document shows a target that
-  the server answers with null (see "Navigation from YAML").  It says so
-  under the standard `capabilities.experimental`, merged with the
-  server's: `"dbtLspPlus": {"version": 1, "references": ["source"],
-  "rename": ["source", "cte"], "definition": ["source", "ref", "doc",
-  "entry", "test"]}` names, per request, the kinds of target it answers
-  itself, and dbt-mode steps aside for exactly those.
+  `name:` under `sources:`, references in any file under the root and a
+  rename in a file the scan holds, and forwards every other one.
+  Definitions likewise, where the document shows a target that the server
+  answers with null (see "Navigation").  It says so under the
+  standard `capabilities.experimental`, merged with the server's:
+  `"dbtLspPlus": {"version": 2, "definition": {KIND: [PLACE, ...]},
+  "references": {...}, "rename": {...}}` names, per request, the kinds of
+  target it answers itself and the places of a request's position, `sql`
+  (a `.sql` file), `yaml` (`.yml`, `.yaml`) or `python` (`.py`).  With a
+  server: definition `source` [sql, yaml, python], `ref`, `doc`, `entry`
+  and `test` [yaml]; references `source` [sql, yaml, python]; rename
+  `source` [sql, yaml, python] and `cte` [sql].  Alone, also definition and
+  references of `ref` [sql, yaml] and `macro` [sql, yaml].  A kind listed
+  at a place is the proxy's at every position of that kind there, possibly
+  null or `[]`, never forwarded, in any file under the root: references
+  come from the scan whichever file asks, while a rename needs a file the
+  scan holds, since it would leave the asking file as it is.  The kinds
+  are by position: `entry` is the `name:` of an entry, `test` a generic
+  test's name, `ref` in YAML a unit test's `model:` too, and `macro` the
+  `ref` keyword itself and the name in the tag of a macro or a generic
+  test.  dbt-mode steps aside for exactly those (its plan
+  014, agreed with plan 017), and reads version 2 only.
 - A method is owned only when the server does not announce it.  dbt lsp
   2.0.9 announces `documentSymbolProvider: false` but answers that request
   with a flat list of tokens, so the proxy owns it.  A later server that
@@ -159,20 +173,24 @@ resolved path.
   - Measured on synthetic projects (`scripts/bench/`) of 3,000 and 6,000
     models with 15 YAML columns each (12.8 and 22.8 MB), on tmpfs, in a
     release build: a workspace symbol, definition, references, rename or
-    call hierarchy request answers in 14 to 22 ms and 30 to 36 ms with
-    nothing changed, and within 0.17 and 0.25 s as the first request
-    after the save of a model, of the largest properties file or of
-    `dbt_project.yml`.  Each took 0.3 to 1.7 s without the cache.  The
-    proxy then holds 68 and 117 MB.
+    call hierarchy request answers in 15 to 23 ms and 30 to 40 ms with
+    nothing changed, but the references of a macro that every model
+    calls (see "Known limitations"), and within 0.20 and 0.31 s as the
+    first request after the save of a model, of the largest properties
+    file or of `dbt_project.yml`.  Each took 0.3 to 1.7 s without the
+    cache.  The proxy then holds 79 and 142 MB.
 - The graph: once the server has listed the graph, the dependencies of each
   node it listed are its own, since only dbt resolves `ref(var('x'))`; until
   then, and for the nodes it did not list, they come from the scan.  The
   server lists no macros, so the edges to and from macros always come from
-  the scan.  The scan looks a ref or a source up in the caller's package,
-  the root project, then any package, as dbt 2.0.9 does by default for a
-  node (in a macro, dbt looks in the calling node's package: see "Known
-  limitations"), and an unqualified macro in the caller's package and the
-  root project only, as dbt does: another package's macros need its name.
+  the scan.  The scan looks a call up as navigation does (see
+  "Navigation"), by the one rule of `navigation::Lookup`: a ref or a source
+  in the caller's package, the root project, then any package, the root
+  first under the lookup flag, every candidate where dbt fails on two
+  packages (dbt1005) (in a macro, dbt looks in the calling node's package:
+  see "Known limitations"), and an unqualified macro in the caller's
+  package and the root project only, as dbt does: another package's macros
+  need its name.
   A dispatch names every
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
@@ -243,9 +261,11 @@ minutes, so only a unit test of the abandonment covers it.
   under `sources:` in the root `dbt_project.yml`; and its declarations when
   the client asks.  A call whose argument is an expression, as in
   `source('raw', 'events' ~ var('suffix'))`, names no table.
-- The proxy answers only on a file the scan holds: on a file not saved yet,
-  or one outside the resource paths, it could not see every occurrence, so
-  the request goes to the server.
+- References come from the scan whichever file under the root asks, the
+  asking file left out when the scan does not hold it, as a file not saved
+  yet or one outside the resource paths.  A rename is answered only on a
+  file the scan holds, which it then edits; elsewhere it goes to the
+  server.
 - An open document is named by the URI the client opened it under, and its
   ranges are those of its open text.
 - A rename keeps the relation in the warehouse.  dbt takes a table's
@@ -342,45 +362,91 @@ its own appended, under the server's URI, else the client's, else the
 file's, first clearing a URI it published under before.  Nothing after
 `shutdown`.
 
-## Navigation from YAML
+## Navigation
 
 dbt lsp 2.0.9 answers null to definition and hover at every position of a
 properties file, and to definition on a `source()` or `doc()` argument in
-SQL.  The proxy answers a definition itself where the document alone shows
-one of these targets, and forwards every other one, YAML included:
+SQL; in SQL it answers null on a package's `ref` and on a name that two
+packages hold, ignores a `ref`'s version, and finds a `ref`'s references in
+its own file only (probed by plan 017's critic).  The proxy answers a
+definition, and references, itself where the document alone shows one of
+these targets, as `experimental.dbtLspPlus` lists them (see "Message
+flow"), and forwards every other one:
 
 - `source`: a `source()` argument in any file, or a source's or table's
   `name:`, leads to the table's or source's `name:`;
-- `ref`: a `ref()` argument in a YAML file (in SQL the server answers), or
-  a unit test's `model:`, leads to the model's, seed's or snapshot's file;
-  a `ref` that names a version is forwarded, since the scan knows no
-  versions' files;
+- `ref`: a `ref()` argument in a YAML file, and alone in SQL too, or a
+  unit test's `model:`, leads to the model's, seed's or snapshot's file;
+- `macro`, alone: a macro call's name or package, in SQL or in the Jinja of
+  a YAML value such as a hook, or the name in the tag of a macro or a
+  generic test (the macro `test_<name>`), leads to the macro's whole block,
+  as dbt lsp answers; the `ref` keyword itself is a macro call, since a
+  project may override `ref`; dbt's own macros (`dbt.*`, builtins) lead
+  nowhere, and a materialization's tag names nothing;
 - `doc`: a `doc()` argument in a YAML file, its quotes as YAML escapes them,
-  leads to the docs block; dbt has no `doc` in SQL;
+  leads to the docs block; dbt has no `doc` in SQL, where `doc(` is a
+  macro call;
 - `entry`: the `name:` of a model, seed, snapshot, analysis or macro entry
   leads to its file or block;
 - `test`: a generic test's name in a `data_tests:` or `tests:` list below
   the top level (an item, the one key of an item, or `test_name:`) leads
   to its test block; dbt's own tests have none, and get null.
 
-Lookup follows dbt 2.0.9, probed with `dbt parse`: a package the name gives
-is the only one searched; else a `ref` or a `source` tries the file's own
-package (the installed package whose directory holds it), then the root,
-then any, the root first when `flags:
+Lookup follows dbt 2.0.9, probed with `dbt parse`, by one rule for
+navigation, references and the call hierarchy (`navigation::Lookup`): a
+package the name gives is the only one searched; else a `ref` or a
+`source` tries the file's own package (the installed package whose
+directory holds it), then the root, then any, the root first when `flags:
 require_ref_searches_node_package_before_root` is a YAML 1.2 false, as dbt
 2.0.9 and dbt-oss 2.0.11 read it: a plain `false`, `False` or `FALSE`, not
 `fAlse`, `no` nor a quoted `'false'`, and no parse warns of a value it
-ignores; a `doc` tries the root, then any package, whichever file calls
-it and flag or not: the first by the byte order of package names, which
-is the order of their paths, since dbt installs each package at
-`dbt_packages/<name>`; an entry describes a resource of the file's own
-package only, since dbt 2.0.9 calls an entry naming another package's
-resource unused (dbt-core 1.12 patches it).  As
-dbt-core 1.12.6's parser reads them: a generic test, the file's package
-then the root; a unit test's model, the file's package.  The first package
-that has something gives one location, or every
-declaration of a source.  A location is the name of a block or of a
-`name:`, or the start of a model's file, as dbt lsp answers a `ref`.
+ignores; an unqualified macro call tries the file's own package, then the
+root, never another package, whose macros dbt keeps behind its name, and
+inside a package's macro that is the macro's package, where dbt looks in
+the rendering node's (the owner's choice, plan 017); a `doc` tries the
+root, then any package, whichever file calls it and flag or not: the
+first by the byte order of package names, which is the order of their
+paths, since dbt installs each package at `dbt_packages/<name>`; an entry
+describes a resource of the file's own package only, since dbt 2.0.9
+calls an entry naming another package's resource unused (dbt-core 1.12
+patches it).  As dbt-core 1.12.6's parser reads them: a generic test, the
+file's package then the root; a unit test's model, the file's package.
+The first package that has something gives its every candidate: one, but
+where dbt fails on a name that two packages other than the file's and the
+root define (dbt1005), every one, as the owner chose; and every
+declaration of a source.
+
+Once a parse exists, its index gives what the scan misses: a version's file
+for `v=` or `version=`, the latest version for a `ref` that names none,
+nothing for a `v=` on a model without versions; a Python model; a snapshot
+defined in YAML; and it skips a node that the root disables, so that a
+package's disabled model gives way to the root's.  An entry of a model,
+seed or snapshot leads to what the index knows of it too, each version of
+a versioned model, as dbt patches them all from the entry.  Only the last
+manifest counts, as for the graph alone (see "Standalone mode").  A
+definition or references request starts a parse when the index is
+missing or stale, in both modes once the server has compiled, and answers
+from the scan meanwhile: a versioned `ref` gets null.  A location is the
+name of a block or of a `name:`, a macro's whole block, or the start of a
+model's file, as dbt lsp answers a `ref`.
+
+References, alone, at a `ref()` argument, a unit test's `model:`, a macro
+call's name, or the name in the tag of a macro or a generic test: each
+call that resolves to the same resource, as its definition would, at its
+name, in SQL, YAML (a relationships test's `to:`, a value's Jinja,
+`dbt_project.yml`'s hooks), Python (`dbt.ref`), analyses, snapshots and
+tests; a unit test's `model:`; for a generic test, its uses in properties
+files.  With `includeDeclaration`, the file's start or the macro's block,
+and the `name:` of each properties entry declaring it in its own package.
+The calls come from the kept scan, which keeps a YAML file's macro calls,
+its unit tests' models, its resources' entries and its generic tests, read
+from one parse, so that no request parses YAML again; calls alike from one
+package are looked up once.
+
+A targeted request reads the document's open text if the client opened
+it, else the saved file, and decides its claim on that text: a client may
+send a request on a file it never opened, and a position that holds no
+target in the saved text is not claimed.
 
 Hover there extends the hover summary (see "Node information and hover"):
 on a `doc`, the docs block's markdown as written, if it holds any; on a
@@ -560,8 +626,9 @@ So the proxy runs the user's own `dbt parse`.
   or when the client closes.  Only the direct child is killed: a launcher's
   grandchild may outlive it.
 - When, with a server: lazily.  A change of the client's marks the index stale; a
-  `nodeInfo` or a hover that finds it stale, or an inlay hint request that
-  finds no index, starts a parse, and is answered from the last index
+  `nodeInfo`, a hover, or a definition or references request that the
+  proxy answers, that finds it stale, or an inlay hint request that finds
+  no index, starts a parse, and is answered from the last index
   meanwhile.  A parse starts only when the server has compiled since the
   change, so that dbt has resolved the packages itself, and such a request
   made before that compilation starts it once it comes,
@@ -721,6 +788,8 @@ Alone, the proxy:
   alone, and null elsewhere; inlay hints with its own, or `[]`;
 - answers `nodeInfo` from the parse, which starts at the first `didOpen`
   (see "How the proxy runs it");
+- answers a definition and references on a `ref` or a macro call in SQL
+  too, and on a macro call in YAML (see "Navigation");
 - takes the graph's edges between nodes from the last parse's manifest,
   `depends_on.nodes` of its enabled nodes of the kinds `dbt.listNodes`
   lists, through the same merge as a listing, and starts a parse for a
@@ -793,7 +862,8 @@ fails with -32803.
 - Custom materializations are in the outline but not in workspace symbols.
 - A new file not saved yet is not part of the project, nor are local packages
   declared in `packages.yml` outside `packages-install-path`, nor versioned
-  models, Python models or YAML snapshots.
+  models, Python models or YAML snapshots, which only navigation reads, from
+  the parse.
 - A file that the project reaches through a link, opened by its real path
   outside the project, is not matched to its resource.
 - A client that reuses the id of a listing the proxy abandoned after two
@@ -803,7 +873,9 @@ fails with -32803.
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the
   customers`, can unmask a later comment: a call commented out after it
-  counts as a reference, and a rename edits it.
+  counts as a reference, and a rename edits it.  A `#` that follows no
+  space, as in `tags: a#b` or a Jinja comment `{# #}`, hides the rest of
+  its line as a YAML comment would.
 - `selectors.yml` and selectors on the command line name a source as
   `source:s.t`; a rename leaves them on the old name.
 - A `ref` with no package names the root project's node first, then any,
@@ -832,9 +904,6 @@ fails with -32803.
   then the root project, not the calling file's package as dbt 2.0.9 does
   for a `ref`.  In a Python model or YAML, a `#` comment between a `ref`'s
   last argument and its `)` hides its hint.
-- `graph::resolve`, behind the call hierarchy, ignores `flags:
-  require_ref_searches_node_package_before_root: false`, which navigation
-  reads.
 - Navigation reads that flag as written.  It reads no explicit tag:
   `!!str false` puts the root first, where dbt keeps the calling node's
   package first, and `!!bool "false"` does not, where dbt does.  It
@@ -845,12 +914,27 @@ fails with -32803.
   the node that calls the macro, not in the macro's own; the proxy, which
   does not know the caller, resolves it in the macro's package.  It shows
   in the navigation of a `source()` in a macro file, and in the call
-  hierarchy's edges from a macro, which always come from the scan.
-- A versioned model's `ref` (`v=2`) and its versions' files are not
-  navigated; a generic test's arguments (`column_name:`, `to:` aside) and
+  hierarchy's edges from a macro, which always come from the scan.  So
+  does an unqualified macro call inside a package's macro, by the owner's
+  choice: navigation, references and the graph look it up in the macro's
+  package, then the root.
+- Before the first parse, a versioned model's `ref`, a Python model and a
+  snapshot defined in YAML lead nowhere, and the call hierarchy never
+  knows them; a generic test's arguments (`column_name:`, `to:` aside) and
   a `config:` block lead nowhere.
 - Where one package has two files of a model's name, one of them disabled,
-  a definition leads to the first by path, which may be the disabled one.
+  a definition before the first parse leads to both.
+- A hook given in a string inside a tag, such as `{{ config(post_hook="{{
+  m() }}") }}`, is not read: its macro calls are no references.
+- With a server, a `ref` or a macro call in SQL goes to dbt lsp, which
+  answers as said under "Navigation"; plan 019's modes may give the user
+  the choice.  A Python model's `dbt.ref` is among a model's references,
+  but a definition there goes to the server: the flag lists no `python`
+  place for `ref`.
+- Observed by plan 017's critic, not checked by a test: dbt lsp 2.0.9,
+  compiling a project with an `on-run-start` hook, tried to download
+  DuckDB's driver; with the network cut, every definition then answered
+  null.
 - A `doc` in a project that sets `docs-paths` to a directory outside its
   resource paths finds no docs block (see `docs-paths` above).
 - A hover or a definition in a large properties file parses it several
@@ -861,13 +945,17 @@ fails with -32803.
   metadata is the same.  The next change of the file shows it.
 - Each request that needs the project walks it, reads the metadata of
   every file and each package's `dbt_project.yml`: most of the 30 to
-  36 ms at 6,000 models.
+  40 ms at 6,000 models.
+- The references of a macro that each of 6,000 synthetic models calls,
+  6,001 locations and 1.5 MB of JSON, take about 86 ms: the walk above,
+  about 25 ms to find and place them, and the rest to encode the answer
+  and for the client to read it.  At 3,000 models, 41 ms.
 - A request that comes while the first read of every file is under way
   reads them all itself, beside that read: 0.4 to 0.55 s and 0.72 to
   1.06 s on 3,000 and 6,000 synthetic models, where a scan of its own
   took 0.30 and 0.53 s without the cache, which derived less.  The proxy
-  then holds up to 91 and 162 MB.  Once that read is done, the first
-  request takes 36 and 72 ms.
+  then holds up to 115 and 208 MB.  Once that read is done, the first
+  request takes 36 and 77 ms.
 - A file that cannot be read, for its permissions or an error of the
   file system, makes each request that needs the project assemble it
   again: about 35 ms more at 6,000 models, and the call hierarchy's graph
@@ -902,7 +990,8 @@ fails with -32803.
 - The corpus's `divergences.txt` lists each divergence from dbt that it
   shows, with its reason (see "Conformance").  Beyond those above: a
   package's model that the root project disables (`+enabled: false`)
-  still resolves, ahead of the root's; a `function()` call and the
+  still resolves, ahead of the root's, in the call hierarchy, and in
+  navigation before the first parse; a `function()` call and the
   functions it names are not read; the graph names every implementation
   of a dispatch, where dbt lists the adapter's alone from a macro, and
   nothing from a node; dbt 2 ignores a source's `overrides`, which the
@@ -938,9 +1027,10 @@ library's answers, each named by a lookup:
   entities and source tables; and a dependency that no call the scan
   reads names;
 - `location`: the file of each, against `original_file_path`;
-- `navigation`: each `ref` and `source` of a node, but a `ref` naming a
-  version, which navigation forwards; and in a properties file each
-  entry's `name:` and each `doc()` in it, against the dependency of the
+- `navigation`: each `ref`, `source` and macro call of a node, as
+  navigation resolves it once a parse exists, the case's manifest as its
+  index; and in a properties file each entry's `name:` and each `doc()` in
+  it, against the dependency of the
   call's name, the node that dbt patched from that file (`patch_path`),
   and the docs block of the doc's name whose text dbt rendered in the
   description that holds the call, a column's or the node's;
@@ -948,9 +1038,9 @@ library's answers, each named by a lookup:
   it, against the dependencies (nodes, and the project's macros) that bear
   the call's name, a dispatch's being its `*__name` implementations.
 
-A node is compared on its own calls and on the `ref` and `source` of each
-macro it reaches through the graph by plain calls, as `<node> via
-<macro>`, since dbt resolves those for the node; but not through a
+A node is compared on its own calls and on the `ref`, `source` and macro
+calls of each macro it reaches through the graph by plain calls, as
+`<node> via <macro>`, since dbt resolves those for the node; but not through a
 dispatch: dbt renders the one implementation it picks, which the corpus
 cannot tell, so no implementation's `ref` or `source` is compared, though
 their calls still count for what the node names.  A macro is compared on
@@ -959,7 +1049,9 @@ case may expect dbt to fail, in a file `expected-error`, and its manifest
 is compared all the same; dbt must leave the copy as it was.  `divergences.txt` lists every divergence,
 what each side answered and why: one it lacks, or an entry that no longer
 diverges, as when an answer changes, fails the corpus.  dbt 2.0.9 and
-dbt-oss 2.0.11 gave the same divergences on every case.
+dbt-oss 2.0.11 gave the same divergences on every case.  Every call that
+navigation resolves must also be among the references of what it leads
+to, which no registry excuses.
 
 A case keeps to what the comparison can attribute: one call per node and
 target name, every call rendered at parse, and docs blocks of distinct
@@ -1020,10 +1112,16 @@ source's description.
     for byte; a first parse from a hint request, none more once an index
     exists; the refresh asked of a client that can, its answer kept from
     the server;
-  - navigation from YAML: each kind of target and its location, dbt's own
-    test null, the server never asked; a column's name, `dbt_project.yml`
-    and a SQL `ref` forwarded; a `source()` in SQL; hover on a doc, a test
-    and an entry's name; nodeInfo on an entry's name; without a server;
+  - navigation: each kind of target and its location, dbt's own test
+    null, the server never asked; a column's name and `dbt_project.yml`
+    forwarded, and with a server a SQL `ref` and its references; a
+    `source()` in SQL; a versioned `ref` in YAML, the proxy's in both
+    modes, null until a parse, then its version's file; alone, a SQL
+    `ref` from the root and from a package with and without the flag, a
+    macro call qualified or not, dbt's own macro null, and the references
+    of a model and of a macro across files, with their declaration; hover
+    on a doc, a test and an entry's name; nodeInfo on an entry's name;
+    without a server;
   - the restart: the client's `initialize`, `initialized` and the open
     documents as they stand, edits, opens and closes during the delay
     included, then a request reaching the new server, four documents
@@ -1104,7 +1202,8 @@ In the order of the feature list agreed with the dbt-mode session:
 5. YAML outline (A1): done in plan 005.
 6. Restart of a crashed server, replaying `initialize`, `initialized` and
    the open documents: done in plan 010.
-7. `packages.yml` local packages outside `packages-install-path`, versioned
-   models (`ref('m', v=2)`), Python models, YAML snapshots.
+7. `packages.yml` local packages outside `packages-install-path`; versioned
+   models, Python models and YAML snapshots in the scan (navigation reads
+   them from the parse since plan 017).
 8. A run in an editor, then with refmux in front of the server for
    monorepos (one root per proxy today).

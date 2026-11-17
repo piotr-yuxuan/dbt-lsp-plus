@@ -54,6 +54,32 @@ const ADDED: [(&str, &[&str]); 6] = [
 /// elsewhere they go to the server.
 const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "textDocument/definition"];
 
+/// What the proxy answers itself, as `experimental.dbtLspPlus` announces
+/// it, version 2: per request, each kind of target with the places where a
+/// request's position may be, `sql`, `yaml` or `python` by the file's
+/// extension; the last column says alone only, with a dbt without `lsp`.
+/// A kind listed at a place is the proxy's at every position of that kind
+/// there, never forwarded; the rows of a kind follow the order of places.
+const ANSWERED: [(&str, &str, &[&str], bool); 12] = [
+    ("definition", "source", &["sql", "yaml", "python"], false),
+    ("definition", "ref", &["sql"], true),
+    ("definition", "ref", &["yaml"], false),
+    ("definition", "macro", &["sql", "yaml"], true),
+    ("definition", "doc", &["yaml"], false),
+    ("definition", "entry", &["yaml"], false),
+    ("definition", "test", &["yaml"], false),
+    ("references", "source", &["sql", "yaml", "python"], false),
+    ("references", "ref", &["sql", "yaml"], true),
+    ("references", "macro", &["sql", "yaml"], true),
+    ("rename", "source", &["sql", "yaml", "python"], false),
+    ("rename", "cte", &["sql"], false),
+];
+
+/// The requests answered by the proxy that ask for the parse's index, in
+/// both modes: nodeInfo, and a definition or references for versions and
+/// disabled nodes.  A stale index is parsed again, as for a hover.
+const WANT_INDEX: [&str; 3] = [config::NODE_INFO, "textDocument/definition", "textDocument/references"];
+
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
 /// flight cancels the first.
@@ -441,8 +467,13 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            let answered = json!({"version": 1, "references": ["source"], "rename": ["source", "cte"],
-                                  "definition": ["source", "ref", "doc", "entry", "test"]});
+            let mut answered = json!({"version": 2});
+            for (request, kind, places, _) in ANSWERED.iter().filter(|(.., alone)| self.standalone || !alone) {
+                let mut listed: Vec<Value> =
+                    serde_json::from_value(answered[*request][*kind].take()).unwrap_or_default();
+                listed.extend(places.iter().map(|place| json!(place)));
+                answered[*request][*kind] = json!(listed);
+            }
             experimental.insert("dbtLspPlus".into(), answered);
         }
         // The proxy's own command, beside the server's.
@@ -702,12 +733,34 @@ impl<W: Write> Proxy<W> {
         let (path, text, offset) = self.document_at(params)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
         let answered = match method {
-            "textDocument/definition" => navigation::target_at(&path, &text, offset).is_some(),
-            // A CTE lives in its file; a source only the scan sees whole.
+            "textDocument/definition" => navigation::target_at(&path, &text, offset)
+                .is_some_and(|target| self.claims("definition", &target, &path)),
+            // A CTE lives in its file; a source only the scan sees whole, and so its references.
             "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
+            "textDocument/references" => {
+                let claimed = navigation::target_at(&path, &text, offset)
+                    .is_some_and(|target| self.claims("references", &target, &path));
+                claimed && self.root.as_ref().is_some_and(|root| path.starts_with(root))
+            }
             _ => self.source_at(params).is_some(),
         };
         answered.then_some(method)
+    }
+
+    /// Whether the proxy answers REQUEST itself on TARGET in the file at
+    /// PATH, as `ANSWERED` says.
+    fn claims(&self, request: &str, target: &navigation::Target, path: &Path) -> bool {
+        let place = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("sql") => "sql",
+            Some("yml" | "yaml") => "yaml",
+            Some("py") => "python",
+            _ => return false,
+        };
+        let listed = |(answered, kind, places, alone): &&(&str, &str, &[&str], bool)| {
+            *answered == request && *kind == target.kind() && places.contains(&place) && (self.standalone || !alone)
+        };
+        ANSWERED.iter().any(|row| listed(&row))
     }
 
     /// The definition of the target at the request's position, by dbt
@@ -716,15 +769,8 @@ impl<W: Write> Proxy<W> {
         let (path, text, offset) = self.document_at(params)?;
         let target = navigation::target_at(&path, &text, offset);
         let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
-        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
-        let locations: Vec<Value> = navigation::resolve(&project, &path, &target)
-            .iter()
-            .map(|found| {
-                let index = LineIndex::new(project.text(&found.path).unwrap_or_default());
-                let range = index.range(found.range.start, found.range.end, self.encoding);
-                json!({"uri": uri_of(&found.path), "range": range})
-            })
-            .collect();
+        let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
+        let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
         Some(Ok(match &locations[..] {
             [] => Value::Null,
             [location] => location.clone(),
@@ -732,14 +778,44 @@ impl<W: Write> Proxy<W> {
         }))
     }
 
-    /// The references or the rename of the source at the request's position.
-    fn on_source(&self, method: &str, params: &Value) -> Option<Result<Value, String>> {
-        let Some((project, target)) = self.source_at(params) else { return Some(Ok(Value::Null)) };
-        let uri_of = |path: &Path| self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
-        if method == "textDocument/references" {
-            let declarations = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
-            return Some(Ok(sources::references(&project, &target, declarations, self.encoding, &uri_of)));
+    /// The references of the source, the node or the macro at the request's
+    /// position, with their declaration when the client asks.
+    fn on_references(&self, params: &Value) -> Option<Result<Value, String>> {
+        let (path, text, offset) = self.document_at(params)?;
+        let target = navigation::target_at(&path, &text, offset);
+        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(json!([]))) };
+        let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
+        if let navigation::Target::Source(source) = &target {
+            let uri_of = |path: &Path| self.uri_of(path);
+            return Some(Ok(sources::references(&project, source, declaration, self.encoding, &uri_of)));
         }
+        let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
+        let found = navigation::references(&lookup, &path, &target, declaration);
+        Some(Ok(Value::Array(self.locations(&project, &found))))
+    }
+
+    /// The URI of the file at PATH, as the client spelt it if it opened it.
+    fn uri_of(&self, path: &Path) -> String {
+        self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path))
+    }
+
+    /// The locations of FOUND in PROJECT, as the client spelt their URIs.
+    fn locations(&self, project: &Project, found: &[navigation::Found]) -> Vec<Value> {
+        let location = |found: &navigation::Found| {
+            // Up to the range's end only: a macro's references may span thousands of files.
+            let text = project.text(&found.path).unwrap_or_default();
+            let index = LineIndex::new(text.get(..found.range.end).unwrap_or(text));
+            let range = index.range(found.range.start, found.range.end, self.encoding);
+            json!({"uri": self.uri_of(&found.path), "range": range})
+        };
+        found.iter().map(location).collect()
+    }
+
+    /// The rename of the source at the request's position, in a file the scan
+    /// holds: a rename that left the asking file as it is would be wrong.
+    fn on_source(&self, params: &Value) -> Option<Result<Value, String>> {
+        let Some((project, target)) = self.source_at(params) else { return Some(Ok(Value::Null)) };
+        let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
         Some(sources::rename(&project, &target, new, self.encoding, &uri_of))
     }
@@ -747,7 +823,7 @@ impl<W: Write> Proxy<W> {
     /// The rename of the source, else of the CTE, at the request's position.
     fn on_rename(&self, params: &Value) -> Option<Result<Value, String>> {
         if self.source_at(params).is_some() {
-            return self.on_source("textDocument/rename", params);
+            return self.on_source(params);
         }
         let (_, text, offset) = self.document_at(params)?;
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
@@ -796,7 +872,9 @@ impl<W: Write> Proxy<W> {
         });
         if let Some(target) = entry {
             let project = self.project()?;
-            return navigation::resolve(&project, &path, &target).first().and_then(|found| index.node(&found.id));
+            let found =
+                navigation::resolve(&navigation::Lookup::new(&project, self.parsing.index.as_ref()), &path, &target);
+            return found.first().and_then(|found| index.node(&found.id));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
         index.of_file(&relative.to_string_lossy())
@@ -998,9 +1076,9 @@ impl<W: Write> Proxy<W> {
     /// PENDING.  A refusal fails it with its reason; a panic while answering
     /// fails that request alone, never the session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
-        // nodeInfo needs the index; alone, so does the call hierarchy's graph.
+        // Alone, the call hierarchy's graph needs the index too.
         let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
-        if method == config::NODE_INFO || (self.standalone && hierarchy) {
+        if WANT_INDEX.contains(&method) || (self.standalone && hierarchy) {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
@@ -1011,7 +1089,7 @@ impl<W: Write> Proxy<W> {
                     .map_or(json!([]), |project| features::workspace_symbols(&project, query, self.encoding)))
             }),
             config::NODE_INFO => self.node_info(params),
-            "textDocument/references" => self.on_source(method, params),
+            "textDocument/references" => self.on_references(params),
             "textDocument/definition" => self.on_definition(params),
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
@@ -1187,7 +1265,11 @@ impl<W: Write> Proxy<W> {
                     let target = navigation::target_at(&path, &text, offset)
                         .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
                     let project = self.project()?;
-                    let found = navigation::resolve(&project, &path, &target);
+                    let found = navigation::resolve(
+                        &navigation::Lookup::new(&project, self.parsing.index.as_ref()),
+                        &path,
+                        &target,
+                    );
                     navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
                 summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard))
