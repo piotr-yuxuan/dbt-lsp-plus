@@ -628,6 +628,15 @@ models:
     }
 
     #[test]
+    fn a_macro_call_in_a_yaml_comment_is_no_target() {
+        let path = Path::new("/p/dbt_project.yml");
+        let hooks = "name: shop\non-run-start: \"{{ log_start() }}\"\n# on-run-end: \"{{ log_end() }}\"\n";
+        let macro_named = |name: &str| Some(Target::Call(scan::Target::Macro { package: None, name: name.into() }));
+        assert_eq!(at(path, hooks, "log_start", 1), macro_named("log_start"), "a hook's macro");
+        assert_eq!(at(path, hooks, "log_end", 1), None, "dbt renders no comment");
+    }
+
+    #[test]
     fn finds_the_names_of_yaml_from_the_document_alone() {
         let yml = Path::new(YML);
         assert_eq!(at(yml, MODELS, "name: orders", 8), named("model", None, "orders"));
@@ -736,10 +745,13 @@ models:
             |name: &str| Target::Call(scan::Target::Ref { package: None, name: name.into(), version: None });
         let parsed = Lookup::new(&project, Some(&index));
         assert_eq!(files_of(&parsed, reference("fact")), ["models/fact_v2.sql"], "the latest alone");
+        let v1 = Target::Call(scan::Target::Ref { package: None, name: "fact".into(), version: Some("1".into()) });
+        assert_eq!(files_of(&parsed, v1), ["models/fact.sql"], "the version its file holds");
         assert_eq!(files_of(&parsed, reference("twin")), ["models/a/twin.sql"], "the one dbt keeps");
         let unit = Target::Named { kind: "unit test model", package: None, name: "fact".into() };
         assert_eq!(files_of(&parsed, unit), ["models/fact.sql", "models/fact_v2.sql"], "each version");
-        // Before a parse, two files of one name are both candidates.
+        // Before a parse, two files of one name are both candidates: the scan reads no
+        // `config(enabled=false)`, which only the parse knows.
         let scanned = Lookup::new(&project, None);
         assert_eq!(files_of(&scanned, reference("twin")), ["models/a/twin.sql", "models/b/twin.sql"]);
         std::fs::remove_dir_all(root).unwrap();
