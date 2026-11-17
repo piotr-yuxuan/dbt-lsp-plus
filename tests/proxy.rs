@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The proxy in front of a scripted fake of dbt lsp 2.0.9.
 
+#[path = "proxy/commands.rs"]
+mod commands;
 // Opt-in, ignored; in this crate so that one crate uses all of `support`.
 #[path = "proxy/conformance.rs"]
 mod conformance;
