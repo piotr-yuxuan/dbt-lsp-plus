@@ -235,8 +235,12 @@ impl Table {
     /// The mode of METHOD: a follower's leader's, `dbt` for a method that
     /// takes none.
     pub fn mode(&self, method: &str) -> Mode {
-        let leader = FOLLOWERS.iter().find(|(follower, _)| *follower == method).map_or(method, |(_, leader)| leader);
-        self.modes.get(leader).copied().unwrap_or(Mode::Dbt)
+        self.modes.get(self.leader(method)).copied().unwrap_or(Mode::Dbt)
+    }
+
+    /// The method whose mode METHOD takes: its own, or its leader's.
+    fn leader<'m>(&self, method: &'m str) -> &'m str {
+        FOLLOWERS.iter().find(|(follower, _)| *follower == method).map_or(method, |(_, leader)| leader)
     }
 
     /// Whether the proxy answers METHOD at a position it claims, by a row of
@@ -254,8 +258,8 @@ impl Table {
     /// answers it: null, or `[]` for a list, in `ours`, and in `dbt` with no
     /// backend; none where the server answers.
     pub fn nothing(&self, method: &str) -> Option<Value> {
-        let mode = self.mode(method);
-        let empty = METHODS.contains(&method) && (mode == Mode::Ours || (self.none && mode == Mode::Dbt));
+        let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
+        let empty = known && (mode == Mode::Ours || (self.none && mode == Mode::Dbt));
         empty.then(|| if LISTS.contains(&method) { json!([]) } else { Value::Null })
     }
 
@@ -414,6 +418,9 @@ mod tests {
         let none = Table::new(&user, &|_| false, true);
         assert_eq!(none.nothing("textDocument/references"), Some(json!([])), "dbt with no backend");
         assert_eq!(none.unanswered(), ["textDocument/references"]);
+        let hierarchy = settings(&[("textDocument/prepareCallHierarchy", "dbt")], None);
+        let none = Table::new(&hierarchy, &|_| false, true);
+        assert_eq!(none.nothing("callHierarchy/incomingCalls"), Some(Value::Null), "a follower too");
         assert!(table.unanswered().is_empty());
     }
 }

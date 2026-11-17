@@ -502,12 +502,14 @@ impl<W: Write> Proxy<W> {
             ADDED.iter().any(|(capability, methods)| methods.contains(&method) && !lacks(capabilities, capability))
         };
         self.table = modes::Table::new(&self.settings, &announced, self.standalone);
-        // A method the proxy answers is announced; one left to the server, as the server announced it.
-        for (capability, methods) in ADDED.iter().filter(|(_, methods)| self.table.mode(methods[0]) != Mode::Dbt) {
-            if lacks(capabilities, capability) {
-                capabilities.insert((*capability).to_owned(), json!(true));
+        // A method the proxy answers is announced; one left to the server, as the server announced it,
+        // and with no backend announced, its answer nothing.
+        for (capability, methods) in ADDED {
+            let mine = self.table.mode(methods[0]) != Mode::Dbt;
+            if (mine || self.standalone) && lacks(capabilities, capability) {
+                capabilities.insert(capability.to_owned(), json!(true));
             }
-            self.owned.extend(*methods);
+            self.owned.extend(methods.iter().filter(|_| mine));
         }
         for (capability, method, owned) in
             PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Ours)
@@ -540,6 +542,9 @@ impl<W: Write> Proxy<W> {
     /// backend answers.
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
+        if !said.is_empty() {
+            said.push(format!("the methods that take a mode are {}", modes::METHODS.join(", ")));
+        }
         let unanswered = self.table.unanswered();
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
@@ -1943,6 +1948,17 @@ pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_method_the_proxy_adds_or_takes_has_a_mode() {
+        let mut settings = modes::Settings::default();
+        settings.set_default("ours").unwrap();
+        let table = modes::Table::new(&settings, &|_| false, false);
+        let added = ADDED.iter().flat_map(|(_, methods)| methods.iter());
+        for method in added.chain(PROVIDERS.iter().map(|(_, method, _)| method)) {
+            assert_eq!(table.mode(method), Mode::Ours, "{method} is not among modes::METHODS");
+        }
+    }
 
     #[test]
     fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
