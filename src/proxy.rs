@@ -1049,12 +1049,9 @@ impl<W: Write> Proxy<W> {
         if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.standalone) {
             return self.log_parse(&why);
         }
-        // An empty or relative base would put the cache in the working directory.
-        let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
-        let base = absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")));
         let server = &self.parsing.server;
         let cache = self.parsing.cache.get_or_insert_with(|| {
-            let cache = config::cache_dir(&base.unwrap_or_else(std::env::temp_dir), &root, server);
+            let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &root, server);
             config::remove_stale(&cache);
             cache
         });
