@@ -1587,6 +1587,7 @@ fn answered_itself(alone: bool) -> Value {
     if alone {
         (definition["ref"], definition["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
         (references["ref"], references["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
+        (definition["function"], references["function"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
     }
     json!({"version": 2, "definition": definition, "references": references,
            "rename": {"source": everywhere, "cte": ["sql"]}})
@@ -2800,6 +2801,58 @@ fn with_dbt_lsp_a_ref_in_sql_reaches_the_server() {
     let answer = session.request("textDocument/definition", on_macro.clone());
     assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_macro}));
     assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 2);
+    assert!(session.finish().success());
+}
+
+/// A copy of the fixture for test NAME with a function `f`, its entry, and a
+/// model `uses_f` that calls it.
+fn with_a_function(name: &str) -> PathBuf {
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::create_dir_all(project.join("functions")).unwrap();
+    std::fs::write(project.join("functions/f.sql"), "x * 2").unwrap();
+    std::fs::write(project.join("functions/_f.yml"), "functions:\n  - name: f\n").unwrap();
+    std::fs::write(project.join("models/marts/uses_f.sql"), "select {{ function('f') }}(1) as v").unwrap();
+    project
+}
+
+#[test]
+fn alone_a_function_call_leads_to_its_file_and_back() {
+    let project = with_a_function("function-alone");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with("function-alone", json!({"no_lsp": true}), &flags, None);
+    session.initialize(&project);
+    let on_f = position_in(&project.join("models/marts/uses_f.sql"), "function('f')", 10);
+    let found = session.request("textDocument/definition", on_f.clone());
+    assert_eq!(found["result"], location(&project, "functions/f.sql", 0, 0, 0), "{found}");
+    let mut params = on_f;
+    params["context"] = json!({"includeDeclaration": false});
+    let used = session.request("textDocument/references", params);
+    let name = "select {{ function('f') }}".find("'f'").unwrap() as u64 + 1;
+    let at_name = location(&project, "models/marts/uses_f.sql", 0, name, name + 1);
+    assert_eq!(used["result"], json!([at_name]), "{used}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_a_function_call_reaches_the_server_but_its_entry_is_the_proxy_s() {
+    let project = with_a_function("function-server");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("function-server", json!({}), &flags, None);
+    session.initialize(&project);
+    let on_f = position_in(&project.join("models/marts/uses_f.sql"), "function('f')", 10);
+    let answer = session.request("textDocument/definition", on_f.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_f}));
+    let mut params = on_f;
+    params["context"] = json!({"includeDeclaration": false});
+    let answer = session.request("textDocument/references", params.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/references", "params": params}));
+    // An entry's name, as every entry's, is answered in both modes.
+    let on_entry = position_in(&project.join("functions/_f.yml"), "f\n", 0);
+    let answer = session.request("textDocument/definition", on_entry);
+    assert_eq!(answer["result"], location(&project, "functions/f.sql", 0, 0, 0), "{answer}");
+    let forwarded = methods(&log);
+    assert_eq!(forwarded.iter().filter(|method| *method == "textDocument/definition").count(), 1);
+    assert_eq!(forwarded.iter().filter(|method| *method == "textDocument/references").count(), 1);
     assert!(session.finish().success());
 }
 

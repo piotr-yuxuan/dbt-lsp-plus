@@ -60,7 +60,7 @@ const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "
 /// extension; the last column says alone only, with a dbt without `lsp`.
 /// A kind listed at a place is the proxy's at every position of that kind
 /// there, never forwarded; the rows of a kind follow the order of places.
-const ANSWERED: [(&str, &str, &[&str], bool); 12] = [
+const ANSWERED: [(&str, &str, &[&str], bool); 14] = [
     ("definition", "source", &["sql", "yaml", "python"], false),
     ("definition", "ref", &["sql"], true),
     ("definition", "ref", &["yaml"], false),
@@ -68,9 +68,11 @@ const ANSWERED: [(&str, &str, &[&str], bool); 12] = [
     ("definition", "doc", &["yaml"], false),
     ("definition", "entry", &["yaml"], false),
     ("definition", "test", &["yaml"], false),
+    ("definition", "function", &["sql", "yaml"], true),
     ("references", "source", &["sql", "yaml", "python"], false),
     ("references", "ref", &["sql", "yaml"], true),
     ("references", "macro", &["sql", "yaml"], true),
+    ("references", "function", &["sql", "yaml"], true),
     ("rename", "source", &["sql", "yaml", "python"], false),
     ("rename", "cte", &["sql"], false),
 ];

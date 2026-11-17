@@ -88,7 +88,8 @@ impl Scanned {
         calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
         calls.sort_by_key(|call| call.range.start);
         let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
-        let resource = |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro"].contains(&entry.label);
+        let resource =
+            |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
         Scanned {
             tables: source_tables_in("", path, &text, &root),
             entries: properties::entries_in(&text, &root, false).into_iter().filter(resource).collect(),

@@ -36,6 +36,7 @@ impl Target {
         match self {
             Target::Source(_) => "source",
             Target::Call(scan::Target::Macro { .. }) => "macro",
+            Target::Call(scan::Target::Function { .. }) => "function",
             Target::Call(_) | Target::Named { kind: "unit test model", .. } => "ref",
             Target::Named { kind: kind @ ("doc" | "test"), .. } => kind,
             Target::Named { .. } => "entry",
@@ -78,7 +79,7 @@ const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 /// `dbt_packages/<name>`.  An entry describes a resource of its own package
 /// only: dbt 2.0.9 calls one naming another package's resource unused,
 /// where dbt-core 1.12 patches it.
-const LOOKUP: [(&str, &[&str], &str, &[Step]); 8] = [
+const LOOKUP: [(&str, &[&str], &str, &[Step]); 9] = [
     ("doc", &["doc"], "", &[Step::Root, Step::Any]),
     ("test", &["macro"], "test_", &[Step::Own, Step::Root]),
     ("unit test model", &["model"], "", &[Step::Own]),
@@ -87,6 +88,7 @@ const LOOKUP: [(&str, &[&str], &str, &[Step]); 8] = [
     ("snapshot", &["snapshot"], "", &[Step::Own]),
     ("analysis", &["analysis"], "", &[Step::Own]),
     ("macro", &["macro"], "", &[Step::Own]),
+    ("function", &["function"], "", &[Step::Own]),
 ];
 
 /// One quote, as YAML writes it inside a quoted scalar too: `''` in single
@@ -124,7 +126,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
             return Some(Target::Call(scan::Target::Macro { package: None, name }));
         }
         let named = |call: &scan::Call| match call.target {
-            scan::Target::Ref { .. } => call.arguments.iter().any(inside),
+            scan::Target::Ref { .. } | scan::Target::Function { .. } => call.arguments.iter().any(inside),
             scan::Target::Macro { .. } => inside(&call.range),
             _ => false,
         };
@@ -165,7 +167,11 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         Some(named("unit test model", None, &name))
     };
     let macro_call = || {
-        let called = |call: &scan::Call| matches!(call.target, scan::Target::Macro { .. }) && inside(&call.range);
+        let called = |call: &scan::Call| match call.target {
+            scan::Target::Macro { .. } => inside(&call.range),
+            scan::Target::Function { .. } => call.arguments.iter().any(inside),
+            _ => false,
+        };
         scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| Target::Call(call.target))
     };
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
@@ -393,7 +399,9 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
     let declared = resolve(lookup, path, target);
     let ids: HashSet<&str> = declared.iter().map(|found| found.id.as_str()).collect();
     let name = match target {
-        Target::Call(scan::Target::Ref { name, .. } | scan::Target::Macro { name, .. })
+        Target::Call(
+            scan::Target::Ref { name, .. } | scan::Target::Macro { name, .. } | scan::Target::Function { name, .. },
+        )
         | Target::Named { name, .. } => name,
         _ => return Vec::new(),
     };
@@ -411,11 +419,15 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
     };
     let calls = |file: &Path, scanned: &'a project::Scanned| -> Vec<Found> {
         let called = |call: &&scan::Call| match &call.target {
-            scan::Target::Ref { name: called, .. } | scan::Target::Macro { name: called, .. } => called == name,
+            scan::Target::Ref { name: called, .. }
+            | scan::Target::Macro { name: called, .. }
+            | scan::Target::Function { name: called, .. } => called == name,
             _ => false,
         };
         let at = |call: &scan::Call| match &call.target {
-            scan::Target::Ref { .. } => call.arguments.last().cloned().unwrap_or(call.range.clone()),
+            scan::Target::Ref { .. } | scan::Target::Function { .. } => {
+                call.arguments.last().cloned().unwrap_or(call.range.clone())
+            }
             _ => call.range.end - name.len()..call.range.end,
         };
         let own = lookup.package_of(file);
@@ -950,6 +962,45 @@ models:
             ("dbt_packages/pkg/macros/m.sql", "{% macro m() %}2{% endmacro %}\n"),
         ];
         scratch_project(name, &files)
+    }
+
+    #[test]
+    fn a_function_s_calls_and_entry_are_its_references() {
+        let files = [
+            ("dbt_project.yml", "name: r\nmodels:\n  r:\n    +post_hook: \"select {{ function('f') }}(1)\"\n"),
+            ("functions/f.sql", "x * 2"),
+            ("functions/_f.yml", "functions:\n  - name: f\n"),
+            ("models/a.sql", "select {{ function('f') }}(1), {{ function('r', 'f') }}(2)"),
+            (
+                "models/_a.yml",
+                "models:\n  - name: a\n    config:\n      post_hook: \"select {{ function('f') }}(3)\"\n",
+            ),
+        ];
+        let root = scratch_project("navigation-function-references", &files);
+        let sql = Path::new("/p/models/a.sql");
+        let text = files[3].1;
+        let function = |package: Option<&str>| {
+            Some(Target::Call(scan::Target::Function { package: package.map(str::to_owned), name: "f".into() }))
+        };
+        assert_eq!(at(sql, text, "function('f')", 10), function(None), "at its name");
+        assert_eq!(at(sql, text, "'r', 'f'", 1), function(Some("r")), "at its package");
+        let keyword = Some(Target::Call(scan::Target::Macro { package: None, name: "function".into() }));
+        assert_eq!(at(sql, text, "function('f')", 2), keyword, "its keyword a macro call, which a project may define");
+        assert_eq!(at(sql, text, "function('f')", 2).unwrap().kind(), "macro");
+        assert_eq!(function(None).unwrap().kind(), "function");
+        let uses = [("dbt_project.yml", "f"), ("models/_a.yml", "f"), ("models/a.sql", "f"), ("models/a.sql", "f")];
+        let uses = uses.map(|(file, text)| (file.to_owned(), text.to_owned()));
+        assert_eq!(used(&root, "models/a.sql", "function('f')", 10, false), uses);
+        let mut declared = uses.to_vec();
+        declared.insert(1, ("functions/_f.yml".into(), "f".into()));
+        declared.insert(2, ("functions/f.sql".into(), String::new()));
+        assert_eq!(used(&root, "models/_a.yml", "function('f')", 10, true), declared, "its entry and its file too");
+        // The entry's name leads to the function's file.
+        assert_eq!(
+            leads(&root, "functions/_f.yml", at(Path::new("/p/functions/_f.yml"), files[2].1, "f\n", 0)),
+            lead("function.r.f", "functions/f.sql", "")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The references of the target at NEEDLE, DELTA bytes in, in the file
