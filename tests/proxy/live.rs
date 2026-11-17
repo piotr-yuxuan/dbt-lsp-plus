@@ -18,13 +18,18 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Whether DBT has `lsp`, as the proprietary build has and dbt-oss has not,
-/// run with HOME as its home; when it is not WANTED, says that the test
-/// NAME does not apply.
-fn has_lsp(dbt: &str, home: &Path, wanted: bool, name: &str) -> bool {
+/// run with HOME as its home.
+fn lsp_of(dbt: &str, home: &Path) -> bool {
     let mut probe = Command::new(dbt);
     probe.args(["lsp", "--help"]).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
     probe.env("HOME", home).stdout(Stdio::null()).stderr(Stdio::null());
-    let has = probe.status().is_ok_and(|status| status.success());
+    probe.status().is_ok_and(|status| status.success())
+}
+
+/// Whether DBT has `lsp`, run with HOME as its home; when it is not
+/// WANTED, says that the test NAME does not apply.
+fn has_lsp(dbt: &str, home: &Path, wanted: bool, name: &str) -> bool {
+    let has = lsp_of(dbt, home);
     if has != wanted {
         let _ = writeln!(std::io::stderr(), "{name}: {dbt} has {}lsp: nothing to test", if has { "" } else { "no " });
     }
@@ -167,6 +172,81 @@ fn alone_with_a_dbt_without_lsp() {
     assert!(session.finish().success());
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
+}
+
+/// Without `--project-dir`, the project found from a document, then from
+/// the client's folder, its dbt the `.venv`'s, with either build: no
+/// `--profiles-dir`, since dbt runs in the project; nothing written there
+/// but dbt's own output.
+#[test]
+#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
+fn the_project_and_its_dbt_found_without_project_dir() {
+    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
+    let project = copy_fixture("live-found");
+    let dir = project.parent().unwrap().to_owned();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let venv = project.join(".venv/bin/dbt");
+    std::fs::create_dir_all(venv.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&dbt, &venv).unwrap();
+    let before = paths(&project);
+    found_from_a_document(&project, &venv);
+    found_from_the_folder(&project, lsp_of(&dbt, &home));
+    let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
+    assert!(added.is_empty(), "the project gained {added:?}");
+}
+
+/// A session of the default command without `--project-dir`, in the parent
+/// of the copy PROJECT, as an agent starts one at a repository's root.
+fn without_project_dir(project: &Path) -> Session {
+    let dir = project.parent().unwrap();
+    let (home, ceiling) = (dir.join("home"), dir.to_owned());
+    let server = ["dbt", "lsp", "--no-send-anonymous-usage-stats"].map(str::to_owned);
+    // No repository: the checkout of the tests is no one's.
+    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1")), ("GIT_CEILING_DIRECTORIES", &ceiling)];
+    let mut session = Session::start(&server, &env, Some(dir));
+    session.timeout = Duration::from_secs(180);
+    session
+}
+
+/// The client's folder above the project: the first model opened names it,
+/// and the proxy answers alone from the parse of the `.venv`'s dbt, VENV.
+fn found_from_a_document(project: &Path, venv: &Path) {
+    let mut session = without_project_dir(project);
+    session.initialize(project.parent().unwrap());
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let info = session.poll(Duration::from_secs(120), request, |result| result.is_object());
+    assert_eq!(info["relation"], "\"shop\".\"main\".\"orders\"", "{info}");
+    let at = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let definition = session.request("textDocument/definition", at);
+    assert_eq!(definition["result"]["uri"], uri(&project.join("models/staging/stg_orders.sql")), "{definition}");
+    let line = format!("dbt {} (the project's .venv)", venv.display());
+    let said = |m: &Value| m["params"]["message"].as_str().is_some_and(|text| text.contains(&line));
+    assert!(session.received.iter().any(|m| m["method"] == "window/logMessage" && said(m)), "{line}");
+    assert!(session.finish().success());
+}
+
+/// The client's folder the project: with a dbt that has `lsp` (LSP), dbt
+/// lsp behind the proxy, which answers the definition of a ref; else the
+/// proxy alone.
+fn found_from_the_folder(project: &Path, lsp: bool) {
+    let mut session = without_project_dir(project);
+    let result = session.initialize(project);
+    let expected = if lsp { "dbt-lsp" } else { "dbt-lsp-plus" };
+    assert_eq!(result["serverInfo"]["name"], expected, "{result}");
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let at = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    // dbt lsp answers once it has compiled; alone, once the parse has run.
+    let defined =
+        |result: &Value| [&result["uri"], &result[0]["uri"], &result[0]["targetUri"]].iter().any(|uri| uri.is_string());
+    let found = session.poll(Duration::from_secs(120), ("textDocument/definition", at), defined);
+    let stg_orders = json!(uri(&project.join("models/staging/stg_orders.sql")));
+    assert!([&found["uri"], &found[0]["uri"], &found[0]["targetUri"]].contains(&&stg_orders), "{found}");
+    assert!(session.finish().success());
 }
 
 /// The information of a node, a hover's summary and the graph, as dbt

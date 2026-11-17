@@ -186,7 +186,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - the sections of `tests/proxy/live.rs` (`document_features`,
     `navigation`, `last_run`, `lineage`, `watcher` and the others): one
     per observed behaviour, so that `in_front_of_the_real_dbt_lsp` stays
-    their sequence;
+    their sequence; `found_from_a_document` and `found_from_the_folder`,
+    one per route, so that
+    `the_project_and_its_dbt_found_without_project_dir` stays theirs;
   - `parse` in `tests/proxy/conformance.rs`: dbt's run, the corpus's one
     effect, apart from the comparisons, which decide;
   - `nodes_compared`, `calls_compared` and `entries_compared` in
