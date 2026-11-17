@@ -3,7 +3,7 @@
 //! from a document over scratch layouts, and the lookup of dbt in the
 //! `.venv`s of a scratch repository, with stub dbts.
 
-use crate::support::{fixture, scratch};
+use crate::support::{fixture, scratch, script};
 use dbt_lsp_plus::locate::{self, Found, Git};
 use std::ffi::OsString;
 use std::fs;
@@ -102,9 +102,7 @@ const DBT_CORE: &str = "echo \"Error: No such command 'lsp'.\" >&2; exit 2";
 
 /// A stub dbt at PATH that appends its path to LOG, then does ANSWER.
 fn stub(path: &Path, answer: &str, log: &Path) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, format!("#!/bin/sh\necho \"$0\" >> '{}'\n{answer}\n", log.display())).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    script(path, &format!("echo \"$0\" >> '{}'\n{answer}", log.display()));
 }
 
 /// A scratch repository for test NAME: `repo`, whose project is in `dbt`,

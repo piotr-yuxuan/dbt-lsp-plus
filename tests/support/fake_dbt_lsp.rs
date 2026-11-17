@@ -71,7 +71,9 @@
 //!   followed by `.runs`, and `{"ended": PID}` there as it exits; and each
 //!   server
 //!   process, a life of the fake, appends its pid to the name followed by
-//!   `.lives`, by which it knows its life.
+//!   `.lives`, by which it knows its life; and every process of the fake,
+//!   whatever it does, `{"argv0": ARGV0, "arguments": ARGUMENTS, "cwd":
+//!   DIR}` to the name followed by `.starts`, as it starts.
 
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
@@ -383,6 +385,14 @@ fn main() {
         .unwrap_or(json!({}));
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let verb = arguments.first().map_or("", String::as_str);
+    if let Ok(log) = std::env::var("FAKE_DBT_LSP_LOG") {
+        let cwd = std::env::current_dir().expect("the working directory");
+        let start = json!({"argv0": std::env::args().next(), "arguments": arguments, "cwd": cwd});
+        let mut starts =
+            OpenOptions::new().create(true).append(true).open(format!("{log}.starts")).expect("open the starts");
+        // One write, so that the lines of two processes never interleave.
+        starts.write_all(format!("{start}\n").as_bytes()).expect("log the start");
+    }
     let mut log = std::env::var("FAKE_DBT_LSP_LOG").ok().map(|path| {
         let path = match verb {
             "parse" => format!("{path}.parses"),

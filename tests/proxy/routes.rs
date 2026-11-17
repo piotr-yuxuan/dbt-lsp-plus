@@ -1,0 +1,299 @@
+// SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+//! The three routes to the project: the server command's `--project-dir`,
+//! the client's folder, and the first document in a project; and the quiet
+//! of a session that has none.
+
+use crate::support::{Session, copy_fixture, scratch, script, uri};
+use crate::{lives, logged, manifest, node_info};
+use serde_json::{Value, json};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// What every process of the fake logged as it started, beside LOG.
+fn starts(log: &Path) -> Vec<Value> {
+    logged(&log.with_extension("jsonl.starts"))
+}
+
+/// The start of the fake whose arguments begin with FIRST, in STARTS.
+fn started<'a>(starts: &'a [Value], first: &str) -> &'a Value {
+    let found = starts.iter().find(|start| start["arguments"][0] == first);
+    found.unwrap_or_else(|| panic!("no start of {first} in {starts:#?}"))
+}
+
+/// PATH resolved.
+fn resolved(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap()
+}
+
+/// The path of a start's VALUE, resolved.
+fn path_of(value: &Value) -> PathBuf {
+    resolved(Path::new(value.as_str().unwrap()))
+}
+
+/// The fake's script, SCRIPT_VALUE written, its log and the proxy's cache,
+/// as `Session::fake` places them, under DIR.
+fn fake_env(dir: &Path, script_value: &Value) -> (PathBuf, PathBuf, PathBuf) {
+    let (script_path, log, cache) = (dir.join("script.json"), dir.join("log.jsonl"), dir.join("cache"));
+    fs::create_dir_all(dir).unwrap();
+    fs::write(&script_path, script_value.to_string()).unwrap();
+    (script_path, log, cache)
+}
+
+/// The fake linked as the `.venv/bin/dbt` of the project at PROJECT.
+fn venv_fake(project: &Path) -> PathBuf {
+    let dbt = project.join(".venv/bin/dbt");
+    fs::create_dir_all(dbt.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt-lsp"), &dbt).unwrap();
+    dbt
+}
+
+/// A PATH whose first directory, under DIR, holds a stub `dbt` that
+/// appends its arguments to the returned log, then runs BODY.
+fn path_with_stub(dir: &Path, body: &str) -> (std::ffi::OsString, PathBuf) {
+    let (bin, log) = (dir.join("bin"), dir.join("stub.log"));
+    script(&bin.join("dbt"), &format!("echo \"$*\" >> '{}'\n{body}", log.display()));
+    let path = std::env::join_paths([bin].into_iter().chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())));
+    (path.unwrap(), log)
+}
+
+/// The log messages that the session received.
+fn log_messages(session: &Session) -> Vec<String> {
+    let logs = session.received.iter().filter(|m| m["method"] == "window/logMessage");
+    logs.map(|m| m["params"]["message"].as_str().unwrap_or_default().to_owned()).collect()
+}
+
+#[test]
+fn without_a_project_the_proxy_answers_null_and_runs_nothing() {
+    let dir = scratch("routes-quiet");
+    let (bin, log, stderr) = (dir.join("bin"), dir.join("stubs.log"), dir.join("stderr"));
+    let stub = format!("echo \"$0 $*\" >> '{}'\nexit 1", log.display());
+    ["dbt", "unshare", "git"].iter().for_each(|name| script(&bin.join(name), &stub));
+    let folder = dir.join("repo");
+    let (yml, sql) = (folder.join("notes/x.yml"), folder.join("notes/y.sql"));
+    fs::create_dir_all(yml.parent().unwrap()).unwrap();
+    fs::write(&yml, "models:\n  - name: x\n").unwrap();
+    fs::write(&sql, "select * from {{ ref('x') }}\n").unwrap();
+    let mut session = Session::start_logged(&[], &[], &[("PATH", &bin)], Some(&folder), Some(&stderr));
+    let capabilities = json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
+    assert_eq!(session.initialize_as(&folder, capabilities)["serverInfo"]["name"], "dbt-lsp-plus");
+    session.open(&yml, None);
+    session.open(&sql, None);
+    let at = json!({"textDocument": {"uri": uri(&sql)}, "position": {"line": 0, "character": 20}});
+    let mut references = at.clone();
+    references["context"] = json!({"includeDeclaration": true});
+    let requests = [
+        ("textDocument/hover", at.clone()),
+        ("textDocument/definition", at.clone()),
+        ("textDocument/references", references),
+        ("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&yml)}})),
+        ("workspace/symbol", json!({"query": "x"})),
+        ("textDocument/prepareCallHierarchy", at.clone()),
+        ("textDocument/implementation", at),
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.p.x"]})),
+        ("shutdown", Value::Null),
+    ];
+    let results: Vec<Value> = requests.map(|(method, params)| session.request(method, params)["result"].clone()).into();
+    assert_eq!(results, vec![Value::Null; 9]);
+    let received = session.received.len();
+    let (status, unread) = session.exit();
+    // The answers to initialize, the eight requests and shutdown: no other frame.
+    assert_eq!((status.success(), received, unread), (true, 10, Vec::new()));
+    assert!(!log.exists(), "{}", fs::read_to_string(&log).unwrap_or_default());
+    assert_eq!(fs::read_to_string(&stderr).unwrap(), "");
+}
+
+/// A session NAME without `--project-dir` in front of the default `dbt
+/// lsp`, in `repo` as Claude Code 2.1.317 starts it at a repository's
+/// root, the fixture copied to `repo/dbt`, whose `.venv/bin/dbt` is the
+/// fake, and a stub `dbt` first on PATH; `repo/ci.yml`, then `orders.sql`
+/// opened.  Returns the session, the project, its dbt, the fake's log and
+/// the stub's.
+fn from_a_document(name: &str) -> (Session, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let copy = copy_fixture(name);
+    let (dir, repo) = (copy.parent().unwrap().to_owned(), copy.with_file_name("repo"));
+    let project = repo.join("dbt");
+    fs::create_dir_all(&repo).unwrap();
+    fs::rename(&copy, &project).unwrap();
+    let dbt = venv_fake(&project);
+    let (script_path, log, cache) = fake_env(&dir, &json!({"manifest": manifest()}));
+    let (path, stub_log) = path_with_stub(&dir, "exit 1");
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+        ("PATH", Path::new(&path)),
+        // No repository but the scratch one: the checkout of the tests is no one's.
+        ("GIT_CEILING_DIRECTORIES", dir.as_path()),
+        ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
+    ];
+    let mut session = Session::start(&[], &env, Some(&repo));
+    let capabilities = json!({
+        "general": {"positionEncodings": ["utf-16"]},
+        "textDocument": {"synchronization": {"didSave": true}, "hover": {"contentFormat": ["markdown", "plaintext"]},
+                         "definition": {"linkSupport": true}, "callHierarchy": {},
+                         "documentSymbol": {"hierarchicalDocumentSymbolSupport": true}},
+        "workspace": {"workspaceFolders": false, "didChangeWatchedFiles": {"dynamicRegistration": false}}});
+    let result = session.initialize_as(&repo, capabilities);
+    assert_eq!(result["capabilities"]["hoverProvider"], json!(true), "alone: {result}");
+    fs::write(repo.join("ci.yml"), "on: push\n").unwrap();
+    session.open(&repo.join("ci.yml"), None);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    (session, project, dbt, log, stub_log)
+}
+
+#[test]
+fn without_project_dir_the_first_document_in_a_project_names_it_and_its_dbt() {
+    let (mut session, project, dbt, log, stub_log) = from_a_document("routes-document");
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    let said = log_messages(&session);
+    let line = format!("project {}, dbt {} (the project's .venv)", project.display(), dbt.display());
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains(&line) && said[0].contains("dbt lsp is not started"), "{said:?}");
+    assert!(!session.received.iter().any(|m| m["method"] == "window/showMessage"));
+    assert!(session.finish().success());
+    assert_eq!((lives(&log).len(), stub_log.exists()), (0, false), "a server started, or PATH's dbt ran");
+    let parse = started(&starts(&log), "parse").clone();
+    assert_eq!((path_of(&parse["argv0"]), path_of(&parse["cwd"])), (resolved(&dbt), resolved(&project)), "{parse}");
+}
+
+#[test]
+fn on_a_project_from_a_document_the_proxy_answers_alone() {
+    let (mut session, project, ..) = from_a_document("routes-document-answers");
+    let orders = project.join("models/marts/orders.sql");
+    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_ref.clone());
+    let summary = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
+    assert!(summary.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
+    let definition = session.request("textDocument/definition", on_ref.clone());
+    assert_eq!(definition["result"]["uri"], uri(&project.join("models/staging/stg_orders.sql")), "{definition}");
+    let mut references = on_ref;
+    references["context"] = json!({"includeDeclaration": false});
+    let references = session.request("textDocument/references", references);
+    let files: Vec<&Value> = references["result"].as_array().unwrap().iter().map(|found| &found["uri"]).collect();
+    assert!(files.contains(&&json!(uri(&orders))), "{references}");
+    let symbols = session.request("workspace/symbol", json!({"query": "orders"}));
+    let model = symbols["result"].as_array().unwrap().iter().find(|symbol| symbol["name"] == "orders");
+    assert_eq!(model.map(|model| &model["location"]["uri"]), Some(&json!(uri(&orders))), "{symbols}");
+    assert!(session.finish().success());
+}
+
+/// A session NAME without `--project-dir` in front of the default `dbt
+/// lsp`, run outside the project, the client's folder a copy of the
+/// fixture whose `.venv/bin/dbt` is the fake playing SCRIPT_VALUE.  Returns
+/// the session, its answer to `initialize`, the fake's starts by then,
+/// the project, its dbt and the fake's log.
+fn from_the_folder(name: &str, script_value: &Value) -> (Session, Value, Vec<Value>, PathBuf, PathBuf, PathBuf) {
+    let project = copy_fixture(name);
+    let dir = project.parent().unwrap().to_owned();
+    let dbt = venv_fake(&project);
+    let (script_path, log, cache) = fake_env(&dir, script_value);
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+        ("GIT_CEILING_DIRECTORIES", dir.as_path()),
+        ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
+    ];
+    let mut session = Session::start(&[], &env, Some(&dir));
+    let result = session.initialize(&project);
+    let at_answer = starts(&log);
+    // Once answered, the line that came before it.
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    (session, result, at_answer, project, dbt, log)
+}
+
+#[test]
+fn without_project_dir_the_client_s_folder_starts_its_dbt_at_initialize() {
+    let (session, result, at_answer, project, dbt, log) = from_the_folder("routes-folder", &json!({}));
+    let said = log_messages(&session);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].ends_with(&format!("dbt {} (the project's .venv).", dbt.display())), "{said:?}");
+    assert!(session.finish().success());
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
+    assert_eq!(lives(&log).len(), 1);
+    let server = at_answer.iter().find(|start| start["arguments"] == json!(["lsp"]));
+    let server = server.unwrap_or_else(|| panic!("no server started before initialize: {at_answer:#?}"));
+    assert_eq!((path_of(&server["argv0"]), path_of(&server["cwd"])), (resolved(&dbt), resolved(&project)));
+}
+
+#[test]
+fn without_project_dir_the_client_s_folder_s_dbt_without_lsp_leaves_the_proxy_alone() {
+    let (session, result, _, _, dbt, log) = from_the_folder("routes-folder-alone", &json!({"no_lsp": true}));
+    let said = log_messages(&session);
+    assert_eq!(said.len(), 1, "{said:?}");
+    let named = format!("dbt {} (the project's .venv); it has no lsp", dbt.display());
+    assert!(said[0].contains(&named), "{said:?}");
+    assert!(session.finish().success());
+    let answer = (&result["serverInfo"]["name"], &result["capabilities"]["hoverProvider"]);
+    assert_eq!(answer, (&json!("dbt-lsp-plus"), &json!(true)), "{result}");
+    assert!(lives(&log).is_empty(), "a server started");
+}
+
+#[test]
+fn given_project_dir_the_command_runs_as_written_and_nothing_is_said() {
+    let project = copy_fixture("routes-given");
+    let dir = project.parent().unwrap().to_owned();
+    let venv_log = dir.join("venv.log");
+    script(&project.join(".venv/bin/dbt"), &format!("echo \"$0 $*\" >> '{}'\nexit 0", venv_log.display()));
+    let (path, stub_log) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt-lsp")));
+    let (script_path, log, cache) = fake_env(&dir, &json!({}));
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+        ("PATH", Path::new(&path)),
+    ];
+    let command = ["dbt".to_owned(), "lsp".into(), "--project-dir".into(), project.to_string_lossy().into_owned()];
+    let mut session = Session::start(&command, &env, None);
+    let result = session.initialize(&project);
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert_eq!(log_messages(&session), Vec::<String>::new());
+    assert!(session.finish().success());
+    let ran = fs::read_to_string(&stub_log).unwrap();
+    let server = format!("lsp --project-dir {}", project.display());
+    assert_eq!(ran.lines().collect::<Vec<_>>(), ["lsp --help", &server], "the probe, then the server");
+    assert!(!venv_log.exists(), "the project's .venv ran");
+}
+
+#[test]
+fn a_project_from_a_document_runs_dbt_in_its_directory() {
+    let copy = copy_fixture("routes-dbt-dir");
+    let repo = copy.with_file_name("repo");
+    let project = repo.join("dbt");
+    fs::create_dir_all(&repo).unwrap();
+    fs::rename(&copy, &project).unwrap();
+    assert!(project.join("profiles.yml").is_file() && !repo.join("profiles.yml").exists());
+    let script_value = json!({"manifest": manifest(), "compiled": "select 1"});
+    let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp").to_owned(), "lsp".into()];
+    let (script_path, log, cache) = fake_env(&repo.with_file_name("session"), &script_value);
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+    ];
+    let mut session = Session::start(&fake, &env, Some(&repo));
+    session.initialize(&repo);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let info = session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(info["unique_id"], "model.shop.orders");
+    assert_eq!(path_of(&started(&starts(&log), "parse")["cwd"]), resolved(&project), "the parse");
+    if dbt_lsp_plus::config::can_cut() {
+        let compiled = session.request(
+            "workspace/executeCommand",
+            json!({"command": "dbt-lsp-plus.compile", "arguments": [uri(&orders)]}),
+        );
+        let file = compiled["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("{compiled}"));
+        assert!(url::Url::parse(file).unwrap().to_file_path().unwrap().is_file(), "{compiled}");
+        assert_eq!(path_of(&started(&starts(&log), "compile")["cwd"]), resolved(&project), "the compile");
+    }
+    assert_eq!(node_info(&mut session, json!("model.shop.orders"))["result"]["unique_id"], "model.shop.orders");
+    assert!(session.finish().success());
+}

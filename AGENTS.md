@@ -61,6 +61,7 @@ tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
+tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
@@ -124,6 +125,9 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     `Proxy::on_problems`: one handler per kind of message or event, so that
     `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
     `on_parsed` stay dispatches;
+  - `Proxy::on_first_project`: the start of a project that a document
+    names, apart from the notification that brings it, so that
+    `on_notification` stays a sequence;
   - `locate::repository`: the one run of git that finds a project's
     repository, at the boundary, its program and environment given;
     `locate::candidates`: the decision where a project's dbt may be, from

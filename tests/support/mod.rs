@@ -82,9 +82,23 @@ impl Session {
 
     /// The same, with the proxy's OPTIONS before the server command.
     pub fn start_with(options: &[&str], server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
+        Session::start_logged(options, server, env, dir, None)
+    }
+
+    /// The same, the proxy's standard error written to the file STDERR when
+    /// given.
+    pub fn start_logged(
+        options: &[&str],
+        server: &[String],
+        env: &[(&str, &Path)],
+        dir: Option<&Path>,
+        stderr: Option<&Path>,
+    ) -> Session {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
         command.args(options).arg("--").args(server);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        let stderr =
+            stderr.map_or_else(Stdio::inherit, |path| File::create(path).expect("create the stderr's file").into());
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr);
         command.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
         for (name, value) in env {
             command.env(name, value);
@@ -280,6 +294,14 @@ impl Session {
             thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+/// Writes at PATH an executable shell script of BODY.
+pub fn script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// The bodies the fake server received, one JSON value per line.

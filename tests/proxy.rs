@@ -10,6 +10,8 @@ mod conformance;
 mod live;
 #[path = "proxy/locate.rs"]
 mod locate;
+#[path = "proxy/routes.rs"]
+mod routes;
 #[path = "proxy/shadow.rs"]
 mod shadow;
 mod support;
@@ -1459,12 +1461,13 @@ fn without_project_dir_the_client_s_folder_is_the_root() {
 }
 
 #[test]
-fn without_project_dir_nor_a_project_folder_the_working_directory_is_the_root() {
-    let (mut session, _) = Session::fake_with("working-directory", json!({}), &[], Some(&fixture()));
+fn without_project_dir_nor_a_project_folder_the_working_directory_names_nothing() {
+    let (mut session, log) = Session::fake_with("working-directory", json!({}), &[], Some(&fixture()));
     session.initialize(&fixture().join("models"));
     let found = session.request("workspace/symbol", json!({"query": "stg_orders"}));
-    assert_eq!(found["result"][0]["location"]["uri"], uri(&fixture().join("models/staging/stg_orders.sql")));
+    assert_eq!(found["result"], Value::Null, "{found}");
     assert!(session.finish().success());
+    assert!(lives(&log).is_empty(), "a server started");
 }
 
 #[test]
