@@ -84,11 +84,11 @@ owns all state and writes both outputs.
   and `test` [yaml]; references `source` [sql, yaml, python]; rename
   `source` [sql, yaml, python] and `cte` [sql].  Alone, also definition and
   references of `ref` [sql, yaml, python], `macro` [sql, yaml] and
-  `function` [sql, yaml].  A kind listed
-  at a place is the proxy's at every position of that kind there, possibly
-  null or `[]`, never forwarded, in any file under the root: references
-  come from the scan whichever file asks, while a rename needs a file the
-  scan holds, since it would leave the asking file as it is.  The kinds
+  `function` [sql, yaml].  A kind listed at a place is the proxy's at
+  every position of that kind there, possibly null or `[]`, never
+  forwarded, in any file under the root: references come from the scan
+  whichever file asks, while a rename needs a file the scan holds, since
+  it would leave the asking file as it is.  The kinds
   are by position: `entry` is the `name:` of an entry, a function's under
   `functions:` included, `test` a generic test's name, `ref` in YAML a
   unit test's `model:` too, `function` either argument of `function()`,
@@ -152,8 +152,8 @@ resolved path.
   - each version of a versioned model, at its file as dbt finds it: the
     version's `defined_in`, else `<name>_v<N>`, anywhere under the model
     paths, and the latest's `<name>` too unless a `defined_in` names it.
-    The latest is `latest_version`, else the highest version: two numbers
-    compare as numbers, anything else as text;
+    The latest is `latest_version`, else the highest version: as numbers
+    when all are numbers, else all as text, as dbt orders them;
   - macros, generic tests and docs blocks;
   - source tables, from the YAML of every resource path, parsed with the
     place of each scalar as written and where each mapping ends;
@@ -393,19 +393,24 @@ flow"), and forwards every other one:
 
 - `source`: a `source()` argument in any file, or a source's or table's
   `name:`, leads to the table's or source's `name:`;
-- `ref`: a `ref()` argument in a YAML file, and alone in SQL too, or a
-  unit test's `model:`, leads to the model's, seed's or snapshot's file;
+- `ref`: a `ref()` argument in a YAML file, and alone in SQL and a Python
+  model's `dbt.ref()` too, or a unit test's `model:`, leads to the
+  model's, seed's or snapshot's file, a version's included;
 - `macro`, alone: a macro call's name or package, in SQL or in the Jinja of
   a YAML value such as a hook, or the name in the tag of a macro or a
   generic test (the macro `test_<name>`), leads to the macro's whole block,
-  as dbt lsp answers; the `ref` keyword itself is a macro call, since a
-  project may override `ref`; dbt's own macros (`dbt.*`, builtins) lead
-  nowhere, and a materialization's tag names nothing;
+  as dbt lsp answers; the `ref` and `function` keywords themselves are
+  macro calls, since a project may override them; dbt's own macros
+  (`dbt.*`, builtins) lead nowhere, and a materialization's tag names
+  nothing;
+- `function`, alone: either argument of `function()`, in SQL or in the
+  Jinja of a YAML value, leads to the function's file;
 - `doc`: a `doc()` argument in a YAML file, its quotes as YAML escapes them,
   leads to the docs block; dbt has no `doc` in SQL, where `doc(` is a
   macro call;
-- `entry`: the `name:` of a model, seed, snapshot, analysis or macro entry
-  leads to its file or block;
+- `entry`: the `name:` of a model, seed, snapshot, analysis, macro or
+  function entry leads to its file or block, each version's file for a
+  versioned model;
 - `test`: a generic test's name in a `data_tests:` or `tests:` list below
   the top level (an item, the one key of an item, or `test_name:`) leads
   to its test block; dbt's own tests have none, and get null.
@@ -449,9 +454,9 @@ meanwhile.  A function call, `function('f')` or `function('pa', 'f')`,
 is looked up as a `ref` is, flag included, from the scan alone, as the
 manifest keeps functions apart from its nodes; a `functions:` entry's
 `name:` leads to the function's file.  A location is the name of a block
-or of a `name:`, a snapshot declared in YAML at its `name:` even once
-parsed, a macro's whole block, or the start of a model's or a function's
-file, as dbt lsp answers a `ref`.
+or of a `name:`, a snapshot's even once parsed, in its block or its
+properties file, a macro's whole block, or the start of a model's or a
+function's file, as dbt lsp answers a `ref`.
 
 References, alone, at a `ref()` or `function()` argument, a unit test's
 `model:`, a macro call's name, or the name in the tag of a macro or a
@@ -885,6 +890,9 @@ fails with -32803.
   `dbt_project.yml` are not followed.
 - Custom materializations are in the outline but not in workspace symbols.
 - A new file not saved yet is not part of the project.
+- A version that YAML reads as a number other than as written, such as
+  `v: 1e3`, which dbt takes as 1000, keeps its written form in the scan:
+  its file `<name>_v1e3` is the version there, where dbt finds none.
 - The scan reads the install path from the project's
   `packages-install-path` only, not from the server's
   `--packages-install-path` or `DBT_PACKAGES_INSTALL_PATH`, which the
