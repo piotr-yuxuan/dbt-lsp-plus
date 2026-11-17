@@ -48,7 +48,8 @@ of the tests, from Emacs.
 - How-to: [Configure an editor](docs/how-to/configure-an-editor.md),
   [Use it with an agent](docs/how-to/use-with-an-agent.md),
   [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md),
-  [Build and test](docs/how-to/build-and-test.md)
+  [Build and test](docs/how-to/build-and-test.md),
+  [Troubleshoot](docs/how-to/troubleshoot.md)
 - Reference: [The features](docs/reference/features.md), by LSP method,
   then [the configuration](docs/reference/features.md#configuration), every option;
   [The release pipeline](docs/reference/release-pipeline.md)
