@@ -89,15 +89,29 @@ pub fn can_cut() -> bool {
     status.is_some_and(|status| status.success())
 }
 
-/// Where this process keeps its parses of ROOT with the server command
-/// SERVER, under BASE: one directory per root and command, hashed with
-/// FNV-1a, which no build changes, then one per process.
-pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
-    let parts = std::iter::once(root.to_string_lossy().into_owned()).chain(server.iter().cloned());
-    let key = parts.fold(0xcbf2_9ce4_8422_2325_u64, |hash, part| {
+/// The user's cache directory: `$XDG_CACHE_HOME`, else `$HOME/.cache`;
+/// none when neither is absolute, since an empty or relative one would put
+/// the cache in the working directory.
+pub fn cache_base() -> Option<PathBuf> {
+    let absolute = |name: &str| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
+    absolute("XDG_CACHE_HOME").or_else(|| absolute("HOME").map(|home| home.join(".cache")))
+}
+
+/// PARTS hashed with FNV-1a, which no build changes, each ended by a zero
+/// byte, as sixteen hexadecimal digits.
+pub fn hash(parts: impl IntoIterator<Item = String>) -> String {
+    let key = parts.into_iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, part| {
         part.bytes().chain([0]).fold(hash, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
     });
-    base.join("dbt-lsp-plus").join(format!("{key:016x}")).join(std::process::id().to_string())
+    format!("{key:016x}")
+}
+
+/// Where this process keeps its parses of ROOT with the server command
+/// SERVER, under BASE: one directory per root and command, by their
+/// `hash`, then one per process.
+pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
+    let parts = std::iter::once(root.to_string_lossy().into_owned()).chain(server.iter().cloned());
+    base.join("dbt-lsp-plus").join(hash(parts)).join(std::process::id().to_string())
 }
 
 /// Removes the caches beside CACHE that no parse wrote for a day, as a
