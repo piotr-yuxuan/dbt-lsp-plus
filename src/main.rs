@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! `dbt-lsp-plus [--] [SERVER COMMAND...]`: a language server on the standard
+//! `dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]`: a language server on the standard
 //! input and output, in front of SERVER COMMAND, `dbt lsp` by default.
 
+use dbt_lsp_plus::modes::{self, Arguments};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: dbt-lsp-plus [--] [SERVER COMMAND...]
+usage: dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
 
 Runs SERVER COMMAND, by default `dbt lsp`, as a language server behind this
 one, on the standard input and output.  Every message passes unchanged; the
@@ -13,26 +14,30 @@ proxy answers itself documentSymbol, workspace/symbol and the call hierarchy
 when the server does not announce them.  With a dbt that has no `lsp`, such
 as dbt-oss, it answers alone, from the files and the user's `dbt parse`.
 The project is the --project-dir of SERVER COMMAND, else the client's root
-folder, else the current directory.";
+folder, else the current directory.
+
+  --mode METHOD=MODE    who answers the LSP method METHOD: ours (the proxy
+                        alone), dbt (dbt lsp alone) or merge (both)
+  --default-mode MODE   the mode of every method the proxy answers but
+                        those set with --mode
+  --backend auto|never  never: no dbt lsp, the proxy alone
+  -h, --help            this text
+  -V, --version         the version
+
+`--` is needed only before a server command that starts with a dash.";
 
 fn main() -> ExitCode {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("-h" | "--help") => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    match modes::arguments(&words) {
+        Ok(Arguments::Help) => println!("{USAGE}"),
+        Ok(Arguments::Version) => println!("dbt-lsp-plus {}", env!("CARGO_PKG_VERSION")),
+        Ok(Arguments::Run { settings, backend, command }) => {
+            return dbt_lsp_plus::proxy::run(&command, settings, backend);
         }
-        Some("-V" | "--version") => {
-            println!("dbt-lsp-plus {}", env!("CARGO_PKG_VERSION"));
-            return ExitCode::SUCCESS;
+        Err(why) => {
+            eprintln!("dbt-lsp-plus: {why}\n\n{USAGE}");
+            return ExitCode::from(2);
         }
-        Some("--") => {
-            args.remove(0);
-        }
-        _ => {}
     }
-    if args.is_empty() {
-        args = vec!["dbt".into(), "lsp".into()];
-    }
-    dbt_lsp_plus::proxy::run(&args)
+    ExitCode::SUCCESS
 }

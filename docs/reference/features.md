@@ -70,10 +70,10 @@ see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).
 
 ## Configuration
 
-dbt-lsp-plus reads no configuration file and no LSP setting: everything
-it takes is on its command line, which ends with the server command, and
-in its environment.  Every option at once, for a project whose profile
-sits beside it:
+dbt-lsp-plus reads no configuration file: what it takes is on its
+command line, which ends with the server command, in its environment,
+and in the client's `initializationOptions` (see "Modes" below).  Every
+option at once, for a project whose profile sits beside it:
 
 ```sh
 env DBT_PACKAGES_INSTALL_PATH=vendor/dbt_packages \
@@ -96,18 +96,58 @@ it in the project.
 ### The proxy's arguments
 
 ```
-dbt-lsp-plus [--] [SERVER COMMAND...]
-dbt-lsp-plus -h | --help
-dbt-lsp-plus -V | --version
+dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
 ```
 
-They are read only as the first argument.
+Options are read from the first word for as long as a word starts with
+`-`; the first word that does not begins the server command.  An unknown
+option, a missing value or a bad one is a usage error: the reason and
+the usage on standard error, exit status 2, nothing started.
 
-- `--`: ends the proxy's own arguments; every word after it is the
-  server command.  Optional, unless the server command starts with `-h`,
-  `--help`, `-V` or `--version`.
+- `--mode METHOD=MODE`: who answers the LSP method METHOD, by its full
+  name, such as `textDocument/hover`: `ours`, `dbt` or `merge` (see
+  "Modes").  Repeatable.
+- `--default-mode MODE`: the mode of every method the proxy answers but
+  those `--mode` sets.
+- `--backend auto|never`: `never` starts no `dbt lsp`, and the proxy
+  answers alone, as with dbt-oss.  Default: `auto`.
+- `--`: ends the proxy's own arguments; needed only before a server
+  command that starts with a dash.
 - `-h`, `--help`: prints the usage and exits.
 - `-V`, `--version`: prints `dbt-lsp-plus X.Y.Z` and exits.
+
+A value goes in the next word or after `=`, as `--backend=never`.
+
+### Modes
+
+Each method the proxy answers has a mode: `ours`, the proxy alone; `dbt`,
+`dbt lsp` alone, its answer passed as it is; `merge`, both.  Set nothing
+and every method behaves as it always has.  The methods are
+`textDocument/documentSymbol`, `workspace/symbol`,
+`textDocument/prepareCallHierarchy` (with the call hierarchy's two
+others), `textDocument/foldingRange`, `textDocument/documentHighlight`,
+`textDocument/selectionRange`, `textDocument/hover`,
+`textDocument/inlayHint`, `textDocument/definition`,
+`textDocument/references`, `textDocument/rename` and
+`textDocument/publishDiagnostics`; any other is `dbt lsp`'s.  Besides the
+command line, a client sets them in `initializationOptions`, which win
+method by method:
+
+```json
+{"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}
+```
+
+For the methods the proxy adds (the outline, workspace symbols, the call
+hierarchy, folding, highlights and selection ranges), `merge` is the
+proxy's answer, as `ours` is, until a later version merges them; `dbt`
+leaves the capability as `dbt lsp` announced it, so that a method it
+announces as absent is never asked.
+
+In Neovim that is `init_options`, not `settings`: the proxy reads no
+`workspace/didChangeConfiguration`, and a change applies when the client
+starts again.  A refused key is ignored and shown once in a warning.
+`dbt lsp` gets `initializationOptions` without `dbtLspPlus`.  With no
+`dbt lsp`, a method set to `dbt` gets nothing, and a warning says so.
 
 ### The server command
 
