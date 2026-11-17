@@ -48,12 +48,14 @@ src/navigation.rs             the targets of definitions and references, dbt's o
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/modes.rs                  who answers each method: the user's settings and the session's table
+src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
+tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
@@ -120,6 +122,16 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     `on_parsed` stay dispatches;
   - `lacks_lsp`: the probe of the user's dbt, at the boundary, with tests
     of its own;
+  - `Proxy::compare`: the shadow's work on a followed request's answer,
+    once the client has it, so that `on_server_response` stays a dispatch;
+  - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's
+    answer and on how two answers stand, free of the file system, with
+    tests of their own;
+  - `shadow::target`, `shadow::oracle`, `shadow::start`, `Record::line`
+    and `Counts::end`: the log's lines in one place, apart from where the
+    proxy reads what they hold;
+  - `Log::open`, `Log::append` and `Session::write`: the start of the
+    shadow's log and its writes, a resource's start and use;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart
