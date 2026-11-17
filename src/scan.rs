@@ -54,6 +54,12 @@ pub enum Target {
         package: Option<String>,
         name: String,
     },
+    /// `function('name')` or `function('package', 'name')`: a function of
+    /// `function-paths`.
+    Function {
+        package: Option<String>,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -188,11 +194,11 @@ pub fn tags(text: &str) -> Vec<Range<usize>> {
 
 /// The string literals inside the Jinja tags of TEXT that a macro may render
 /// as SQL, as `is_positive('orders.amount')` does: all but the arguments of
-/// `ref` and `source`, which name models and sources.
+/// `ref`, `source` and `function`, which name models, sources and functions.
 pub fn jinja_strings(text: &str) -> Vec<Range<usize>> {
     let named: Vec<Range<usize>> = calls(text)
         .into_iter()
-        .filter(|call| matches!(call.target, Target::Ref { .. } | Target::Source { .. }))
+        .filter(|call| matches!(call.target, Target::Ref { .. } | Target::Source { .. } | Target::Function { .. }))
         .flat_map(|call| call.arguments)
         .collect();
     let mut found = Vec::new();
@@ -446,6 +452,8 @@ static DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static FUNCTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\bfunction\s*\(\s*['"]([^'"]*)['"](?:\s*,\s*['"]([^'"]*)['"])?\s*\)"#).unwrap());
 static MACRO_CALL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?:\b(macro|test|materialization)\s+)?(?:\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?\b([A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -476,7 +484,7 @@ fn refs_and_sources(text: &str, at: usize) -> Vec<Call> {
     found
 }
 
-/// The `ref`, `source`, `adapter.dispatch` and possible macro calls inside
+/// The `ref`, `source`, `adapter.dispatch`, `function` and possible macro calls inside
 /// the Jinja tags of TEXT, a tag inside a SQL comment included, since Jinja
 /// renders it.  A possible macro call is a `name(` or `package.name(` outside
 /// strings and not a method or a filter: which of them are macros is the
@@ -492,6 +500,19 @@ pub fn calls(text: &str) -> Vec<Call> {
                 Target::Dispatch { package: call.get(2).map(|p| p.as_str().to_owned()), name: call[1].to_owned() };
             let range = at + call.get(0).unwrap().start()..at + call.get(0).unwrap().end();
             found.push(Call { target, range, arguments: Vec::new() });
+        }
+        for call in FUNCTION.captures_iter(tag) {
+            let shift = |found: regex::Match| at + found.start()..at + found.end();
+            let (package, name) = match call.get(2) {
+                Some(name) => (Some(call[1].to_owned()), name.as_str().to_owned()),
+                None => (None, call[1].to_owned()),
+            };
+            let arguments = [call.get(1), call.get(2)].into_iter().flatten().map(shift).collect();
+            found.push(Call {
+                target: Target::Function { package, name },
+                range: shift(call.get(0).unwrap()),
+                arguments,
+            });
         }
         let code = mask(tag, &[("'", "'", true), ("\"", "\"", true)]);
         for call in MACRO_CALL.captures_iter(&code).filter(|call| call.get(1).is_none()) {
@@ -528,6 +549,23 @@ pub fn without_yaml_comments(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_function_call_names_its_function_and_its_package() {
+        let text = "select {{ function('f') }}(1), {{ function( \"pa\" , 'g' ) }}(2), {{ function(var('x')) }}(3)";
+        let found = calls(text);
+        let functions: Vec<(&Target, Vec<&str>)> = found
+            .iter()
+            .filter(|call| matches!(call.target, Target::Function { .. }))
+            .map(|call| (&call.target, call.arguments.iter().map(|range| &text[range.clone()]).collect()))
+            .collect();
+        let f = Target::Function { package: None, name: "f".into() };
+        let g = Target::Function { package: Some("pa".into()), name: "g".into() };
+        assert_eq!(functions, [(&f, vec!["f"]), (&g, vec!["pa", "g"])], "no literal, no function");
+        // The keyword is a macro call too, as `ref`'s is: a project's macro `function` replaces it.
+        assert!(found.iter().any(|call| call.target == Target::Macro { package: None, name: "function".into() }));
+        assert!(jinja_strings(text).iter().all(|range| !["'f'", "'g'"].contains(&&text[range.clone()])));
+    }
 
     #[test]
     fn a_ref_with_an_expression_for_argument_names_no_model() {

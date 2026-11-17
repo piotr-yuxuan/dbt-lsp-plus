@@ -30,7 +30,7 @@ type Divergence = (String, &'static str, String);
 const SECTIONS: [&str; 5] = ["nodes", "sources", "functions", "macros", "docs"];
 
 /// The labels of the entries of a properties file that patch a resource.
-const PATCHED: [&str; 5] = ["model", "seed", "snapshot", "analysis", "macro"];
+const PATCHED: [&str; 6] = ["model", "seed", "snapshot", "analysis", "macro", "function"];
 
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
@@ -167,7 +167,7 @@ fn manifest_entry<'a>(manifest: &'a Value, id: &str) -> Option<&'a Value> {
 /// What dbt and the scan each know in the project's packages, by id, and
 /// where each is written: dbt's nodes but its generic tests, sources,
 /// functions, macros and docs blocks, against the scan's entities and source
-/// tables.
+/// tables; and each id the scan has twice.
 fn nodes_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     let ours = |entry: &Value| entry["package_name"].as_str().is_some_and(|p| project.packages.contains_key(p));
     let mut dbt = BTreeMap::new();
@@ -182,11 +182,16 @@ fn nodes_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
     };
     let mut scanned: BTreeMap<String, String> =
         project.entities.iter().map(|entity| (entity.id.clone(), relative(&entity.package, &entity.path))).collect();
+    let mut found = Vec::new();
+    // Two of one id, which dbt rejects, would hide behind the map.
+    let mut seen = BTreeSet::new();
+    for entity in project.entities.iter().filter(|entity| !seen.insert(entity.id.as_str())) {
+        found.push((format!("node:{}", entity.id), "scan", "the scan has it twice".to_owned()));
+    }
     let tables = project.sources.iter();
     scanned.extend(
         tables.map(|t| (format!("source.{}.{}.{}", t.package, t.source, t.table), relative(&t.package, &t.path))),
     );
-    let mut found = Vec::new();
     for id in dbt.keys().chain(scanned.keys()).collect::<BTreeSet<_>>() {
         let subject = format!("node:{id}");
         match (dbt.get(id), scanned.get(id)) {
@@ -223,13 +228,27 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         let macros = ids("macros").filter(|id| project.packages.contains_key(&field(id, "package_name")));
         ids("nodes").chain(macros).map(str::to_owned).collect()
     };
-    // The calls that name DEPENDENCY, as `written` writes them: a dispatch,
-    // to any namespace, names each implementation `*__name`, since the
-    // root's `dispatch:` may send one namespace to another package.
+    // The calls that name DEPENDENCY, as `written` writes them: a version
+    // by its number, and by none when it is the latest, as dbt's manifest
+    // says; a dispatch, to any namespace, names each implementation
+    // `*__name`, since the root's `dispatch:` may send one namespace to
+    // another package.
     let callers = |dependency: &str| -> Vec<String> {
         let (package, name) = (field(dependency, "package_name"), field(dependency, "name"));
+        let node = manifest_entry(manifest, dependency).unwrap_or(&Value::Null);
+        let refs = |suffix: &str| [format!("ref('{name}'{suffix})"), format!("ref('{package}', '{name}'{suffix})")];
         match field(dependency, "resource_type").as_str() {
-            "model" | "seed" | "snapshot" => vec![format!("ref('{name}')"), format!("ref('{package}', '{name}')")],
+            "model" | "seed" | "snapshot" => {
+                let version = match &node["version"] {
+                    Value::String(version) => Some(version.clone()),
+                    Value::Number(version) => Some(version.to_string()),
+                    _ => None,
+                };
+                let latest = version.is_none() || node["version"] == node["latest_version"];
+                let versioned = version.iter().flat_map(|version| refs(&format!(", v={version}")));
+                versioned.chain(latest.then(|| refs("")).into_iter().flatten()).collect()
+            }
+            "function" => vec![format!("function('{name}')"), format!("function('{package}', '{name}')")],
             "source" => vec![format!("source('{}', '{name}')", field(dependency, "source_name"))],
             "macro" => {
                 let dispatched = name.rsplit_once("__").map(|(_, name)| name.to_owned());
@@ -246,9 +265,10 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
     };
     // A call as written, and what navigation looks up for it.
     let written = |target: &scan::Target| match target {
-        scan::Target::Ref { package, name, .. } => {
+        scan::Target::Ref { package, name, version } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
-            (format!("ref({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+            let version = version.as_ref().map_or_else(String::new, |version| format!(", v={version}"));
+            (format!("ref({}{version})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
         }
         scan::Target::Source { source, table } => {
             let table_target = sources::Target::Table { source: source.clone(), table: table.clone() };
@@ -262,6 +282,10 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
             format!("adapter.dispatch('{name}'{})", package.iter().map(|p| format!(", '{p}'")).collect::<String>()),
             None,
         ),
+        scan::Target::Function { package, name } => {
+            let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
+            (format!("function({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+        }
     };
     // ID, then each macro that it reaches through the graph's edges: through
     // plain calls only, unless DISPATCHED, since dbt renders only the
@@ -317,7 +341,10 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
                 let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
                 let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
                 named.extend(dbt.iter().cloned());
-                let reference = matches!(call.target, scan::Target::Ref { .. } | scan::Target::Source { .. });
+                let reference = matches!(
+                    call.target,
+                    scan::Target::Ref { .. } | scan::Target::Source { .. } | scan::Target::Function { .. }
+                );
                 let in_rendering = target.is_some() && rendered.contains(&holder.id);
                 let Some(subject) = subject(entity, holder, reference, in_rendering) else { continue };
                 for (lookup, ours) in answers(holder, call, target) {
@@ -348,7 +375,9 @@ fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<Stri
     for (path, file) in &project.files {
         for call in &file.calls {
             let at = match &call.target {
-                scan::Target::Ref { .. } => call.arguments.last().cloned().unwrap_or(call.range.clone()),
+                scan::Target::Ref { .. } | scan::Target::Function { .. } => {
+                    call.arguments.last().cloned().unwrap_or(call.range.clone())
+                }
                 scan::Target::Macro { name, .. } => call.range.end - name.len()..call.range.end,
                 _ => continue,
             };
@@ -430,7 +459,7 @@ fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lo
             let ours = target.map_or_else(BTreeSet::new, |target| resolved(path, &target));
             let patched = |e: &Value| e["patch_path"] == file.as_str() && e["name"] == entry.name.as_str();
             let dbt: BTreeSet<String> =
-                ["nodes", "macros"].into_iter().flat_map(|section| ids(section, &patched)).collect();
+                ["nodes", "macros", "functions"].into_iter().flat_map(|section| ids(section, &patched)).collect();
             let subject = format!("{file} {}", entry.name);
             if ours != dbt {
                 found.push((subject.clone(), "navigation", format!("proxy {ours:?}, dbt {dbt:?}")));

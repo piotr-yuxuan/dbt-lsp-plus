@@ -1,0 +1,21 @@
+models:
+  - name: m
+    versions:
+      - v: 1
+      - v: 2
+  - name: n
+    latest_version: 1
+    versions:
+      - v: 1
+        defined_in: n_old
+      - v: 2
+  - name: k
+    latest_version: 2
+    versions:
+      - v: 1
+        defined_in: k
+      - v: 2
+  - name: p
+    versions:
+      - v: 1
+      - v: '2'

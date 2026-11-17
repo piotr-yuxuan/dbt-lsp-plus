@@ -1585,8 +1585,9 @@ fn answered_itself(alone: bool) -> Value {
                                 "test": ["yaml"]});
     let mut references = json!({"source": everywhere});
     if alone {
-        (definition["ref"], definition["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
-        (references["ref"], references["macro"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
+        (definition["ref"], definition["macro"]) = (everywhere.clone(), json!(["sql", "yaml"]));
+        (references["ref"], references["macro"]) = (everywhere.clone(), json!(["sql", "yaml"]));
+        (definition["function"], references["function"]) = (json!(["sql", "yaml"]), json!(["sql", "yaml"]));
     }
     json!({"version": 2, "definition": definition, "references": references,
            "rename": {"source": everywhere, "cte": ["sql"]}})
@@ -2801,6 +2802,111 @@ fn with_dbt_lsp_a_ref_in_sql_reaches_the_server() {
     assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_macro}));
     assert_eq!(methods(&log).iter().filter(|method| *method == "textDocument/definition").count(), 2);
     assert!(session.finish().success());
+}
+
+/// A copy of the fixture for test NAME with a function `f`, its entry, and a
+/// model `uses_f` that calls it.
+fn with_a_function(name: &str) -> PathBuf {
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::create_dir_all(project.join("functions")).unwrap();
+    std::fs::write(project.join("functions/f.sql"), "x * 2").unwrap();
+    std::fs::write(project.join("functions/_f.yml"), "functions:\n  - name: f\n").unwrap();
+    std::fs::write(project.join("models/marts/uses_f.sql"), "select {{ function('f') }}(1) as v").unwrap();
+    project
+}
+
+#[test]
+fn alone_a_function_call_leads_to_its_file_and_back() {
+    let project = with_a_function("function-alone");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) = Session::fake_with("function-alone", json!({"no_lsp": true}), &flags, None);
+    session.initialize(&project);
+    let on_f = position_in(&project.join("models/marts/uses_f.sql"), "function('f')", 10);
+    let found = session.request("textDocument/definition", on_f.clone());
+    assert_eq!(found["result"], location(&project, "functions/f.sql", 0, 0, 0), "{found}");
+    let mut params = on_f;
+    params["context"] = json!({"includeDeclaration": false});
+    let used = session.request("textDocument/references", params);
+    let name = "select {{ function('f') }}".find("'f'").unwrap() as u64 + 1;
+    let at_name = location(&project, "models/marts/uses_f.sql", 0, name, name + 1);
+    assert_eq!(used["result"], json!([at_name]), "{used}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_a_function_call_reaches_the_server_but_its_entry_is_the_proxy_s() {
+    let project = with_a_function("function-server");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("function-server", json!({}), &flags, None);
+    session.initialize(&project);
+    let on_f = position_in(&project.join("models/marts/uses_f.sql"), "function('f')", 10);
+    let answer = session.request("textDocument/definition", on_f.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/definition", "params": on_f}));
+    let mut params = on_f;
+    params["context"] = json!({"includeDeclaration": false});
+    let answer = session.request("textDocument/references", params.clone());
+    assert_eq!(answer["result"], json!({"echo": "textDocument/references", "params": params}));
+    // An entry's name, as every entry's, is answered in both modes.
+    let on_entry = position_in(&project.join("functions/_f.yml"), "f\n", 0);
+    let answer = session.request("textDocument/definition", on_entry);
+    assert_eq!(answer["result"], location(&project, "functions/f.sql", 0, 0, 0), "{answer}");
+    let forwarded = methods(&log);
+    assert_eq!(forwarded.iter().filter(|method| *method == "textDocument/definition").count(), 1);
+    assert_eq!(forwarded.iter().filter(|method| *method == "textDocument/references").count(), 1);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn with_dbt_lsp_a_function_keeps_its_callers_after_the_listing() {
+    for named in [false, true] {
+        let project = with_a_function(&format!("function-listing-{named}"));
+        // Only the server says that uses_f depends on orders: once it shows, the listing is applied.
+        let mut depends_on = vec!["model.shop.orders"];
+        depends_on.extend(named.then_some("function.shop.f"));
+        let all = json!({"error": null, "nodes": [node("model.shop.uses_f", "models/marts/uses_f.sql", &depends_on)]});
+        let sources = json!({"error": null, "nodes": []});
+        let flags = [Path::new("--project-dir"), &project];
+        let script = json!({"answers": {ALL: all, SOURCES: sources}});
+        let (mut session, _) = Session::fake_with(&format!("function-listing-{named}"), script, &flags, None);
+        session.initialize(&project);
+        session.open(&project.join("models/marts/uses_f.sql"), None);
+        let uses_f = item("models/marts/uses_f.sql", "model.shop.uses_f");
+        let listed = |calls: &Value| calls.as_array().unwrap().iter().any(|c| c["to"]["detail"] == "model.shop.orders");
+        session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", json!({"item": uses_f})), listed);
+        let f = item("functions/f.sql", "function.shop.f");
+        let incoming = session.request("callHierarchy/incomingCalls", json!({"item": f}));
+        assert_eq!(details(&incoming["result"], "from"), ["model.shop.uses_f"], "named by the listing: {named}");
+        assert!(session.finish().success());
+    }
+}
+
+#[test]
+fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_the_server_s_with_dbt_lsp() {
+    let python = "def model(dbt, session):\n    return dbt.ref('stg_orders')\n";
+    for alone in [true, false] {
+        let project = copy_fixture(&format!("python-ref-{alone}-project"));
+        std::fs::write(project.join("models/marts/py_orders.py"), python).unwrap();
+        let flags = [Path::new("--project-dir"), &project];
+        let (mut session, _) =
+            Session::fake_with(&format!("python-ref-{alone}"), json!({"no_lsp": alone}), &flags, None);
+        session.initialize(&project);
+        let on_ref = position_in(&project.join("models/marts/py_orders.py"), "ref('stg_orders')", 6);
+        let found = session.request("textDocument/definition", on_ref.clone());
+        let mut params = on_ref.clone();
+        params["context"] = json!({"includeDeclaration": false});
+        let used = session.request("textDocument/references", params.clone());
+        if alone {
+            assert_eq!(found["result"], location(&project, "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
+            let files: Vec<&str> =
+                used["result"].as_array().unwrap().iter().map(|l| l["uri"].as_str().unwrap()).collect();
+            let uses = ["models/marts/orders.sql", "models/marts/py_orders.py", "snapshots/orders_snapshot.sql"];
+            assert_eq!(files, uses.map(|file| uri(&project.join(file))), "{used}");
+        } else {
+            assert_eq!(found["result"], json!({"echo": "textDocument/definition", "params": on_ref}));
+            assert_eq!(used["result"], json!({"echo": "textDocument/references", "params": params}));
+        }
+        assert!(session.finish().success());
+    }
 }
 
 /// A copy of the fixture for test NAME with a model `dim` in two versions,

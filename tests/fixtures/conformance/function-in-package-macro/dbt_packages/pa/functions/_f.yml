@@ -1,0 +1,7 @@
+functions:
+  - name: f
+    arguments:
+      - name: x
+        data_type: integer
+    returns:
+      data_type: integer

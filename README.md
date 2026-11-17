@@ -8,15 +8,16 @@
 [![Issues](https://img.shields.io/github/issues/piotr-yuxuan/dbt-lsp-plus)](https://github.com/piotr-yuxuan/dbt-lsp-plus/issues)
 [![Minimum Rust](https://img.shields.io/badge/rust-1.89%2B-informational)](https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/Cargo.toml)
 
-A language server that sits in front of `dbt lsp`, the language server of
-dbt 2, and adds what it lacks, for every editor and for agents: the
-outline of a model, every resource of a project as a workspace symbol, the
-call hierarchy of models, sources and macros, references and renames of
-sources, definitions from YAML (and alone, of refs and macros in SQL),
-and the last run's failures as diagnostics.  With dbt-oss, which has no
-`dbt lsp`, it works alone, from the files and your own `dbt parse`.  It
-uses only the server's interface, unlocks nothing that dbt gates behind
-an account, and does not ship dbt.  It is pre-release.
+A language server that sits in front of `dbt lsp`, the language server
+of dbt 2, and adds what it lacks, for every editor and for agents: the
+outline of a model, every resource of a project as a workspace symbol,
+the call hierarchy of models, sources, macros and functions, references
+and renames of sources, definitions from YAML (and alone, of refs,
+macros and functions), and the last run's failures as diagnostics.  With
+dbt-oss, which has no `dbt lsp`, it works alone, from the files and your
+own `dbt parse`.  It uses only the server's interface, unlocks nothing
+that dbt gates behind an account, and does not ship dbt.  It is
+pre-release.
 
 ![](./docs/social-media-preview.png)
 

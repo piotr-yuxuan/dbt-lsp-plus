@@ -118,7 +118,7 @@ impl Graph {
         let items = project.entities.iter().map(|e| {
             let item = Item {
                 id: e.id.clone(),
-                name: e.name.clone(),
+                name: e.shown(),
                 resource_type: e.resource_type.to_owned(),
                 path: e.path.clone(),
                 range: e.range.clone(),
@@ -133,7 +133,9 @@ impl Graph {
     /// This graph with the dependencies of each node listed in NODES as the
     /// server gives them, instead of the scanned ones; the scanned call sites
     /// stay.  The server lists no macro, so the scanned edges to and from
-    /// macros stay, and so do those of a node it did not list.  A node the
+    /// macros stay, and so do those of a node it did not list.  No probe
+    /// shows whether it names functions among a node's dependencies, so a
+    /// scanned edge to a function stays too, as one to a macro.  A node the
     /// scan missed is placed at the start of its file in PROJECT.
     pub fn with_server(mut self, nodes: &[ServerNode], project: &Project) -> Graph {
         let listed: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
@@ -149,9 +151,12 @@ impl Graph {
                 project.packages.get(&node.package).or_else(|| project.packages.get(&project.root_package));
             let path = package_dir.map_or_else(PathBuf::new, |dir| dir.join(&node.original_file_path));
             let resource_type = node.resource_type.clone();
+            // A model's version, which the listing names as its model, is shown as its id ends: `orders.v2`.
+            let own = node.id.strip_prefix(&format!("model.{}.", node.package)).filter(|_| resource_type == "model");
+            let version = own.filter(|shown| shown.starts_with(&format!("{}.v", node.name)));
             let item = Item {
                 id: node.id.clone(),
-                name: node.name.clone(),
+                name: version.map_or_else(|| node.name.clone(), str::to_owned),
                 resource_type,
                 path,
                 range: 0..0,
@@ -159,8 +164,8 @@ impl Graph {
             };
             self.items.entry(node.id.clone()).or_insert(item);
         }
-        let kept =
-            scanned.into_iter().filter(|((from, to), _)| to.starts_with("macro.") || !listed.contains(from.as_str()));
+        let own = |to: &str| to.starts_with("macro.") || to.starts_with("function.");
+        let kept = scanned.into_iter().filter(|((from, to), _)| own(to) || !listed.contains(from.as_str()));
         edges.extend(kept.map(|((from, to), sites)| Edge { from, to, sites }));
         edges.retain(|edge| self.items.contains_key(&edge.from) && self.items.contains_key(&edge.to));
         edges.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
@@ -262,6 +267,34 @@ mod tests {
     }
 
     #[test]
+    fn an_edge_to_a_function_stays_whether_the_listing_names_it_or_not() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("functions/f.sql", "x * 2"),
+            ("models/a.sql", "select {{ function('f') }}(1)"),
+        ];
+        let root = project::scratch_project("graph-function", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        let listing = |depends_on: &[&str]| {
+            let answer = json!({"error": null, "nodes": [
+                {"unique_id": "model.shop.a", "name": "a", "resource_type": "model", "package_name": "shop",
+                 "original_file_path": "models/a.sql", "depends_on": {"nodes": depends_on}}]});
+            let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
+            nodes
+        };
+        for depends_on in [&[][..], &["function.shop.f"]] {
+            let graph = Graph::scanned(&project).with_server(&listing(depends_on), &project);
+            let edge = graph.edges.iter().filter(|e| e.from == "model.shop.a" && e.to == "function.shop.f");
+            let sites: Vec<&str> = edge
+                .flat_map(|e| &e.sites)
+                .map(|site| &project.text(&root.join("models/a.sql")).unwrap()[site.clone()])
+                .collect();
+            assert_eq!(sites, ["function('f')"], "{depends_on:?}: once, at its call");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn server_edges_win_for_nodes_and_keep_the_scanned_call_sites() {
         let project = shop();
         let answer = json!({"error": null, "nodes": [
@@ -274,10 +307,12 @@ mod tests {
             {"unique_id": "test.shop.not_null_orders_id.abc", "name": "not_null_orders_id", "resource_type": "test",
              "package_name": "shop", "original_file_path": "models/marts/_marts.yml",
              "depends_on": {"nodes": ["model.shop.orders"]}},
+            {"unique_id": "model.shop.z.v3", "name": "z", "resource_type": "model",
+             "package_name": "shop", "original_file_path": "models/z_v3.sql", "depends_on": {"nodes": []}},
             {"name": "no unique_id"}
         ]});
         let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
-        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.len(), 4);
         let graph = Graph::scanned(&project).with_server(&nodes, &project);
         let edges = pairs(&graph);
         assert!(edges.contains(&("model.shop.order_summary", "model.shop.orders")));
@@ -292,6 +327,10 @@ mod tests {
         let text = project.text(&graph.items["model.shop.orders"].path).unwrap();
         assert_eq!(&text[stg.sites[0].clone()], "ref('stg_orders'");
         assert!(graph.items["test.shop.not_null_orders_id.abc"].path.ends_with("models/marts/_marts.yml"));
+        assert_eq!(
+            graph.items["model.shop.z.v3"].name, "z.v3",
+            "a version the scan missed, as dbt's selectors write it"
+        );
     }
 
     #[test]

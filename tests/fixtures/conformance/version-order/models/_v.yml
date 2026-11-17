@@ -1,0 +1,17 @@
+models:
+  - name: a
+    versions:
+      - v: 10
+      - v: 9
+  - name: b
+    versions:
+      - v: beta
+      - v: alpha
+  - name: c
+    versions:
+      - v: 2
+      - v: alpha
+  - name: d
+    versions:
+      - v: 10
+      - v: 9a

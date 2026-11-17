@@ -2,6 +2,7 @@
 //! The resources of a dbt project and of its installed packages, read from
 //! their files: what dbt itself would parse, without dbt.
 
+use crate::packages;
 use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
@@ -15,12 +16,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 /// A resource: a model, seed, snapshot, analysis, singular test, macro,
-/// source table or docs block, with the calls of its body.
+/// function, source table or docs block, with the calls of its body.
 #[derive(Clone, Debug)]
 pub struct Entity {
-    /// dbt's `unique_id`, such as `model.shop.orders`.
+    /// dbt's `unique_id`, such as `model.shop.orders`, or
+    /// `model.shop.orders.v2` for a version.
     pub id: String,
+    /// dbt's `name`: a version's is its model's.
     pub name: String,
+    /// A model's version, as its properties file writes it, and whether it
+    /// is the latest.
+    pub version: Option<String>,
+    pub latest: bool,
     pub resource_type: &'static str,
     pub package: String,
     pub path: PathBuf,
@@ -68,6 +75,12 @@ pub struct Scanned {
     pub models: Vec<(String, Range<usize>)>,
     /// The generic tests that a properties file names.
     pub tests: Vec<Test>,
+    /// The snapshots that a properties file declares: each entry of
+    /// `snapshots:` with a `relation:`, and that relation as written.  One
+    /// without patches a snapshot of SQL, or names nothing.
+    pub snapshots: Vec<(Entry, Range<usize>)>,
+    /// The versioned models of a properties file's `models:`.
+    pub versions: Vec<Versioned>,
 }
 
 impl Scanned {
@@ -77,15 +90,45 @@ impl Scanned {
         if !sources::is_yaml(path) {
             return Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() };
         }
-        // Its macro calls too, inside the Jinja of its values, such as hooks, but in its comments.
-        let macros = |call: &Call| matches!(call.target, scan::Target::Macro { .. } | scan::Target::Dispatch { .. });
+        // Its macro and function calls too, inside the Jinja of its values, such as hooks, but in its comments.
+        let macros = |call: &Call| {
+            matches!(
+                call.target,
+                scan::Target::Macro { .. } | scan::Target::Dispatch { .. } | scan::Target::Function { .. }
+            )
+        };
         calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
         calls.sort_by_key(|call| call.range.start);
         let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
-        let resource = |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro"].contains(&entry.label);
+        let resource =
+            |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
+        let entries: Vec<Entry> = properties::entries_in(&text, &root, false).into_iter().filter(resource).collect();
+        let index = LineIndex::new(&text);
+        let relation = |item: &Node| {
+            Some((written(&text, &index, item.get("name")?)?.1, written(&text, &index, item.get("relation")?)?.1))
+        };
+        let relations: Vec<_> =
+            root.get("snapshots").map_or(&[][..], Node::items).iter().filter_map(relation).collect();
+        let declared = |entry: &Entry| {
+            let (_, relation) =
+                relations.iter().find(|(name, _)| entry.label == "snapshot" && *name == entry.name_range)?;
+            Some((entry.clone(), relation.clone()))
+        };
+        let version = |item: &Node| {
+            let defined_in = item.get("defined_in").and_then(Node::as_str).map(str::to_owned);
+            Some((item.get("v")?.as_str()?.to_owned(), defined_in))
+        };
+        let versioned = |model: &Node| {
+            let versions: Vec<_> = model.get("versions")?.items().iter().filter_map(version).collect();
+            let latest = model.get("latest_version").and_then(Node::as_str).map(str::to_owned);
+            let name = model.get("name")?.as_str()?.to_owned();
+            (!versions.is_empty()).then_some(Versioned { name, latest, versions })
+        };
         Scanned {
             tables: source_tables_in("", path, &text, &root),
-            entries: properties::entries_in(&text, &root, false).into_iter().filter(resource).collect(),
+            versions: root.get("models").map_or(&[][..], Node::items).iter().filter_map(versioned).collect(),
+            snapshots: entries.iter().filter_map(declared).collect(),
+            entries,
             models: unit_test_models(&text, &root),
             tests: properties::tests_in(&text, &root),
             calls,
@@ -97,7 +140,7 @@ impl Scanned {
     /// The file at PATH as it is now, OPEN being its text if the editor has
     /// it open, and what that gives.  A seed's text is not read: its entity
     /// needs none, and a seed can be large.  A file that is not UTF-8, such
-    /// as a `.DS_Store`, gives nothing.  None when the file cannot be read.
+    /// as a `Thumbs.db`, gives nothing.  None when the file cannot be read.
     pub fn read(path: &Path, open: Option<&str>) -> Option<Scanned> {
         let seed = path.extension().is_some_and(|extension| extension == "csv");
         let text = match open {
@@ -141,6 +184,17 @@ pub struct SourceTable {
     pub anchored: bool,
 }
 
+impl Entity {
+    /// Its name as shown, as dbt's selectors write it: `orders.v2` for a
+    /// version.
+    pub fn shown(&self) -> String {
+        match &self.version {
+            Some(version) => format!("{}.v{version}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 impl From<&SourceTable> for Entity {
     fn from(table: &SourceTable) -> Entity {
         Entity {
@@ -152,44 +206,106 @@ impl From<&SourceTable> for Entity {
             range: table.table_range.clone(),
             name_range: table.table_range.clone(),
             calls: Vec::new(),
+            version: None,
+            latest: false,
         }
     }
 }
 
+/// A versioned model that a properties file declares: its name, its
+/// `latest_version` as written, if any, and each version as written with
+/// its `defined_in`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Versioned {
+    pub name: String,
+    pub latest: Option<String>,
+    pub versions: Vec<(String, Option<String>)>,
+}
+
+/// The entities that ENTITY, of a file, is, given the versioned models that
+/// the properties files of its package declare, DECLARED: one per version
+/// that names its file, as dbt finds them (a version's `defined_in`, else
+/// `<name>_v<N>`, and for the latest without one, `<name>` too unless a
+/// `defined_in` names it), else ENTITY itself.  The latest is the
+/// `latest_version`, else the highest version: as numbers when all are
+/// numbers, else all as text.  A decision on the files already read, so
+/// that the versions of a package are linked once all are.
+pub fn versions_of(entity: Entity, declared: &[&Versioned]) -> Vec<Entity> {
+    let number = |version: &String| version.parse::<f64>().ok().filter(|number| number.is_finite());
+    let mut found = Vec::new();
+    for model in declared.iter().filter(|_| entity.resource_type == "model") {
+        let numbers = model.versions.iter().all(|(version, _)| number(version).is_some());
+        let order = |one: &&String, other: &&String| match numbers {
+            true => number(one).unwrap_or_default().total_cmp(&number(other).unwrap_or_default()),
+            false => one.cmp(other),
+        };
+        let latest = model.latest.as_ref().or_else(|| model.versions.iter().map(|(version, _)| version).max_by(order));
+        let named = model.versions.iter().any(|(_, defined_in)| defined_in.as_ref() == Some(&model.name));
+        for (version, defined_in) in &model.versions {
+            let is_latest = latest == Some(version);
+            let names = match defined_in {
+                Some(stem) => *stem == entity.name,
+                None => {
+                    entity.name == format!("{}_v{version}", model.name)
+                        || is_latest && !named && entity.name == model.name
+                }
+            };
+            let id = format!("model.{}.{}.v{version}", entity.package, model.name);
+            let version = Some(version.clone());
+            found.extend(names.then(|| Entity {
+                id,
+                name: model.name.clone(),
+                version,
+                latest: is_latest,
+                ..entity.clone()
+            }));
+        }
+    }
+    if found.is_empty() { vec![entity] } else { found }
+}
+
 /// A kind of resource directory: its key in `dbt_project.yml` and dbt's
-/// default, the resource each file of an extension is, and the blocks it
-/// holds as (block, extension, resource type, prefix of the name in the id).
+/// default, the resource each file of an extension is, as (extension,
+/// resource type), and the blocks it holds as (block, extension, resource
+/// type, prefix of the name in the id).
 struct Layout {
     key: &'static str,
     default: &'static str,
-    file: Option<(&'static str, &'static str)>,
+    files: &'static [(&'static str, &'static str)],
     blocks: &'static [(Kind, &'static str, &'static str, &'static str)],
 }
 
 const DOCS: (Kind, &str, &str, &str) = (Kind::Docs, "md", "doc", "");
 const GENERIC_TEST: (Kind, &str, &str, &str) = (Kind::Test, "sql", "macro", "test_");
 
-const LAYOUT: [Layout; 6] = [
-    Layout { key: "model-paths", default: "models", file: Some(("sql", "model")), blocks: &[DOCS] },
-    Layout { key: "seed-paths", default: "seeds", file: Some(("csv", "seed")), blocks: &[DOCS] },
+const LAYOUT: [Layout; 7] = [
+    Layout { key: "model-paths", default: "models", files: &[("sql", "model"), ("py", "model")], blocks: &[DOCS] },
+    Layout { key: "seed-paths", default: "seeds", files: &[("csv", "seed")], blocks: &[DOCS] },
     Layout {
         key: "snapshot-paths",
         default: "snapshots",
-        file: None,
+        files: &[],
         blocks: &[(Kind::Snapshot, "sql", "snapshot", ""), DOCS],
     },
-    Layout { key: "analysis-paths", default: "analyses", file: Some(("sql", "analysis")), blocks: &[DOCS] },
+    Layout { key: "analysis-paths", default: "analyses", files: &[("sql", "analysis")], blocks: &[DOCS] },
     // A file of generic tests is no singular test: see `file_entities`.
-    Layout { key: "test-paths", default: "tests", file: Some(("sql", "test")), blocks: &[GENERIC_TEST, DOCS] },
+    Layout { key: "test-paths", default: "tests", files: &[("sql", "test")], blocks: &[GENERIC_TEST, DOCS] },
     Layout {
         key: "macro-paths",
         default: "macros",
-        file: None,
+        files: &[],
         blocks: &[(Kind::Macro, "sql", "macro", ""), GENERIC_TEST, DOCS],
+    },
+    // Each file is a function, with or without its `functions:` entry.
+    Layout {
+        key: "function-paths",
+        default: "functions",
+        files: &[("sql", "function"), ("py", "function")],
+        blocks: &[],
     },
 ];
 
-/// The entities of one file of SQL, Markdown or CSV of PACKAGE, found in a
+/// The entities of one file of SQL, Python, Markdown or CSV of PACKAGE, found in a
 /// directory of LAYOUT, from what its text gives, SCANNED.
 fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned) -> Vec<Entity> {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
@@ -208,6 +324,8 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
             .collect(),
         range,
         name_range,
+        version: None,
+        latest: false,
     };
     let mut found = Vec::new();
     for block in &scanned.blocks {
@@ -217,8 +335,7 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
             found.push(entity(resource_type, id, &block.name, block.range.clone(), block.name_range.clone()));
         }
     }
-    if let Some((ext, resource_type)) = layout.file
-        && ext == extension
+    if let Some((_, resource_type)) = layout.files.iter().find(|(ext, _)| *ext == extension)
         && found.iter().all(|e| e.resource_type == "doc")
     {
         let whole = 0..scanned.text.len();
@@ -311,10 +428,13 @@ static SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A'(?:[^']
 
 /// Every file below DIR with its metadata, in a stable order, through
 /// symbolic links but once per directory; nothing when DIR does not exist.
+/// A file whose name starts with a dot is left out, as dbt leaves it out,
+/// but not the files of a directory whose name does.
 fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     let mut pending = vec![dir.to_owned()];
     let mut seen = HashSet::new();
     let mut found = Vec::new();
+    let hidden = |path: &Path| path.file_name().is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
     while let Some(dir) = pending.pop() {
         if !seen.insert(fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
             continue;
@@ -323,7 +443,7 @@ fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
         for path in entries.flatten().map(|entry| entry.path()) {
             match fs::metadata(&path) {
                 Ok(kind) if kind.is_dir() => pending.push(path),
-                Ok(kind) if kind.is_file() => found.push((path, kind)),
+                Ok(kind) if kind.is_file() && !hidden(&path) => found.push((path, kind)),
                 _ => {}
             }
         }
@@ -360,7 +480,9 @@ pub struct Listing {
 
 /// What a scan finds of the project at ROOT: each package's resource paths,
 /// layout by layout, then its `dbt_project.yml`, whose vars and hooks hold
-/// calls too.  None when ROOT has no named `dbt_project.yml`.
+/// calls too.  Its packages are those installed, then the local packages
+/// that its packages files name and that are not.  None when ROOT has no
+/// named `dbt_project.yml`.
 pub fn find(root: &Path) -> Option<Listing> {
     let (root_package, root_config) = package_config(root)?;
     let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
@@ -368,8 +490,16 @@ pub fn find(root: &Path) -> Option<Listing> {
         fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
     installed.sort();
     let others = installed.into_iter().filter_map(|dir| package_config(&dir).map(|(name, config)| (name, dir, config)));
-    let packages: Vec<(String, PathBuf, Node)> =
+    let mut packages: Vec<(String, PathBuf, Node)> =
         std::iter::once((root_package, root.to_owned(), root_config)).chain(others).collect();
+    // A local package not installed yet, as in a fresh clone, where its packages file names it.
+    for dir in packages::local_dirs(root) {
+        if let Some((name, config)) = package_config(&dir)
+            && packages.iter().all(|(known, ..)| *known != name)
+        {
+            packages.push((name, dir, config));
+        }
+    }
     let mut found = Vec::new();
     for (package, (_, dir, config)) in packages.iter().enumerate() {
         for (at, layout) in LAYOUT.iter().enumerate() {
@@ -414,12 +544,51 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
                 let tables: Vec<SourceTable> = scanned.tables.iter().map(package).collect();
                 project.entities.extend(tables.iter().map(Entity::from));
                 project.sources.extend(tables);
+                let within = |range: &Range<usize>| {
+                    let calls = scanned
+                        .calls
+                        .iter()
+                        .filter(|call| range.start <= call.range.start && call.range.end <= range.end);
+                    calls.cloned().collect()
+                };
+                let snapshot = |(entry, relation): &(Entry, Range<usize>)| Entity {
+                    id: format!("snapshot.{name}.{}", entry.name),
+                    name: entry.name.clone(),
+                    resource_type: "snapshot",
+                    package: name.clone(),
+                    path: file.path.clone(),
+                    // From its first line's start, so that a request at its `name:` line's start is inside.
+                    range: scanned.text[..entry.range.start].rfind('\n').map_or(0, |at| at + 1)..entry.range.end,
+                    name_range: entry.name_range.clone(),
+                    calls: within(relation),
+                    version: None,
+                    latest: false,
+                };
+                project.entities.extend(scanned.snapshots.iter().map(snapshot));
             }
             Some(layout) => project.entities.extend(file_entities(name, &LAYOUT[layout], &file.path, &scanned)),
             None => {}
         }
         project.files.insert(file.path.clone(), scanned);
     }
+    // The versions of each package, once all its properties files are read; a model that two files
+    // declare, which dbt rejects, by the first.
+    let mut declared: HashMap<&str, Vec<&Versioned>> = HashMap::new();
+    for file in &listing.found {
+        let versions = project.files.get(&file.path).map_or(&[][..], |scanned| scanned.versions.as_slice());
+        let known = declared.entry(packages[file.package].0.as_str()).or_default();
+        for versioned in versions {
+            if known.iter().all(|other| other.name != versioned.name) {
+                known.push(versioned);
+            }
+        }
+    }
+    let entities = std::mem::take(&mut project.entities).into_iter();
+    let of = |entity: Entity| {
+        let package = declared.get(entity.package.as_str()).map_or(&[][..], Vec::as_slice);
+        versions_of(entity, package)
+    };
+    project.entities = entities.flat_map(of).collect();
     project.packages.extend(packages.iter().cloned());
     project
 }
@@ -476,6 +645,11 @@ mod tests {
         let hooks = Scanned::of(Path::new("/p/dbt_project.yml"), hooks.into());
         assert!(macro_named(&hooks.calls, "log_start"), "a hook's macro");
         assert!(!macro_named(&hooks.calls, "log_end"), "dbt renders no comment");
+        // A hook's function too, as both builds count it for the model.
+        let hook = "models:\n  - name: a\n    config:\n      post_hook: \"select {{ function('f') }}(1)\"\n";
+        let hook = Scanned::of(Path::new("/p/models/_a.yml"), hook.into());
+        let function = scan::Target::Function { package: None, name: "f".into() };
+        assert!(hook.calls.iter().any(|call| call.target == function), "{:?}", hook.calls);
     }
 
     #[test]
@@ -511,6 +685,286 @@ mod tests {
             ]
         );
         assert_eq!(project.packages["shop_utils"], fixture().join("dbt_packages/shop_utils"));
+    }
+
+    #[test]
+    fn a_file_whose_name_starts_with_a_dot_is_no_resource() {
+        let source = "sources:\n  - name: hidden\n    tables:\n      - name: t\n";
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/.hidden.sql", "select 1"),
+            ("models/.p.yml", source),
+            ("models/.dir/inner.sql", "select 1"),
+            ("macros/.m.sql", "{% macro m() %}1{% endmacro %}"),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/models/.ph.sql", "select 1"),
+        ];
+        let root = scratch_project("project-dot-files", &files);
+        let project = scan(&root, &HashMap::new()).unwrap();
+        let ids: Vec<&str> = project.entities.iter().map(|e| e.id.as_str()).collect();
+        // As both builds parse it: the file in a dotted directory alone.
+        assert_eq!(ids, ["model.shop.inner"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_package_not_installed_is_read_where_its_packages_file_names_it() {
+        let files = [
+            ("proj/dbt_project.yml", "name: r\n"),
+            ("proj/packages.yml", "packages:\n  - local: shared\n  - local: ../beside\n"),
+            ("proj/models/c.sql", "select * from {{ ref('s_m') }}"),
+            ("proj/shared/dbt_project.yml", "name: shared\n"),
+            ("proj/shared/models/s_m.sql", "select 1"),
+            ("beside/dbt_project.yml", "name: bes\n"),
+            ("beside/models/b_m.sql", "select 1"),
+            // A local package's own local package is read from the root, as dbt reads it.
+            ("beside/packages.yml", "packages:\n  - local: inner\n"),
+            ("proj/inner/dbt_project.yml", "name: inner\n"),
+            ("proj/inner/models/i_m.sql", "select 1"),
+            ("deps/dbt_project.yml", "name: r\n"),
+            ("deps/dependencies.yml", "packages:\n  - local: shared\n"),
+            ("deps/shared/dbt_project.yml", "name: shared\n"),
+            ("deps/shared/models/s_m.sql", "select 1"),
+            ("deps/dbt_packages/shared/dbt_project.yml", "name: shared\n"),
+            ("deps/dbt_packages/shared/models/s_m.sql", "select 1"),
+            ("tab/dbt_project.yml", "name: r\n"),
+            ("tab/packages.yml", "packages:\n  - local:\tshared\n"),
+            ("tab/shared/dbt_project.yml", "name: shared\n"),
+            ("tab/shared/models/s_m.sql", "select 1"),
+        ];
+        let dir = scratch_project("project-local-packages", &files);
+        let ids = |root: &str| -> Vec<(String, PathBuf)> {
+            let project = scan(&dir.join(root), &HashMap::new()).unwrap();
+            let mut ids: Vec<(String, PathBuf)> = project
+                .entities
+                .iter()
+                .map(|e| (e.id.clone(), e.path.strip_prefix(&project.packages[&e.package]).unwrap().to_owned()))
+                .collect();
+            ids.sort();
+            ids
+        };
+        let at = |id: &str, path: &str| (id.to_owned(), PathBuf::from(path));
+        // The ids dbt gives once it installs them: each package's project name, not its directory's.
+        let expected = [
+            at("model.bes.b_m", "models/b_m.sql"),
+            at("model.inner.i_m", "models/i_m.sql"),
+            at("model.r.c", "models/c.sql"),
+            at("model.shared.s_m", "models/s_m.sql"),
+        ];
+        assert_eq!(ids("proj"), expected);
+        let project = scan(&dir.join("proj"), &HashMap::new()).unwrap();
+        let graph = crate::graph::Graph::scanned(&project);
+        let edges: Vec<(&str, &str)> = graph.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect();
+        assert_eq!(edges, [("model.r.c", "model.shared.s_m")], "as dbt resolves it once installed");
+        let deps = scan(&dir.join("deps"), &HashMap::new()).unwrap();
+        assert_eq!(deps.packages["shared"], dir.join("deps/dbt_packages/shared"), "the installed one, once");
+        assert_eq!(ids("deps").len(), 1);
+        assert_eq!(ids("tab"), Vec::new(), "a packages file dbt-lsp-plus cannot read names none");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn python_models_and_functions_are_resources() {
+        let entry = "functions:\n  - name: f\n    returns:\n      data_type: integer\n";
+        let python = "def model(dbt, session):\n    a = dbt.ref('x')\n    b = dbt.source('s', 't')\n    return a\n";
+        let files = [
+            ("shop/dbt_project.yml", "name: shop\n"),
+            ("shop/models/x.sql", "select 1 as id"),
+            ("shop/models/py_m.py", python),
+            ("shop/functions/f.sql", "x * 2"),
+            ("shop/functions/_f.yml", entry),
+            ("shop/functions/sub/g.py", "def main(x):\n    return x\n"),
+            ("shop/dbt_packages/pa/dbt_project.yml", "name: pa\n"),
+            ("shop/dbt_packages/pa/functions/pf.sql", "x + 1"),
+            ("udfs/dbt_project.yml", "name: u\nfunction-paths: ['udfs']\n"),
+            ("udfs/udfs/d.sql", "x * 2"),
+            ("udfs/functions/not_one.sql", "x"),
+        ];
+        let dir = scratch_project("project-python-functions", &files);
+        let ids = |root: &str| {
+            let project = scan(&dir.join(root), &HashMap::new()).unwrap();
+            let mut ids: Vec<String> = project.entities.iter().map(|e| e.id.clone()).collect();
+            ids.sort();
+            (ids, project)
+        };
+        let (shop, project) = ids("shop");
+        // As both builds parse them: each file under `function-paths` a function, its entry or none.
+        let expected = ["function.pa.pf", "function.shop.f", "function.shop.g", "model.shop.py_m", "model.shop.x"];
+        assert_eq!(shop, expected);
+        let python_model = project.entities.iter().find(|e| e.id == "model.shop.py_m").unwrap();
+        let targets: Vec<&scan::Target> = python_model.calls.iter().map(|call| &call.target).collect();
+        let reference = scan::Target::Ref { package: None, name: "x".into(), version: None };
+        let source = scan::Target::Source { source: "s".into(), table: "t".into() };
+        assert_eq!(targets, [&reference, &source]);
+        assert_eq!(ids("udfs").0, ["function.u.d"], "the configured paths only");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_snapshots_entry_with_a_relation_is_a_snapshot_of_its_properties_file() {
+        let snapshots = "snapshots:\n  - name: old\n    description: patches the SQL one\n  - name: orphan\n\
+                         \x20   description: names nothing\n  - name: ys\n    relation: ref('x')\n    columns:\n\
+                         \x20     - name: id\n        data_tests:\n          - relationships:\n\
+                         \x20             arguments:\n                to: ref('y')\n                field: id\n";
+        let sources = "sources:\n  - name: s\n    tables:\n      - name: t\nsnapshots:\n  - name: in_models\n\
+                       \x20   relation: source('s', 't')\n";
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/x.sql", "select 1 as id"),
+            ("models/y.sql", "select 1 as id"),
+            ("models/_src.yml", sources),
+            ("snapshots/old.sql", "{% snapshot old %}\nselect * from {{ ref('x') }}\n{% endsnapshot %}\n"),
+            ("snapshots/_s.yml", snapshots),
+        ];
+        let root = scratch_project("project-yaml-snapshots", &files);
+        let project = scan(&root, &HashMap::new()).unwrap();
+        let snapshot = |id: &str| project.entities.iter().find(|e| e.id == id).unwrap();
+        let mut found: Vec<(&str, &Path)> = project
+            .entities
+            .iter()
+            .filter(|e| e.resource_type == "snapshot")
+            .map(|e| (e.id.as_str(), e.path.strip_prefix(&root).unwrap()))
+            .collect();
+        found.sort();
+        // As both builds parse them: one `old`, at its SQL; no `orphan`; each relation's at its properties file.
+        let expected = [
+            ("snapshot.shop.in_models", Path::new("models/_src.yml")),
+            ("snapshot.shop.old", Path::new("snapshots/old.sql")),
+            ("snapshot.shop.ys", Path::new("snapshots/_s.yml")),
+        ];
+        assert_eq!(found, expected);
+        let ys = snapshot("snapshot.shop.ys");
+        let targets: Vec<&scan::Target> = ys.calls.iter().map(|call| &call.target).collect();
+        let x = scan::Target::Ref { package: None, name: "x".into(), version: None };
+        assert_eq!(targets, [&x], "its relation's, not its column test's");
+        assert_eq!(&snapshots[ys.name_range.clone()], "ys");
+        assert!(snapshots[ys.range.clone()].starts_with("  - name: ys\n"), "from its first line's start");
+        assert!(snapshots[ys.range.clone()].trim_end().ends_with("field: id"));
+        let in_models = snapshot("snapshot.shop.in_models");
+        let source = scan::Target::Source { source: "s".into(), table: "t".into() };
+        assert_eq!(in_models.calls.iter().map(|call| &call.target).collect::<Vec<_>>(), [&source]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The model of the file STEM in the root `r`.
+    fn model_file(stem: &str) -> Entity {
+        Entity {
+            id: format!("model.r.{stem}"),
+            name: stem.to_owned(),
+            version: None,
+            latest: false,
+            resource_type: "model",
+            package: "r".into(),
+            path: PathBuf::from(format!("models/{stem}.sql")),
+            range: 0..0,
+            name_range: 0..0,
+            calls: Vec::new(),
+        }
+    }
+
+    /// The versioned model NAME, its LATEST and its VERSIONS with their `defined_in`.
+    fn declared(name: &str, latest: Option<&str>, versions: &[(&str, Option<&str>)]) -> Versioned {
+        Versioned {
+            name: name.into(),
+            latest: latest.map(str::to_owned),
+            versions: versions.iter().map(|(v, d)| ((*v).to_owned(), d.map(str::to_owned))).collect(),
+        }
+    }
+
+    /// The ids, and whether each is the latest, that the file STEM is with VERSIONED.
+    fn version_ids(stem: &str, versioned: &Versioned) -> Vec<(String, bool)> {
+        versions_of(model_file(stem), &[versioned]).into_iter().map(|e| (e.id, e.latest)).collect()
+    }
+
+    #[test]
+    fn a_model_file_is_the_version_that_names_it() {
+        let is = |id: &str, latest: bool| vec![(id.to_owned(), latest)];
+        // Each as both builds parse it.
+        let plain = declared("m", None, &[("1", None), ("2", None)]);
+        assert_eq!(version_ids("m_v1", &plain), is("model.r.m.v1", false));
+        assert_eq!(version_ids("m_v2", &plain), is("model.r.m.v2", true), "the highest, with no latest_version");
+        assert_eq!(version_ids("m", &plain), is("model.r.m.v2", true), "the latest's, as it names no file");
+        assert_eq!(version_ids("other", &plain), is("model.r.other", false));
+        let first = declared("m", Some("1"), &[("1", None), ("2", None)]);
+        assert_eq!(version_ids("m", &first), is("model.r.m.v1", true));
+        let mut seed = model_file("m_v1");
+        seed.resource_type = "seed";
+        assert_eq!(versions_of(seed, &[&plain])[0].id, "model.r.m_v1", "a model's alone");
+    }
+
+    #[test]
+    fn a_defined_in_names_its_version_s_file_alone() {
+        let is = |id: &str, latest: bool| vec![(id.to_owned(), latest)];
+        // Each as both builds parse it.
+        let moved = declared("n", Some("1"), &[("1", Some("n_old")), ("2", None)]);
+        assert_eq!(version_ids("n_old", &moved), is("model.r.n.v1", true));
+        assert_eq!(version_ids("n", &moved), is("model.r.n", false), "the latest's has a defined_in");
+        let kept = declared("m", Some("2"), &[("1", Some("m")), ("2", None)]);
+        assert_eq!(
+            version_ids("m", &kept),
+            is("model.r.m.v1", false),
+            "a file a defined_in names is that version's alone"
+        );
+        assert_eq!(version_ids("m_v2", &kept), is("model.r.m.v2", true));
+    }
+
+    #[test]
+    fn the_latest_version_is_the_highest_as_numbers_when_all_are_else_as_text() {
+        // As both builds order them, whatever the order of the list.
+        let cases: [(&[&str], &str); 6] = [
+            (&["9", "10"], "10"),
+            (&["alpha", "beta"], "beta"),
+            (&["2", "alpha"], "alpha"),
+            (&["10", "9a"], "9a"),
+            (&["2", "10", "1a"], "2"),
+            (&["1a", "10", "2"], "2"),
+        ];
+        for (versions, latest) in cases {
+            let listed: Vec<(&str, Option<&str>)> = versions.iter().map(|version| (*version, None)).collect();
+            let ordered = declared("a", None, &listed);
+            let expected = vec![(format!("model.r.a.v{latest}"), true)];
+            assert_eq!(version_ids(&format!("a_v{latest}"), &ordered), expected, "{versions:?}");
+        }
+    }
+
+    #[test]
+    fn a_version_s_file_is_found_anywhere_in_its_package_s_model_paths() {
+        let properties = "models:\n  - name: m\n    versions:\n      - v: 1\n      - v: 2\n  - name: n\n\
+                          \x20   latest_version: 1\n    versions:\n      - v: 1\n        defined_in: n_old\n      - v: '2'\n";
+        let files = [
+            ("dbt_project.yml", "name: r\n"),
+            ("models/_v.yml", properties),
+            ("models/m_v1.sql", "select 1"),
+            ("models/sub/m_v2.py", "def model(dbt, session):\n    return dbt.ref('x')\n"),
+            ("models/n_old.sql", "select 1"),
+            ("models/deep/n_v2.sql", "select 2"),
+            ("dbt_packages/pa/dbt_project.yml", "name: pa\n"),
+            ("dbt_packages/pa/models/m_v3.sql", "select 3"),
+            (
+                "dbt_packages/pa/models/_m.yml",
+                "models:\n  - name: m\n    latest_version: 3\n    versions:\n      - v: 3\n",
+            ),
+            // A second declaration, which dbt rejects, makes no second entity.
+            ("models/zz_again.yml", "models:\n  - name: m\n    versions:\n      - v: 1\n      - v: 2\n"),
+        ];
+        let root = scratch_project("project-versions", &files);
+        let project = scan(&root, &HashMap::new()).unwrap();
+        let mut found: Vec<(String, &str, Option<&str>, bool)> = project
+            .entities
+            .iter()
+            .filter(|e| e.resource_type == "model")
+            .map(|e| (e.id.clone(), e.name.as_str(), e.version.as_deref(), e.latest))
+            .collect();
+        found.sort();
+        let expected = [
+            ("model.pa.m.v3".to_owned(), "m", Some("3"), true),
+            ("model.r.m.v1".to_owned(), "m", Some("1"), false),
+            ("model.r.m.v2".to_owned(), "m", Some("2"), true),
+            ("model.r.n.v1".to_owned(), "n", Some("1"), true),
+            ("model.r.n.v2".to_owned(), "n", Some("2"), false),
+        ];
+        assert_eq!(found, expected);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

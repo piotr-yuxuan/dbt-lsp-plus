@@ -1,0 +1,22 @@
+functions:
+  - name: double_it
+    arguments:
+      - name: x
+        data_type: integer
+    returns:
+      data_type: integer
+  - name: triple
+    arguments:
+      - name: x
+        data_type: integer
+    returns:
+      data_type: integer
+  - name: pyf
+    config:
+      runtime_version: '3.11'
+      entry_point: main
+    arguments:
+      - name: x
+        data_type: integer
+    returns:
+      data_type: integer

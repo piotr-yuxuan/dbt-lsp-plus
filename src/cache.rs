@@ -244,12 +244,12 @@ mod tests {
     fn a_file_that_cannot_be_read_is_tried_again_but_one_not_text_is_kept() {
         let dir =
             scratch_project("cache-unreadable", &[("dbt_project.yml", "name: shop\n"), ("models/a.sql", "select 1")]);
-        // Not UTF-8, as a `.DS_Store` that macOS leaves in a directory.
-        fs::write(dir.join("models/.DS_Store"), b"\x00\x00\x00\x01Bud1\xff").unwrap();
+        // Not UTF-8, as a `Thumbs.db` that Windows leaves in a directory.
+        fs::write(dir.join("models/Thumbs.db"), b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\xff").unwrap();
         let (texts, edits) = (HashMap::new(), HashMap::new());
         let mut cache = Cache::default();
         let first = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }).unwrap();
-        assert_eq!(first.text(&dir.join("models/.DS_Store")), Some(""));
+        assert_eq!(first.text(&dir.join("models/Thumbs.db")), Some(""));
         cache.project(&dir, 2, &Open { texts: &texts, edits: &edits }).unwrap();
         assert_eq!(cache.generation, 1, "nothing changed: not built again");
         let unreadable = dir.join("models/b.sql");

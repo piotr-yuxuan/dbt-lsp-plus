@@ -10,7 +10,7 @@ use crate::yaml::{self, Node};
 use crate::{config, project, text};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The files of a project that name its packages.
 const FILES: [&str; 2] = ["packages.yml", "dependencies.yml"];
@@ -18,6 +18,12 @@ const FILES: [&str; 2] = ["packages.yml", "dependencies.yml"];
 /// The packages that DOC names.
 fn items(doc: &Node) -> &[Node] {
     doc.get("packages").map_or(&[][..], Node::items)
+}
+
+/// The directory of each `local:` package that DOCS name, as written,
+/// from the root.
+fn locals(docs: &[Node]) -> impl Iterator<Item = &str> {
+    docs.iter().flat_map(items).filter_map(|package| package.get("local")?.as_str())
 }
 
 /// The source of a package from the network, by which a lock names it too.
@@ -82,11 +88,24 @@ fn named(root: &Path) -> Result<Vec<Node>, String> {
                 dir.display()
             ));
         }
-        let locals = found.iter().flat_map(items).filter_map(|package| package.get("local")?.as_str());
-        pending.extend(locals.map(|local| root.join(local)).filter(|local| seen.insert(local.clone())));
+        pending.extend(locals(&found).map(|local| root.join(local)).filter(|local| seen.insert(local.clone())));
         docs.extend(found);
     }
     Ok(docs)
+}
+
+/// The directory of each `local:` package of the project at ROOT, its own
+/// and its local packages', in turn, each from the root as dbt reads it,
+/// its `..` resolved by the file system: none when a file that names
+/// packages does not read as dbt reads it, which only the guard refuses.
+pub fn local_dirs(root: &Path) -> Vec<PathBuf> {
+    let docs = named(root).unwrap_or_default();
+    let resolved = |local: &str| {
+        let dir = root.join(local);
+        let up = Path::new(local).components().any(|part| part == Component::ParentDir);
+        if up { fs::canonicalize(&dir).unwrap_or(dir) } else { dir }
+    };
+    locals(&docs).map(resolved).collect()
 }
 
 /// Why dbt would install packages before it parses the project at ROOT with
@@ -110,8 +129,7 @@ pub fn refused(root: &Path, server: &[String], cut: bool, alone: bool) -> Option
     // A package with no name dbt cannot install either.
     let missing =
         |dir: &&str| project::package_config(&root.join(dir)).is_none_or(|(project, _)| !installed(&install, &project));
-    let locals = docs.iter().flat_map(items).filter_map(|package| package.get("local")?.as_str());
-    if let Some(dir) = locals.into_iter().find(missing) {
+    if let Some(dir) = locals(&docs).find(missing) {
         return Some(format!("the local package {dir} is not installed: {why}"));
     }
     let mut sources = docs.iter().flat_map(items).filter_map(source).peekable();

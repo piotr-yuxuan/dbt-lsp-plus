@@ -1,0 +1,6 @@
+name: r
+config-version: 2
+version: '1.0.0'
+profile: r
+flags:
+  require_ref_searches_node_package_before_root: false

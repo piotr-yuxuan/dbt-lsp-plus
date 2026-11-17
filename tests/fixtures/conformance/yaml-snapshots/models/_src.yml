@@ -1,0 +1,11 @@
+sources:
+  - name: s
+    tables:
+      - name: t
+snapshots:
+  - name: in_models
+    relation: source('s', 't')
+    config:
+      unique_key: id
+      strategy: check
+      check_cols: all
