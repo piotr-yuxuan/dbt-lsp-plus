@@ -62,6 +62,7 @@ tests/proxy/commands.rs       the commands for clients, in front of the fake and
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
+tests/proxy/plugin.rs         the Claude Code plugin's files: no path in them
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
@@ -80,6 +81,8 @@ docs/explanation/design.md    the design, what dbt lsp was observed to do, what 
 docs/diagrams/                diagram sources, light and dark, in diagram-design's sanityinc-tomorrow profile
 docs/images/                  their PNG exports, by headless Chromium at twice the size
 docs/social-media-preview.png GitHub's preview, from the untracked docs/work/social-preview/
+.claude-plugin/               the marketplace of the repository, which names its one plugin
+plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as the server of .sql, .yml and .yaml
 ```
 
 ## Rules of the code

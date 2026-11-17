@@ -10,6 +10,8 @@ mod conformance;
 mod live;
 #[path = "proxy/locate.rs"]
 mod locate;
+#[path = "proxy/plugin.rs"]
+mod plugin;
 #[path = "proxy/routes.rs"]
 mod routes;
 #[path = "proxy/shadow.rs"]

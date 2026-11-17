@@ -1,0 +1,6 @@
+{
+  "dbt": {
+    "command": "dbt-lsp-plus",
+    "extensionToLanguage": {".sql": "sql", ".yml": "yaml", ".yaml": "yaml"}
+  }
+}
