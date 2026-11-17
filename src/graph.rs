@@ -133,7 +133,9 @@ impl Graph {
     /// This graph with the dependencies of each node listed in NODES as the
     /// server gives them, instead of the scanned ones; the scanned call sites
     /// stay.  The server lists no macro, so the scanned edges to and from
-    /// macros stay, and so do those of a node it did not list.  A node the
+    /// macros stay, and so do those of a node it did not list.  No probe
+    /// shows whether it names functions among a node's dependencies, so a
+    /// scanned edge to a function stays too, as one to a macro.  A node the
     /// scan missed is placed at the start of its file in PROJECT.
     pub fn with_server(mut self, nodes: &[ServerNode], project: &Project) -> Graph {
         let listed: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
@@ -159,8 +161,8 @@ impl Graph {
             };
             self.items.entry(node.id.clone()).or_insert(item);
         }
-        let kept =
-            scanned.into_iter().filter(|((from, to), _)| to.starts_with("macro.") || !listed.contains(from.as_str()));
+        let own = |to: &str| to.starts_with("macro.") || to.starts_with("function.");
+        let kept = scanned.into_iter().filter(|((from, to), _)| own(to) || !listed.contains(from.as_str()));
         edges.extend(kept.map(|((from, to), sites)| Edge { from, to, sites }));
         edges.retain(|edge| self.items.contains_key(&edge.from) && self.items.contains_key(&edge.to));
         edges.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
@@ -259,6 +261,34 @@ mod tests {
         let to: Vec<&str> =
             pairs(&own).into_iter().filter(|(from, _)| *from == "model.shop.report").map(|(_, to)| to).collect();
         assert_eq!(to, ["model.other.twice", "model.pkg.twice"]);
+    }
+
+    #[test]
+    fn an_edge_to_a_function_stays_whether_the_listing_names_it_or_not() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("functions/f.sql", "x * 2"),
+            ("models/a.sql", "select {{ function('f') }}(1)"),
+        ];
+        let root = project::scratch_project("graph-function", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        let listing = |depends_on: &[&str]| {
+            let answer = json!({"error": null, "nodes": [
+                {"unique_id": "model.shop.a", "name": "a", "resource_type": "model", "package_name": "shop",
+                 "original_file_path": "models/a.sql", "depends_on": {"nodes": depends_on}}]});
+            let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
+            nodes
+        };
+        for depends_on in [&[][..], &["function.shop.f"]] {
+            let graph = Graph::scanned(&project).with_server(&listing(depends_on), &project);
+            let edge = graph.edges.iter().filter(|e| e.from == "model.shop.a" && e.to == "function.shop.f");
+            let sites: Vec<&str> = edge
+                .flat_map(|e| &e.sites)
+                .map(|site| &project.text(&root.join("models/a.sql")).unwrap()[site.clone()])
+                .collect();
+            assert_eq!(sites, ["function('f')"], "{depends_on:?}: once, at its call");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
