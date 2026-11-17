@@ -12,8 +12,6 @@ dispatch	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default
 dispatch	model.r.c2 adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn", "macro.pa.duckdb__fn", "macro.pa.postgres__fn"}, dbt {}	dbt lists nothing for a dispatch called from a node; the graph names every implementation, dbt the adapter's only
 dispatch-ref	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn", "macro.pa.duckdb__fn"}, dbt {"macro.pa.duckdb__fn"}	the graph names every implementation, dbt the adapter's only
 dispatch-search-order	macro.pa.fn adapter.dispatch('fn', 'pa')	graph	proxy {"macro.pa.default__fn"}, dbt {"macro.r.default__fn"}	the graph follows no `dispatch:` search order (design.md, known limitations)
-function	model.r.c -> function.r.double_it	scan	no call that the scan reads	the scan reads no function() call
-function	node:function.r.double_it	scan	only dbt has it	the scan reads no functions
 macro-in-package-macro	macro.pa.outer inner()	graph	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
 macro-in-package-macro	macro.pa.outer inner()	navigation	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
 macro-in-package-macro	model.r.c via macro.pa.outer inner()	graph	proxy {"macro.pa.inner"}, dbt {"macro.r.inner"}	a macro call inside a macro resolves in the macro's package, then the root, as the owner decided; dbt's in the rendering node's (design.md)
@@ -21,25 +19,7 @@ macro-in-package-macro	model.r.c via macro.pa.outer inner()	navigation	proxy {"m
 macro-ref	model.r.c via macro.pa.get_x ref('x')	graph	proxy {"model.pa.x"}, dbt {"model.r.x"}	a ref in a macro resolves in the macro's package, dbt's in the calling node's (design.md)
 macro-ref	model.r.c via macro.pa.get_x ref('x')	navigation	proxy {"model.pa.x"}, dbt {"model.r.x"}	a ref in a macro resolves in the macro's package, dbt's in the calling node's (design.md)
 macro-unknown	node:model.r.c	scan	only the proxy has it	dbt drops a node whose macro is unknown (dbt1501); the scan keeps it
-python-model	node:model.r.py_m	scan	only dbt has it	the scan reads no Python model
 ref-var	model.r.c -> model.r.x	scan	no call that the scan reads	the scan reads no ref of a variable; the server's listing gives it
 source-overrides	model.r.c source('stripe', 'charge')	graph	proxy {"source.stripe_source.stripe.charge"}, dbt {"source.r.stripe.charge"}	dbt 2 ignores `overrides` (dbt1060); the scan places the source in the package, as dbt-core
 source-overrides	model.r.c source('stripe', 'charge')	navigation	proxy {"source.stripe_source.stripe.charge"}, dbt {"source.r.stripe.charge"}	dbt 2 ignores `overrides` (dbt1060); the scan places the source in the package, as dbt-core
 source-overrides	node:source.r.stripe.charge	scan	only dbt has it	dbt 2 ignores `overrides` (dbt1060) and declares the root's own source; the scan drops it, as dbt-core
-versions	model.pa.pc ref('m')	graph	proxy {}, dbt {"model.pa.m.v3"}	the scan knows no versions: a ref of one answers nothing
-versions	model.r.c ref('m')	graph	proxy {}, dbt {"model.r.m.v1"}	the scan knows no versions: a ref of one answers nothing
-versions	model.r.c2 ref('m')	graph	proxy {}, dbt {"model.r.m.v2"}	the scan knows no versions: a ref of one answers nothing
-versions	model.r.c3 ref('m')	graph	proxy {}, dbt {"model.r.m.v1"}	the scan knows no versions: a ref of one answers nothing
-versions	model.r.c4 ref('pa', 'm')	graph	proxy {}, dbt {"model.pa.m.v3"}	the scan knows no versions: a ref of one answers nothing
-versions	node:model.pa.m.v1	scan	only dbt has it	the scan knows no versions: no node per version
-versions	node:model.pa.m.v2	scan	only dbt has it	the scan knows no versions: no node per version
-versions	node:model.pa.m.v3	scan	only dbt has it	the scan knows no versions: no node per version
-versions	node:model.pa.m_v1	scan	only the proxy has it	the scan knows no versions: a version's file is a model of its own
-versions	node:model.pa.m_v2	scan	only the proxy has it	the scan knows no versions: a version's file is a model of its own
-versions	node:model.pa.m_v3	scan	only the proxy has it	the scan knows no versions: a version's file is a model of its own
-versions	node:model.r.m.v1	scan	only dbt has it	the scan knows no versions: no node per version
-versions	node:model.r.m.v2	scan	only dbt has it	the scan knows no versions: no node per version
-versions	node:model.r.m_v1	scan	only the proxy has it	the scan knows no versions: a version's file is a model of its own
-versions	node:model.r.m_v2	scan	only the proxy has it	the scan knows no versions: a version's file is a model of its own
-yaml-snapshot	model.r.c ref('ys')	graph	proxy {}, dbt {"snapshot.r.ys"}	the scan reads no snapshot declared in YAML
-yaml-snapshot	node:snapshot.r.ys	scan	only dbt has it	the scan reads no snapshot declared in YAML
