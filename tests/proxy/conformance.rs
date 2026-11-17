@@ -262,6 +262,10 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
             format!("adapter.dispatch('{name}'{})", package.iter().map(|p| format!(", '{p}'")).collect::<String>()),
             None,
         ),
+        scan::Target::Function { package, name } => {
+            let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
+            (format!("function({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+        }
     };
     // ID, then each macro that it reaches through the graph's edges: through
     // plain calls only, unless DISPATCHED, since dbt renders only the

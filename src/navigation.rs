@@ -221,8 +221,8 @@ impl<'a> Lookup<'a> {
     }
 
     /// Where a call of TARGET from the package OWN leads, by dbt 2.0.9's
-    /// lookup: in the package the call names; else a `ref`, a `source` or a
-    /// dispatch in OWN and the root, in the flag's order, then in any
+    /// lookup: in the package the call names; else a `ref`, a `source`, a
+    /// function or a dispatch in OWN and the root, in the flag's order, then in any
     /// package; an unqualified macro in OWN, then the root only, since dbt
     /// keeps another package's macros behind its name.  Every resource of
     /// the first of these that has some, but those the last parse disables,
@@ -236,7 +236,8 @@ impl<'a> Lookup<'a> {
         let steps = match target {
             scan::Target::Ref { package: Some(package), .. }
             | scan::Target::Macro { package: Some(package), .. }
-            | scan::Target::Dispatch { package: Some(package), .. } => vec![Some(package.as_str())],
+            | scan::Target::Dispatch { package: Some(package), .. }
+            | scan::Target::Function { package: Some(package), .. } => vec![Some(package.as_str())],
             scan::Target::Macro { package: None, .. } => vec![Some(own), Some(root)],
             _ => vec![Some(first), Some(second), None],
         };
@@ -284,6 +285,9 @@ impl<'a> Lookup<'a> {
                 }
                 scan::Target::Macro { name, .. } => {
                     get(format!("macro.{package}.{name}")).iter().map(|entity| found(entity)).collect()
+                }
+                scan::Target::Function { name, .. } => {
+                    get(format!("function.{package}.{name}")).iter().map(|entity| found(entity)).collect()
                 }
                 scan::Target::Dispatch { name, .. } => {
                     let (prefix, suffix) = (format!("macro.{package}."), format!("__{name}"));
@@ -708,6 +712,46 @@ models:
             lead("source.shop.raw.orders", "models/_sources.yml", "orders")
         );
         assert_eq!(leads(&root, pkg_yml, table)[0].0, "source.pkg.raw.orders");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_function_is_looked_up_as_a_ref_is() {
+        let files = |flag: &str| {
+            [
+                ("dbt_project.yml", format!("name: r\n{flag}")),
+                ("functions/f.sql", "x * 2".into()),
+                ("models/c.sql", "select 1".into()),
+                ("dbt_packages/pa/dbt_project.yml", "name: pa\n".into()),
+                ("dbt_packages/pa/functions/f.sql", "x + 1".into()),
+                ("dbt_packages/pa/functions/g.sql", "x + 2".into()),
+                ("dbt_packages/pa/models/pm.sql", "select 1".into()),
+                ("dbt_packages/pb/dbt_project.yml", "name: pb\n".into()),
+                ("dbt_packages/pb/functions/k.sql", "x + 3".into()),
+            ]
+        };
+        let function = |package: Option<&str>, name: &str| {
+            Some(Target::Call(scan::Target::Function { package: package.map(str::to_owned), name: name.into() }))
+        };
+        let ids = |root: &Path, rel: &str, target| -> Vec<String> {
+            leads(root, rel, target).into_iter().map(|(id, ..)| id).collect()
+        };
+        // As both builds resolve them: the caller's package, the root, then any; a qualified call in its package.
+        let owned = files("");
+        let root = scratch_project("navigation-functions", &owned.each_ref().map(|(p, t)| (*p, t.as_str())));
+        let pm = "dbt_packages/pa/models/pm.sql";
+        assert_eq!(ids(&root, "models/c.sql", function(None, "f")), ["function.r.f"]);
+        assert_eq!(ids(&root, pm, function(None, "f")), ["function.pa.f"]);
+        assert_eq!(ids(&root, "models/c.sql", function(None, "g")), ["function.pa.g"]);
+        assert_eq!(ids(&root, pm, function(None, "k")), ["function.pb.k"]);
+        assert_eq!(ids(&root, "models/c.sql", function(Some("pa"), "f")), ["function.pa.f"]);
+        assert_eq!(ids(&root, "models/c.sql", function(Some("r"), "g")), Vec::<String>::new());
+        std::fs::remove_dir_all(root).unwrap();
+        // The flag puts the root first, for a function as for a ref.
+        let flagged = files("flags:\n  require_ref_searches_node_package_before_root: false\n");
+        let root = scratch_project("navigation-functions-flag", &flagged.each_ref().map(|(p, t)| (*p, t.as_str())));
+        assert_eq!(ids(&root, pm, function(None, "f")), ["function.r.f"]);
+        assert_eq!(ids(&root, pm, function(None, "g")), ["function.pa.g"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

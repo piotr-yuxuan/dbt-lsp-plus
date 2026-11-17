@@ -78,8 +78,13 @@ impl Scanned {
         if !sources::is_yaml(path) {
             return Scanned { blocks: scan::blocks(&text), calls, text, ..Scanned::default() };
         }
-        // Its macro calls too, inside the Jinja of its values, such as hooks, but in its comments.
-        let macros = |call: &Call| matches!(call.target, scan::Target::Macro { .. } | scan::Target::Dispatch { .. });
+        // Its macro and function calls too, inside the Jinja of its values, such as hooks, but in its comments.
+        let macros = |call: &Call| {
+            matches!(
+                call.target,
+                scan::Target::Macro { .. } | scan::Target::Dispatch { .. } | scan::Target::Function { .. }
+            )
+        };
         calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
         calls.sort_by_key(|call| call.range.start);
         let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
@@ -497,6 +502,11 @@ mod tests {
         let hooks = Scanned::of(Path::new("/p/dbt_project.yml"), hooks.into());
         assert!(macro_named(&hooks.calls, "log_start"), "a hook's macro");
         assert!(!macro_named(&hooks.calls, "log_end"), "dbt renders no comment");
+        // A hook's function too, as both builds count it for the model.
+        let hook = "models:\n  - name: a\n    config:\n      post_hook: \"select {{ function('f') }}(1)\"\n";
+        let hook = Scanned::of(Path::new("/p/models/_a.yml"), hook.into());
+        let function = scan::Target::Function { package: None, name: "f".into() };
+        assert!(hook.calls.iter().any(|call| call.target == function), "{:?}", hook.calls);
     }
 
     #[test]
