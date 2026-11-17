@@ -90,6 +90,51 @@ fn in_front_of_the_real_dbt_lsp() {
     assert!(added.is_empty(), "the project gained {added:?}");
 }
 
+/// The shadow in front of the real dbt lsp: definitions on a `ref` and on
+/// a macro call, and references on the `ref`, as dbt lsp 2.0.9 answered
+/// them beside the proxy: the baseline that design.md records.
+#[test]
+#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
+fn the_shadow_in_front_of_the_real_dbt_lsp() {
+    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
+    let project = copy_fixture("live-shadow");
+    let home = project.with_file_name("home");
+    std::fs::create_dir_all(&home).unwrap();
+    if !has_lsp(&dbt, &home, true, "the_shadow_in_front_of_the_real_dbt_lsp") {
+        return;
+    }
+    let project_arg = project.to_string_lossy().into_owned();
+    let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
+    let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
+    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
+    let mut session = Session::start_with(&["--shadow"], &server, &env, Some(&project));
+    session.timeout = Duration::from_secs(180);
+    session.initialize(&project);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
+    session.request("textDocument/definition", at(4, 28));
+    session.request("textDocument/definition", at(16, 24));
+    let mut references = at(4, 28);
+    references["context"] = json!({"includeDeclaration": false});
+    session.request("textDocument/references", references);
+    let summary = session.request("workspace/executeCommand", json!({"command": "dbt-lsp-plus.shadowSummary"}));
+    assert!(session.finish().success());
+    let dir = home.join(".cache/dbt-lsp-plus/shadow");
+    let log = std::fs::read_dir(&dir).unwrap().flatten().map(|entry| entry.path()).next().unwrap();
+    let lines: Vec<Value> =
+        std::fs::read_to_string(log).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let counts = json!({"definition": {"ref": {"sql": {"equal": 1}}, "macro": {"sql": {"equal": 1}}},
+                        "references": {"ref": {"sql": {"oursAdds": 1}}}});
+    assert_eq!(summary["result"], json!({"requests": 3, "counts": counts}), "{summary}");
+    assert!(lines[0]["server"]["name"] == "dbt-lsp" && lines[0]["server"]["version"].is_string(), "{}", lines[0]);
+    // dbt lsp 2.0.9 leaves out the snapshot's ref, which the proxy adds.
+    let references = lines.iter().find(|line| line["method"] == "references").unwrap();
+    assert_eq!(references["oursOnly"][0]["path"], "snapshots/orders_snapshot.sql", "{references}");
+    assert_eq!(lines.last().unwrap()["counts"], counts);
+}
+
 /// With a dbt that has no `lsp`, such as dbt-oss: the proxy alone, its
 /// node information, hover and graph from the user's own `dbt parse`, and
 /// that parse's errors as diagnostics.
