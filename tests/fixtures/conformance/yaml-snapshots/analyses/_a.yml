@@ -1,0 +1,7 @@
+snapshots:
+  - name: in_analyses
+    relation: ref('x')
+    config:
+      unique_key: id
+      strategy: check
+      check_cols: all

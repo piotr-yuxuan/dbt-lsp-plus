@@ -1,0 +1,9 @@
+sources:
+  - name: s
+    tables:
+      - name: t
+models:
+  - name: m
+    versions:
+      - v: 1
+      - v: 2

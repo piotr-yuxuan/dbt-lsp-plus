@@ -1,0 +1,4 @@
+sources:
+  - name: hidden
+    tables:
+      - name: t

@@ -1,0 +1,1 @@
+select {{ function('f') }}(1) as v

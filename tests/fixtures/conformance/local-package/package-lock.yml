@@ -1,0 +1,4 @@
+packages:
+- local: shared
+  name: shared
+sha1_hash: deb0ab99d4f216933b2d1072cc2eb69b9c058ebd

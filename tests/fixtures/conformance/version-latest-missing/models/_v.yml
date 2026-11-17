@@ -1,0 +1,5 @@
+models:
+  - name: m
+    versions:
+      - v: 1
+      - v: 2

@@ -1,0 +1,21 @@
+snapshots:
+  - name: old
+    description: patched
+    columns:
+      - name: id
+        description: the id
+  - name: orphan
+    description: nothing
+  - name: in_snapshots
+    relation: ref('x')
+    config:
+      unique_key: id
+      strategy: check
+      check_cols: all
+    columns:
+      - name: id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('y')
+                field: id
