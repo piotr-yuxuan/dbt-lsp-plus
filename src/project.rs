@@ -16,12 +16,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 /// A resource: a model, seed, snapshot, analysis, singular test, macro,
-/// source table or docs block, with the calls of its body.
+/// function, source table or docs block, with the calls of its body.
 #[derive(Clone, Debug)]
 pub struct Entity {
-    /// dbt's `unique_id`, such as `model.shop.orders`.
+    /// dbt's `unique_id`, such as `model.shop.orders`, or
+    /// `model.shop.orders.v2` for a version.
     pub id: String,
+    /// dbt's `name`: a version's is its model's.
     pub name: String,
+    /// A model's version, as its properties file writes it, and whether it
+    /// is the latest.
+    pub version: Option<String>,
+    pub latest: bool,
     pub resource_type: &'static str,
     pub package: String,
     pub path: PathBuf,
@@ -73,6 +79,8 @@ pub struct Scanned {
     /// `snapshots:` with a `relation:`, and that relation as written.  One
     /// without patches a snapshot of SQL, or names nothing.
     pub snapshots: Vec<(Entry, Range<usize>)>,
+    /// The versioned models of a properties file's `models:`.
+    pub versions: Vec<Versioned>,
 }
 
 impl Scanned {
@@ -106,8 +114,19 @@ impl Scanned {
                 relations.iter().find(|(name, _)| entry.label == "snapshot" && *name == entry.name_range)?;
             Some((entry.clone(), relation.clone()))
         };
+        let version = |item: &Node| {
+            let defined_in = item.get("defined_in").and_then(Node::as_str).map(str::to_owned);
+            Some((item.get("v")?.as_str()?.to_owned(), defined_in))
+        };
+        let versioned = |model: &Node| {
+            let versions: Vec<_> = model.get("versions")?.items().iter().filter_map(version).collect();
+            let latest = model.get("latest_version").and_then(Node::as_str).map(str::to_owned);
+            let name = model.get("name")?.as_str()?.to_owned();
+            (!versions.is_empty()).then_some(Versioned { name, latest, versions })
+        };
         Scanned {
             tables: source_tables_in("", path, &text, &root),
+            versions: root.get("models").map_or(&[][..], Node::items).iter().filter_map(versioned).collect(),
             snapshots: entries.iter().filter_map(declared).collect(),
             entries,
             models: unit_test_models(&text, &root),
@@ -176,8 +195,60 @@ impl From<&SourceTable> for Entity {
             range: table.table_range.clone(),
             name_range: table.table_range.clone(),
             calls: Vec::new(),
+            version: None,
+            latest: false,
         }
     }
+}
+
+/// A versioned model that a properties file declares: its name, its
+/// `latest_version` as written, if any, and each version as written with
+/// its `defined_in`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Versioned {
+    pub name: String,
+    pub latest: Option<String>,
+    pub versions: Vec<(String, Option<String>)>,
+}
+
+/// The entities that ENTITY, of a file, is, given the versioned models that
+/// the properties files of its package declare, DECLARED: one per version
+/// that names its file, as dbt finds them (a version's `defined_in`, else
+/// `<name>_v<N>`, and for the latest without one, `<name>` too unless a
+/// `defined_in` names it), else ENTITY itself.  The latest is the
+/// `latest_version`, else the highest version: two numbers compare as
+/// numbers, anything else as text.  A decision on the files already read,
+/// so that the versions of a package are linked once all are.
+pub fn versions_of(entity: Entity, declared: &[&Versioned]) -> Vec<Entity> {
+    let order = |one: &&String, other: &&String| match (one.parse::<f64>(), other.parse::<f64>()) {
+        (Ok(one), Ok(other)) => one.total_cmp(&other),
+        _ => one.cmp(other),
+    };
+    let mut found = Vec::new();
+    for model in declared.iter().filter(|_| entity.resource_type == "model") {
+        let latest = model.latest.as_ref().or_else(|| model.versions.iter().map(|(version, _)| version).max_by(order));
+        let named = model.versions.iter().any(|(_, defined_in)| defined_in.as_ref() == Some(&model.name));
+        for (version, defined_in) in &model.versions {
+            let is_latest = latest == Some(version);
+            let names = match defined_in {
+                Some(stem) => *stem == entity.name,
+                None => {
+                    entity.name == format!("{}_v{version}", model.name)
+                        || is_latest && !named && entity.name == model.name
+                }
+            };
+            let id = format!("model.{}.{}.v{version}", entity.package, model.name);
+            let version = Some(version.clone());
+            found.extend(names.then(|| Entity {
+                id,
+                name: model.name.clone(),
+                version,
+                latest: is_latest,
+                ..entity.clone()
+            }));
+        }
+    }
+    if found.is_empty() { vec![entity] } else { found }
 }
 
 /// A kind of resource directory: its key in `dbt_project.yml` and dbt's
@@ -240,6 +311,8 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
             .collect(),
         range,
         name_range,
+        version: None,
+        latest: false,
     };
     let mut found = Vec::new();
     for block in &scanned.blocks {
@@ -475,6 +548,8 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
                     range: scanned.text[..entry.range.start].rfind('\n').map_or(0, |at| at + 1)..entry.range.end,
                     name_range: entry.name_range.clone(),
                     calls: within(relation),
+                    version: None,
+                    latest: false,
                 };
                 project.entities.extend(scanned.snapshots.iter().map(snapshot));
             }
@@ -483,6 +558,18 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
         }
         project.files.insert(file.path.clone(), scanned);
     }
+    // The versions of each package, once all its properties files are read.
+    let mut declared: HashMap<&str, Vec<&Versioned>> = HashMap::new();
+    for file in &listing.found {
+        let versions = project.files.get(&file.path).map_or(&[][..], |scanned| scanned.versions.as_slice());
+        declared.entry(packages[file.package].0.as_str()).or_default().extend(versions);
+    }
+    let entities = std::mem::take(&mut project.entities).into_iter();
+    let of = |entity: Entity| {
+        let package = declared.get(entity.package.as_str()).map_or(&[][..], Vec::as_slice);
+        versions_of(entity, package)
+    };
+    project.entities = entities.flat_map(of).collect();
     project.packages.extend(packages.iter().cloned());
     project
 }
@@ -733,6 +820,118 @@ mod tests {
         let in_models = snapshot("snapshot.shop.in_models");
         let source = scan::Target::Source { source: "s".into(), table: "t".into() };
         assert_eq!(in_models.calls.iter().map(|call| &call.target).collect::<Vec<_>>(), [&source]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The model of the file STEM in the root `r`.
+    fn model_file(stem: &str) -> Entity {
+        Entity {
+            id: format!("model.r.{stem}"),
+            name: stem.to_owned(),
+            version: None,
+            latest: false,
+            resource_type: "model",
+            package: "r".into(),
+            path: PathBuf::from(format!("models/{stem}.sql")),
+            range: 0..0,
+            name_range: 0..0,
+            calls: Vec::new(),
+        }
+    }
+
+    /// The versioned model NAME, its LATEST and its VERSIONS with their `defined_in`.
+    fn declared(name: &str, latest: Option<&str>, versions: &[(&str, Option<&str>)]) -> Versioned {
+        Versioned {
+            name: name.into(),
+            latest: latest.map(str::to_owned),
+            versions: versions.iter().map(|(v, d)| ((*v).to_owned(), d.map(str::to_owned))).collect(),
+        }
+    }
+
+    /// The ids, and whether each is the latest, that the file STEM is with VERSIONED.
+    fn version_ids(stem: &str, versioned: &Versioned) -> Vec<(String, bool)> {
+        versions_of(model_file(stem), &[versioned]).into_iter().map(|e| (e.id, e.latest)).collect()
+    }
+
+    #[test]
+    fn a_model_file_is_the_version_that_names_it() {
+        let is = |id: &str, latest: bool| vec![(id.to_owned(), latest)];
+        // Each as both builds parse it.
+        let plain = declared("m", None, &[("1", None), ("2", None)]);
+        assert_eq!(version_ids("m_v1", &plain), is("model.r.m.v1", false));
+        assert_eq!(version_ids("m_v2", &plain), is("model.r.m.v2", true), "the highest, with no latest_version");
+        assert_eq!(version_ids("m", &plain), is("model.r.m.v2", true), "the latest's, as it names no file");
+        assert_eq!(version_ids("other", &plain), is("model.r.other", false));
+        let first = declared("m", Some("1"), &[("1", None), ("2", None)]);
+        assert_eq!(version_ids("m", &first), is("model.r.m.v1", true));
+        let mut seed = model_file("m_v1");
+        seed.resource_type = "seed";
+        assert_eq!(versions_of(seed, &[&plain])[0].id, "model.r.m_v1", "a model's alone");
+    }
+
+    #[test]
+    fn a_defined_in_names_its_version_s_file_alone() {
+        let is = |id: &str, latest: bool| vec![(id.to_owned(), latest)];
+        // Each as both builds parse it.
+        let moved = declared("n", Some("1"), &[("1", Some("n_old")), ("2", None)]);
+        assert_eq!(version_ids("n_old", &moved), is("model.r.n.v1", true));
+        assert_eq!(version_ids("n", &moved), is("model.r.n", false), "the latest's has a defined_in");
+        let kept = declared("m", Some("2"), &[("1", Some("m")), ("2", None)]);
+        assert_eq!(
+            version_ids("m", &kept),
+            is("model.r.m.v1", false),
+            "a file a defined_in names is that version's alone"
+        );
+        assert_eq!(version_ids("m_v2", &kept), is("model.r.m.v2", true));
+    }
+
+    #[test]
+    fn the_latest_version_is_the_highest_two_numbers_compared_as_numbers() {
+        // As both builds order them.
+        for (versions, latest) in
+            [(["9", "10"], "10"), (["alpha", "beta"], "beta"), (["2", "alpha"], "alpha"), (["10", "9a"], "9a")]
+        {
+            let ordered = declared("a", None, &[(versions[0], None), (versions[1], None)]);
+            let expected = vec![(format!("model.r.a.v{latest}"), true)];
+            assert_eq!(version_ids(&format!("a_v{latest}"), &ordered), expected, "{versions:?}");
+        }
+    }
+
+    #[test]
+    fn a_version_s_file_is_found_anywhere_in_its_package_s_model_paths() {
+        let properties = "models:\n  - name: m\n    versions:\n      - v: 1\n      - v: 2\n  - name: n\n\
+                          \x20   latest_version: 1\n    versions:\n      - v: 1\n        defined_in: n_old\n      - v: '2'\n";
+        let files = [
+            ("dbt_project.yml", "name: r\n"),
+            ("models/_v.yml", properties),
+            ("models/m_v1.sql", "select 1"),
+            ("models/sub/m_v2.py", "def model(dbt, session):\n    return dbt.ref('x')\n"),
+            ("models/n_old.sql", "select 1"),
+            ("models/deep/n_v2.sql", "select 2"),
+            ("dbt_packages/pa/dbt_project.yml", "name: pa\n"),
+            ("dbt_packages/pa/models/m_v3.sql", "select 3"),
+            (
+                "dbt_packages/pa/models/_m.yml",
+                "models:\n  - name: m\n    latest_version: 3\n    versions:\n      - v: 3\n",
+            ),
+        ];
+        let root = scratch_project("project-versions", &files);
+        let project = scan(&root, &HashMap::new()).unwrap();
+        let mut found: Vec<(String, &str, Option<&str>, bool)> = project
+            .entities
+            .iter()
+            .filter(|e| e.resource_type == "model")
+            .map(|e| (e.id.clone(), e.name.as_str(), e.version.as_deref(), e.latest))
+            .collect();
+        found.sort();
+        let expected = [
+            ("model.pa.m.v3".to_owned(), "m", Some("3"), true),
+            ("model.r.m.v1".to_owned(), "m", Some("1"), false),
+            ("model.r.m.v2".to_owned(), "m", Some("2"), true),
+            ("model.r.n.v1".to_owned(), "n", Some("1"), true),
+            ("model.r.n.v2".to_owned(), "n", Some("2"), false),
+        ];
+        assert_eq!(found, expected);
         fs::remove_dir_all(root).unwrap();
     }
 

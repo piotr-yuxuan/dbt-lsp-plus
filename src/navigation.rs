@@ -277,9 +277,22 @@ impl<'a> Lookup<'a> {
                     if self.index.is_some_and(|index| !index.resources(package, name).is_empty()) {
                         return parsed(package, name, version.as_deref());
                     }
-                    // The scan knows no versions: a ref that names one finds nothing there.
-                    let kinds = ["model", "seed", "snapshot"].into_iter().filter(|_| version.is_none());
-                    kinds.flat_map(|kind| get(format!("{kind}.{package}.{name}"))).map(|entity| found(entity)).collect()
+                    // Else the scan's: a version by its name and version, the latest when none is named, which may
+                    // have no file; a model, seed or snapshot when the name has no versions and the call names none.
+                    let prefix = format!("model.{package}.{name}.v");
+                    let ids = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
+                    let versions: Vec<&Entity> = ids
+                        .flat_map(|(_, entities)| entities.iter().copied())
+                        .filter(|entity| entity.version.is_some() && entity.name == *name)
+                        .collect();
+                    let chosen = |entity: &&Entity| match version {
+                        Some(version) => entity.version.as_ref() == Some(version),
+                        None => entity.latest,
+                    };
+                    let plain = versions.is_empty() && version.is_none();
+                    let kinds = ["model", "seed", "snapshot"].into_iter().filter(|_| plain);
+                    let unversioned = kinds.flat_map(|kind| get(format!("{kind}.{package}.{name}")).iter().copied());
+                    versions.into_iter().filter(chosen).chain(unversioned).map(found).collect()
                 }
                 scan::Target::Source { source, table } => {
                     get(format!("source.{package}.{source}.{table}")).iter().map(|entity| found(entity)).collect()
@@ -365,11 +378,18 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
     };
     let Some((_, types, prefix, steps)) = LOOKUP.iter().find(|(row, ..)| row == kind) else { return Vec::new() };
     let steps = package.as_deref().map_or_else(|| packages(steps), |package| vec![Some(package)]);
-    let matching = project.entities.iter().filter(|entity| {
-        types.contains(&entity.resource_type)
-            && entity.id == format!("{}.{}.{prefix}{name}", entity.resource_type, entity.package)
-    });
-    let found = matching.map(|entity| {
+    // A versioned model's entry, or a unit test of it, names each version.
+    let matching: Vec<&Entity> = project
+        .entities
+        .iter()
+        .filter(|entity| {
+            types.contains(&entity.resource_type)
+                && (entity.id == format!("{}.{}.{prefix}{name}", entity.resource_type, entity.package)
+                    || entity.version.is_some() && entity.name == *name)
+        })
+        .collect();
+    let every = matching.iter().any(|entity| entity.version.is_some());
+    let found = matching.into_iter().map(|entity| {
         let found = Found { id: entity.id.clone(), path: entity.path.clone(), range: entity.name_range.clone() };
         (entity.package.as_str(), found)
     });
@@ -381,7 +401,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
     let typed = nodes.into_iter().filter(|node| node["resource_type"] == resource_type);
     let mut parsed: Vec<Found> = typed.filter_map(|node| lookup.parsed_at(node)).collect();
     if parsed.is_empty() {
-        return first_step(found.collect(), &steps, false);
+        return first_step(found.collect(), &steps, every);
     }
     parsed.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
     parsed
@@ -790,6 +810,52 @@ models:
                           "package_name": "shop", "original_file_path": "snapshots/_s.yml"});
         let index = Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {"snapshot.shop.ys": node}}));
         assert_eq!(at(&Lookup::new(&project, Some(&index))), expected, "its name, not its file's start");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn before_a_parse_a_ref_finds_a_version_through_the_scan() {
+        let properties = "models:\n  - name: m\n    versions:\n      - v: 1\n      - v: 2\n  - name: gone\n\
+                          \x20   versions:\n      - v: 1\n      - v: 2\nunit_tests:\n  - name: t\n    model: m\n";
+        let files = [
+            ("dbt_project.yml", "name: r\n"),
+            ("models/_v.yml", properties),
+            ("models/m_v1.sql", "select 1"),
+            ("models/m.sql", "select 2"),
+            ("models/gone_v1.sql", "select 1"),
+            ("models/x.sql", "select 1"),
+            ("models/c.sql", "select * from {{ ref('m') }}, {{ ref('m', v=1) }}"),
+        ];
+        let root = scratch_project("navigation-versions-scanned", &files);
+        let reference = |name: &str, version: Option<&str>| {
+            Some(Target::Call(scan::Target::Ref {
+                package: None,
+                name: name.into(),
+                version: version.map(str::to_owned),
+            }))
+        };
+        let ids =
+            |target| -> Vec<String> { leads(&root, "models/c.sql", target).into_iter().map(|(id, ..)| id).collect() };
+        // As both builds resolve them: `m.sql` is the latest, version 2, as no file has its default name.
+        assert_eq!(ids(reference("m", None)), ["model.r.m.v2"]);
+        assert_eq!(ids(reference("m", Some("1"))), ["model.r.m.v1"]);
+        assert_eq!(ids(reference("x", Some("1"))), Vec::<String>::new(), "no version of a model without versions");
+        assert_eq!(ids(reference("gone", None)), Vec::<String>::new(), "a latest with no file, which dbt fails on");
+        let named = |kind: &'static str| Some(Target::Named { kind, package: None, name: "m".into() });
+        let each = ["model.r.m.v1", "model.r.m.v2"];
+        let mut entry = ids(named("model"));
+        entry.sort();
+        assert_eq!(entry, each, "an entry names each version");
+        let mut unit = ids(named("unit test model"));
+        unit.sort();
+        assert_eq!(unit, each, "as dbt tests each version");
+        let used = used(&root, "models/c.sql", "ref('m')", 6, true);
+        let files: Vec<&str> = used.iter().map(|(file, _)| file.as_str()).collect();
+        assert_eq!(
+            files,
+            ["models/_v.yml", "models/_v.yml", "models/c.sql", "models/m.sql"],
+            "its entry, its unit test, its call"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

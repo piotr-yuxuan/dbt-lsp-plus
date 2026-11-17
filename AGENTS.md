@@ -95,6 +95,9 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     change the graph, free of the file system, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
     free of the file system, with tests of its own;
+  - `project::versions_of`: the decision which versions a model's file
+    is, free of the file system, with tests of its own, once every
+    properties file of its package is read;
   - `Cache::build`: the reads of a refresh, through `&self`, so that the
     cache changes only once the project is built;
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
