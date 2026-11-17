@@ -2,6 +2,7 @@
 //! The resources of a dbt project and of its installed packages, read from
 //! their files: what dbt itself would parse, without dbt.
 
+use crate::packages;
 use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
@@ -363,7 +364,9 @@ pub struct Listing {
 
 /// What a scan finds of the project at ROOT: each package's resource paths,
 /// layout by layout, then its `dbt_project.yml`, whose vars and hooks hold
-/// calls too.  None when ROOT has no named `dbt_project.yml`.
+/// calls too.  Its packages are those installed, then the local packages
+/// that its packages files name and that are not.  None when ROOT has no
+/// named `dbt_project.yml`.
 pub fn find(root: &Path) -> Option<Listing> {
     let (root_package, root_config) = package_config(root)?;
     let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
@@ -371,8 +374,16 @@ pub fn find(root: &Path) -> Option<Listing> {
         fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
     installed.sort();
     let others = installed.into_iter().filter_map(|dir| package_config(&dir).map(|(name, config)| (name, dir, config)));
-    let packages: Vec<(String, PathBuf, Node)> =
+    let mut packages: Vec<(String, PathBuf, Node)> =
         std::iter::once((root_package, root.to_owned(), root_config)).chain(others).collect();
+    // A local package not installed yet, as in a fresh clone, where its packages file names it.
+    for dir in packages::local_dirs(root) {
+        if let Some((name, config)) = package_config(&dir)
+            && packages.iter().all(|(known, ..)| *known != name)
+        {
+            packages.push((name, dir, config));
+        }
+    }
     let mut found = Vec::new();
     for (package, (_, dir, config)) in packages.iter().enumerate() {
         for (at, layout) in LAYOUT.iter().enumerate() {
@@ -534,6 +545,58 @@ mod tests {
         // As both builds parse it: the file in a dotted directory alone.
         assert_eq!(ids, ["model.shop.inner"]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_local_package_not_installed_is_read_where_its_packages_file_names_it() {
+        let files = [
+            ("proj/dbt_project.yml", "name: r\n"),
+            ("proj/packages.yml", "packages:\n  - local: shared\n  - local: ../beside\n"),
+            ("proj/models/c.sql", "select * from {{ ref('s_m') }}"),
+            ("proj/shared/dbt_project.yml", "name: shared\n"),
+            ("proj/shared/models/s_m.sql", "select 1"),
+            ("beside/dbt_project.yml", "name: bes\n"),
+            ("beside/models/b_m.sql", "select 1"),
+            // A local package's own local package is read from the root, as dbt reads it.
+            ("beside/packages.yml", "packages:\n  - local: inner\n"),
+            ("proj/inner/dbt_project.yml", "name: inner\n"),
+            ("proj/inner/models/i_m.sql", "select 1"),
+            ("deps/dbt_project.yml", "name: r\n"),
+            ("deps/dependencies.yml", "packages:\n  - local: shared\n"),
+            ("deps/shared/dbt_project.yml", "name: shared\n"),
+            ("deps/shared/models/s_m.sql", "select 1"),
+            ("deps/dbt_packages/shared/dbt_project.yml", "name: shared\n"),
+            ("deps/dbt_packages/shared/models/s_m.sql", "select 1"),
+            ("tab/dbt_project.yml", "name: r\n"),
+            ("tab/packages.yml", "packages:\n  - local:\tshared\n"),
+            ("tab/shared/dbt_project.yml", "name: shared\n"),
+            ("tab/shared/models/s_m.sql", "select 1"),
+        ];
+        let dir = scratch_project("project-local-packages", &files);
+        let ids = |root: &str| -> Vec<(String, PathBuf)> {
+            let project = scan(&dir.join(root), &HashMap::new()).unwrap();
+            let mut ids: Vec<(String, PathBuf)> = project
+                .entities
+                .iter()
+                .map(|e| (e.id.clone(), e.path.strip_prefix(&project.packages[&e.package]).unwrap().to_owned()))
+                .collect();
+            ids.sort();
+            ids
+        };
+        let at = |id: &str, path: &str| (id.to_owned(), PathBuf::from(path));
+        // The ids dbt gives once it installs them: each package's project name, not its directory's.
+        let expected = [
+            at("model.bes.b_m", "models/b_m.sql"),
+            at("model.inner.i_m", "models/i_m.sql"),
+            at("model.r.c", "models/c.sql"),
+            at("model.shared.s_m", "models/s_m.sql"),
+        ];
+        assert_eq!(ids("proj"), expected);
+        let deps = scan(&dir.join("deps"), &HashMap::new()).unwrap();
+        assert_eq!(deps.packages["shared"], dir.join("deps/dbt_packages/shared"), "the installed one, once");
+        assert_eq!(ids("deps").len(), 1);
+        assert_eq!(ids("tab"), Vec::new(), "a packages file dbt-lsp-plus cannot read names none");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
