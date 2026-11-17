@@ -137,6 +137,12 @@ method by method:
 {"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}
 ```
 
+For the methods the proxy adds (the outline, workspace symbols, the call
+hierarchy, folding, highlights and selection ranges), `merge` is the
+proxy's answer, as `ours` is, until a later version merges them; `dbt`
+leaves the capability as `dbt lsp` announced it, so that a method it
+announces as absent is never asked.
+
 In Neovim that is `init_options`, not `settings`: the proxy reads no
 `workspace/didChangeConfiguration`, and a change applies when the client
 starts again.  A refused key is ignored and shown once in a warning.
