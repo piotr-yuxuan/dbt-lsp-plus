@@ -1143,8 +1143,9 @@ impl<W: Write> Proxy<W> {
 
     /// Whether the position of PARAMS names a node, and which node of INDEX:
     /// that of the `ref` or `source` there, or of the entry whose `name:` is
-    /// there, else, when FILE, the one node its document defines.  None when
-    /// it names nothing; `Some(None)` when it names a node that INDEX lacks,
+    /// there, else, when FILE, the one node its document defines, but in a
+    /// YAML file, where the manifest also places the generic tests that it
+    /// declares, which the scan does not see.  None when it names nothing; `Some(None)` when it names a node that INDEX lacks,
     /// or that, without an index, the scan tells is named but cannot give.
     fn node_at<'a>(&self, index: Option<&'a config::Index>, params: &Value, file: bool) -> Option<Option<&'a Value>> {
         let (path, text, offset) = self.document_at(params)?;
@@ -1168,7 +1169,8 @@ impl<W: Write> Proxy<W> {
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
             return Some(index.zip(found.first()).and_then(|(index, found)| index.node(&found.id)));
         }
-        let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
+        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
+        let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
         if let Some(index) = index {
             return index.of_file(&relative.to_string_lossy()).map(Some);
         }
@@ -1697,11 +1699,8 @@ impl<W: Write> Proxy<W> {
     /// turns into why the proxy has none.
     fn hover_part(&self, params: &Value) -> Pending {
         let index = self.parsing.index.as_ref();
-        // Line 1, column 1 of a resource file stands for the node it defines; not of a properties
-        // file, where the manifest also places the generic tests it declares.
-        let uri = params.pointer("/textDocument/uri").and_then(Value::as_str).unwrap_or_default();
-        let yaml = uri.ends_with(".yml") || uri.ends_with(".yaml");
-        let start = !yaml && params["position"] == json!({"line": 0, "character": 0});
+        // Line 1, column 1 of a file stands for the node it defines.
+        let start = params["position"] == json!({"line": 0, "character": 0});
         let named = self.node_at(index, params, start);
         let summary = index
             .zip(named.flatten())

@@ -1226,7 +1226,9 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   server's `executeCommandProvider.commands`: arguments `[uniqueId]` or
   `[{uri, position}]`, a position naming the `ref` or `source` under it,
   or the entry whose `name:` is there,
-  else the one node its file defines.  The result is the manifest's node,
+  else the one node its file defines, but in a YAML file (a properties
+  file, or a YAML snapshot's), where the manifest also places the generic
+  tests it declares.  The result is the manifest's node,
   with `summary`, the text of the summary a hover shows first (its lines
   apart by a plain line break), null for no node, and error -32803 with the reason until a first parse
   has finished; after that, the last index answers, and a later failure is
@@ -1236,8 +1238,8 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   forwarded and augmented: on a `ref` or
   `source` argument, an entry's `name:` in YAML, or at position 0:0 (line
   1, column 1) of a file that defines one node, which stands for that
-  node as nodeInfo's position does, but in a properties file, where the
-  manifest also places the generic tests it declares, resolved from the
+  node as nodeInfo's position does, a YAML file aside (a properties
+  file, or a YAML snapshot's), resolved from the
   document's text when the request arrives, the server's answer gets the
   node's summary and facts first, then a rule;
   plain text gets a blank line instead, an array of marked strings the
@@ -1258,8 +1260,8 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   stays as it is.  nodeInfo's `summary` holds the summary alone.
 - Where the proxy answers the hover itself, alone or in `plus`, a hover
   that names a node before any index exists (a `ref` or a `source`, an
-  entry's `name:`, or 0:0 of a file but a properties file whose scan
-  holds one model, seed, snapshot, analysis or singular test of the root
+  entry's `name:`, or 0:0 of a file but a YAML file whose scan holds
+  one model, seed, snapshot, analysis or singular test of the root
   package) is error
   -32803 with nodeInfo's reason, word for word: `dbt parse has not
   finished: it is running`, its failure, or `waiting for dbt lsp to

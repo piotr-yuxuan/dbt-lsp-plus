@@ -57,7 +57,7 @@ method:
   configuration, relation and summary from the user's own `dbt parse`, and
   that summary first in the server's hover on a `ref` or a `source`, and
   at line 1, column 1 (position 0:0) of a file that defines one node, a
-  properties file aside,
+  YAML file aside (a properties file, or a YAML snapshot's),
   followed by the node's facts, a line each: its unique id and properties
   file, then its declared columns with their types.  Where the proxy
   answers the hover itself (alone, or in `plus`), a hover on a node

@@ -2694,6 +2694,44 @@ fn alone_a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
     let start =
         json!({"uri": uri(&fixture().join("models/marts/orders.sql")), "position": {"line": 0, "character": 0}});
     assert_eq!(node_info(&mut session, start)["result"]["summary"], "model table, \"shop\".\"main\".\"orders\"");
+    // nodeInfo by the same rule: not the generic test that the manifest places in a properties file.
+    let properties =
+        json!({"uri": uri(&fixture().join("models/staging/_sources.yml")), "position": {"line": 0, "character": 0}});
+    let info = node_info(&mut session, properties);
+    assert_eq!((info.get("error"), &info["result"]), (None, &Value::Null), "{info}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_yaml_snapshot_s_file_names_no_node_at_its_start() {
+    let project = copy_fixture("hover-yaml-snapshot-project");
+    let snapshot = project.join("snapshots/_recent.yml");
+    let yaml = "snapshots:\n  - name: recent\n    relation: ref('orders')\n    config:\n      unique_key: order_id\n      strategy: check\n      check_cols: all\n";
+    std::fs::write(&snapshot, yaml).unwrap();
+    let mut manifest = manifest();
+    manifest["nodes"]["snapshot.shop.recent"] = json!({"unique_id": "snapshot.shop.recent", "name": "recent",
+        "resource_type": "snapshot", "package_name": "shop", "original_file_path": "snapshots/_recent.yml",
+        "config": {"materialized": "snapshot"}});
+    let gate = scratch("hover-yaml-snapshot-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest, "parse_gate": gate});
+    let (mut session, _) =
+        Session::fake_with("hover-yaml-snapshot", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let start = json!({"textDocument": {"uri": uri(&snapshot)}, "position": {"line": 0, "character": 0}});
+    // Before the index, the scan sees the one snapshot; once indexed, the manifest has it too: neither names it.
+    let before = session.request("textDocument/hover", start.clone());
+    assert_eq!((before.get("error"), &before["result"]), (None, &Value::Null), "before the index: {before}");
+    std::fs::write(&gate, "").unwrap();
+    let request = (
+        "workspace/executeCommand",
+        json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["snapshot.shop.recent"]}),
+    );
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    let after = session.request("textDocument/hover", start);
+    assert_eq!((after.get("error"), &after["result"]), (None, &Value::Null), "after the index: {after}");
+    let info = node_info(&mut session, json!({"uri": uri(&snapshot), "position": {"line": 0, "character": 0}}));
+    assert_eq!(info["result"], Value::Null, "{info}");
     assert!(session.finish().success());
 }
 
