@@ -40,13 +40,14 @@ const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "-
 /// that dbt's install of packages fails there rather than rewrite it.
 /// Recursive first, as a directory holding a mount point needs, where the
 /// system has it.  The working directory is then entered again, through
-/// the mount: one in that directory would still reach what lies under it.
+/// the mount: one in that directory would still reach what lies under it;
+/// one that cannot be entered again stops the run.
 const CUT: [&str; 5] = [
     "unshare",
     "-rnm",
     "sh",
     "-c",
-    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && { cd -- "$(pwd -P 2>/dev/null)" 2>/dev/null; exec "$@"; }"#,
+    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && here=$(pwd -P) && cd -- "$here" && exec "$@""#,
 ];
 
 /// The words of the proxy's `dbt parse`, as `dbt_command` takes them.
@@ -535,6 +536,23 @@ mod tests {
         command.args(&CUT[1..]).arg(&dir).args(["sh", "-c", write]).current_dir(&dir);
         assert!(command.status().unwrap().success());
         assert!(!dir.join("relative").exists() && !dir.join("absolute").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn under_the_cut_a_working_directory_that_cannot_be_entered_again_stops_the_run() {
+        if !can_cut() {
+            return;
+        }
+        let dir = scratch_project("cut-gone", &[("guarded/x", ""), ("outside/x", "")]);
+        let marker = dir.join("outside/ran");
+        // The run's working directory removed before the cut starts.
+        let gone = "mkdir gone && cd gone && rmdir ../gone && exec \"$@\"";
+        let mut command = Command::new("sh");
+        command.args(["-c", gone, "sh"]).args(CUT).arg(dir.join("guarded")).args(["sh", "-c", "touch \"$0\""]);
+        command.arg(&marker).current_dir(dir.join("outside")).stderr(Stdio::null());
+        assert!(!command.status().unwrap().success());
+        assert!(!marker.exists(), "the command ran");
         fs::remove_dir_all(&dir).unwrap();
     }
 

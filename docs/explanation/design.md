@@ -1049,7 +1049,8 @@ So the proxy runs the user's own `dbt parse`.
   holding a mount point needs, else plain.  The shell then enters its
   working directory again by its path: a working directory in the root
   would still reach the writable directory under the mount, as a
-  relative write from it showed.  Else with
+  relative write from it showed; one it cannot enter again, as a
+  directory removed, stops the run.  Else with
   dbt's flags and the guard on packages alone, which the proxy says once
   on its standard error.  A server command with no `lsp` word gets no
   parse.  The working directory is the root's on the folder's route and
