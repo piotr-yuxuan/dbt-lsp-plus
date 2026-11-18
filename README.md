@@ -53,7 +53,8 @@ For Claude Code, the repository is a plugin marketplace whose plugin
 starts `dbt-lsp-plus` from `PATH` for `.sql`, `.yml` and `.yaml` files:
 
 ```
-claude plugin install dbt-lsp-plus --marketplace piotr-yuxuan/dbt-lsp-plus
+claude plugin marketplace add /path/to/dbt-lsp-plus
+claude plugin install dbt-lsp-plus@dbt-lsp-plus
 ```
 
 [Use it with an agent](docs/how-to/use-with-an-agent.md) says more.

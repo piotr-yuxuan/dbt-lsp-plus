@@ -59,6 +59,10 @@ seconds, 10 by default.
 - **Every answer null, and nothing in the log.**  Without `--project-dir`,
   neither the client's folder nor any file opened lies in a dbt project:
   open a model, or pass `--project-dir`.
+- **Usage statistics sent with dbt 2.0.9.**  The default command, the
+  Claude Code plugin's, is `dbt lsp` with no flag; pass
+  `--no-send-anonymous-usage-stats` in the server command (see [Use it
+  with an agent](use-with-an-agent.md)).
 - **Not the dbt expected.**  The line `dbt-lsp-plus: project ..., dbt ...`
   says which it took and which it skipped, and why: a `.venv` whose `dbt`
   is dbt-core 1.x is skipped.  A path in the server command, in place of

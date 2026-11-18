@@ -36,14 +36,12 @@ declares the server.  With `dbt-lsp-plus` installed and on the `PATH` that
 Claude Code starts with:
 
 ```
-claude plugin install dbt-lsp-plus --marketplace piotr-yuxuan/dbt-lsp-plus
+claude plugin marketplace add /path/to/dbt-lsp-plus
+claude plugin install dbt-lsp-plus@dbt-lsp-plus
 ```
 
-which adds the marketplace first, as `claude plugin marketplace add
-piotr-yuxuan/dbt-lsp-plus` then `claude plugin install
-dbt-lsp-plus@dbt-lsp-plus` do; a clone's path works in place of
-`piotr-yuxuan/dbt-lsp-plus`.  In a session that was running, then,
-`/reload-plugins`.  Installed at user scope, the default, it serves the
+the first with the path of a clone of this repository.  In a session that
+was running, then, `/reload-plugins`.  Installed at user scope, the default, it serves the
 `.sql`, `.yml` and `.yaml` files of every repository, and stays quiet
 where there is no dbt project; with `--scope project`, only in the
 repository where it is installed.  Its `.lsp.json` holds no path:
@@ -56,6 +54,27 @@ repository where it is installed.  Its `.lsp.json` holds no path:
   }
 }
 ```
+
+The plugin's command is the default `dbt lsp`, with no flag: with dbt
+2.0.9 behind it, dbt sends its anonymous usage statistics, which
+`DO_NOT_TRACK` does not stop.  To keep them, declare the server in a
+plugin of your own, or at project scope, with the flag:
+
+```json
+{
+  "dbt": {
+    "command": "dbt-lsp-plus",
+    "args": ["--", "dbt", "lsp", "--no-send-anonymous-usage-stats"],
+    "extensionToLanguage": {".sql": "sql", ".yml": "yaml", ".yaml": "yaml"}
+  }
+}
+```
+
+The proxy runs the `dbt` it finds in the repository's `.venv`s, outside
+its cut, as soon as a file of a dbt project opens: in a repository you do
+not trust, give the server command an absolute path to a dbt of your
+own, which the proxy runs as written, or install the plugin at project
+scope only where you trust the repository.
 
 Claude Code starts the server at the first LSP call, or the first `Edit`,
 on such a file, in the session's directory, with its own environment.

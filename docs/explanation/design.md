@@ -1284,6 +1284,7 @@ fails with -32803.
 |-----------|-----------|
 | No `--project-dir`, and neither the client's folder nor a document opened yet lies in a project | Null to every request but `initialize`, nothing run, nothing said (see "Root") |
 | A `.venv/bin/dbt` that cannot run or is not a dbt 2 | Skipped and named in the line; the next place, else `PATH` (see "Root") |
+| A repository whose `.venv/bin/dbt` is not to be trusted | Run, outside the cut, as soon as a file of its project opens, on the folder's route and a document's: its probe, then the parse or `dbt lsp`.  A server command with a path to dbt, or `--project-dir`, runs what it names |
 | The user's dbt has no `lsp` | Standalone mode, with no warning (see "Standalone mode") |
 | `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for, and fails every other request with -32803 |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but those to which the proxy adds a part, which get that part, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph |
