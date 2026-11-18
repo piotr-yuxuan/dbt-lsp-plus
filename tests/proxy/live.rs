@@ -383,7 +383,7 @@ fn ids(answer: &Value) -> Vec<String> {
 
 /// Every path under DIR, relative to it, but dbt lsp's own `target/` and
 /// `logs/`.
-fn paths(dir: &Path) -> BTreeSet<PathBuf> {
+pub(crate) fn paths(dir: &Path) -> BTreeSet<PathBuf> {
     let mut found = BTreeSet::new();
     let mut pending = vec![dir.to_owned()];
     while let Some(next) = pending.pop() {

@@ -60,6 +60,7 @@ tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
 tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
+tests/proxy/cli.rs            the subcommands doctor and select, the binary run as from a shell
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
