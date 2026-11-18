@@ -78,9 +78,14 @@ scope only where you trust the repository.
 
 Claude Code starts the server at the first LSP call, or the first `Edit`,
 on such a file, in the session's directory, with its own environment.
-An agent loads the LSP tool with ToolSearch first.  A hover asked within a
-second of the first file opened may come back empty while the proxy's
-first `dbt parse` runs.
+An agent loads the LSP tool with ToolSearch first.  A hover at line 1,
+column 1 of a model's file shows the model: its summary, unique id,
+properties file and declared columns with their types, once the proxy's
+`dbt parse` has run.  Before that, where the proxy answers alone, as on
+a project found from a file, a hover on a `ref`, a `source` or a model's
+file is an error that says why, `dbt parse has not finished: it is
+running`, or names the parse's failure: ask again once it has ended.  In
+front of `dbt lsp`, such a hover may still come back empty.
 
 When the LSP tool answers `Executable not found in $PATH:
 "dbt-lsp-plus"`, Claude Code did not find the binary: install it where

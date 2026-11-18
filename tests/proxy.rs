@@ -306,10 +306,16 @@ fn workspace_symbols_list_every_resource_with_its_package_and_id() {
     let (mut session, _) = Session::fake("workspace-symbols", json!({}));
     session.initialize(&fixture());
     let all = session.request("workspace/symbol", json!({"query": ""}));
-    assert_eq!(all["result"].as_array().unwrap().len(), 22);
+    let all = all["result"].as_array().unwrap();
+    assert_eq!(all.len(), 22);
+    for symbol in all {
+        let (container, data) = (&symbol["containerName"], &symbol["data"]);
+        let typed = container.as_str().unwrap().starts_with(&format!("{}.", data["resourceType"].as_str().unwrap()));
+        assert!(*container == data["uniqueId"] && typed, "{symbol}");
+    }
     let found = session.request("workspace/symbol", json!({"query": "ctd"}));
     assert_eq!(names(&found["result"]), ["cents_to_dollars"]);
-    assert_eq!(found["result"][0]["containerName"], "shop");
+    assert_eq!(found["result"][0]["containerName"], "macro.shop.cents_to_dollars");
     assert_eq!(found["result"][0]["data"], json!({"uniqueId": "macro.shop.cents_to_dollars", "resourceType": "macro"}));
     assert_eq!(found["result"][0]["location"]["uri"], uri(&fixture().join("macros/money.sql")));
     assert_eq!(found["result"][0]["location"]["range"]["start"], json!({"line": 0, "character": 9}));
@@ -1981,7 +1987,8 @@ fn node_info_gives_the_summary_a_hover_shows() {
     let on_ref = json!({"line": 4, "character": 28});
     let info = node_info(&mut session, json!({"uri": file, "position": on_ref}));
     let hover = session.request("textDocument/hover", json!({"textDocument": {"uri": file}, "position": on_ref}));
-    assert_eq!(info["result"]["summary"], hover["result"]["contents"]["value"], "{hover}");
+    let summary = info["result"]["summary"].as_str().unwrap();
+    assert_eq!(hover["result"]["contents"]["value"], format!("{summary}\n`model.shop.stg_orders`"), "{hover}");
     assert!(session.finish().success());
 }
 
@@ -2473,8 +2480,13 @@ fn a_hover_on_a_ref_gets_the_summary_first_and_any_other_passes_byte_for_byte() 
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap();
-    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"\n\n---\n\nServer text");
-    let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
+    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"  \n`model.shop.stg_orders`\n\n---\n\nServer text");
+    // Line 1, column 1 stands for the file's own model.
+    let start = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
+    let own = session.request("textDocument/hover", start);
+    let value = own["result"]["contents"]["value"].as_str().unwrap();
+    assert_eq!(value, "model table, \"shop\".\"main\".\"orders\"  \n`model.shop.orders`\n\n---\n\nServer text");
+    let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 3, "character": 0}});
     let plain = session.request("textDocument/hover", elsewhere);
     let expected = answer.replace("$ID", &plain["id"].to_string());
     assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "the answer's bytes changed");
@@ -2616,7 +2628,10 @@ fn the_summary_alone_follows_the_client_s_first_hover_format() {
         let customers = uri(&fixture().join("models/staging/stg_customers.sql"));
         let on_source = json!({"textDocument": {"uri": customers}, "position": {"line": 5, "character": 23}});
         let hover = session.request("textDocument/hover", on_source);
-        assert_eq!(hover["result"]["contents"], json!({"kind": kind, "value": "source, raw_customers"}), "{formats}");
+        // A line break in markdown needs two spaces before it.
+        let breaks = if kind == "markdown" { "  \n" } else { "\n" };
+        let value = format!("source, raw_customers{breaks}`source.shop.raw.customers`");
+        assert_eq!(hover["result"]["contents"], json!({"kind": kind, "value": value}), "{formats}");
         assert!(session.finish().success());
     }
 }
@@ -2629,19 +2644,171 @@ fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
     assert_eq!([&capabilities["hoverProvider"], &capabilities["inlayHintProvider"]], [&json!(true), &json!(true)]);
     let orders = fixture().join("models/marts/orders.sql");
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    // Before any document, the hover asks for the parse whose reason it gives, which the proxy has started
+    // before it answers.
     let early = session.request("textDocument/hover", on_ref.clone());
-    assert_eq!((early.get("error"), &early["result"]), (None, &Value::Null), "before a parse: {early}");
+    let running = json!({"code": -32803, "message": "dbt parse has not finished: it is running"});
+    assert_eq!((early.get("result"), &early["error"]), (None, &running), "before a parse: {early}");
     session.open(&orders, None);
     let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", on_ref), |result| !result.is_null());
-    let summary = json!({"kind": "plaintext", "value": "model view, \"shop\".\"main\".\"stg_orders\""});
+    let summary =
+        json!({"kind": "plaintext", "value": "model view, \"shop\".\"main\".\"stg_orders\"\n`model.shop.stg_orders`"});
     assert_eq!(hover["contents"], summary);
     let hints = hints_of(&mut session, &orders)["result"].clone();
     assert!(hints.as_array().unwrap().iter().any(|hint| hint["tooltip"] == "model.shop.stg_orders"), "{hints}");
-    let elsewhere = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
+    let elsewhere = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 3, "character": 0}});
     assert_eq!(session.request("textDocument/hover", elsewhere)["result"], Value::Null);
     // `ref(var(...))` names no node the scan can see: no hint.
     assert_eq!(hints_of(&mut session, &fixture().join("models/marts/order_summary.sql"))["result"], json!([]));
     assert!(lives(&log).is_empty(), "a server started");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
+    let mut manifest = manifest();
+    let orders = &mut manifest["nodes"]["model.shop.orders"];
+    orders["patch_path"] = json!("shop://models/marts/_orders.yml");
+    orders["columns"] = json!({"order_id": {"name": "order_id", "data_type": "integer"}, "status": {"name": "status"}});
+    // A generic test that a properties file declares: the manifest places it there.
+    manifest["nodes"]["test.shop.not_null_customers_id"] = json!({"unique_id": "test.shop.not_null_customers_id",
+        "name": "not_null_customers_id", "resource_type": "test", "package_name": "shop",
+        "original_file_path": "models/staging/_sources.yml", "attached_node": "source.shop.raw.customers"});
+    let (mut session, _) = Session::fake("hover-start", json!({"no_lsp": true, "manifest": manifest}));
+    session.initialize(&fixture());
+    let at = |file: &str, line: u64| json!({"textDocument": {"uri": uri(&fixture().join(file))}, "position": {"line": line, "character": 0}});
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    let request = ("textDocument/hover", at("models/marts/orders.sql", 0));
+    let hover = session.poll(Duration::from_secs(10), request, |result| !result.is_null());
+    let value = "model table, \"shop\".\"main\".\"orders\"\n\
+                 `model.shop.orders`, properties `models/marts/_orders.yml`\n\
+                 columns `order_id` `integer`, `status`";
+    assert_eq!(hover["contents"], json!({"kind": "plaintext", "value": value}));
+    // Elsewhere in the file, at the start of a file the manifest lacks or of a properties file: nothing.
+    let none =
+        [("models/marts/orders.sql", 3), ("models/marts/order_summary.sql", 0), ("models/staging/_sources.yml", 0)];
+    for (file, line) in none {
+        let hover = session.request("textDocument/hover", at(file, line));
+        assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{file}:{line}: {hover}");
+    }
+    let start =
+        json!({"uri": uri(&fixture().join("models/marts/orders.sql")), "position": {"line": 0, "character": 0}});
+    assert_eq!(node_info(&mut session, start)["result"]["summary"], "model table, \"shop\".\"main\".\"orders\"");
+    // nodeInfo by the same rule: not the generic test that the manifest places in a properties file.
+    let properties =
+        json!({"uri": uri(&fixture().join("models/staging/_sources.yml")), "position": {"line": 0, "character": 0}});
+    let info = node_info(&mut session, properties);
+    assert_eq!((info.get("error"), &info["result"]), (None, &Value::Null), "{info}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_markdown_hover_gives_the_facts_byte_for_byte_as_claude_code_asks() {
+    let mut manifest = manifest();
+    let orders = &mut manifest["nodes"]["model.shop.orders"];
+    orders["patch_path"] = json!("shop://models/marts/_orders.yml");
+    orders["columns"] = json!({"tags": {"name": "tags", "data_type": "array<string>"}});
+    let (mut session, _) = Session::fake("hover-start-markdown", json!({"no_lsp": true, "manifest": manifest}));
+    // Claude Code's hover capability; it hands the agent the contents as they come.
+    let capabilities = json!({"textDocument": {"hover": {"contentFormat": ["markdown", "plaintext"]}}});
+    session.request("initialize", json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": capabilities}));
+    session.notify("initialized", json!({}));
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let start = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
+    let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", start), |result| !result.is_null());
+    let value = "model table, \"shop\".\"main\".\"orders\"  \n\
+                 `model.shop.orders`, properties `models/marts/_orders.yml`  \n\
+                 columns `tags` `array<string>`";
+    assert_eq!(hover["contents"], json!({"kind": "markdown", "value": value}));
+    let path = hover["contents"]["value"].as_str().unwrap().contains("models/marts/_orders.yml");
+    assert!(path, "the path, byte for byte");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_yaml_snapshot_s_file_names_no_node_at_its_start() {
+    let project = copy_fixture("hover-yaml-snapshot-project");
+    let snapshot = project.join("snapshots/_recent.yml");
+    let yaml = "snapshots:\n  - name: recent\n    relation: ref('orders')\n    config:\n      unique_key: order_id\n      strategy: check\n      check_cols: all\n";
+    std::fs::write(&snapshot, yaml).unwrap();
+    let mut manifest = manifest();
+    manifest["nodes"]["snapshot.shop.recent"] = json!({"unique_id": "snapshot.shop.recent", "name": "recent",
+        "resource_type": "snapshot", "package_name": "shop", "original_file_path": "snapshots/_recent.yml",
+        "config": {"materialized": "snapshot"}});
+    let gate = scratch("hover-yaml-snapshot-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest, "parse_gate": gate});
+    let (mut session, _) =
+        Session::fake_with("hover-yaml-snapshot", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let start = json!({"textDocument": {"uri": uri(&snapshot)}, "position": {"line": 0, "character": 0}});
+    // Before the index, the scan sees the one snapshot; once indexed, the manifest has it too: neither names it.
+    let before = session.request("textDocument/hover", start.clone());
+    assert_eq!((before.get("error"), &before["result"]), (None, &Value::Null), "before the index: {before}");
+    std::fs::write(&gate, "").unwrap();
+    let request = (
+        "workspace/executeCommand",
+        json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["snapshot.shop.recent"]}),
+    );
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    let after = session.request("textDocument/hover", start);
+    assert_eq!((after.get("error"), &after["result"]), (None, &Value::Null), "after the index: {after}");
+    let info = node_info(&mut session, json!({"uri": uri(&snapshot), "position": {"line": 0, "character": 0}}));
+    assert_eq!(info["result"], Value::Null, "{info}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_on_a_node_before_any_index_says_why() {
+    let gate = scratch("hover-unindexed-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest(), "parse_gate": gate});
+    let (mut session, _) = Session::fake("hover-unindexed", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
+    // The first document opened started the parse: on a ref and at the file's start, its reason.
+    let running = json!({"code": -32803, "message": "dbt parse has not finished: it is running"});
+    let staging = fixture().join("models/staging/stg_customers.sql");
+    let on_source = json!({"textDocument": {"uri": uri(&staging)}, "position": {"line": 5, "character": 23}});
+    let on_entry = position_in(&fixture().join("models/staging/_sources.yml"), "name: customers", 8);
+    for params in [at(4, 28), at(0, 0), on_source, on_entry] {
+        let hover = session.request("textDocument/hover", params.clone());
+        assert_eq!((hover.get("result"), &hover["error"]), (None, &running), "{params}: {hover}");
+    }
+    // At `with`, in the argument of a macro call, at a properties file's start: nothing named, null.
+    let properties = fixture().join("models/staging/_sources.yml");
+    let start = json!({"textDocument": {"uri": uri(&properties)}, "position": {"line": 0, "character": 0}});
+    for params in [at(3, 0), position_in(&orders, "'orders.amount'", 3), start] {
+        let hover = session.request("textDocument/hover", params);
+        assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    }
+    std::fs::write(&gate, "").unwrap();
+    let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", at(4, 28)), |result| !result.is_null());
+    assert_eq!(hover["contents"]["value"], "model view, \"shop\".\"main\".\"stg_orders\"\n`model.shop.stg_orders`");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_after_a_failed_parse_says_what_node_info_says() {
+    let (mut session, _) = Session::fake("hover-unindexed-failed", json!({"no_lsp": true, "parse_exit": 2}));
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let end = Instant::now() + Duration::from_secs(10);
+    let reason = loop {
+        let info = node_info(&mut session, json!("model.shop.orders"));
+        if info["error"]["message"] != "dbt parse has not finished: it is running" {
+            break info["error"]["message"].clone();
+        }
+        assert!(Instant::now() < end, "the parse did not end: {info}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(reason.as_str().is_some_and(|reason| reason.starts_with("dbt parse has not finished: ")), "{reason}");
+    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_ref);
+    assert_eq!((hover.get("result"), &hover["error"]), (None, &json!({"code": -32803, "message": reason})), "{hover}");
     assert!(session.finish().success());
 }
 
@@ -2809,12 +2976,13 @@ fn an_entry_s_name_is_its_node_for_hover_and_node_info() {
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
     let on_name = position_in(&project.join("models/marts/_models.yml"), "name: orders", 8);
     let hover = session.request("textDocument/hover", on_name.clone());
-    assert_eq!(hover["result"]["contents"]["value"], "model table, \"shop\".\"main\".\"orders\"");
+    assert_eq!(hover["result"]["contents"]["value"], "model table, \"shop\".\"main\".\"orders\"\n`model.shop.orders`");
     let argument = json!({"uri": on_name["textDocument"]["uri"], "position": on_name["position"]});
     assert_eq!(node_info(&mut session, argument)["result"]["unique_id"], "model.shop.orders");
     // A source table's `name:` too.
     let on_table = position_in(&project.join("models/staging/_sources.yml"), "name: customers", 8);
-    assert_eq!(session.request("textDocument/hover", on_table)["result"]["contents"]["value"], "source, raw_customers");
+    let value = "source, raw_customers\n`source.shop.raw.customers`";
+    assert_eq!(session.request("textDocument/hover", on_table)["result"]["contents"]["value"], value);
     assert!(session.finish().success());
 }
 
@@ -3197,6 +3365,37 @@ fn one_method_left_to_dbt_lsp_keeps_the_others_as_they_were() {
     assert!(outline["result"].is_array(), "{outline}");
     let counts = ["textDocument/definition", "textDocument/references", "textDocument/documentSymbol"];
     assert_eq!(counts.map(|method| received(&log, method)), [1, 0, 0]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_plus_a_hover_on_a_node_before_dbt_lsp_compiles_says_why() {
+    let script = json!({"manifest": manifest(), "hold_compile": true});
+    let (mut session, log) = with_options("mode-plus-unindexed", script, &["--mode", "textDocument/hover=plus"]);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let hover = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+    let waiting =
+        json!({"code": -32803, "message": "dbt parse has not finished: waiting for dbt lsp to compile the project"});
+    assert_eq!((hover.get("result"), &hover["error"]), (None, &waiting), "{hover}");
+    barrier(&mut session);
+    assert_eq!(received(&log, "textDocument/hover"), 0);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_left_to_dbt_asks_for_no_index() {
+    let script = json!({"no_lsp": true, "manifest": manifest()});
+    let (mut session, log) = with_options("mode-hover-alone", script, &["--mode", "textDocument/hover=dbt"]);
+    session.initialize(&fixture());
+    // No document opened: alone, the first one starts a parse itself.
+    let orders = fixture().join("models/marts/orders.sql");
+    let hover = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(parses(&log).len(), 0);
     assert!(session.finish().success());
 }
 

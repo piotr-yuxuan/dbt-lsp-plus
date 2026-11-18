@@ -88,6 +88,7 @@ fn in_front_of_the_real_dbt_lsp() {
     assert_eq!(symbols["result"][0]["name"], "events.page_views");
     recorded_observations(&mut session, &result);
     node_information(&mut session, &project);
+    facts_in_the_hover(&mut session, &project);
     commands(&mut session, &project);
     rename_a_source_table_and_compile(&mut session, &project);
     restart(&mut session, &project);
@@ -156,6 +157,7 @@ fn alone_with_a_dbt_without_lsp() {
     if has_lsp(&dbt, &home, false, "alone_with_a_dbt_without_lsp") {
         return;
     }
+    std::fs::write(project.join("models/marts/_models.yml"), LIVE_MODELS).unwrap();
     let project_arg = project.to_string_lossy().into_owned();
     let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
     let before = paths(&project);
@@ -166,6 +168,7 @@ fn alone_with_a_dbt_without_lsp() {
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
     session.wait_for(|m| m["method"] == "client/registerCapability");
     alone_from_the_parse(&mut session, &project);
+    facts_in_the_hover(&mut session, &project);
     alone_navigates_sql(&mut session, &project);
     alone_the_parse_s_errors(&mut session, &project);
     alone_commands(&mut session, &project);
@@ -263,11 +266,17 @@ fn found_from_the_folder(project: &Path, lsp: bool) {
 /// resolves them: `order_summary`'s upstream is a variable.
 fn alone_from_the_parse(session: &mut Session, project: &Path) {
     session.open(&project.join("models/marts/orders.sql"), None);
+    let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
+    // At once, before the parse has ended: the summary, or why there is none, never a null.
+    let early = session.request("textDocument/hover", on_ref.clone());
+    let value = early["result"]["contents"]["value"].as_str().unwrap_or_default();
+    let reason = early["error"]["message"].as_str().unwrap_or_default();
+    let unindexed = early["error"]["code"] == -32803 && reason.starts_with("dbt parse has not finished: ");
+    assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\"") || unindexed, "{early}");
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     let orders = session.poll(Duration::from_secs(60), request, |result| result.is_object());
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"", "{orders}");
-    let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
     let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
@@ -426,6 +435,24 @@ fn node_information(session: &mut Session, project: &Path) {
     }
 }
 
+/// Once the parse has given the nodes, the facts after a summary, each on a
+/// line of its own, hard in markdown: on a `ref`, the model's id; at line 1,
+/// column 1 of a model's file, the model's own, from its properties file,
+/// `LIVE_MODELS`.
+fn facts_in_the_hover(session: &mut Session, project: &Path) {
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let at = |line: u64, character: u64| json!({"textDocument": {"uri": orders}, "position": {"line": line, "character": character}});
+    let on_ref = session.request("textDocument/hover", at(4, 28));
+    let value = on_ref["result"]["contents"]["value"].as_str().unwrap_or_default();
+    let summary = value.starts_with("model view, \"shop\".\"main\".\"stg_orders\"");
+    assert!(summary && value.lines().any(|line| line.trim_end() == "`model.shop.stg_orders`"), "{on_ref}");
+    let own = session.request("textDocument/hover", at(0, 0));
+    let value = own["result"]["contents"]["value"].as_str().unwrap_or_default();
+    for fact in ["`model.shop.orders`, properties `models/marts/_models.yml`", "columns `customer_id`"] {
+        assert!(value.lines().any(|line| line.trim_end() == fact), "{fact}: {own}");
+    }
+}
+
 /// The server killed: the proxy restarts it, whose first compilation
 /// publishes again, dbt's warning on the models' file among them, and which
 /// answers a hover.  Its registration of the file watcher, which the client
@@ -578,8 +605,10 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
     let on_column = session.request("textDocument/definition", at("customer_id", 2));
     assert_eq!(on_column["result"], Value::Null, "{on_column}");
-    // An answer of the proxy's own, after which a log of that deadline would have come.
-    session.request("workspace/symbol", json!({"query": "orders"}));
+    // An answer of the proxy's own, after which a log of that deadline would have come; its container the id.
+    let symbols = session.request("workspace/symbol", json!({"query": "orders"}));
+    let model = |s: &Value| s["name"] == "orders" && s["containerName"] == "model.shop.orders";
+    assert!(symbols["result"].as_array().is_some_and(|found| found.iter().any(model)), "{symbols}");
     let late = |m: &&Value| {
         m["method"] == "window/logMessage"
             && m["params"]["type"] == 4

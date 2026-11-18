@@ -68,6 +68,12 @@ seconds, 10 by default.
   `~/.dbt`, not in the project.  Pass `--profiles-dir` in the server
   command (see [the
   configuration](../reference/features.md#configuration)).
+- **A hover is an error, "dbt parse has not finished: ...".**  The proxy
+  answers the hover itself (alone, or in `plus`) and has no index yet:
+  "it is running", ask again once the parse has ended; "waiting for dbt
+  lsp to compile the project", ask again once `dbt lsp` has compiled;
+  any other reason is the parse's failure, which the entry above, or the
+  log's `dbt-lsp-plus: dbt parse failed: ...`, says how to fix.
 - **Every answer null, and nothing in the log.**  Without `--project-dir`,
   neither the client's folder nor any file opened lies in a dbt project:
   open a model, or pass `--project-dir`.

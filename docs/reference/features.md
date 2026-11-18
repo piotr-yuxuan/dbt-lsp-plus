@@ -13,7 +13,9 @@ method:
 - `workspace/symbol`: every model, seed, snapshot, analysis, singular test,
   macro, generic test, function, source table and docs block, installed
   and local packages included, Python models and snapshots declared in
-  YAML too, each version of a model as `orders.v2`;
+  YAML too, each version of a model as `orders.v2`; each one's
+  `containerName` its unique id, such as `model.shop.orders`, which
+  begins with its resource type and package;
 - the call hierarchy (`textDocument/prepareCallHierarchy`,
   `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`): what a
   model, source, macro or function is used by, and what it
@@ -53,7 +55,17 @@ method:
 - `dbt-lsp-plus.nodeInfo` (`workspace/executeCommand`), a command that
   gives a node's resolved
   configuration, relation and summary from the user's own `dbt parse`, and
-  that summary first in the server's hover on a `ref` or a `source`;
+  that summary first in the server's hover on a `ref` or a `source`, and
+  at line 1, column 1 (position 0:0) of a file that defines one node, a
+  YAML file aside (a properties file, or a YAML snapshot's),
+  followed by the node's facts, a line each, each value a code span: its
+  unique id and properties file, then its declared columns with their
+  types.  A line break inside a value is given as a space.  A package's file is written `<package>://<path>`, as dbt writes
+  `patch_path`: the path is relative to the package's directory, under
+  `dbt_packages/` by default.  Where the proxy
+  answers the hover itself (alone, or in `plus`), a hover on a node
+  before the first parse has given an index is error -32803 with
+  nodeInfo's reason, `dbt parse has not finished: ...`;
 - within a document: folding (`textDocument/foldingRange`) of Jinja
   blocks, CTEs, tags and comments; highlights
   (`textDocument/documentHighlight`) of a CTE's uses and of a block's tags;

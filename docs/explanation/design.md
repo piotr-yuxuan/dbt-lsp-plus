@@ -568,6 +568,24 @@ bundle's code rather than seen in a session says "(bundle)".
   Claude Code answered dbt lsp's `window/workDoneProgress/create`,
   `workspace/configuration` and refresh requests, and took 143 empty sets
   of diagnostics.
+- The LSP tool's `line` and `character` are 1-based, sent as `line - 1`
+  and `character - 1`: line 1, column 1 is position 0:0 (bundle).
+- An error answer reaches the agent as `Error performing <operation>:
+  LSP request '<method>' failed for server 'plugin:<plugin>:<server>':
+  <message>`: the message whole, not its code nor its `data` (bundle).
+- ContentModified (-32801) is retried up to three times, after 500, 1,000
+  and 2,000 ms, then reported as any error; no other code is retried
+  (bundle).
+- A null hover reads "No hover information available", with "the cursor
+  is not on a symbol" or "the LSP server has not fully indexed the file"
+  as its causes; a null definition, empty references and empty workspace
+  symbols read alike, each naming indexing as a possible cause (bundle).
+- A workspace symbol shows as `<name> (<Kind>) - Line <n> in
+  <containerName>`, grouped by file, its `data` unread; a call hierarchy
+  item as `<name> (<Kind>) - <file>:<line> [<detail>]`; a document symbol
+  as `<name> (<Kind>) <detail> - Line <n>`.  A hover's contents are
+  joined, prefixed with "Hover info at L:C:" only when it has a `range`
+  (bundle).
 
 So a plugin cannot name the project, and when the client's folder holds
 none, the proxy answers `initialize` before it can know it.
@@ -1208,7 +1226,9 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   server's `executeCommandProvider.commands`: arguments `[uniqueId]` or
   `[{uri, position}]`, a position naming the `ref` or `source` under it,
   or the entry whose `name:` is there,
-  else the one node its file defines.  The result is the manifest's node,
+  else the one node its file defines, but in a YAML file (a properties
+  file, or a YAML snapshot's), where the manifest also places the generic
+  tests it declares.  The result is the manifest's node,
   with `summary`, the text of the summary a hover shows first (its lines
   apart by a plain line break), null for no node, and error -32803 with the reason until a first parse
   has finished; after that, the last index answers, and a later failure is
@@ -1216,15 +1236,49 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   in YAML or a Python model outside it.
 - A hover, with inlay hints (see "Inlay hints"), is a method that is
   forwarded and augmented: on a `ref` or
-  `source` argument, or an entry's `name:` in YAML, resolved from the
+  `source` argument, an entry's `name:` in YAML, or at position 0:0 (line
+  1, column 1) of a file that defines one node, which stands for that
+  node as nodeInfo's position does, a YAML file aside (a properties
+  file, or a YAML snapshot's), resolved from the
   document's text when the request arrives, the server's answer gets the
-  node's summary first, then a rule;
+  node's summary and facts first, then a rule;
   plain text gets a blank line instead, an array of marked strings the
   summary as its first item, a null answer the summary alone.  Elsewhere,
   or without an index, the answer passes byte for byte.  The summary is one
   line of what dbt builds and where, then one of what is set beyond the
   defaults: group and owner, access when not protected, an enforced
-  contract, the version, tags, disabled, the number of tests.
+  contract, the version, tags, disabled, the number of tests.  The facts
+  follow, each on a line of its own, hard in markdown: the unique id, with
+  `, properties <file>` when a properties file patches the node, or a
+  source's own file: from the root, or, for a package's node,
+  `<package>://` and from the package's directory, as dbt writes
+  `patch_path`; then, when
+  any column is declared, `columns ` and each one's name and declared
+  `data_type`, by name, as the manifest is read.  Each value of the facts
+  (the id, the file, each column's name and type) is a code span, its
+  fence longer than any run of backticks inside, and a space of padding
+  when it begins or ends with a backtick or a space: markdown shows a
+  type such as `array<string>` whole rather than as a tag, and the raw
+  text, which Claude Code hands its agent unrendered, keeps every byte of
+  a path such as `models/marts/_orders.yml`.  A line break inside a
+  value, as in a type written as a YAML block, is given as a space, as
+  markdown shows it, so that each fact stays one line.  Plain text gets
+  the same spans.  nodeInfo's `summary` holds the summary alone.
+- Where the proxy answers the hover itself, alone or in `plus`, a hover
+  that names a node before any index exists (a `ref` or a `source`, an
+  entry's `name:`, or 0:0 of a file but a YAML file whose scan holds
+  one model, seed, snapshot, analysis or singular test of the root
+  package) is error
+  -32803 with nodeInfo's reason, word for word: `dbt parse has not
+  finished: it is running`, its failure, or `waiting for dbt lsp to
+  compile the project`.  The hover asks for the index first, as nodeInfo
+  does, but in `dbt`.  A position that names nothing, a macro call's
+  argument included, stays null; once an index exists, a node it lacks is
+  null too, even while a parse runs.  An agent reads the error's message
+  (Claude Code shows `Error performing hover: ...: <message>`), where a
+  null reads "not indexed"; lsp-mode's eldoc ignores a hover's error.  In
+  `merge` in front of dbt lsp, even while it restarts, the hover keeps
+  the merge's answers (see "Modes").
 
 ## Restart
 
@@ -1283,7 +1337,9 @@ Alone, the proxy:
   `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`; it logs
   once that the dbt has no `lsp`, and warns nothing;
 - answers a hover with the summary or the YAML block it would put first,
-  alone, and null elsewhere; inlay hints with its own, or `[]`;
+  alone, null elsewhere, and, on a node before any index, error -32803
+  with nodeInfo's reason (see "What the client gets"); inlay hints with
+  its own, or `[]`;
 - answers `nodeInfo` from the parse, which starts at the first `didOpen`
   (see "How the proxy runs it");
 - answers a definition and references on a `ref` or a macro call in SQL
@@ -1656,8 +1712,11 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     a server that cannot start; one parse at
     a time and one more after a change during it; the parse's flags and
     cache; dbt's output kept off the client's channel; a parse killed at
-    `exit`; a node by id or by position; the summary first on a hover of a
-    ref, any other hover byte for byte.
+    `exit`; a node by id or by position; the summary and the facts first
+    on a hover of a ref and at a file's start, any other hover byte for
+    byte; the facts' lines from a manifest, unit tested; a hover on a node
+    before any index, alone and in `plus`, failing with nodeInfo's reason,
+    and a hover in `dbt` asking for no index.
   - stale sources at their names, kept by a build and keeping its
     failures, cleared by a fresh check and by `sources.json` gone;
   - the last run: failures where written, the server's diagnostics joined
@@ -1751,6 +1810,8 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   round for the files written under the project: at most two
   compilations, where the proxy without its filter of dbt's output gave
   twelve.
+  It checks the facts of a hover at a model's start, from its properties
+  file, and a workspace symbol's id as its container.
   It ends by killing the server, which the proxy restarts: diagnostics
   are published again and a hover is answered, and the client, which
   declares dynamic registration, gets dbt's watcher registration once.
@@ -1758,7 +1819,9 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   an empty listing with `{"error": "No nodes found"}`, as 2.0.9 was seen to.
   With a dbt that has no `lsp`, the same test passes saying so, and a
   second one runs the proxy alone: its node information, hover and graph
-  from the parse, `order_summary`'s upstream through its variable, and a
+  from the parse, a hover sent at once that is the summary or the reason,
+  never null, the same facts at the model's start,
+  `order_summary`'s upstream through its variable, and a
   model written outside the editor with an unknown `ref` shown as dbt1048
   from the watcher's event, then cleared when it goes.
   The live rename also relies on two observations that no fake-backed test
