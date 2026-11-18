@@ -251,6 +251,10 @@ enum Pending {
     /// A merged request to which the proxy adds nothing: this nothing, null
     /// or `[]`, is its answer when the server's is an error, late, or none.
     Nothing(Value),
+    /// A hover whose position names a node while no index exists: in front
+    /// of the server, a nothing, null; answered by the proxy, why it has
+    /// no index yet.
+    Unindexed,
     /// Answered with the proxy's part alone once the server was late: its
     /// answer, when it comes, is dropped.
     Answered,
@@ -286,6 +290,7 @@ impl Pending {
             Pending::Hover(..) => json!({"result": null}),
             Pending::Hints(_) => json!({"result": []}),
             Pending::Nothing(nothing) => return Some(nothing.clone()),
+            Pending::Unindexed => return Some(Value::Null),
             _ => return None,
         };
         self.merged(&nothing, markdown).map(|merged| merged["result"].clone())
@@ -297,7 +302,7 @@ impl Pending {
     fn deadline(&self) -> Option<Duration> {
         match self {
             Pending::Hover(..) | Pending::Hints(_) => Some(MERGE_DEADLINE),
-            Pending::Nothing(_) => Some(NOTHING_DEADLINE),
+            Pending::Nothing(_) | Pending::Unindexed => Some(NOTHING_DEADLINE),
             _ => None,
         }
     }
@@ -1136,10 +1141,11 @@ impl<W: Write> Proxy<W> {
         Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
     }
 
-    /// The node of the `ref` or `source` at the position of PARAMS, or of the
-    /// entry whose `name:` is there, else, when FILE, the one node its
-    /// document defines.
-    fn node_at<'a>(&self, index: &'a config::Index, params: &Value, file: bool) -> Option<&'a Value> {
+    /// Whether the position of PARAMS names a node, and which node of INDEX:
+    /// that of the `ref` or `source` there, or of the entry whose `name:` is
+    /// there, else, when FILE, the one node its document defines.  Without
+    /// an index, the scan tells what is named, but not its node.
+    fn node_at<'a>(&self, index: Option<&'a config::Index>, params: &Value, file: bool) -> Option<Option<&'a Value>> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
             |call: &scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
@@ -1148,7 +1154,8 @@ impl<W: Write> Proxy<W> {
             path.extension().is_some_and(|extension| ["yml", "yaml", "py"].contains(&&*extension.to_string_lossy()));
         let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
         if let Some(call) = calls.into_iter().find(inside) {
-            return index.named(&call.target);
+            let named = matches!(call.target, scan::Target::Ref { .. } | scan::Target::Source { .. });
+            return named.then(|| index.and_then(|index| index.named(&call.target)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
         let entry = navigation::target_at(&path, &text, offset).filter(|target| {
@@ -1157,32 +1164,44 @@ impl<W: Write> Proxy<W> {
         });
         if let Some(target) = entry {
             let project = self.project()?;
-            let found =
-                navigation::resolve(&navigation::Lookup::new(&project, self.parsing.index.as_ref()), &path, &target);
-            return found.first().and_then(|found| index.node(&found.id));
+            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
+            return Some(index.zip(found.first()).and_then(|(index, found)| index.node(&found.id)));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file)?;
-        index.of_file(&relative.to_string_lossy())
+        if let Some(index) = index {
+            return index.of_file(&relative.to_string_lossy()).map(Some);
+        }
+        // As `Index::of_file` reads the manifest: the kinds of resources it holds as nodes.
+        let project = self.project()?;
+        let defines = |entity: &&project::Entity| {
+            entity.path == path
+                && entity.package == project.root_package
+                && matches!(entity.resource_type, "model" | "seed" | "snapshot" | "analysis" | "test")
+        };
+        (project.entities.iter().filter(defines).count() == 1).then_some(None)
+    }
+
+    /// Why no index answers yet, as nodeInfo and a hover say it.
+    fn unindexed(&self) -> String {
+        let why = match (self.parsing.running.is_some(), &self.parsing.failure) {
+            (true, _) => "it is running",
+            (false, Some(failure)) => failure,
+            (false, None) => "waiting for dbt lsp to compile the project",
+        };
+        format!("dbt parse has not finished: {why}")
     }
 
     /// The information of a node, named by its id or by a position: the
     /// manifest's node with its relation and the summary a hover shows, null
     /// for no node; a failure while no parse has finished.
     fn node_info(&self, params: &Value) -> Option<Result<Value, String>> {
-        let Some(index) = &self.parsing.index else {
-            let why = match (self.parsing.running.is_some(), &self.parsing.failure) {
-                (true, _) => "it is running",
-                (false, Some(failure)) => failure,
-                (false, None) => "waiting for dbt lsp to compile the project",
-            };
-            return Some(Err(format!("dbt parse has not finished: {why}")));
-        };
+        let Some(index) = &self.parsing.index else { return Some(Err(self.unindexed())) };
         let argument = params.pointer("/arguments/0")?;
         let node = match argument.as_str() {
             Some(id) => index.node(id),
             None => {
                 let position = json!({"textDocument": {"uri": argument["uri"]}, "position": argument["position"]});
-                self.node_at(index, &position, true)
+                self.node_at(Some(index), &position, true).flatten()
             }
         };
         let summarised = |node: &Value| {
@@ -1481,6 +1500,11 @@ impl<W: Write> Proxy<W> {
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Ok)
             }
+            // Asked for first, as nodeInfo does, so that the reason is that of the parse it may start.
+            "textDocument/hover" if *pending == Pending::Unindexed => {
+                self.want_index();
+                Some(Err(self.unindexed()))
+            }
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
@@ -1666,6 +1690,32 @@ impl<W: Write> Proxy<W> {
         }
     }
 
+    /// What the answer to a hover at PARAMS gets first, outside `dbt`: the
+    /// summary and facts of the node named there, else a doc's or a generic
+    /// test's block; else nothing, null, which a node named before any index
+    /// turns into why the proxy has none.
+    fn hover_part(&self, params: &Value) -> Pending {
+        let index = self.parsing.index.as_ref();
+        // Line 1, column 1 of a file stands for the node it defines.
+        let start = params["position"] == json!({"line": 0, "character": 0});
+        let named = self.node_at(index, params, start);
+        let summary = index
+            .zip(named.flatten())
+            .map(|(index, node)| (format!("{}\n{}", index.summary(node), config::Index::facts(node)), true));
+        // A doc's or a generic test's block, the project scanned only then.
+        let block = || {
+            let (path, text, offset) = self.document_at(params)?;
+            let target = navigation::target_at(&path, &text, offset)
+                .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
+            let project = self.project()?;
+            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
+            navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
+        };
+        let nothing =
+            if named.is_some() && index.is_none() { Pending::Unindexed } else { Pending::Nothing(Value::Null) };
+        summary.or_else(block).map_or(nothing, |(text, hard)| Pending::Hover(text, hard))
+    }
+
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
     /// proxy must not cancel, the summary that a hover's answer gets, a
@@ -1674,7 +1724,7 @@ impl<W: Write> Proxy<W> {
     /// hover keeps the index fresh, an inlay hint only makes one, and in
     /// `dbt` neither; a shadowed request wants what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
-        // Outside `dbt`, a hover, hints, a definition or references with no part of the proxy's.
+        // Outside `dbt`, hints, a definition or references with no part of the proxy's.
         let nothing = Pending::Nothing(modes::empty(method));
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
@@ -1689,27 +1739,7 @@ impl<W: Write> Proxy<W> {
             }
             (_, Some("dbt.listNodes" | commands::NODES)) => Pending::Listing,
             ("textDocument/hover", _) if self.table.mode(method) != Mode::Dbt => {
-                let index = self.parsing.index.as_ref();
-                // Line 1, column 1 of a file stands for the node it defines.
-                let start = params["position"] == json!({"line": 0, "character": 0});
-                let summary = index.and_then(|index| {
-                    let node = self.node_at(index, params, start)?;
-                    Some((format!("{}\n{}", index.summary(node), config::Index::facts(node)), true))
-                });
-                // A doc's or a generic test's block, the project scanned only then.
-                let block = || {
-                    let (path, text, offset) = self.document_at(params)?;
-                    let target = navigation::target_at(&path, &text, offset)
-                        .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
-                    let project = self.project()?;
-                    let found = navigation::resolve(
-                        &navigation::Lookup::new(&project, self.parsing.index.as_ref()),
-                        &path,
-                        &target,
-                    );
-                    navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
-                };
-                return (summary.or_else(block).map_or(nothing, |(text, hard)| Pending::Hover(text, hard)), true);
+                return (self.hover_part(params), true);
             }
             ("textDocument/inlayHint", _) if self.table.mode(method) != Mode::Dbt => {
                 // A panic leaves the server's answer as it is.

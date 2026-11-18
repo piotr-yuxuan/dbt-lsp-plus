@@ -2644,8 +2644,10 @@ fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
     assert_eq!([&capabilities["hoverProvider"], &capabilities["inlayHintProvider"]], [&json!(true), &json!(true)]);
     let orders = fixture().join("models/marts/orders.sql");
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    // Before any document, the hover asks for the parse whose reason it gives.
     let early = session.request("textDocument/hover", on_ref.clone());
-    assert_eq!((early.get("error"), &early["result"]), (None, &Value::Null), "before a parse: {early}");
+    let reason = early["error"]["message"].as_str().unwrap_or_default();
+    assert!(early["error"]["code"] == -32803 && reason.starts_with("dbt parse has not finished: "), "{early}");
     session.open(&orders, None);
     let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", on_ref), |result| !result.is_null());
     let summary =
@@ -2687,6 +2689,54 @@ fn alone_a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
     let start =
         json!({"uri": uri(&fixture().join("models/marts/orders.sql")), "position": {"line": 0, "character": 0}});
     assert_eq!(node_info(&mut session, start)["result"]["summary"], "model table, \"shop\".\"main\".\"orders\"");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_on_a_node_before_any_index_says_why() {
+    let gate = scratch("hover-unindexed-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest(), "parse_gate": gate});
+    let (mut session, _) = Session::fake("hover-unindexed", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
+    // The first document opened started the parse: on a ref and at the file's start, its reason.
+    let running = json!({"code": -32803, "message": "dbt parse has not finished: it is running"});
+    for (line, character) in [(4, 28), (0, 0)] {
+        let hover = session.request("textDocument/hover", at(line, character));
+        assert_eq!((hover.get("result"), &hover["error"]), (None, &running), "{line}:{character}: {hover}");
+    }
+    // At `with`, and in the argument of a macro call: nothing named, null.
+    for params in [at(3, 0), position_in(&orders, "'orders.amount'", 3)] {
+        let hover = session.request("textDocument/hover", params);
+        assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    }
+    std::fs::write(&gate, "").unwrap();
+    let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", at(4, 28)), |result| !result.is_null());
+    assert_eq!(hover["contents"]["value"], "model view, \"shop\".\"main\".\"stg_orders\"\nmodel.shop.stg_orders");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_after_a_failed_parse_says_what_node_info_says() {
+    let (mut session, _) = Session::fake("hover-unindexed-failed", json!({"no_lsp": true, "parse_exit": 2}));
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let end = Instant::now() + Duration::from_secs(10);
+    let reason = loop {
+        let info = node_info(&mut session, json!("model.shop.orders"));
+        if info["error"]["message"] != "dbt parse has not finished: it is running" {
+            break info["error"]["message"].clone();
+        }
+        assert!(Instant::now() < end, "the parse did not end: {info}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(reason.as_str().is_some_and(|reason| reason.starts_with("dbt parse has not finished: ")), "{reason}");
+    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_ref);
+    assert_eq!((hover.get("result"), &hover["error"]), (None, &json!({"code": -32803, "message": reason})), "{hover}");
     assert!(session.finish().success());
 }
 
@@ -3243,6 +3293,37 @@ fn one_method_left_to_dbt_lsp_keeps_the_others_as_they_were() {
     assert!(outline["result"].is_array(), "{outline}");
     let counts = ["textDocument/definition", "textDocument/references", "textDocument/documentSymbol"];
     assert_eq!(counts.map(|method| received(&log, method)), [1, 0, 0]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_plus_a_hover_on_a_node_before_dbt_lsp_compiles_says_why() {
+    let script = json!({"manifest": manifest(), "hold_compile": true});
+    let (mut session, log) = with_options("mode-plus-unindexed", script, &["--mode", "textDocument/hover=plus"]);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let hover = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+    let waiting =
+        json!({"code": -32803, "message": "dbt parse has not finished: waiting for dbt lsp to compile the project"});
+    assert_eq!((hover.get("result"), &hover["error"]), (None, &waiting), "{hover}");
+    barrier(&mut session);
+    assert_eq!(received(&log, "textDocument/hover"), 0);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_left_to_dbt_asks_for_no_index() {
+    let script = json!({"no_lsp": true, "manifest": manifest()});
+    let (mut session, log) = with_options("mode-hover-alone", script, &["--mode", "textDocument/hover=dbt"]);
+    session.initialize(&fixture());
+    // No document opened: alone, the first one starts a parse itself.
+    let orders = fixture().join("models/marts/orders.sql");
+    let hover = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    std::thread::sleep(Duration::from_millis(500));
+    parses_stay(&log, 0);
     assert!(session.finish().success());
 }
 

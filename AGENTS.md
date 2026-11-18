@@ -184,6 +184,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     the proxy's command; what the proxy keeps of a forwarded request apart
     from where it goes; one event's dispatch apart from the waiting with
     the listing's deadline;
+  - `Proxy::hover_part`: what a hover's answer gets first, or why it has
+    nothing, apart from what the proxy keeps of other requests, so that
+    `remember` stays a dispatch;
   - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
     outcome and its end, each the end of a resource, as `stop_server`;
   - the sections of `tests/proxy/live.rs` (`document_features`,
