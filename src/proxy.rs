@@ -2485,6 +2485,34 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_page_quotes_the_proxy_s_own_words() {
+        let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/use-with-an-agent.md"));
+        let page = page.unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+        let sources = [
+            include_str!("proxy.rs"),
+            include_str!("cli.rs"),
+            include_str!("commands.rs"),
+            include_str!("packages.rs"),
+        ];
+        let code: Vec<&str> =
+            sources.iter().filter_map(|source| source.split("\n#[cfg(test)]\nmod tests {").next()).collect();
+        let quoted = [
+            "it is running",
+            "waiting for dbt lsp to compile the project",
+            "dbt lsp is not running",
+            "dbt-lsp-plus answers alone.",
+            "give a path within the project",
+            "dbt-lsp-plus runs dbt only cut off the network, which this system cannot",
+            "a package from the network is named, and nothing cuts dbt parse off the network here",
+            "run dbt deps",
+        ];
+        for words in quoted {
+            assert!(page.contains(words), "the agent page quotes {words:?}");
+            assert!(code.iter().any(|source| source.contains(words)), "the code outside its tests says {words:?}");
+        }
+    }
+
+    #[test]
     fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
         let root = Path::new("/work/a b/shop");
         // As the proxy gives them: a link of logs out of the project, resolved, included.
