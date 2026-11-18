@@ -242,8 +242,8 @@ enum Pending {
     Listing,
     /// Answered with null if the server dies first, as LSP asks of `shutdown`.
     Shutdown,
-    /// A hover whose answer gets this text first: a node's summary, whose
-    /// line breaks are hard, or a docs block's text or a test's signature,
+    /// A hover whose answer gets this text first: a node's summary and
+    /// facts, whose line breaks are hard, or a docs block's text or a test's signature,
     /// markdown as written.
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
@@ -1690,8 +1690,12 @@ impl<W: Write> Proxy<W> {
             (_, Some("dbt.listNodes" | commands::NODES)) => Pending::Listing,
             ("textDocument/hover", _) if self.table.mode(method) != Mode::Dbt => {
                 let index = self.parsing.index.as_ref();
-                let summary =
-                    index.and_then(|index| self.node_at(index, params, false).map(|node| (index.summary(node), true)));
+                // Line 1, column 1 of a file stands for the node it defines.
+                let start = params["position"] == json!({"line": 0, "character": 0});
+                let summary = index.and_then(|index| {
+                    let node = self.node_at(index, params, start)?;
+                    Some((format!("{}\n{}", index.summary(node), config::Index::facts(node)), true))
+                });
                 // A doc's or a generic test's block, the project scanned only then.
                 let block = || {
                     let (path, text, offset) = self.document_at(params)?;

@@ -374,6 +374,24 @@ impl Index {
         let first = first.join(", ");
         if set.is_empty() { first } else { format!("{first}\n{}", set.join("; ")) }
     }
+
+    /// What a hover shows of NODE after its summary: one line of its unique
+    /// id and its properties file, the one that patches it, else a source's
+    /// own; then, if any column is declared, one line of the columns, each
+    /// its name and its type when declared, in the manifest's order as read,
+    /// which is by name.
+    pub fn facts(node: &Value) -> String {
+        let patch = node["patch_path"].as_str().map(|path| path.split_once("://").map_or(path, |(_, file)| file));
+        let source = || node["original_file_path"].as_str().filter(|_| node["resource_type"] == "source");
+        let id = node["unique_id"].as_str().unwrap_or_default();
+        let first = patch.or_else(source).map_or_else(|| id.to_owned(), |file| format!("{id}, properties {file}"));
+        let columns = node["columns"].as_object().into_iter().flatten().map(|(name, column)| {
+            let declared = column["data_type"].as_str().filter(|data_type| !data_type.is_empty());
+            declared.map_or_else(|| name.clone(), |data_type| format!("{name} {data_type}"))
+        });
+        let columns: Vec<String> = columns.collect();
+        if columns.is_empty() { first } else { format!("{first}\ncolumns {}", columns.join(", ")) }
+    }
 }
 
 /// What a parse gave: the index of the manifest it wrote, if it wrote one;
@@ -776,6 +794,35 @@ mod tests {
         let dim = index.summary(index.node("model.shop.dim.v2").unwrap());
         assert_eq!(dim, "model incremental unique key id, day, v2\nversion 2");
         assert_eq!(index.summary(index.node("model.shop.off").unwrap()), "model table, no relation\ndisabled");
+    }
+
+    #[test]
+    fn the_facts_give_the_id_the_properties_file_and_the_declared_columns() {
+        let columns = json!({"order_id": {"name": "order_id", "data_type": "integer"}, "status": {"name": "status"}});
+        let untyped =
+            json!({"status": {"name": "status", "data_type": null}, "amount": {"name": "amount", "data_type": null}});
+        let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {
+            "model.shop.orders": {"unique_id": "model.shop.orders", "resource_type": "model", "name": "orders",
+                "patch_path": "shop://models/marts/_orders.yml", "columns": columns, "config": {}},
+            "model.shop.bare": {"unique_id": "model.shop.bare", "resource_type": "model", "name": "bare",
+                "original_file_path": "models/bare.sql", "columns": {}, "config": {}},
+            "model.shop.untyped": {"unique_id": "model.shop.untyped", "resource_type": "model", "name": "untyped",
+                "columns": untyped, "config": {}}},
+            "sources": {"source.shop.raw.customers": {"unique_id": "source.shop.raw.customers",
+                "resource_type": "source", "name": "customers", "source_name": "raw",
+                "original_file_path": "models/staging/_sources.yml"}}});
+        let index = Index::of(&manifest);
+        let facts = |id: &str| Index::facts(index.node(id).unwrap());
+        assert_eq!(
+            facts("model.shop.orders"),
+            "model.shop.orders, properties models/marts/_orders.yml\ncolumns order_id integer, status"
+        );
+        assert_eq!(facts("model.shop.bare"), "model.shop.bare", "a model's own file is no properties file");
+        assert_eq!(
+            facts("source.shop.raw.customers"),
+            "source.shop.raw.customers, properties models/staging/_sources.yml"
+        );
+        assert_eq!(facts("model.shop.untyped"), "model.shop.untyped\ncolumns amount, status");
     }
 
     #[test]

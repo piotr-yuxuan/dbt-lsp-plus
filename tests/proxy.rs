@@ -1981,7 +1981,8 @@ fn node_info_gives_the_summary_a_hover_shows() {
     let on_ref = json!({"line": 4, "character": 28});
     let info = node_info(&mut session, json!({"uri": file, "position": on_ref}));
     let hover = session.request("textDocument/hover", json!({"textDocument": {"uri": file}, "position": on_ref}));
-    assert_eq!(info["result"]["summary"], hover["result"]["contents"]["value"], "{hover}");
+    let summary = info["result"]["summary"].as_str().unwrap();
+    assert_eq!(hover["result"]["contents"]["value"], format!("{summary}\nmodel.shop.stg_orders"), "{hover}");
     assert!(session.finish().success());
 }
 
@@ -2473,8 +2474,13 @@ fn a_hover_on_a_ref_gets_the_summary_first_and_any_other_passes_byte_for_byte() 
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap();
-    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"\n\n---\n\nServer text");
-    let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
+    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"  \nmodel.shop.stg_orders\n\n---\n\nServer text");
+    // Line 1, column 1 stands for the file's own model.
+    let start = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
+    let own = session.request("textDocument/hover", start);
+    let value = own["result"]["contents"]["value"].as_str().unwrap();
+    assert_eq!(value, "model table, \"shop\".\"main\".\"orders\"  \nmodel.shop.orders\n\n---\n\nServer text");
+    let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 3, "character": 0}});
     let plain = session.request("textDocument/hover", elsewhere);
     let expected = answer.replace("$ID", &plain["id"].to_string());
     assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "the answer's bytes changed");
@@ -2616,7 +2622,10 @@ fn the_summary_alone_follows_the_client_s_first_hover_format() {
         let customers = uri(&fixture().join("models/staging/stg_customers.sql"));
         let on_source = json!({"textDocument": {"uri": customers}, "position": {"line": 5, "character": 23}});
         let hover = session.request("textDocument/hover", on_source);
-        assert_eq!(hover["result"]["contents"], json!({"kind": kind, "value": "source, raw_customers"}), "{formats}");
+        // A line break in markdown needs two spaces before it.
+        let breaks = if kind == "markdown" { "  \n" } else { "\n" };
+        let value = format!("source, raw_customers{breaks}source.shop.raw.customers");
+        assert_eq!(hover["result"]["contents"], json!({"kind": kind, "value": value}), "{formats}");
         assert!(session.finish().success());
     }
 }
@@ -2633,15 +2642,45 @@ fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
     assert_eq!((early.get("error"), &early["result"]), (None, &Value::Null), "before a parse: {early}");
     session.open(&orders, None);
     let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", on_ref), |result| !result.is_null());
-    let summary = json!({"kind": "plaintext", "value": "model view, \"shop\".\"main\".\"stg_orders\""});
+    let summary =
+        json!({"kind": "plaintext", "value": "model view, \"shop\".\"main\".\"stg_orders\"\nmodel.shop.stg_orders"});
     assert_eq!(hover["contents"], summary);
     let hints = hints_of(&mut session, &orders)["result"].clone();
     assert!(hints.as_array().unwrap().iter().any(|hint| hint["tooltip"] == "model.shop.stg_orders"), "{hints}");
-    let elsewhere = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
+    let elsewhere = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 3, "character": 0}});
     assert_eq!(session.request("textDocument/hover", elsewhere)["result"], Value::Null);
     // `ref(var(...))` names no node the scan can see: no hint.
     assert_eq!(hints_of(&mut session, &fixture().join("models/marts/order_summary.sql"))["result"], json!([]));
     assert!(lives(&log).is_empty(), "a server started");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
+    let mut manifest = manifest();
+    let orders = &mut manifest["nodes"]["model.shop.orders"];
+    orders["patch_path"] = json!("shop://models/marts/_orders.yml");
+    orders["columns"] = json!({"order_id": {"name": "order_id", "data_type": "integer"}, "status": {"name": "status"}});
+    let (mut session, _) = Session::fake("hover-start", json!({"no_lsp": true, "manifest": manifest}));
+    session.initialize(&fixture());
+    let at = |file: &str, line: u64| json!({"textDocument": {"uri": uri(&fixture().join(file))}, "position": {"line": line, "character": 0}});
+    session.open(&fixture().join("models/marts/orders.sql"), None);
+    let request = ("textDocument/hover", at("models/marts/orders.sql", 0));
+    let hover = session.poll(Duration::from_secs(10), request, |result| !result.is_null());
+    let value = "model table, \"shop\".\"main\".\"orders\"\n\
+                 model.shop.orders, properties models/marts/_orders.yml\n\
+                 columns order_id integer, status";
+    assert_eq!(hover["contents"], json!({"kind": "plaintext", "value": value}));
+    // Elsewhere in the file, at the start of a file the manifest lacks or of a properties file: nothing.
+    let none =
+        [("models/marts/orders.sql", 3), ("models/marts/order_summary.sql", 0), ("models/staging/_sources.yml", 0)];
+    for (file, line) in none {
+        let hover = session.request("textDocument/hover", at(file, line));
+        assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{file}:{line}: {hover}");
+    }
+    let start =
+        json!({"uri": uri(&fixture().join("models/marts/orders.sql")), "position": {"line": 0, "character": 0}});
+    assert_eq!(node_info(&mut session, start)["result"]["summary"], "model table, \"shop\".\"main\".\"orders\"");
     assert!(session.finish().success());
 }
 
@@ -2809,12 +2848,13 @@ fn an_entry_s_name_is_its_node_for_hover_and_node_info() {
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
     let on_name = position_in(&project.join("models/marts/_models.yml"), "name: orders", 8);
     let hover = session.request("textDocument/hover", on_name.clone());
-    assert_eq!(hover["result"]["contents"]["value"], "model table, \"shop\".\"main\".\"orders\"");
+    assert_eq!(hover["result"]["contents"]["value"], "model table, \"shop\".\"main\".\"orders\"\nmodel.shop.orders");
     let argument = json!({"uri": on_name["textDocument"]["uri"], "position": on_name["position"]});
     assert_eq!(node_info(&mut session, argument)["result"]["unique_id"], "model.shop.orders");
     // A source table's `name:` too.
     let on_table = position_in(&project.join("models/staging/_sources.yml"), "name: customers", 8);
-    assert_eq!(session.request("textDocument/hover", on_table)["result"]["contents"]["value"], "source, raw_customers");
+    let value = "source, raw_customers\nsource.shop.raw.customers";
+    assert_eq!(session.request("textDocument/hover", on_table)["result"]["contents"]["value"], value);
     assert!(session.finish().success());
 }
 
