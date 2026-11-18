@@ -306,10 +306,16 @@ fn workspace_symbols_list_every_resource_with_its_package_and_id() {
     let (mut session, _) = Session::fake("workspace-symbols", json!({}));
     session.initialize(&fixture());
     let all = session.request("workspace/symbol", json!({"query": ""}));
-    assert_eq!(all["result"].as_array().unwrap().len(), 22);
+    let all = all["result"].as_array().unwrap();
+    assert_eq!(all.len(), 22);
+    for symbol in all {
+        let (container, data) = (&symbol["containerName"], &symbol["data"]);
+        let typed = container.as_str().unwrap().starts_with(&format!("{}.", data["resourceType"].as_str().unwrap()));
+        assert!(*container == data["uniqueId"] && typed, "{symbol}");
+    }
     let found = session.request("workspace/symbol", json!({"query": "ctd"}));
     assert_eq!(names(&found["result"]), ["cents_to_dollars"]);
-    assert_eq!(found["result"][0]["containerName"], "shop");
+    assert_eq!(found["result"][0]["containerName"], "macro.shop.cents_to_dollars");
     assert_eq!(found["result"][0]["data"], json!({"uniqueId": "macro.shop.cents_to_dollars", "resourceType": "macro"}));
     assert_eq!(found["result"][0]["location"]["uri"], uri(&fixture().join("macros/money.sql")));
     assert_eq!(found["result"][0]["location"]["range"]["start"], json!({"line": 0, "character": 9}));

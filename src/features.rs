@@ -140,8 +140,9 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
 
 /// Every resource of PROJECT whose name holds the characters of QUERY in
 /// order, ignoring case, as LSP 3.17 `WorkspaceSymbol`s that are also valid
-/// `SymbolInformation`s: the package as container, and dbt's unique id and
-/// resource type as data.
+/// `SymbolInformation`s: dbt's unique id as container, which begins with
+/// the resource type and the package and which clients show, and the id
+/// and resource type as data.
 pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> Value {
     let query = query.to_lowercase();
     let matches = |name: &str| {
@@ -157,7 +158,7 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
             "name": entity.shown(),
             "kind": resource_kind(entity.resource_type),
             "location": {"uri": uri(&entity.path), "range": index.range(entity.name_range.start, entity.name_range.end, encoding)},
-            "containerName": entity.package,
+            "containerName": entity.id,
             "data": {"uniqueId": entity.id, "resourceType": entity.resource_type},
         }));
     }
@@ -463,7 +464,7 @@ mod tests {
         let symbols = workspace_symbols(&project, "EVPGVW", Encoding::Utf16);
         assert_eq!(symbols.as_array().unwrap().len(), 1);
         assert_eq!(symbols[0]["name"], "events.page_views");
-        assert_eq!(symbols[0]["containerName"], "shop");
+        assert_eq!(symbols[0]["containerName"], "source.shop.events.page_views");
         assert_eq!(symbols[0]["data"], json!({"uniqueId": "source.shop.events.page_views", "resourceType": "source"}));
         assert_eq!(symbols[0]["location"]["range"]["start"], json!({"line": 13, "character": 15}));
         let all = workspace_symbols(&project, "", Encoding::Utf16);
