@@ -3645,10 +3645,10 @@ fn a_late_server_gives_the_proxy_s_nothing_at_2_s() {
     for (id, (method, params, _)) in (7001..).zip(where_the_proxy_has_nothing()) {
         session.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
     }
-    std::thread::sleep(Duration::from_millis(1900));
-    // An answer of the proxy's own, after which all it sent before has come.
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    assert_eq!((7001..7005).map(|id| frames_of(&session, &json!(id))).sum::<usize>(), 0, "before 2 s");
+    // Read as they come: the first of the four no earlier than the deadline.
+    let ids = [json!(7001), json!(7002), json!(7003), json!(7004)];
+    session.wait_for(|m| ids.contains(&m["id"]) && m.get("method").is_none());
+    assert!(started.elapsed() >= Duration::from_secs(2), "before 2 s: {:?}", started.elapsed());
     for (id, (method, _, nothing)) in (7001..).zip(where_the_proxy_has_nothing()) {
         let answer = session.wait_for(|m| m["id"] == id && m.get("method").is_none());
         assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing), "{method}: {answer}");
