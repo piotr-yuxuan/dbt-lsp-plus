@@ -75,14 +75,15 @@ method:
   SQL.
 
 Every other message passes unchanged, byte for byte.  A feature that the
-server announces stays the server's, but for a source's definition,
-references and rename, a CTE's rename, the definitions of docs, entries
-(a function's included) and tests in YAML, and the definitions and
-references of refs, macros and functions; the initialize result names
-those, per kind of target and kind of file, under
-`experimental.dbtLspPlus`.  A definition, references, hover or inlay
-hints left to `dbt lsp` get its answer when it comes within 300 ms where
-the proxy adds something (a summary, hints), within 2 s where it adds
+server announces stays the server's, but for the rename of a source or
+a CTE, and the definitions and references at the kinds of target that
+[Where dbt-lsp-plus answers definitions and
+references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)
+lists; the initialize result names those, per kind of target and kind of
+file, under `experimental.dbtLspPlus`.  A definition, references, hover
+or inlay hints left to `dbt lsp` get its answer when it comes within
+300 ms where the proxy adds something (a summary, hints), within 2 s
+where it adds
 nothing; else, and when `dbt lsp` fails, exits or is not running, the
 proxy's own: its part, else null, or `[]` for references and hints.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
