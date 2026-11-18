@@ -1012,7 +1012,12 @@ fn ignores_watched_changes_of_dbt_s_own_output() {
     let output = raw(&[&written[..], &[link.join("logs")]].concat());
     session.send_raw(output.as_bytes());
     until_logged(&log, "the event, byte for byte", |lines| lines.contains(&output));
-    // A hover after a change of the graph would list, or parse again.
+    // A hover, which wants the index, after a change of the graph would list, or parse again.
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    session.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}}),
+    );
     barrier(&mut session);
     barrier(&mut session);
     assert_eq!((listings(&log, "*"), listings(&log, "source:*")), (1, 1));
@@ -2536,8 +2541,9 @@ fn a_parse_wanted_before_a_compilation_does_not_start_after_shutdown() {
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    // A change, then a hover that wants the parse its compilation allows.
+    // A change, then a nodeInfo that wants the parse its compilation allows.
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    node_info(&mut session, json!("model.shop.orders"));
     barrier(&mut session);
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
     session.notify("test/compile", json!({}));
