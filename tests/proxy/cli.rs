@@ -305,6 +305,27 @@ fn select_lists_the_nodes_by_dbt_list_under_the_cut_and_leaves_no_run() {
 }
 
 #[test]
+fn select_sweeps_a_run_directory_left_for_a_day() {
+    let case = Case::new("cli-select-stale", &json!({"list": listed()}));
+    venv_fake(&case.copy);
+    if !cut("select_sweeps_a_run_directory_left_for_a_day") {
+        return;
+    }
+    case.run(&case.copy, &["select", "+stg_orders+"]);
+    let hashes: Vec<PathBuf> =
+        fs::read_dir(case.dir.join("cache/dbt-lsp-plus")).unwrap().flatten().map(|e| e.path()).collect();
+    // As a select killed by a signal leaves it, two days ago.
+    let stale = hashes[0].join("1");
+    fs::create_dir_all(&stale).unwrap();
+    let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+    fs::File::create(stale.join("parse.log")).unwrap().set_modified(two_days).unwrap();
+    let fresh = hashes[0].join("2");
+    fs::create_dir_all(&fresh).unwrap();
+    case.run(&case.copy, &["select", "+stg_orders+"]);
+    assert!(!stale.exists() && fresh.exists(), "{:?}", fs::read_dir(&hashes[0]).unwrap().collect::<Vec<_>>());
+}
+
+#[test]
 fn select_without_the_cut_is_refused_and_runs_nothing() {
     let mut case = Case::new("cli-select-no-cut", &json!({"list": listed()}));
     venv_fake(&case.copy);

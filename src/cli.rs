@@ -233,6 +233,8 @@ fn select(selector: &str, command: &[String]) -> Value {
     }
     let (dbt, dir) = dbt_of(&project, route, command);
     let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &project, &dbt.command);
+    // What a select or a proxy killed by a signal left, swept after a day, as `Proxy::cache` does.
+    config::remove_stale(&cache);
     let (job, run) = (commands::nodes_job(selector), cache.join("run"));
     let Some(line) = config::dbt_command(&dbt.command, &project, &run, true, &job.words) else {
         return commands::failure(commands::NODES, commands::NO_LSP_WORD);
