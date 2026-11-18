@@ -279,9 +279,11 @@ fn from_a_shell(project: &Path, lsp: bool) {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null");
         let output = command.output().expect("run dbt-lsp-plus");
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(stdout.lines().count(), 1, "{words:?}: {stdout}");
-        (output.status.code(), serde_json::from_str::<Value>(&stdout).unwrap())
+        let (stdout, stderr) = (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
+        let answer = serde_json::from_str::<Value>(&stdout).unwrap_or_default();
+        let one_line = stdout.lines().count() == 1 && stdout.ends_with('\n');
+        assert!(one_line && answer.is_object() && stderr.is_empty(), "{words:?}: {stdout} {stderr}");
+        (output.status.code(), answer)
     };
     let (status, doctor) = run(dir, &["doctor", "shop/models/marts/orders.sql"]);
     let found = (&doctor["route"], &doctor["dbt"]["source"], &doctor["dbt"]["lsp"]);
