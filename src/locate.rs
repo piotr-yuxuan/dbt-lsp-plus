@@ -52,10 +52,12 @@ pub struct Git {
 /// Where the project at PROJECT lies in git, by one run of GIT there: its
 /// work tree's top, and its main worktree's, the parent of its common
 /// directory when that is named `.git`; none outside a repository, or when
-/// git cannot run, fails or answers past the probe's deadline.
+/// git cannot run, fails or answers past the probe's deadline.  The common
+/// directory may come relative to PROJECT, as git before 2.31 gives it,
+/// which knows no `--path-format`.
 fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     let mut command = Command::new(&git.program);
-    command.args(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]);
+    command.args(["rev-parse", "--show-toplevel", "--git-common-dir"]);
     command.current_dir(project).env_clear().envs(git.env.iter().map(|(name, value)| (name, value)));
     command.env_remove("GIT_DIR").env_remove("GIT_WORK_TREE");
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
@@ -66,9 +68,10 @@ fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     stdout.take(1 << 16).read_to_string(&mut text).ok()?;
     let lines: Vec<PathBuf> = text.lines().map(PathBuf::from).collect();
     let [top, common] = &lines[..] else { return None };
-    if !status.success() || !top.is_absolute() || !common.is_absolute() {
+    if !status.success() || !top.is_absolute() {
         return None;
     }
+    let common = fs::canonicalize(project.join(common)).ok()?;
     let main = common.parent().filter(|_| common.file_name() == Some(".git".as_ref()));
     Some((top.clone(), main.map(Path::to_owned)))
 }

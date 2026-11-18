@@ -419,10 +419,11 @@ word is `dbt` (the default `dbt lsp` included), the dbt is the project's
 `<main>/.venv/bin/dbt`, without repeats, that is a file and answers `lsp
 --help`, in the project, as a dbt 2 does, with `lsp` (status 0) or without
 (dbt-oss's status 2 and "unrecognized subcommand 'lsp'"); `<top>` and
-`<main>` come from one `git rev-parse --path-format=absolute
---show-toplevel --git-common-dir` in the project, without `GIT_DIR` or
-`GIT_WORK_TREE`, `<main>` the common directory's parent when that is named
-`.git`.  A file that answers otherwise (dbt-core 1.x's "No such command
+`<main>` come from one `git rev-parse --show-toplevel --git-common-dir`
+in the project, without `GIT_DIR` or `GIT_WORK_TREE`, `<main>` the common
+directory's parent when that is named `.git`; the common directory, which
+git may give relative to where it ran, is read from the project, with no
+`--path-format`, which git before 2.31 prints back as a word.  A file that answers otherwise (dbt-core 1.x's "No such command
 'lsp'", one that cannot run, one past the deadline) is skipped and named.
 Else `dbt` stays, for `PATH`, probed as on the given route (on the
 folder's route only, since a document's starts no server).  Any other

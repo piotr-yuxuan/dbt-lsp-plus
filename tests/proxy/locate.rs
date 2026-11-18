@@ -180,6 +180,26 @@ fn from_a_linked_worktree_dbt_is_the_main_worktree_s_project_s_then_its_own() {
 }
 
 #[test]
+fn a_git_that_names_the_common_directory_from_where_it_ran_finds_the_main_worktree() {
+    let (repo, git, log) = repository("locate-dbt-old-git");
+    let (linked, command) = (repo.join(".worktree/x/dbt"), words(&COMMAND));
+    let main_project = repo.join("dbt/.venv/bin/dbt");
+    stub(&main_project, HAS_LSP, &log);
+    // As git 2.30 answers in a linked worktree's subdirectory: a flag it does
+    // not know printed back, the common directory relative to where it ran.
+    let old_git = repo.with_file_name("git");
+    let top = repo.join(".worktree/x");
+    let answers = format!(
+        "for word; do case $word in rev-parse) ;; --show-toplevel) echo '{}' ;; \
+         --git-common-dir) echo ../../../.git ;; *) echo \"$word\" ;; esac; done",
+        top.display()
+    );
+    script(&old_git, &answers);
+    let found = locate::dbt(&linked, &command, &Git { program: old_git.into(), env: git.env });
+    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", Some(true)));
+}
+
+#[test]
 fn a_dbt_that_cannot_run_or_has_no_lsp_subcommand_is_skipped_and_named() {
     let (repo, git, log) = repository("locate-dbt-skipped");
     let (project, command) = (repo.join("dbt"), words(&COMMAND));
