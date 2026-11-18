@@ -71,13 +71,14 @@ fn alive(pid: u32) -> bool {
     probe.status().expect("run kill").success()
 }
 
-/// Sends a request that the server answers, so that everything the proxy
-/// sent before it has reached the fake and its log once the answer is back.
+/// Sends a request that only the server answers, a completion, which no
+/// deadline answers in its place, so that everything the proxy sent before
+/// it has reached the fake and its log once the answer is back.
 fn barrier(session: &mut Session) {
     let orders = uri(&fixture().join("models/marts/orders.sql"));
     let position = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
-    let hover = session.request("textDocument/hover", position);
-    assert!(hover.get("result").is_some(), "{hover}");
+    let completion = session.request("textDocument/completion", position);
+    assert!(completion.get("result").is_some(), "{completion}");
 }
 
 fn node(id: &str, path: &str, depends_on: &[&str]) -> Value {
@@ -2431,6 +2432,7 @@ fn after_dbt_lsp_is_lost_with_no_change_its_compilation_still_guards_the_package
     let (mut session, log, _) = hub_package_without_a_cut("lost-guard-earned");
     session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
     session.wait_for(|m| m["method"] == "window/showMessage");
+    parses_stay(&log, 0);
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     let info = session.poll(Duration::from_secs(10), request, |result| result.is_object());
@@ -3554,11 +3556,12 @@ fn frames_of(session: &Session, id: &Value) -> usize {
     session.received.iter().filter(|m| m["id"] == *id && m.get("method").is_none()).count()
 }
 
-/// A request the fake answers at once, after which every earlier frame has come.
+/// A request the fake answers at once, and no deadline in its place, after
+/// which every earlier frame has come.
 fn settle(session: &mut Session) {
     let elsewhere =
         json!({"textDocument": {"uri": "file:///elsewhere/x.sql"}, "position": {"line": 0, "character": 0}});
-    session.request("textDocument/definition", elsewhere);
+    session.request("textDocument/completion", elsewhere);
 }
 
 fn on_ref() -> Value {
@@ -3665,7 +3668,8 @@ fn in_dbt_a_late_server_is_awaited() {
     for (id, (method, params, _)) in (7001..).zip(where_the_proxy_has_nothing()) {
         session.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
     }
-    std::thread::sleep(Duration::from_millis(600));
+    // Past both deadlines of `merge`, 300 ms and 2 s: `dbt` has none.
+    std::thread::sleep(Duration::from_millis(2500));
     session.request("workspace/symbol", json!({"query": "orders"}));
     assert_eq!((7001..7005).map(|id| frames_of(&session, &json!(id))).sum::<usize>(), 0, "answered before the server");
     session.notify("test/release", json!({}));
