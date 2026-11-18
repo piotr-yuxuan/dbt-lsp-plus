@@ -5,7 +5,7 @@
 use crate::live::paths;
 use crate::logged;
 use crate::routes::{fake_env, path_with_stub, resolved, starts, venv_fake};
-use crate::support::{copy_fixture, script};
+use crate::support::{Session, copy_fixture, script};
 use dbt_lsp_plus::config::can_cut;
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -407,6 +407,42 @@ fn select_without_the_cut_is_refused_and_runs_nothing() {
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": REFUSED})));
     assert!(case.runs().is_empty(), "{:?}", case.runs());
     assert!(starts(&case.log).is_empty(), "not even a probe: {:#?}", starts(&case.log));
+}
+
+#[test]
+fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
+    let case = Case::new("cli-select-shared", &json!({"list": listed()}));
+    venv_fake(&case.copy);
+    if !cut("select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent") {
+        return;
+    }
+    let (home, cache) = (case.dir.join("home"), case.dir.join("cache"));
+    let env = [
+        ("HOME", home.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+        ("FAKE_DBT_LSP_SCRIPT", case.script.as_path()),
+        ("FAKE_DBT_LSP_LOG", case.log.as_path()),
+        ("GIT_CEILING_DIRECTORIES", case.dir.as_path()),
+        ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
+    ];
+    // The proxy on the folder's route, with the default server command, as select runs.
+    let mut session = Session::start_with(&["--backend", "never"], &[], &env, Some(&case.copy));
+    session.initialize(&case.copy);
+    session.open(&case.copy.join("models/marts/orders.sql"), None);
+    let parents = || -> Vec<PathBuf> {
+        let hashes = fs::read_dir(cache.join("dbt-lsp-plus")).into_iter().flatten().flatten();
+        hashes.map(|hash| hash.path()).filter(|hash| fs::read_dir(hash).unwrap().next().is_some()).collect()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while parents().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the proxy's parse made no cache");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let proxy = parents();
+    let (status, _) = case.run(&case.copy, &["select", "+stg_orders+"]);
+    let all: Vec<PathBuf> = fs::read_dir(cache.join("dbt-lsp-plus")).unwrap().flatten().map(|e| e.path()).collect();
+    assert_eq!((status, all), (Some(0), proxy), "one parent, so that each sweeps what the other left");
+    assert!(session.finish().success());
 }
 
 #[test]
