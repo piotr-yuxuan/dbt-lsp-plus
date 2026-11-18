@@ -60,7 +60,7 @@ method:
   YAML file aside (a properties file, or a YAML snapshot's),
   followed by the node's facts, a line each, each value a code span: its
   unique id and properties file, then its declared columns with their
-  types.  A package's file is written `<package>://<path>`, as dbt writes
+  types.  A line break inside a value is given as a space.  A package's file is written `<package>://<path>`, as dbt writes
   `patch_path`: the path is relative to the package's directory, under
   `dbt_packages/` by default.  Where the proxy
   answers the hover itself (alone, or in `plus`), a hover on a node

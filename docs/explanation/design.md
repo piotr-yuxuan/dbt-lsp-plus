@@ -1256,11 +1256,14 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   any column is declared, `columns ` and each one's name and declared
   `data_type`, by name, as the manifest is read.  Each value of the facts
   (the id, the file, each column's name and type) is a code span, its
-  fence longer than any run of backticks inside: markdown shows a type
-  such as `array<string>` whole rather than as a tag, and the raw text,
-  which Claude Code hands its agent unrendered, keeps every byte of a
-  path such as `models/marts/_orders.yml`.  Plain text gets the same
-  spans.  nodeInfo's `summary` holds the summary alone.
+  fence longer than any run of backticks inside, and a space of padding
+  when it begins or ends with a backtick or a space: markdown shows a
+  type such as `array<string>` whole rather than as a tag, and the raw
+  text, which Claude Code hands its agent unrendered, keeps every byte of
+  a path such as `models/marts/_orders.yml`.  A line break inside a
+  value, as in a type written as a YAML block, is given as a space, as
+  markdown shows it, so that each fact stays one line.  Plain text gets
+  the same spans.  nodeInfo's `summary` holds the summary alone.
 - Where the proxy answers the hover itself, alone or in `plus`, a hover
   that names a node before any index exists (a `ref` or a `source`, an
   entry's `name:`, or 0:0 of a file but a YAML file whose scan holds

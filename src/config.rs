@@ -384,11 +384,16 @@ impl Index {
     /// value is a code span, so that markdown shows its bytes as they are,
     /// which plain text gives as they are too.
     pub fn facts(&self, node: &Value) -> String {
-        // A fence longer than any run of backticks inside, and a space within
-        // it when the value begins or ends with one, which markdown drops.
+        // Line breaks as spaces, as markdown shows them in a span, so that the
+        // span is one line; a fence longer than any run of backticks inside;
+        // and a space within it when the value begins or ends with a backtick
+        // or a space, since markdown drops one space at each end.
         let code = |text: &str| {
+            let text = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
             let fence = "`".repeat(text.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1);
-            let space = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
+            let edge = [' ', '`'];
+            let pad = !text.trim_matches(' ').is_empty() && (text.starts_with(edge) || text.ends_with(edge));
+            let space = if pad { " " } else { "" };
             format!("{fence}{space}{text}{space}{fence}")
         };
         let package = node["package_name"].as_str().filter(|package| *package != self.root_package);
@@ -827,7 +832,10 @@ mod tests {
                 "package_name": "utils", "patch_path": "utils://models/_dates.yml", "config": {}},
             "model.shop.odd": {"unique_id": "model.shop.odd", "resource_type": "model", "name": "odd",
                 "package_name": "shop", "config": {},
-                "columns": {"a`b": {"data_type": "`x`"}, "tags": {"data_type": "array<string>"}}}},
+                "columns": {"a`b": {"data_type": "`x`"}, "tags": {"data_type": "array<string>"}}},
+            "model.shop.lines": {"unique_id": "model.shop.lines", "resource_type": "model", "name": "lines",
+                "package_name": "shop", "config": {},
+                "columns": {" id ": {}, "nested": {"data_type": "STRUCT<\r\n  a INT64\n>\n"}}}},
             "sources": {"source.shop.raw.customers": {"unique_id": "source.shop.raw.customers",
                 "resource_type": "source", "name": "customers", "source_name": "raw", "package_name": "shop",
                 "original_file_path": "models/staging/_sources.yml"},
@@ -850,6 +858,12 @@ mod tests {
         assert_eq!(facts("model.utils.dates"), "`model.utils.dates`, properties `utils://models/_dates.yml`");
         // Verbatim inside spans that markdown shows literally, backticks included.
         assert_eq!(facts("model.shop.odd"), "`model.shop.odd`\ncolumns ``a`b`` `` `x` ``, `tags` `array<string>`");
+        // A line break as a space, so that one span holds the value; a space
+        // at an end kept inside the padding that markdown strips.
+        assert_eq!(
+            facts("model.shop.lines"),
+            "`model.shop.lines`\ncolumns `  id  `, `nested` ` STRUCT<   a INT64 >  `"
+        );
         assert_eq!(facts("source.utils.raw.days"), "`source.utils.raw.days`, properties `utils://models/_sources.yml`");
     }
 

@@ -1144,10 +1144,12 @@ impl<W: Write> Proxy<W> {
 
     /// Whether the position of PARAMS names a node, and which node of INDEX:
     /// that of the `ref` or `source` there, or of the entry whose `name:` is
-    /// there, else, when FILE, the one node its document defines, but in a
-    /// YAML file, where the manifest also places the generic tests that it
-    /// declares, which the scan does not see.  None when it names nothing; `Some(None)` when it names a node that INDEX lacks,
-    /// or that, without an index, the scan tells is named but cannot give.
+    /// there, else, when FILE, the one node its document defines, but never
+    /// in a YAML file: there the manifest places the generic tests a file
+    /// declares beside its node, a YAML snapshot's included, so neither the
+    /// scan nor `of_file` can name one node.  None when it names nothing;
+    /// `Some(None)` when it names a node that INDEX lacks, or that, without
+    /// an index, the scan tells is named but cannot give.
     fn node_at<'a>(&self, index: Option<&'a config::Index>, params: &Value, file: bool) -> Option<Option<&'a Value>> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
