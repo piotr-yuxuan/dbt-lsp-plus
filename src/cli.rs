@@ -198,7 +198,9 @@ fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
     };
     let alone = locate::alone(backend == Backend::Never, route, || probed == Ok(false));
     let cut = config::can_cut();
-    let packages = packages::refused(&project, &dbt.command, cut, alone.is_some());
+    // With the server command as given, as select asks it: finding the dbt
+    // changes only a bare `dbt`, and the guard reads none of it.
+    let packages = packages::refused(&project, command, cut, alone.is_some());
     let skipped = dbt.skipped.iter().map(|(path, why)| json!({"path": path.display().to_string(), "why": why}));
     let found = json!({"command": dbt.command, "named": dbt.named, "source": dbt.source,
                        "skipped": skipped.collect::<Vec<_>>(), "lsp": probed.as_ref().ok(), "why": probed.as_ref().err()});
