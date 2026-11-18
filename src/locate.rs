@@ -164,6 +164,27 @@ pub fn dbt(project: &Path, command: &[String], git: &Git) -> Found {
     Found { named: on_path.map_or_else(|| "dbt".into(), |dbt| dbt.display().to_string()), source: "PATH", ..found }
 }
 
+/// How a session found its project: the server command's `--project-dir`,
+/// the client's folder, or a document in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Given,
+    Folder,
+    Document,
+}
+
+/// Why a session on ROUTE answers alone, NEVER saying that the backend is
+/// `never`; none when dbt lsp starts behind the proxy.  NO_LSP, whether the
+/// dbt has no `lsp`, is asked only where it decides: neither under `never`
+/// nor on a document's route, where no dbt lsp starts.
+pub fn alone(never: bool, route: Route, no_lsp: impl FnOnce() -> bool) -> Option<&'static str> {
+    match (never, route) {
+        (true, _) => Some("the backend is never"),
+        (_, Route::Document) => Some("dbt lsp is not started for a project found from a file"),
+        _ => no_lsp().then_some("it has no lsp"),
+    }
+}
+
 /// What a dbt answers to `lsp --help`.
 #[derive(Debug, PartialEq)]
 pub enum Probe {
@@ -261,6 +282,31 @@ mod tests {
         }
         let in_root = args(&["sh", "-c", "[ \"$(pwd)\" = / ] && exit 0; exit 1", "lsp"]);
         assert_eq!(kind(probe(&in_root, Some(Path::new("/")))), "lsp", "in the directory given");
+    }
+
+    #[test]
+    fn a_session_is_alone_under_never_on_a_document_or_with_no_lsp_probed_only_then() {
+        let never = "the backend is never";
+        let document = "dbt lsp is not started for a project found from a file";
+        let cases = [
+            (true, Route::Given, false, Some(never), 0),
+            (true, Route::Folder, true, Some(never), 0),
+            (true, Route::Document, true, Some(never), 0),
+            (false, Route::Document, false, Some(document), 0),
+            (false, Route::Given, true, Some("it has no lsp"), 1),
+            (false, Route::Folder, true, Some("it has no lsp"), 1),
+            (false, Route::Given, false, None, 1),
+            (false, Route::Folder, false, None, 1),
+        ];
+        for (never_set, route, no_lsp, expected, probes) in cases {
+            let asked = std::cell::Cell::new(0);
+            let probe = || {
+                asked.set(asked.get() + 1);
+                no_lsp
+            };
+            assert_eq!(alone(never_set, route, probe), expected, "{never_set} {route:?}");
+            assert_eq!(asked.get(), probes, "probes of {never_set} {route:?}");
+        }
     }
 
     #[test]

@@ -757,12 +757,8 @@ impl<W: Write> Proxy<W> {
         let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.parsing.server.clone()), &git);
         let no_lsp =
             || found.lsp.map_or_else(|| locate::probe(&found.command, Some(&root)) == Probe::NoLsp, |lsp| !lsp);
-        // Neither with `never` nor on a document is the dbt probed for a server.
-        let alone = match (self.never, document) {
-            (true, _) => Some("the backend is never"),
-            (_, true) => Some("dbt lsp is not started for a project found from a file"),
-            _ => no_lsp().then_some("it has no lsp"),
-        };
+        let route = if document { locate::Route::Document } else { locate::Route::Folder };
+        let alone = locate::alone(self.never, route, no_lsp);
         self.parsing.cut = config::can_cut();
         if !self.parsing.cut {
             eprintln!("{NO_CUT}");
@@ -2389,7 +2385,13 @@ pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backen
     // With `never`, nothing of the user's dbt runs but its parse.
     let never = backend == modes::Backend::Never;
     let given = project_dir(command);
-    let standalone = never || (given.is_some() && locate::probe(command, None) == Probe::NoLsp);
+    // Without a project yet, `take_project` decides once one is named.
+    let standalone = match given {
+        Some(_) => {
+            locate::alone(never, locate::Route::Given, || locate::probe(command, None) == Probe::NoLsp).is_some()
+        }
+        None => never,
+    };
     let (server, absent) = match (given.is_some() && !standalone).then(|| spawn_server(command, &events, 0, None)) {
         Some(Ok(server)) => (Some(server), None),
         Some(Err(why)) => (None, Some(why)),
