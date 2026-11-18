@@ -37,7 +37,7 @@ fn source(package: &Node) -> Option<(&'static str, String)> {
 /// SERVER's words before `lsp` or in the environment the parse inherits,
 /// else the project's `packages-install-path`, else `dbt_packages`; from the
 /// root.  A `dbt_project.yml` that does not read is a refusal.
-fn install_path(root: &Path, server: &[String]) -> Result<PathBuf, String> {
+pub fn install_path(root: &Path, server: &[String]) -> Result<PathBuf, String> {
     let before = server.iter().take_while(|word| *word != "lsp");
     let assigned = before.filter_map(|word| word.strip_prefix("DBT_PACKAGES_INSTALL_PATH=")).last().map(str::to_owned);
     let variable = assigned.or_else(|| std::env::var("DBT_PACKAGES_INSTALL_PATH").ok()).filter(|path| !path.is_empty());

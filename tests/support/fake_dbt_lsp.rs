@@ -56,7 +56,8 @@
 //!     `compile_writes` under `--target-path` (`compiled/shop/R` by
 //!     default), with a manifest whose node of R in the package shop names
 //!     that file as its `compiled_path`, from the working directory as dbt
-//!     does when it can; `list`, values that a list prints,
+//!     does when it can, or always, through `..`, when `compiled_relative`
+//!     is true; `list`, values that a list prints,
 //!     one JSON line each; `run_log`, text that either prints first, as
 //!     dbt's log; `run_exit`, the status of either; `run_gate`, a file
 //!     either waits for first; `run_hang`, true when either never exits;
@@ -71,7 +72,9 @@
 //!   followed by `.runs`, and `{"ended": PID}` there as it exits; and each
 //!   server
 //!   process, a life of the fake, appends its pid to the name followed by
-//!   `.lives`, by which it knows its life.
+//!   `.lives`, by which it knows its life; and every process of the fake,
+//!   whatever it does, `{"argv0": ARGV0, "arguments": ARGUMENTS, "cwd":
+//!   DIR}` to the name followed by `.starts`, as it starts.
 
 use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
@@ -295,7 +298,7 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
         probe.is_some_and(|probe| std::fs::write(&probe, "").and_then(|()| std::fs::remove_file(&probe)).is_ok());
     if let Some(mut log) = log {
         let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces(), "wrote": wrote});
-        writeln!(log, "{line}").expect("write the log");
+        log.write_all(format!("{line}\n").as_bytes()).expect("write the log");
     }
     if let Some(log) = script["parse_log"].as_str() {
         print!("{}", std::fs::read_to_string(log).expect("read the parse's log"));
@@ -337,7 +340,7 @@ fn flag<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
 fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
     if let Some(log) = &mut log {
         let line = json!({"run": arguments, "pid": std::process::id(), "interfaces": interfaces()});
-        writeln!(log, "{line}").expect("write the log");
+        log.write_all(format!("{line}\n").as_bytes()).expect("write the log");
     }
     if let Some(gate) = script["run_gate"].as_str() {
         let end = Instant::now() + Duration::from_secs(30);
@@ -359,7 +362,15 @@ fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
         std::fs::create_dir_all(file.parent().unwrap()).expect("create the compiled file's directory");
         std::fs::write(&file, text).expect("write the compiled file");
         let cwd = std::env::current_dir().expect("the working directory");
-        let compiled_path = file.strip_prefix(&cwd).unwrap_or(&file);
+        let compiled_path = match script["compiled_relative"] == json!(true) {
+            true => {
+                // Up from the working directory to the first directory both share, then down.
+                let shared = cwd.components().zip(file.components()).take_while(|(one, other)| one == other).count();
+                let up = (shared..cwd.components().count()).map(|_| Path::new(".."));
+                up.chain(file.components().skip(shared).map(|part| Path::new(part.as_os_str()))).collect()
+            }
+            false => file.strip_prefix(&cwd).unwrap_or(&file).to_owned(),
+        };
         let node = json!({"original_file_path": relative, "package_name": "shop", "compiled_path": compiled_path});
         let manifest = json!({"nodes": {"model.shop.compiled": node}});
         std::fs::write(Path::new(target).join("manifest.json"), manifest.to_string()).expect("write the manifest");
@@ -369,7 +380,7 @@ fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
         println!("{node}");
     }
     if let Some(log) = &mut log {
-        writeln!(log, "{}", json!({"ended": std::process::id()})).expect("write the log");
+        log.write_all(format!("{}\n", json!({"ended": std::process::id()})).as_bytes()).expect("write the log");
     }
     std::process::exit(script["run_exit"].as_i64().unwrap_or(0) as i32);
 }
@@ -383,6 +394,14 @@ fn main() {
         .unwrap_or(json!({}));
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let verb = arguments.first().map_or("", String::as_str);
+    if let Ok(log) = std::env::var("FAKE_DBT_LSP_LOG") {
+        let cwd = std::env::current_dir().expect("the working directory");
+        let start = json!({"argv0": std::env::args().next(), "arguments": arguments, "cwd": cwd});
+        let mut starts =
+            OpenOptions::new().create(true).append(true).open(format!("{log}.starts")).expect("open the starts");
+        // One write, so that the lines of two processes never interleave.
+        starts.write_all(format!("{start}\n").as_bytes()).expect("log the start");
+    }
     let mut log = std::env::var("FAKE_DBT_LSP_LOG").ok().map(|path| {
         let path = match verb {
             "parse" => format!("{path}.parses"),
@@ -401,7 +420,7 @@ fn main() {
     let life = std::env::var("FAKE_DBT_LSP_LOG").map_or(1, |log| {
         let lives = format!("{log}.lives");
         let mut file = OpenOptions::new().create(true).append(true).open(&lives).expect("open the lives");
-        writeln!(file, "{}", std::process::id()).expect("count a life");
+        file.write_all(format!("{}\n", std::process::id()).as_bytes()).expect("count a life");
         std::fs::read_to_string(&lives).expect("read the lives").lines().count()
     });
     refuse_or_help(&script, &arguments, true);

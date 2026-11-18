@@ -374,10 +374,86 @@ alike unless said:
 
 ## Root
 
-The project directory is the server command's `--project-dir` (`--project-dir
-X` or `--project-dir=X`), so that the proxy reads the project the server
-runs on; else the client's first workspace folder or `rootUri`, when it holds
-a `dbt_project.yml`; else the working directory.
+The project directory, the root, comes by one of three routes, the first
+that applies:
+
+- **given**: the server command's `--project-dir` (`--project-dir X` or
+  `--project-dir=X`), so that the proxy reads the project the server runs
+  on.  Everything starts with the process, as before plan 036: the probe
+  of `lsp`, `dbt lsp`, the cut's probe, in the proxy's working directory,
+  with the command as written, and nothing more is said.  dbt-mode takes
+  this route, always.
+- **the folder**: else the client's first workspace folder, or `rootUri`,
+  when it holds a `dbt_project.yml`.  What the given route starts with
+  the process starts when the client's `initialize` comes, before it is
+  forwarded: the dbt (below), its probe, the cut's probe, `dbt lsp`.
+- **a document**: else the first document opened that lies in a project,
+  from its path as spelt: the nearest directory above it holding
+  `dbt_project.yml` that lies in no package of a directory above it
+  holding one (`locate::project_of`).  A directory lies in a package of
+  one above when it is under that one's install path, as dbt takes it, or
+  in one of its local packages, as spelt or links resolved, as a hub
+  package's own `integration_tests` project does; the walk then goes on
+  from the next one above.  A project whose `dbt_project.yml` does not
+  read has no packages.  No walk stops at git's
+  top level: a worktree in a checkout is no package of it.  dbt-mode's
+  walk (`dbt-project.el`) also skips `dbt_internal_packages` and reads the
+  install path from the project alone.  The proxy answers `initialize`
+  before any document comes (Claude Code opens the first one right after
+  `initialized`), so such a session is alone for its life: its answer is
+  the alone one, without the alone message, and `dbt lsp` never starts
+  (plan 037 may start it).  At that document, before it is tracked: the
+  root, the dbt, the cut's probe, the first scan, the watcher of runs,
+  the watcher of files when the client lets the proxy register it, and the
+  line; then the parse, as alone.
+
+The working directory no longer names the project.  Before a project, and
+for ever when no document lies in one, the proxy is quiet: no process (no
+probe, no `unshare`, no git, no dbt), no polling, no watcher, nothing on
+its standard error, no message but a refused setting's at `initialize`,
+and every request but `initialize` gets null, valid for each method the
+proxy announces and each one an agent was seen to send.
+
+On the folder's route and a document's, when the server command's first
+word is `dbt` (the default `dbt lsp` included), the dbt is the project's
+(`locate::dbt`): the first of `<project>/.venv/bin/dbt`,
+`<top>/.venv/bin/dbt`, `<main>/<project from top>/.venv/bin/dbt` and
+`<main>/.venv/bin/dbt`, without repeats, that is a file and answers `lsp
+--help`, in the project, as a dbt 2 does, with `lsp` (status 0) or without
+(dbt-oss's status 2 and "unrecognized subcommand 'lsp'"); `<top>` and
+`<main>` come from one `git rev-parse --show-toplevel --git-common-dir`
+in the project, without `GIT_DIR` or `GIT_WORK_TREE`, `<main>` the common
+directory's parent when that is named `.git`; the common directory, which
+git may give relative to where it ran, is read from the project as
+written, each `..` dropping the component before it, so that a `.git`
+reached through a link keeps its name; with no `--path-format`, which git
+before 2.31 prints back as a word.  A file that answers otherwise (dbt-core 1.x's "No such command
+'lsp'", one that cannot run, one past the deadline) is skipped and named.
+Else `dbt` stays, for `PATH`, probed as on the given route (on the
+folder's route only, since a document's starts no server).  Any other
+first word (a path, `uvx`, `dbt-2.0.9`) is the user's, kept.  Only `.venv`
+is looked at: no other environment, no `Scripts\dbt.exe`.
+
+The line: once, on the standard error and as one `window/logMessage`
+(type 3) once the client can take it, `dbt-lsp-plus: project <root>, dbt
+<path> (<where>)`, `<where>` one of "the project's .venv", "the
+repository's .venv", "the main worktree's project .venv", "the main
+worktree's .venv", "PATH" (named by the first `dbt` on it) and "the server
+command", then each place skipped and why, then why the proxy is alone,
+when it is: "the backend is never", "dbt lsp is not started for a project
+found from a file" or "it has no lsp".  It replaces the alone message of
+the given route; it is not an interface (plan 039's `doctor` will be).
+Claude Code shows it only in its debug log.
+
+On those two routes, dbt's processes run in the root: `dbt lsp`, the
+probes, the parse and the runs of the commands for clients, so that a
+`profiles.yml` beside the project is found as under lsp-mode, which starts
+the server there; a YAML error's file and a compile's path are read from
+there too.  The proxy's own working directory does not change, and what
+the server command names from it keeps naming it: a first word that is a
+relative path and a relative `--profiles-dir` are made absolute against
+it first (`config::anchored`); a relative `--packages-install-path` is
+the project's, for dbt as for the proxy.
 
 The URIs the proxy returns are built on the root, so the root keeps the
 spelling the user or the client gave it:
@@ -391,6 +467,83 @@ A document under the root as spelt keeps its path, links within the project
 included, since the scan walks them so.  A document reached through another
 spelling of its directory is mapped onto the root by that directory's
 resolved path.
+
+### What Claude Code does with a language server, observed on 2.1.317
+
+A logging language server in a plugin, and Claude Code driven by a local
+stand-in for the Messages API that plays a script of tool calls, in a
+scratch home and configuration, on Linux, from the command line: at a
+repository's root whose dbt project is in `dbt/`, in a linked worktree,
+in `dbt/models`, with no capability announced, an `Edit` first, and the
+proxy 0.1.5 in front of dbt 2.0.9.  What was read from the 2.1.317
+bundle's code rather than seen in a session says "(bundle)".
+
+- A server starts late: nothing starts with the session.  The first call
+  of the LSP tool on a file whose extension the plugin maps starts it, and
+  so does the first `Edit` of such a file; `Read` does not.  The LSP tool
+  is deferred: an agent loads it with ToolSearch first.
+- Its process runs in the session's directory (or a host's
+  `projectConfigRoot`, or `.lsp.json`'s `workspaceFolder`, when set
+  (bundle)); `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PROJECT_DIR}` are
+  expanded in `args`; its environment is Claude Code's, plus
+  `CLAUDE_PROJECT_DIR` (the session's directory), `CLAUDE_PLUGIN_ROOT` and
+  `CLAUDE_PLUGIN_DATA`.  The desktop app's was not observed.
+- `initialize` names one workspace folder, `rootUri` and `rootPath`, all
+  the session's directory: a repository's root, a worktree's root or
+  `dbt/models`, never the nested project.  `initializationOptions` is `{}`.
+  The client offers `didSave`, hover in markdown, definition links,
+  hierarchical document symbols, the call hierarchy and
+  `positionEncodings: ["utf-16"]`; `workspace.workspaceFolders` false,
+  `didChangeWatchedFiles` without dynamic registration; no rename, inlay
+  hints, code lens, code actions, completion, `executeCommand` or
+  `window.workDoneProgress`.
+- The first `didOpen` comes at once: `initialized`, the `didOpen` of the
+  file that started the server, then its request, within a millisecond of
+  the answer to `initialize`.  Each new file is opened before its request.
+  The first document can lie outside every dbt project: an `Edit` of a
+  repository's `ci.yml` opened it before any model.
+- Announced capabilities are not read: to a server that announced none,
+  it sent hover, `workspace/symbol`, `textDocument/implementation` and
+  `prepareCallHierarchy`.
+- What it drops: `window/showMessage` and `window/logMessage` leave no
+  trace; a line on the server's standard error goes to the debug log,
+  written only with `--debug` or `--debug-file`, as `[LSP SERVER
+  plugin:<plugin>:<server>] <line>`; `client/registerCapability` is
+  answered null and ignored (bundle); `didChangeWatchedFiles` never comes.
+- An `Edit` of a file not yet open sends `didOpen` with the new text and
+  no `didSave`; of an open file, `didChange` with the whole text, then
+  `didSave`.  Past 50 open files it closes the oldest (bundle).
+- References outside the session's directory, or under a path git
+  ignores, reach the agent; a null reads "No symbols found", "No
+  definition found".  A request waits 60 s by default (`requestTimeout`);
+  a crashed server is restarted up to three times (bundle).
+- `.lsp.json` (bundle): `command` (no space unless absolute), `args`,
+  `extensionToLanguage` (required), `transport`, `env`,
+  `initializationOptions`, `settings`, `workspaceFolder`,
+  `startupTimeout`, `shutdownTimeout`, `requestTimeout`, `restartOnCrash`,
+  `maxRestarts`, `diagnostics` (default true: diagnostics pushed into the
+  agent's context after its edits).  An extension maps to one server: a
+  second plugin claiming `.yml` is not used for it.  With `--plugin-dir`, a
+  directory with `.lsp.json` at its top is one plugin (observed).
+- The proxy 0.1.5 in front of dbt 2.0.9 offline, the session in the
+  fixture's folder: a hover on `ref('stg_orders')` answered dbt lsp's
+  parents and children, then, once the parse had run, the proxy's summary
+  above them; the definition, one reference, eight workspace symbols.
+  Claude Code answered dbt lsp's `window/workDoneProgress/create`,
+  `workspace/configuration` and refresh requests, and took 143 empty sets
+  of diagnostics.
+
+So a plugin cannot name the project, and when the client's folder holds
+none, the proxy answers `initialize` before it can know it.
+
+### dbt lsp under a parent `rootUri`, observed on 2.0.9
+
+Started in a repository's root, the fixture copied to `dbt/`, with
+`rootUri` the repository's root: with `--project-dir dbt` and without it,
+dbt lsp compiled `dbt/` on the `didOpen` of `dbt/models/marts/orders.sql`,
+answered the definition of `ref('stg_orders')` with its file and its hover
+with the parents and children.  `dbt lsp --help` exits 0 on 2.0.9;
+dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
 
 ## State
 
@@ -901,11 +1054,16 @@ So the proxy runs the user's own `dbt parse`.
   `package-lock.yml` (dbt1001, "Read-only file system") instead of
   rewriting the install path, as both builds were seen to.  The mount is
   recursive (`rbind,ro=recursive`) where the system has it, as a root
-  holding a mount point needs, else plain.  Else with
+  holding a mount point needs, else plain.  The shell then enters its
+  working directory again by its path: a working directory in the root
+  would still reach the writable directory under the mount, as a
+  relative write from it showed; one it cannot enter again, as a
+  directory removed, stops the run.  Else with
   dbt's flags and the guard on packages alone, which the proxy says once
   on its standard error.  A server command with no `lsp` word gets no
-  parse.  The working directory
-  and the environment are the proxy's.  So a launcher (`uvx dbt`) runs
+  parse.  The working directory is the root's on the folder's route and
+  a document's, the proxy's when given (see "Root"), and the environment
+  the proxy's.  So a launcher (`uvx dbt`) runs
   with no network too, and fails when its cache is cold: the docs ask for
   the dbt binary itself, which needs only the C and C++ runtimes.
 - The child: no input; both outputs in `parse.log` in the cache, never on
@@ -1065,7 +1223,9 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
 ## Standalone mode
 
 Before it spawns the server, the proxy runs the words of its command before
-`lsp`, then `lsp --help`, with `NO_COLOR=1`, killed past ten seconds.  Status
+`lsp`, then `lsp --help`, with `NO_COLOR=1`, killed past ten seconds
+(`locate::probe`): with the process when given its project, else once the
+client's folder names it (see "Root").  Status
 2 with "unrecognized subcommand 'lsp'" on the standard error, as dbt-oss
 2.0.11 answers, means the dbt has no `lsp`; anything else, `uvx dbt`'s own
 status 2 offline included, spawns the server as before.  A command with no
@@ -1094,7 +1254,7 @@ Alone, the proxy:
   level `error` or `warn`, placed by the last line of its message,
   `  --> PATH[:LINE:COLUMN]`, lines and columns from 1, columns in code
   points; the path in the root if it is there, else in dbt's working
-  directory, which is the proxy's, else in the one package that holds it,
+  directory (see "Root"), else in the one package that holds it,
   as dbt names a YAML loader's error from its working directory, with
   `..` from a sibling, resolved as written, and a package's file from its
   package; `dbt_project.yml` too, when the scan cannot read it; a range of no
@@ -1124,6 +1284,9 @@ fails with -32803.
 
 | Situation | Behaviour |
 |-----------|-----------|
+| No `--project-dir`, and neither the client's folder nor a document opened yet lies in a project | Null to every request but `initialize`, nothing run, nothing said (see "Root") |
+| A `.venv/bin/dbt` that cannot run or is not a dbt 2 | Skipped and named in the line; the next place, else `PATH` (see "Root") |
+| A repository whose `.venv/bin/dbt` is not to be trusted | Run, outside the cut, as soon as a file of its project opens, on the folder's route and a document's: its probe, then the parse or `dbt lsp`.  A server command with a path to dbt, or `--project-dir`, runs what it names |
 | The user's dbt has no `lsp` | Standalone mode, with no warning (see "Standalone mode") |
 | `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for, and fails every other request with -32803 |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but those to which the proxy adds a part, which get that part, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph |
@@ -1400,9 +1563,31 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     version 1, a file created then deleted, the project's name and model
     paths, an open `dbt_project.yml` renaming the project once saved, a
     package's file replaced with its size and time kept;
-  - the root: `--project-dir` first and as spelt, the client's folder or the
-    working directory without it, the client's spelling through a link, a
+  - the root: `--project-dir` first and as spelt, the client's folder
+    without it, the working directory naming nothing, the client's
+    spelling through a link, a
     link inside the project, a document opened through another spelling;
+  - the routes: without a project, null to every request, no other frame,
+    nothing run and nothing on the standard error, with stubs of `dbt`,
+    `unshare` and git alone on `PATH`; the client's folder starting its
+    `.venv`'s dbt at `initialize`, in the project, and alone with one
+    without `lsp`; a document's project, as Claude Code opens it after a
+    file outside every project, answered alone from the parse of its
+    `.venv`'s dbt, which runs in the project, with one line and no server;
+    a given `--project-dir` running `dbt` from `PATH` as written, the
+    project's `.venv` untouched, nothing said; the parse and a compile in
+    a document's project; the fake logs each process's `argv[0]`,
+    arguments and working directory for these;
+  - the walk up from a document over scratch layouts (nested, in
+    worktrees, packages installed, local, under a flagged install path,
+    beside the project, under a project that does not read, a package's
+    own project, an install through a link, reached by the link or by its
+    target, a project through a linked parent), and the
+    lookup of dbt in scratch repositories made with a scratch home and no
+    global git configuration, with stub dbts: the project's `.venv` before
+    the repository's, the main worktree's project's then its own from a
+    linked worktree, one that cannot run and dbt-core 1.x skipped and
+    named, no git, another first word kept;
   - listings: on the first `didOpen` only, after the change that prompts
     them, no loop, at most three retries, none while the client's is pending
     nor after `shutdown`, an empty `*` and failed or cancelled listings

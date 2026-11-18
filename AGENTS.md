@@ -51,6 +51,7 @@ src/modes.rs                  who answers each method: the user's settings and t
 src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
+src/locate.rs                 the project of a document, the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
@@ -59,6 +60,9 @@ tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone 
 tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
+tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
+tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
+tests/proxy/plugin.rs         the Claude Code plugin's files: no path in them
 tests/support/                the test client and fake-dbt-lsp
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
@@ -77,6 +81,8 @@ docs/explanation/design.md    the design, what dbt lsp was observed to do, what 
 docs/diagrams/                diagram sources, light and dark, in diagram-design's sanityinc-tomorrow profile
 docs/images/                  their PNG exports, by headless Chromium at twice the size
 docs/social-media-preview.png GitHub's preview, from the untracked docs/work/social-preview/
+.claude-plugin/               the marketplace of the repository, which names its one plugin
+plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as the server of .sql, .yml and .yaml
 ```
 
 ## Rules of the code
@@ -122,8 +128,16 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
     `Proxy::on_problems`: one handler per kind of message or event, so that
     `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
     `on_parsed` stay dispatches;
-  - `lacks_lsp`: the probe of the user's dbt, at the boundary, with tests
-    of its own;
+  - `config::anchored`: the server command's relative paths made the
+    proxy's directory's, apart from where dbt then runs, with tests of its
+    own;
+  - `Proxy::on_first_project`: the start of a project that a document
+    names, apart from the notification that brings it, so that
+    `on_notification` stays a sequence;
+  - `locate::repository`: the one run of git that finds a project's
+    repository, at the boundary, its program and environment given;
+    `locate::candidates`: the decision where a project's dbt may be, from
+    git's answers, with tests of its own;
   - `Proxy::on_command`, `Proxy::run_command` and `Proxy::on_ran`: a
     request of a command for clients, its run by dbt's CLI, and the run's
     answer, one handler each, so that `on_request` and `handle` stay
@@ -175,7 +189,9 @@ docs/social-media-preview.png GitHub's preview, from the untracked docs/work/soc
   - the sections of `tests/proxy/live.rs` (`document_features`,
     `navigation`, `last_run`, `lineage`, `watcher` and the others): one
     per observed behaviour, so that `in_front_of_the_real_dbt_lsp` stays
-    their sequence;
+    their sequence; `found_from_a_document` and `found_from_the_folder`,
+    one per route, so that
+    `the_project_and_its_dbt_found_without_project_dir` stays theirs;
   - `parse` in `tests/proxy/conformance.rs`: dbt's run, the corpus's one
     effect, apart from the comparisons, which decide;
   - `nodes_compared`, `calls_compared` and `entries_compared` in

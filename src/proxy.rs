@@ -5,6 +5,7 @@
 
 use crate::commands::{self, Via};
 use crate::graph::{self, Graph, ServerNode};
+use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
 use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
@@ -16,13 +17,12 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -169,6 +169,11 @@ type ReadFailures = fn(&Value, &Value) -> Option<Vec<runs::Failure>>;
 /// How often the files of the last run are looked at.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
 
+/// What the proxy says on its standard error where nothing can cut its
+/// runs of dbt off.
+const NO_CUT: &str = "dbt-lsp-plus: unshare -rnm cannot cut dbt parse off the network and the project here: \
+                      dbt's flags and the guard on packages alone keep it offline and the project as it is";
+
 /// What the proxy knows to start a server that died again.
 #[derive(Default)]
 struct Restart {
@@ -301,6 +306,10 @@ struct Parsing {
     failure: Option<String>,
     /// Whether a parse runs cut off the network and from writing the project.
     cut: bool,
+    /// Where dbt's processes run: the project, when the client's folder or
+    /// a document named it; none, the proxy's working directory, when the
+    /// server command did.
+    dir: Option<PathBuf>,
     cache: Option<PathBuf>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
@@ -318,8 +327,13 @@ struct Proxy<W: Write> {
     standalone: bool,
     /// Why there is no server, told to the client once it is initialized.
     absent: Option<String>,
+    /// The line that says which project and which dbt the proxy found,
+    /// told to the client once it can be.
+    line: Option<String>,
     /// The project directory: the server command's `--project-dir`, spelt
-    /// as the client spells it when the client names the same directory.
+    /// as the client spells it when the client names the same directory;
+    /// else the client's folder, when it holds a project; else the project
+    /// of the first document opened in one; none before.
     root: Option<PathBuf>,
     /// The root with its links resolved, onto which the client's paths map.
     canonical_root: Option<PathBuf>,
@@ -490,6 +504,7 @@ impl<W: Write> Proxy<W> {
             server,
             standalone: false,
             absent,
+            line: None,
             root: None,
             canonical_root: None,
             encoding: Encoding::Utf16,
@@ -664,26 +679,94 @@ impl<W: Write> Proxy<W> {
             &json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": capabilities, "serverInfo": info}}),
         );
         self.tell_settings();
-        // A dbt without `lsp` is no failure: said once, out of the user's way.
+        // Without a project yet, nothing is said: there may never be one.
+        if self.root.is_none() {
+            return;
+        }
+        // A dbt without `lsp` is no failure: said once, out of the user's way,
+        // by the line of the dbt found, when one was looked for.
         if self.standalone {
             let dbt = self.parsing.server.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>();
             let text = match self.never {
                 true => "dbt-lsp-plus: the backend is never: dbt-lsp-plus answers alone.".to_owned(),
                 false => format!("dbt-lsp-plus: {} has no lsp: dbt-lsp-plus answers alone.", dbt.join(" ")),
             };
-            let params = json!({"type": 3, "message": text});
-            return self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+            self.line.get_or_insert(text);
+            return self.say_found();
         }
         let why = self.absent.take().unwrap_or_else(|| "dbt lsp is not running".into());
         let text = format!("{why}: dbt-lsp-plus serves only its own features: symbols, lineage, folding, renames.");
         self.send_client(
             &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 2, "message": text}}),
         );
+        self.say_found();
+    }
+
+    /// Tells the client, once, which project and which dbt the proxy found,
+    /// as one log line.
+    fn say_found(&mut self) {
+        if let Some(text) = self.line.take() {
+            let params = json!({"type": 3, "message": text});
+            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+        }
+    }
+
+    /// Takes ROOT as the project, found from the client's folder, or from a
+    /// document when DOCUMENT, on which the proxy stays alone: dbt's
+    /// processes run there, the server command's relative paths are taken
+    /// from the proxy's directory, its `dbt` becomes the project's, the cut
+    /// is probed, the server started unless alone, and
+    /// the line that says so is written on the standard error and kept for
+    /// the client.
+    fn take_project(&mut self, root: PathBuf, document: bool) {
+        let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
+        // What the user wrote from the proxy's directory still names the same from the project.
+        let server = std::env::current_dir().map(|cwd| config::anchored(&self.parsing.server, &cwd));
+        let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.parsing.server.clone()), &git);
+        let no_lsp =
+            || found.lsp.map_or_else(|| locate::probe(&found.command, Some(&root)) == Probe::NoLsp, |lsp| !lsp);
+        // Neither with `never` nor on a document is the dbt probed for a server.
+        let alone = match (self.never, document) {
+            (true, _) => Some("the backend is never"),
+            (_, true) => Some("dbt lsp is not started for a project found from a file"),
+            _ => no_lsp().then_some("it has no lsp"),
+        };
+        self.parsing.cut = config::can_cut();
+        if !self.parsing.cut {
+            eprintln!("{NO_CUT}");
+        }
+        let skipped: String =
+            found.skipped.iter().map(|(path, why)| format!("; skipped {} ({why})", path.display())).collect();
+        let tail = alone.map_or_else(|| ".".to_owned(), |why| format!("; {why}: dbt-lsp-plus answers alone."));
+        let (root_shown, named, source) = (root.display(), &found.named, found.source);
+        let line = format!("dbt-lsp-plus: project {root_shown}, dbt {named} ({source}){skipped}{tail}");
+        eprintln!("{line}");
+        self.line = Some(line);
+        (self.parsing.server, self.parsing.dir, self.standalone) = (found.command, Some(root.clone()), alone.is_some());
+        if let (None, Some(events)) = (alone, self.parsing.events.clone()) {
+            match spawn_server(&self.parsing.server, &events, 0, Some(&root)) {
+                Ok(server) => self.server = Some(server),
+                Err(why) => self.absent = Some(why),
+            }
+        }
+        self.set_root(root);
+    }
+
+    /// The first scan of the project, read on a thread meanwhile, so that
+    /// the first request needs none.
+    fn scan_first(&mut self) {
+        if let Some(root) = self.root.clone() {
+            let (filled, filling) = mpsc::channel();
+            thread::spawn(move || drop(filled.send(cache::fill(&root))));
+            self.filling.replace(Some(filling));
+        }
     }
 
     /// Learns from the client's `initialize`: the outline's shape, and the
     /// root when the server command named none, or the client's spelling of
-    /// the one it named.
+    /// the one it named.  A project in the client's folder starts what the
+    /// server command's would have at the proxy's start; without one, the
+    /// proxy is alone for good, and quiet until a document names a project.
     fn on_initialize(&mut self, params: &Value) {
         let options = params.get("initializationOptions").unwrap_or(&Value::Null);
         (self.settings, self.refused) = self.settings.over(options);
@@ -704,21 +787,12 @@ impl<W: Write> Proxy<W> {
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         let same = |folder: &Path| fs::canonicalize(folder).ok() == self.canonical_root;
         match (folder, &self.root) {
-            (Some(folder), None) => self.set_root(folder),
+            (Some(folder), None) => self.take_project(folder, false),
             (Some(folder), Some(_)) if same(&folder) => self.set_root(folder),
-            (None, None) => {
-                if let Ok(dir) = std::env::current_dir() {
-                    self.set_root(dir);
-                }
-            }
+            (None, None) => self.standalone = true,
             _ => {}
         }
-        // The first scan, read meanwhile, so that the first request needs none.
-        if let Some(root) = self.root.clone() {
-            let (filled, filling) = mpsc::channel();
-            thread::spawn(move || drop(filled.send(cache::fill(&root))));
-            self.filling.replace(Some(filling));
-        }
+        self.scan_first();
     }
 
     /// The path of a `file:` URI, mapped onto the root when it reaches the
@@ -884,6 +958,12 @@ impl<W: Write> Proxy<W> {
     /// in its mode; with nothing, where the mode says so, and without a
     /// server for a definition and `shutdown`; else by forwarding it.
     fn route(&self, method: &str, params: &Value) -> Route {
+        // Before a project, null to all but `initialize`: a valid result of
+        // every method the proxy announces, and of each an agent was seen to
+        // send.
+        if self.root.is_none() && method != "initialize" {
+            return Route::Answer(Value::Null);
+        }
         if let Some(owned) = self.owned.get(method) {
             return Route::Here(owned);
         }
@@ -1113,7 +1193,8 @@ impl<W: Write> Proxy<W> {
         let Some(events) = self.parsing.events.clone() else { return };
         self.parsing.fresh = true;
         let report = Box::new(move |outcome| drop(events.send(Event::Parsed(outcome))));
-        self.parsing.running = Some(config::start(command, cache, config::PARSE_DEADLINE, report));
+        let dir = self.parsing.dir.clone();
+        self.parsing.running = Some(config::start(command, dir, cache, config::PARSE_DEADLINE, report));
     }
 
     /// This process's cache of ROOT, under the user's, made at its first
@@ -1166,7 +1247,7 @@ impl<W: Write> Proxy<W> {
         let root = self.root.clone().unwrap_or_default();
         let job = match command {
             commands::COMPILE => {
-                let cwd = std::env::current_dir().unwrap_or_default();
+                let cwd = self.dbt_dir().unwrap_or_default();
                 commands::compile_job(
                     self.local_path(argument.as_str()).as_deref(),
                     &root,
@@ -1201,7 +1282,8 @@ impl<W: Write> Proxy<W> {
             return;
         };
         let report = Box::new(move |result| drop(events.send(Event::Ran(id, result))));
-        self.run = Some(commands::start(job, line, dir, config::PARSE_DEADLINE, report));
+        let cwd = self.parsing.dir.clone();
+        self.run = Some(commands::start(job, line, cwd, dir, config::PARSE_DEADLINE, report));
     }
 
     /// A run's RESULT, the answer to the client's request ID; then the next
@@ -1268,9 +1350,9 @@ impl<W: Write> Proxy<W> {
         // The packages, while the project's configuration still reads.
         let packages: Vec<PathBuf> =
             self.project().map_or_else(Vec::new, |project| project.packages.values().cloned().collect());
-        // dbt names a YAML file's error from its working directory, the
-        // proxy's, and a package's file from its package.
-        let cwd = std::env::current_dir().ok();
+        // dbt names a YAML file's error from its working directory, and a
+        // package's file from its package.
+        let cwd = self.dbt_dir();
         let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
         for problem in problems {
             let path = problem.place.as_ref().and_then(|place| {
@@ -1308,6 +1390,12 @@ impl<W: Write> Proxy<W> {
     fn unsaved(&self, path: &Path) -> bool {
         let lines = |text: &str| text.replace("\r\n", "\n");
         self.documents.get(path).is_some_and(|open| text::read(path).is_none_or(|file| lines(&file) != lines(open)))
+    }
+
+    /// The working directory of dbt's processes: the project's when the
+    /// client's folder or a document named it, else the proxy's.
+    fn dbt_dir(&self) -> Option<PathBuf> {
+        self.parsing.dir.clone().or_else(|| std::env::current_dir().ok())
     }
 
     /// Asks a client that can refresh its inlay hints to do so, since they
@@ -1486,10 +1574,13 @@ impl<W: Write> Proxy<W> {
 
     /// A notification of the client's, METHOD with PARAMS, BODY as it came:
     /// kept and forwarded; when the graph may have changed, a listing, and,
-    /// alone, a parse, which nothing else would start.  Alone, `initialized`
-    /// registers the watcher that dbt lsp would, of every file, for a client
-    /// that lets it: an edit outside the editor changes the graph too.
+    /// alone, a parse, which nothing else would start.  Alone with a project,
+    /// `initialized` registers the watcher that dbt lsp would.  Before a
+    /// project, the first document opened in one names it.
     fn on_notification(&mut self, method: &str, params: &Value, body: &[u8]) {
+        if method == "textDocument/didOpen" && self.root.is_none() && self.initialized && !self.shutdown {
+            self.on_first_project(params);
+        }
         self.track(method, params);
         // The modes are fixed with the flag that the client read at `initialize`.
         let setting = params.pointer("/settings/dbtLspPlus").is_some();
@@ -1503,12 +1594,12 @@ impl<W: Write> Proxy<W> {
         }
         // The server gets the change before the listing it prompts.
         self.send_server(body);
-        if method == "initialized" && self.standalone && self.watches {
-            let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
-                                 "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
-            self.ask_client("client/registerCapability", Some(json!({"registrations": [watcher]})));
+        if method == "initialized" && self.standalone && self.root.is_some() {
+            self.register_watcher();
         }
-        let first_open = method == "textDocument/didOpen" && !std::mem::replace(&mut self.opened, true);
+        // The first document opened in the project.
+        let first_open =
+            method == "textDocument/didOpen" && self.root.is_some() && !std::mem::replace(&mut self.opened, true);
         // dbt lsp's output, as spelt and as resolved: a link out of the project included.
         let output = || {
             let spelt = self.root.iter().flat_map(|root| OUTPUT.map(|dir| root.join(dir)));
@@ -1520,6 +1611,30 @@ impl<W: Write> Proxy<W> {
             if self.standalone {
                 self.want_index();
             }
+        }
+    }
+
+    /// The project of the document that PARAMS opens, when it lies in one,
+    /// before the document is tracked: taken, alone, with the first scan,
+    /// the watcher of runs and the watcher of files that `initialize` and
+    /// `initialized` start with a project; then the line that says so.
+    fn on_first_project(&mut self, params: &Value) {
+        let path = uri_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
+        let Some(root) = path.and_then(|path| locate::project_of(&path, &self.parsing.server)) else { return };
+        self.take_project(root, true);
+        self.scan_first();
+        self.watch_runs();
+        self.register_watcher();
+        self.say_found();
+    }
+
+    /// Registers, alone, the watcher that dbt lsp would, of every file, for a
+    /// client that lets it: an edit outside the editor changes the graph too.
+    fn register_watcher(&mut self) {
+        if self.watches {
+            let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
+                                 "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
+            self.ask_client("client/registerCapability", Some(json!({"registrations": [watcher]})));
         }
     }
 
@@ -1711,6 +1826,7 @@ impl<W: Write> Proxy<W> {
             }
             self.send_client(&message);
             self.tell_settings();
+            self.say_found();
             self.shadow_line(&shadow::start(&message["result"]["serverInfo"], &self.table));
             return self.watch_runs();
         }
@@ -2006,7 +2122,7 @@ impl<W: Write> Proxy<W> {
         }
         self.restart.past.push(Instant::now());
         self.restart.spawned += 1;
-        match spawn_server(&self.parsing.server, &events, self.restart.spawned) {
+        match spawn_server(&self.parsing.server, &events, self.restart.spawned, self.parsing.dir.as_deref()) {
             Ok(mut server) => {
                 self.next_id += 1;
                 let id = format!("{OWN_ID}{}", self.next_id);
@@ -2160,16 +2276,20 @@ fn spawn_reader(
     });
 }
 
-/// The server COMMAND started as process GENERATION, its output read into
-/// EVENTS; else why not.
-fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> Result<Server, String> {
-    let spawned = Command::new(&command[0])
-        .args(&command[1..])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn();
-    let mut child = spawned.map_err(|error| {
+/// The server COMMAND started as process GENERATION, in DIR when given, its
+/// output read into EVENTS; else why not.
+fn spawn_server(
+    command: &[String],
+    events: &Sender<Event>,
+    generation: u64,
+    dir: Option<&Path>,
+) -> Result<Server, String> {
+    let mut spawned = Command::new(&command[0]);
+    spawned.args(&command[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    if let Some(dir) = dir {
+        spawned.current_dir(dir);
+    }
+    let mut child = spawned.spawn().map_err(|error| {
         eprintln!("dbt-lsp-plus: cannot start {}: {error}", command.join(" "));
         format!("dbt lsp could not start ({error})")
     })?;
@@ -2184,55 +2304,29 @@ fn spawn_server(command: &[String], events: &Sender<Event>, generation: u64) -> 
     Ok(Server { child, stdin, generation })
 }
 
-/// Whether the dbt of COMMAND, a server command, has no `lsp`, as dbt-oss
-/// 2.0.11: the words before its `lsp` word, then `lsp --help`, exit 2 with
-/// "unrecognized subcommand 'lsp'" on the standard error.  A launcher's own
-/// failure (`uvx dbt` offline exits 2 too), a probe past its deadline, any
-/// other answer, or a command with no word before `lsp` is not.
-fn lacks_lsp(command: &[String]) -> bool {
-    let Some(at) = command.iter().position(|word| word == "lsp").filter(|at| *at > 0) else { return false };
-    let mut probe = Command::new(&command[0]);
-    probe.args(&command[1..at]).args(["lsp", "--help"]).env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
-    let Ok(mut child) = probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() else {
-        return false;
-    };
-    let stderr = child.stderr.take().expect("piped stderr");
-    let (sender, read) = mpsc::channel();
-    // Read apart, so that neither a full pipe nor a launcher's child holding
-    // it open holds the proxy.
-    thread::spawn(move || {
-        let mut text = Vec::new();
-        let _ = stderr.take(1 << 16).read_to_end(&mut text);
-        let _ = sender.send(text);
-    });
-    let status = config::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false));
-    let stderr = read.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
-    status.and_then(|status| status.code()) == Some(2)
-        && String::from_utf8_lossy(&stderr).contains("unrecognized subcommand 'lsp'")
-}
-
 /// Runs the proxy on the standard input and output, in front of COMMAND,
-/// alone when its dbt has no `lsp`.
+/// alone when its dbt has no `lsp`.  Given COMMAND's `--project-dir`, the
+/// probe, the server and the cut start now, in the proxy's working
+/// directory; else nothing runs before the client's folder or a document
+/// names the project.
 pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backend) -> ExitCode {
     let (events, inbox) = mpsc::channel();
     // With `never`, nothing of the user's dbt runs but its parse.
     let never = backend == modes::Backend::Never;
-    let standalone = never || lacks_lsp(command);
-    let (server, absent) = match (!standalone).then(|| spawn_server(command, &events, 0)) {
+    let given = project_dir(command);
+    let standalone = never || (given.is_some() && locate::probe(command, None) == Probe::NoLsp);
+    let (server, absent) = match (given.is_some() && !standalone).then(|| spawn_server(command, &events, 0, None)) {
         Some(Ok(server)) => (Some(server), None),
         Some(Err(why)) => (None, Some(why)),
         None => (None, None),
     };
-    let cut = config::can_cut();
-    if !cut {
-        eprintln!(
-            "dbt-lsp-plus: unshare -rnm cannot cut dbt parse off the network and the project here: \
-             dbt's flags and the guard on packages alone keep it offline and the project as it is"
-        );
+    let cut = given.is_some() && config::can_cut();
+    if given.is_some() && !cut {
+        eprintln!("{NO_CUT}");
     }
     let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), cut, ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, project_dir(command));
+    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, given);
     proxy.standalone = standalone;
     (proxy.never, proxy.settings) = (never, settings);
     proxy.parsing = parsing;
@@ -2328,28 +2422,6 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
-    }
-
-    #[test]
-    fn only_a_refusal_of_lsp_by_dbt_itself_means_no_lsp() {
-        // `sh -c SCRIPT lsp --help` runs SCRIPT, as a dbt answering its probe.
-        let dbt = |script: &str| lacks_lsp(&args(&["sh", "-c", script, "lsp", "--project-dir", "/p"]));
-        let refused = "echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2";
-        assert!(dbt(refused), "dbt-oss 2.0.11");
-        assert!(!dbt("echo 'Start the dbt language server'; exit 0"), "2.0.9 prints its help");
-        assert!(!dbt("echo 'error: Failed to fetch the index' >&2; exit 2"), "a launcher offline");
-        assert!(!dbt("echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 1"), "another status");
-        // The probe takes only the words before `lsp`, and adds `--help`.
-        assert!(dbt(
-            "[ \"$0 $1\" = 'lsp --help' ] && [ $# -eq 1 ] && { echo \"unrecognized subcommand 'lsp'\" >&2; exit 2; }"
-        ));
-        // dbt-oss 2.0.11 colours the word under CLICOLOR_FORCE, unless NO_COLOR is set.
-        let coloured =
-            "[ -n \"$NO_COLOR\" ] || { printf \"unrecognized subcommand '\\033[33mlsp\\033[0m'\" >&2; exit 2; }";
-        assert!(dbt(&format!("{coloured}; echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2")));
-        assert!(!lacks_lsp(&args(&["/nonexistent/dbt", "lsp"])), "a dbt that cannot start");
-        assert!(!lacks_lsp(&args(&["sh", "-c", "exit 2"])), "a command with no lsp word");
-        assert!(!lacks_lsp(&args(&["lsp", "--project-dir", "/p"])), "no word before lsp");
     }
 
     #[test]

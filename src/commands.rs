@@ -222,14 +222,15 @@ impl Drop for Answer {
     }
 }
 
-/// Runs COMMAND, JOB's dbt command writing under DIR, in a thread of its
-/// own, with no input and both outputs in `DIR/run.log`, DIR's manifest
+/// Runs COMMAND, JOB's dbt command writing under DIR, in CWD when given, in
+/// a thread of its own, with no input and both outputs in `DIR/run.log`, DIR's manifest
 /// removed first so that only this run's counts, the compiled files of
 /// earlier runs kept; hands REPORT the answer.  dbt is killed past
 /// DEADLINE, or when the run is stopped.
 pub fn start(
     job: Job,
     command: Vec<String>,
+    cwd: Option<PathBuf>,
     dir: PathBuf,
     deadline: Duration,
     report: Box<dyn FnOnce(Value) + Send>,
@@ -239,7 +240,8 @@ pub fn start(
         let _ = fs::remove_file(dir.join("target/manifest.json"));
         let _ = fs::create_dir_all(&dir);
         let log = dir.join("run.log");
-        let status = config::spawn_logged(&command, &log).map(|child| config::finish(child, deadline, stopped));
+        let status =
+            config::spawn_logged(&command, cwd.as_deref(), &log).map(|child| config::finish(child, deadline, stopped));
         let status = status.map_err(|error| format!("cannot run {}: {error}", command[0]));
         let manifest = fs::read_to_string(dir.join("target/manifest.json")).ok();
         let manifest = manifest.and_then(|text| serde_json::from_str(&text).ok());
@@ -413,7 +415,7 @@ mod tests {
         let (sender, answers) = mpsc::channel();
         let job = Job { command: COMPILE, words: Vec::new(), read: Box::new(|_| panic!("a reader's bug")) };
         let report = Box::new(move |answer| drop(sender.send(answer)));
-        let running = start(job, ["true".to_owned()].into(), dir.join("run"), Duration::from_secs(10), report);
+        let running = start(job, ["true".to_owned()].into(), None, dir.join("run"), Duration::from_secs(10), report);
         let answer = answers.recv_timeout(Duration::from_secs(10)).expect("an answer");
         assert_eq!(answer, failure(COMPILE, "the run ended without an answer"));
         running.stop();
@@ -426,7 +428,7 @@ mod tests {
         let (sender, answers) = mpsc::channel();
         let command = ["sh", "-c", "sleep 30"].map(str::to_owned).to_vec();
         let report = Box::new(move |answer| drop(sender.send(answer)));
-        let running = start(nodes_job("x"), command, dir.join("run"), Duration::from_millis(100), report);
+        let running = start(nodes_job("x"), command, None, dir.join("run"), Duration::from_millis(100), report);
         let answer = answers.recv_timeout(Duration::from_secs(10)).expect("an answer within the deadline");
         assert!(answer["error"].as_str().unwrap().contains("deadline"), "{answer}");
         running.stop();

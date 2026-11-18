@@ -34,12 +34,17 @@ dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 ```
 
 The project is the `--project-dir` of the server command, else the
-client's root folder, else the current directory; [the
+client's root folder when it holds `dbt_project.yml`, else the project of
+the first file opened in one; the current directory names none.  Without
+`--project-dir`, the bare `dbt` is the project's `.venv`'s, the
+repository's or the main worktree's when one answers as dbt 2, else the
+one on `PATH`, and dbt runs in the project; [the
 configuration](../reference/features.md#configuration) gives every option.
 Alone, with dbt-oss, the proxy's `dbt parse` keeps `--profiles-dir`,
 `--profile`, `--target`, `--vars` and `--packages-install-path` from the
-server command: without `--profiles-dir`, dbt looks for `profiles.yml` in
-the proxy's working directory, then in `~/.dbt`, not in the project.
+server command: with `--project-dir` and without `--profiles-dir`, dbt
+looks for `profiles.yml` in the proxy's working directory, then in
+`~/.dbt`, not in the project.
 
 ## Emacs with Eglot
 

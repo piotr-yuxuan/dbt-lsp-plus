@@ -43,6 +43,22 @@ unchanged, byte for byte.  [Your first
 session](docs/tutorials/first-session.md) walks through it on the project
 of the tests, from Emacs.
 
+Without `--project-dir`, the project is the client's folder when it holds
+`dbt_project.yml`, else the one of the first file opened in a project, a
+nested `dbt/` or a worktree; and `dbt` is the project's `.venv`'s, the
+repository's or the main worktree's, else the one on `PATH`.  Outside a
+dbt project it stays quiet.
+
+For Claude Code, the repository is a plugin marketplace whose plugin
+starts `dbt-lsp-plus` from `PATH` for `.sql`, `.yml` and `.yaml` files:
+
+```
+claude plugin marketplace add /path/to/dbt-lsp-plus
+claude plugin install dbt-lsp-plus@dbt-lsp-plus
+```
+
+[Use it with an agent](docs/how-to/use-with-an-agent.md) says more.
+
 ## Documentation
 
 - Tutorial: [Your first session](docs/tutorials/first-session.md)

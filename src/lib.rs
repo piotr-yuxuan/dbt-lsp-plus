@@ -7,6 +7,7 @@ pub mod config;
 pub mod document;
 pub mod features;
 pub mod graph;
+pub mod locate;
 pub mod modes;
 pub mod navigation;
 pub mod packages;

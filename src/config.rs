@@ -39,23 +39,31 @@ const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "-
 /// that no network reaches, where that directory is mounted read-only, so
 /// that dbt's install of packages fails there rather than rewrite it.
 /// Recursive first, as a directory holding a mount point needs, where the
-/// system has it.
+/// system has it.  The working directory is then entered again, through
+/// the mount: one in that directory would still reach what lies under it;
+/// one that cannot be entered again stops the run.
 const CUT: [&str; 5] = [
     "unshare",
     "-rnm",
     "sh",
     "-c",
-    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && exec "$@""#,
+    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && here=$(pwd -P) && cd -- "$here" && exec "$@""#,
 ];
 
 /// The words of the proxy's `dbt parse`, as `dbt_command` takes them.
 pub const PARSE: [&str; 3] = ["parse", "--log-format", "json"];
 
-/// Starts COMMAND with no input and both its outputs in the file at LOG.
-pub fn spawn_logged(command: &[String], log: &Path) -> std::io::Result<Child> {
+/// Starts COMMAND in DIR, when given, with no input and both its outputs in
+/// the file at LOG.
+pub fn spawn_logged(command: &[String], dir: Option<&Path>, log: &Path) -> std::io::Result<Child> {
     let out = File::create(log)?;
     let err = out.try_clone()?;
-    Command::new(&command[0]).args(&command[1..]).stdin(Stdio::null()).stdout(out).stderr(err).spawn()
+    let mut child = Command::new(&command[0]);
+    child.args(&command[1..]).stdin(Stdio::null()).stdout(out).stderr(err);
+    if let Some(dir) = dir {
+        child.current_dir(dir);
+    }
+    child.spawn()
 }
 
 /// The dbt command WORDS, as `PARSE`, that matches
@@ -85,6 +93,25 @@ pub fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, word
     let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
     command.extend(quiet.map(str::to_owned));
     Some(command)
+}
+
+/// SERVER, a server command, with what it names from the directory DIR,
+/// the proxy's, made absolute: a first word that is a path, as
+/// `.venv/bin/dbt`, and `--profiles-dir`'s value, in either form, which
+/// dbt reads from its working directory; so that they name the same once
+/// dbt runs in the project.  `--packages-install-path` is the project's
+/// already.
+pub fn anchored(server: &[String], dir: &Path) -> Vec<String> {
+    let absolute = |value: &str| dir.join(value).to_string_lossy().into_owned();
+    let anchored = |(at, word): (usize, &String)| {
+        let valued = at > 0 && server[at - 1] == "--profiles-dir";
+        match word.strip_prefix("--profiles-dir=") {
+            Some(value) => format!("--profiles-dir={}", absolute(value)),
+            None if valued || (at == 0 && word.contains('/')) => absolute(word),
+            None => word.clone(),
+        }
+    };
+    server.iter().enumerate().map(anchored).collect()
 }
 
 /// Whether this system can run a command under the cut: Linux, where an
@@ -399,17 +426,24 @@ impl Drop for Report {
     }
 }
 
-/// Runs COMMAND, a `dbt parse` writing under CACHE, in a thread of its own,
-/// with no input and its output in `CACHE/parse.log`, and hands REPORT the
-/// outcome.  dbt is killed past DEADLINE, or when the parse is stopped.
-pub fn start(command: Vec<String>, cache: PathBuf, deadline: Duration, report: ReportFn) -> Running {
+/// Runs COMMAND, a `dbt parse` writing under CACHE, in DIR when given, in a
+/// thread of its own, with no input and its output in `CACHE/parse.log`,
+/// and hands REPORT the outcome.  dbt is killed past DEADLINE, or when the
+/// parse is stopped.
+pub fn start(
+    command: Vec<String>,
+    dir: Option<PathBuf>,
+    cache: PathBuf,
+    deadline: Duration,
+    report: ReportFn,
+) -> Running {
     Running::spawn(move |stopped| {
         let mut report = Report(Some(report));
         let (log, manifest) = (cache.join("parse.log"), cache.join("target/manifest.json"));
         let _ = fs::create_dir_all(&cache);
         // Only a manifest this run writes counts.
         let _ = fs::remove_file(&manifest);
-        let status = spawn_logged(&command, &log).map(|child| finish(child, deadline, stopped));
+        let status = spawn_logged(&command, dir.as_deref(), &log).map(|child| finish(child, deadline, stopped));
         let text = fs::read_to_string(&log).unwrap_or_default();
         // dbt's first error, else the first line that is none of its events,
         // as a launcher's own.
@@ -506,6 +540,65 @@ mod tests {
             dbt_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), true, &parse),
             None
         );
+    }
+
+    #[test]
+    fn under_the_cut_its_directory_is_read_only_from_within_too() {
+        let cut = can_cut();
+        assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
+        if !cut {
+            return;
+        }
+        let dir = scratch_project("cut-within", &[("x", "")]);
+        let write = r#"touch relative 2>/dev/null; touch "$(pwd)/absolute" 2>/dev/null; exit 0"#;
+        let mut command = Command::new(CUT[0]);
+        command.args(&CUT[1..]).arg(&dir).args(["sh", "-c", write]).current_dir(&dir);
+        assert!(command.status().unwrap().success());
+        assert!(!dir.join("relative").exists() && !dir.join("absolute").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn under_the_cut_a_working_directory_that_cannot_be_entered_again_stops_the_run() {
+        if !can_cut() {
+            return;
+        }
+        let dir = scratch_project("cut-gone", &[("guarded/x", ""), ("outside/x", "")]);
+        let marker = dir.join("outside/ran");
+        // The run's working directory removed before the cut starts.
+        let gone = "mkdir gone && cd gone && rmdir ../gone && exec \"$@\"";
+        let mut command = Command::new("sh");
+        command.args(["-c", gone, "sh"]).args(CUT).arg(dir.join("guarded")).args(["sh", "-c", "touch \"$0\""]);
+        command.arg(&marker).current_dir(dir.join("outside")).stderr(Stdio::null());
+        assert!(!command.status().unwrap().success());
+        assert!(!marker.exists(), "the command ran");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_relative_program_and_profiles_dir_are_taken_from_the_proxy_s_directory() {
+        let dir = Path::new("/work/repo");
+        let cases = [
+            (
+                vec![".venv/bin/dbt", "lsp", "--profiles-dir", "config"],
+                vec!["/work/repo/.venv/bin/dbt", "lsp", "--profiles-dir", "/work/repo/config"],
+            ),
+            (
+                vec!["dbt", "lsp", "--profiles-dir=config", "--target", "dev"],
+                vec!["dbt", "lsp", "--profiles-dir=/work/repo/config", "--target", "dev"],
+            ),
+            (
+                vec!["/opt/dbt", "lsp", "--profiles-dir", "/etc/dbt"],
+                vec!["/opt/dbt", "lsp", "--profiles-dir", "/etc/dbt"],
+            ),
+            (
+                vec!["uvx", "dbt", "lsp", "--packages-install-path", "vendor"],
+                vec!["uvx", "dbt", "lsp", "--packages-install-path", "vendor"],
+            ),
+        ];
+        for (server, expected) in cases {
+            assert_eq!(anchored(&words(&server), dir), words(&expected), "{server:?}");
+        }
     }
 
     #[test]
@@ -693,24 +786,27 @@ mod tests {
         let (sender, outcomes) = mpsc::channel();
         let report =
             |sender: mpsc::Sender<Outcome>| -> ReportFn { Box::new(move |outcome| drop(sender.send(outcome))) };
-        let running = start(words(&["sh", "-c", &write]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        let running =
+            start(words(&["sh", "-c", &write]), None, dir.clone(), Duration::from_secs(10), report(sender.clone()));
         let written = outcomes.recv().unwrap();
         running.stop();
         assert!(written.failure.is_none() && written.index.is_some(), "{written:?}");
         let started = Instant::now();
-        let killed = start(words(&["sleep", "30"]), dir.clone(), Duration::from_millis(200), report(sender.clone()));
+        let killed =
+            start(words(&["sleep", "30"]), None, dir.clone(), Duration::from_millis(200), report(sender.clone()));
         let late = outcomes.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(late.index.is_none(), "a manifest left by an earlier run does not count");
         assert!(late.failure.unwrap().contains("deadline") && started.elapsed() < Duration::from_secs(3));
         killed.stop();
-        start(words(&["sleep", "30"]), dir.clone(), Duration::from_secs(60), report(sender.clone())).stop();
+        start(words(&["sleep", "30"]), None, dir.clone(), Duration::from_secs(60), report(sender.clone())).stop();
         assert!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap().contains("stopped"));
         // dbt's version comes first; its first error says why.
         let json = r#"echo '{"info": {"code": "A001", "level": "info", "msg": "Running with dbt=2.0.9"}}'
             echo '{"info": {"code": "1501", "level": "error", "msg": "[error] [JinjaError (dbt1501)]: Failed"}}'
             echo '{"info": {"code": "1048", "level": "error", "msg": "[error] [DependencyNotFound (dbt1048)]"}}'
             exit 1"#;
-        let failing = start(words(&["sh", "-c", json]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        let failing =
+            start(words(&["sh", "-c", json]), None, dir.clone(), Duration::from_secs(10), report(sender.clone()));
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(
@@ -719,7 +815,7 @@ mod tests {
         );
         // A launcher fails before dbt says anything.
         let launcher = "echo; echo 'error: Failed to fetch the index' >&2; exit 2";
-        let failing = start(words(&["sh", "-c", launcher]), dir.clone(), Duration::from_secs(10), report(sender));
+        let failing = start(words(&["sh", "-c", launcher]), None, dir.clone(), Duration::from_secs(10), report(sender));
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(failure.starts_with("error: Failed to fetch the index (see "), "{failure}");
@@ -737,17 +833,18 @@ mod tests {
         let ended =
             format!(r#"{error}; echo '{{"info": {{"code": "Q039", "level": "info", "msg": "Finished"}}}}'; exit 1"#);
         let complete =
-            start(words(&["sh", "-c", &ended]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+            start(words(&["sh", "-c", &ended]), None, dir.clone(), Duration::from_secs(10), report(sender.clone()));
         let found = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems;
         complete.stop();
         assert_eq!(found.map(|problems| problems[0].code.clone()), Some("1048".to_owned()));
         // Dead, or killed, before its end, it says nothing of what it did not reach.
         let died = format!("{error}; exit 101");
-        let dead = start(words(&["sh", "-c", &died]), dir.clone(), Duration::from_secs(10), report(sender.clone()));
+        let dead =
+            start(words(&["sh", "-c", &died]), None, dir.clone(), Duration::from_secs(10), report(sender.clone()));
         assert_eq!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems, None);
         dead.stop();
         let cut = format!("{error}; exec sleep 30");
-        let killed = start(words(&["sh", "-c", &cut]), dir.clone(), Duration::from_millis(300), report(sender));
+        let killed = start(words(&["sh", "-c", &cut]), None, dir.clone(), Duration::from_millis(300), report(sender));
         assert_eq!(outcomes.recv_timeout(Duration::from_secs(5)).unwrap().problems, None);
         killed.stop();
         fs::remove_dir_all(&dir).unwrap();
