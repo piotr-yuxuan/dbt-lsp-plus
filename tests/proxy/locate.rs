@@ -43,11 +43,19 @@ fn a_document_s_project_is_the_nearest_one_above_that_is_no_package() {
             // A tab after a key: dbt may read it, the proxy cannot.
             ("unread/dbt_project.yml", "name:\tp\n"),
             ("unread/dbt_packages/q/dbt_project.yml", project),
+            ("hub/dbt_project.yml", project),
+            ("hub/dbt_packages/utils/dbt_project.yml", project),
+            ("hub/dbt_packages/utils/integration_tests/dbt_project.yml", project),
+            ("linked/dbt_project.yml", project),
+            ("linked/vendor/p/dbt_project.yml", project),
         ],
     );
+    // `dbt deps` installs through a link; an editor may open the file by its target.
+    std::os::unix::fs::symlink("vendor", dir.join("linked/dbt_packages")).unwrap();
+    std::os::unix::fs::symlink("linked", dir.join("alias")).unwrap();
     let corpus = fixture().with_file_name("conformance");
     let (default, vendor) = (&["dbt", "lsp"][..], &["dbt", "lsp", "--packages-install-path", "vendor"][..]);
-    let cases: [(&str, PathBuf, &[&str], Option<PathBuf>); 11] = [
+    let cases: [(&str, PathBuf, &[&str], Option<PathBuf>); 15] = [
         ("nested", dir.join("nested/repo/dbt/models/a.sql"), default, Some(dir.join("nested/repo/dbt"))),
         (
             "in a worktree",
@@ -82,7 +90,26 @@ fn a_document_s_project_is_the_nearest_one_above_that_is_no_package() {
         ("under the server's install path", dir.join("install/vendor/p/m.sql"), vendor, Some(dir.join("install"))),
         ("outside the install path", dir.join("install/vendor/p/m.sql"), default, Some(dir.join("install/vendor/p"))),
         ("under no dbt_project.yml", dir.join("nowhere/notes/x.yml"), default, None),
-        ("a local package beside it", dir.join("side/beside/models/m.sql"), default, Some(dir.join("side/beside"))),
+        (
+            "beside the project naming it local, no sibling is consulted",
+            dir.join("side/beside/models/m.sql"),
+            default,
+            Some(dir.join("side/beside")),
+        ),
+        (
+            "a package's own project",
+            dir.join("hub/dbt_packages/utils/integration_tests/models/a.sql"),
+            default,
+            Some(dir.join("hub")),
+        ),
+        ("installed through a link", dir.join("linked/dbt_packages/p/m.sql"), default, Some(dir.join("linked"))),
+        ("opened by the link's target", dir.join("linked/vendor/p/m.sql"), default, Some(dir.join("linked"))),
+        (
+            "the project through a linked parent",
+            dir.join("alias/dbt_packages/p/m.sql"),
+            default,
+            Some(dir.join("alias")),
+        ),
         (
             "above it, a project that does not read",
             dir.join("unread/dbt_packages/q/m.sql"),

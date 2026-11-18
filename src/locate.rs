@@ -18,27 +18,30 @@ use std::thread;
 use std::time::Duration;
 
 /// The project of the document at PATH, as spelt: the nearest directory
-/// above it holding `dbt_project.yml` that is no package of the next one
-/// above; none outside every project.  A directory is a package of the next
-/// one above when it lies under that one's install path, as dbt takes it
-/// with the server command COMMAND, or is one of its local packages, links
-/// resolved; the walk then goes on from that one, unless its
-/// `dbt_project.yml` does not read.  No walk stops at git's top level.
+/// above it holding `dbt_project.yml` that lies in no package of a
+/// directory above it holding one; none outside every project.  A
+/// directory lies in a package of one above when it is under that one's
+/// install path, as dbt takes it with the server command COMMAND, or in
+/// one of its local packages, as spelt or links resolved, as a package's
+/// own `integration_tests` project does; the walk then goes on from the
+/// next one above.  A project whose `dbt_project.yml` does not read has no
+/// packages.  No walk stops at git's top level.
 pub fn project_of(path: &Path, command: &[String]) -> Option<PathBuf> {
     let resolved = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let within = |inner: &Path, dir: &Path| inner.starts_with(dir) || resolved(inner).starts_with(resolved(dir));
     let package_of = |inner: &Path, outer: &Path| {
         let Ok(install) = packages::install_path(outer, command) else { return false };
-        let under = inner.starts_with(&install) || resolved(inner).starts_with(resolved(&install));
-        under || packages::local_dirs(outer).iter().any(|local| resolved(local) == resolved(inner))
+        within(inner, &install) || packages::local_dirs(outer).iter().any(|local| within(inner, local))
     };
-    let mut found: Option<&Path> = None;
-    for dir in path.ancestors().filter(|dir| dir.join("dbt_project.yml").is_file()) {
-        match found {
-            Some(inner) if !package_of(inner, dir) => break,
-            _ => found = Some(dir),
+    let projects: Vec<&Path> = path.ancestors().filter(|dir| dir.join("dbt_project.yml").is_file()).collect();
+    let mut found = *projects.first()?;
+    for (at, outer) in projects.iter().enumerate().skip(1) {
+        if !projects[at..].iter().any(|above| package_of(found, above)) {
+            break;
         }
+        found = outer;
     }
-    found.map(Path::to_owned)
+    Some(found.to_owned())
 }
 
 /// How git runs for the lookup: its program, and its whole environment,

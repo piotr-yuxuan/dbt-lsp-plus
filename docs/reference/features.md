@@ -211,8 +211,8 @@ these flags when the server command has them, as `--flag X` or
   the proxy's working directory.  Default: the client's first workspace
   folder or `rootUri`, when it holds a `dbt_project.yml`; else the
   project of the first file opened in one: the nearest directory above it
-  holding a `dbt_project.yml` that is no package of the next one above,
-  installed or local.  Before that the proxy runs nothing and answers
+  holding a `dbt_project.yml` that lies in no package, installed or local,
+  of a project above it.  Before that the proxy runs nothing and answers
   every request with null, and for such a project it runs no `dbt lsp`:
   it answers alone, as with dbt-oss.  The working directory never names
   the project.

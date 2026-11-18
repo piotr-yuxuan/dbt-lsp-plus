@@ -389,11 +389,13 @@ that applies:
   forwarded: the dbt (below), its probe, the cut's probe, `dbt lsp`.
 - **a document**: else the first document opened that lies in a project,
   from its path as spelt: the nearest directory above it holding
-  `dbt_project.yml` that is no package of the next one above
-  (`locate::project_of`).  A directory is a package of the next one above
-  when it lies under that one's install path, as dbt takes it, or is one
-  of its local packages, links resolved; the walk then goes on from that
-  one, unless its `dbt_project.yml` does not read.  No walk stops at git's
+  `dbt_project.yml` that lies in no package of a directory above it
+  holding one (`locate::project_of`).  A directory lies in a package of
+  one above when it is under that one's install path, as dbt takes it, or
+  in one of its local packages, as spelt or links resolved, as a hub
+  package's own `integration_tests` project does; the walk then goes on
+  from the next one above.  A project whose `dbt_project.yml` does not
+  read has no packages.  No walk stops at git's
   top level: a worktree in a checkout is no package of it.  dbt-mode's
   walk (`dbt-project.el`) also skips `dbt_internal_packages` and reads the
   install path from the project alone.  The proxy answers `initialize`
@@ -1571,7 +1573,9 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     arguments and working directory for these;
   - the walk up from a document over scratch layouts (nested, in
     worktrees, packages installed, local, under a flagged install path,
-    beside the project, under a project that does not read), and the
+    beside the project, under a project that does not read, a package's
+    own project, an install through a link, reached by the link or by its
+    target, a project through a linked parent), and the
     lookup of dbt in scratch repositories made with a scratch home and no
     global git configuration, with stub dbts: the project's `.venv` before
     the repository's, the main worktree's project's then its own from a
