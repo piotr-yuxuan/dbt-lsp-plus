@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
@@ -57,7 +57,9 @@ pub struct Git {
 /// directory when that is named `.git`; none outside a repository, or when
 /// git cannot run, fails or answers past the probe's deadline.  The common
 /// directory may come relative to PROJECT, as git before 2.31 gives it,
-/// which knows no `--path-format`.
+/// which knows no `--path-format`: it is read from there as written, each
+/// `..` dropping the component before it, so that a `.git` reached
+/// through a link keeps its name.
 fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     let mut command = Command::new(&git.program);
     command.args(["rev-parse", "--show-toplevel", "--git-common-dir"]);
@@ -74,7 +76,14 @@ fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     if !status.success() || !top.is_absolute() {
         return None;
     }
-    let common = fs::canonicalize(project.join(common)).ok()?;
+    let common = project.join(common).components().fold(PathBuf::new(), |mut path, part| {
+        match part {
+            Component::ParentDir => drop(path.pop()),
+            Component::CurDir => {}
+            other => path.push(other),
+        }
+        path
+    });
     let main = common.parent().filter(|_| common.file_name() == Some(".git".as_ref()));
     Some((top.clone(), main.map(Path::to_owned)))
 }

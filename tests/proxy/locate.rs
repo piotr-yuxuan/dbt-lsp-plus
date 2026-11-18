@@ -227,6 +227,23 @@ fn a_git_that_names_the_common_directory_from_where_it_ran_finds_the_main_worktr
 }
 
 #[test]
+fn a_main_worktree_whose_git_directory_is_a_link_is_found() {
+    let (repo, git, log) = repository("locate-dbt-linked-git");
+    let (linked, command) = (repo.join(".worktree/x/dbt"), words(&COMMAND));
+    let main_project = repo.join("dbt/.venv/bin/dbt");
+    stub(&main_project, HAS_LSP, &log);
+    // The checkout's .git moved elsewhere, a link left in its place.
+    let store = repo.with_file_name("store.git");
+    fs::rename(repo.join(".git"), &store).unwrap();
+    std::os::unix::fs::symlink(&store, repo.join(".git")).unwrap();
+    let old_git = repo.with_file_name("git");
+    let top = repo.join(".worktree/x");
+    script(&old_git, &format!("echo '{}'; echo ../../../.git", top.display()));
+    let found = locate::dbt(&linked, &command, &Git { program: old_git.into(), env: git.env });
+    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", Some(true)));
+}
+
+#[test]
 fn a_dbt_that_cannot_run_or_has_no_lsp_subcommand_is_skipped_and_named() {
     let (repo, git, log) = repository("locate-dbt-skipped");
     let (project, command) = (repo.join("dbt"), words(&COMMAND));
