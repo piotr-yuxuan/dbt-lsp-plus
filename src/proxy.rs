@@ -52,7 +52,7 @@ const ADDED: [(&str, &[&str]); 6] = [
     ("selectionRangeProvider", &["textDocument/selectionRange"]),
 ];
 
-/// The capabilities of the requests that the proxy answers in `ours`
+/// The capabilities of the requests that the proxy answers in `plus`
 /// whatever the server announces, and whether it then answers them as a
 /// whole, as a hover, rather than by target.
 const PROVIDERS: [(&str, &str, bool); 5] = [
@@ -604,7 +604,7 @@ impl<W: Write> Proxy<W> {
             capabilities.remove(*capability);
         }
         for (capability, method, owned) in
-            PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Ours)
+            PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Plus)
         {
             if lacks(capabilities, capability) {
                 capabilities.insert((*capability).to_owned(), json!(true));
@@ -636,12 +636,14 @@ impl<W: Write> Proxy<W> {
 
     /// Says once, after `initialize` is answered, what of the user's settings
     /// cannot take effect: each refusal, the methods set to `dbt` that no
-    /// backend answers, and a shadow with no dbt lsp to compare with.
+    /// backend answers, and a shadow with no dbt lsp to compare with; and a
+    /// mode named by its former name.
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
         if !said.is_empty() {
             said.push(format!("the methods that take a mode are {}", modes::METHODS.join(", ")));
         }
+        said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
         let unanswered = self.table.unanswered();
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
@@ -1643,7 +1645,7 @@ impl<W: Write> Proxy<W> {
     /// proxy must not cancel, the summary that a hover's answer gets, a
     /// request that the shadow follows; and whether, once routed, it asks for
     /// a fresh index: a hover keeps the index fresh, an inlay hint only makes
-    /// one, and in `dbt` neither; a shadowed request wants what `ours` reads.
+    /// one, and in `dbt` neither; a shadowed request wants what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
@@ -1693,13 +1695,13 @@ impl<W: Write> Proxy<W> {
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 return (hints.map_or(Pending::Request, Pending::Hints), self.parsing.index.is_none());
             }
-            // Followed only once forwarded: one the proxy answers is no one's to compare, and `ours` forwards none.
+            // Followed only once forwarded: one the proxy answers is no one's to compare, and `plus` forwards none.
             ("textDocument/definition" | "textDocument/references", _) => {
                 let changes = self.changes;
                 let shadowed = self
                     .shadow
                     .as_ref()
-                    .filter(|_| self.table.mode(method) != Mode::Ours)
+                    .filter(|_| self.table.mode(method) != Mode::Plus)
                     .map(|_| Pending::Shadow { method: method.to_owned(), params: params.clone(), changes });
                 let fresh = shadowed.is_some();
                 return (shadowed.unwrap_or(Pending::Request), fresh);
@@ -1908,7 +1910,7 @@ impl<W: Write> Proxy<W> {
     fn on_server_diagnostics(&mut self, message: &Value, body: &[u8]) {
         match self.table.mode("textDocument/publishDiagnostics") {
             Mode::Dbt => return self.send_client_body(body),
-            Mode::Ours => return,
+            Mode::Plus => return,
             Mode::Merge => {}
         }
         let uri = message.pointer("/params/uri").and_then(Value::as_str);
@@ -2347,11 +2349,11 @@ mod tests {
     #[test]
     fn every_method_the_proxy_adds_or_takes_has_a_mode() {
         let mut settings = modes::Settings::default();
-        settings.set_default("ours").unwrap();
+        settings.set_default("plus").unwrap();
         let table = modes::Table::new(&settings, &|_| false, false);
         let added = ADDED.iter().flat_map(|(_, methods)| methods.iter());
         for method in added.chain(PROVIDERS.iter().map(|(_, method, _)| method)) {
-            assert_eq!(table.mode(method), Mode::Ours, "{method} is not among modes::METHODS");
+            assert_eq!(table.mode(method), Mode::Plus, "{method} is not among modes::METHODS");
         }
     }
 

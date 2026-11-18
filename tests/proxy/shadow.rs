@@ -178,8 +178,8 @@ fn a_definition_the_proxy_answers_is_not_followed() {
     assert!(answer["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("_sources.yml")), "{answer}");
     assert_eq!(summary(&mut session), json!({"requests": 0, "counts": {}}));
     assert!(session.finish().success());
-    let options = ["--mode", "textDocument/definition=ours", "--shadow"];
-    let (mut session, log) = with_options("shadow-ours", json!({}), &options);
+    let options = ["--mode", "textDocument/definition=plus", "--shadow"];
+    let (mut session, log) = with_options("shadow-plus", json!({}), &options);
     session.initialize(&fixture());
     session.request("textDocument/definition", on_ref());
     assert_eq!(summary(&mut session)["requests"], 0);

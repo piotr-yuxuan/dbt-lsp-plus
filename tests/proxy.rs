@@ -3017,8 +3017,8 @@ fn a_hover_left_to_dbt_lsp_passes_byte_for_byte_and_starts_no_parse() {
 }
 
 #[test]
-fn ours_answers_without_the_server_and_lists_every_row() {
-    let (mut session, log) = with_options("mode-ours", json!({}), &["--default-mode", "ours"]);
+fn plus_answers_without_the_server_and_lists_every_row() {
+    let (mut session, log) = with_options("mode-plus", json!({}), &["--default-mode", "plus"]);
     let result = session.initialize(&fixture());
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered_itself(true), "the alone-only rows too");
     let orders = fixture().join("models/marts/orders.sql");
@@ -3031,6 +3031,46 @@ fn ours_answers_without_the_server_and_lists_every_row() {
     let counts = ["textDocument/definition", "textDocument/hover"];
     assert_eq!(counts.map(|method| received(&log, method)), [0, 0], "nothing forwarded");
     assert!(session.finish().success());
+}
+
+#[test]
+fn ours_is_read_as_plus_with_one_warning() {
+    let shown = |session: &Session| -> Vec<String> {
+        let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage");
+        shown.filter_map(|m| m["params"]["message"].as_str()).map(str::to_owned).collect()
+    };
+    let (mut session, log) = with_options("mode-ours", json!({}), &["--mode", "textDocument/definition=ours"]);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    let nowhere = session.request("textDocument/definition", position_in(&orders, "select", 1));
+    assert_eq!((nowhere.get("error"), &nowhere["result"]), (None, &Value::Null), "{nowhere}");
+    assert_eq!(received(&log, "textDocument/definition"), 0, "answered as in plus");
+    let said = shown(&session);
+    assert!(said.len() == 1 && said[0].contains("the mode ours is now named plus"), "{said:?}");
+    assert!(session.finish().success());
+    let (mut options, _) = with_options("mode-ours-options", json!({}), &[]);
+    options.initialize_options(&fixture(), json!({"dbtLspPlus": {"defaultMode": "ours"}}));
+    options.request("workspace/symbol", json!({"query": "orders"}));
+    let said = shown(&options);
+    assert!(said.len() == 1 && said[0].contains("the mode ours is now named plus"), "{said:?}");
+    assert!(options.finish().success());
+}
+
+#[test]
+fn plus_set_either_way_says_nothing() {
+    let (mut session, _) = with_options("mode-plus-quiet", json!({}), &["--mode", "textDocument/definition=plus"]);
+    session.initialize_options(&fixture(), json!({"dbtLspPlus": {"defaultMode": "plus"}}));
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert_eq!(show_messages(&session), 0);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_usage_names_plus_and_not_ours() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus")).arg("--help").output().unwrap();
+    let usage = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && usage.contains("plus (the proxy"), "{usage}");
+    assert!(!usage.split(|c: char| !c.is_alphanumeric()).any(|word| word == "ours"), "{usage}");
 }
 
 #[test]
@@ -3076,7 +3116,7 @@ fn with_no_backend_a_method_left_to_dbt_gets_nothing_and_is_said_once() {
 
 #[test]
 fn initialization_options_set_modes_and_reach_the_server_without_the_proxy_s_section() {
-    let options = json!({"dbtLspPlus": {"modes": {"textDocument/definition": "dbt", "textDocument/completion": "ours"}},
+    let options = json!({"dbtLspPlus": {"modes": {"textDocument/definition": "dbt", "textDocument/completion": "plus"}},
                          "other": 1});
     let (mut session, log) = with_options("mode-options", json!({}), &[]);
     session.initialize_options(&fixture(), options);
@@ -3106,7 +3146,7 @@ fn diagnostics_follow_their_mode() {
         "uri": uri(&models), "diagnostics": [{"range": {"start": {"line": 0, "character": 0},
         "end": {"line": 0, "character": 0}}, "severity": 2, "source": "dbt", "message": "from dbt"}]}})
     .to_string();
-    for mode in ["dbt", "ours"] {
+    for mode in ["dbt", "plus"] {
         let script = json!({"raw_on_compile": [from_dbt.clone()]});
         let flags = [Path::new("--project-dir"), &project];
         let assigned = format!("textDocument/publishDiagnostics={mode}");
@@ -3144,7 +3184,7 @@ fn a_setting_sent_later_is_the_server_s_and_said_once_to_be_no_mode() {
     session.initialize(&fixture());
     for _ in 0..2 {
         session
-            .notify("workspace/didChangeConfiguration", json!({"settings": {"dbtLspPlus": {"defaultMode": "ours"}}}));
+            .notify("workspace/didChangeConfiguration", json!({"settings": {"dbtLspPlus": {"defaultMode": "plus"}}}));
     }
     let said = session.wait_for(|m| {
         m["method"] == "window/logMessage" && m["params"]["message"].as_str().unwrap().contains("initializationOptions")
@@ -3192,8 +3232,8 @@ fn nothing(method: &str) -> Value {
 }
 
 #[test]
-fn ours_answers_every_method_itself() {
-    let (mut session, log) = with_options("mode-every-ours", json!({}), &["--default-mode", "ours"]);
+fn plus_answers_every_method_itself() {
+    let (mut session, log) = with_options("mode-every-plus", json!({}), &["--default-mode", "plus"]);
     session.initialize(&fixture());
     // At the first `select`, the targeted requests and the hover find nothing of the proxy's.
     let targeted = ["textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/rename"];
