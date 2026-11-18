@@ -3578,7 +3578,8 @@ fn a_late_server_leaves_a_hover_s_summary_alone_and_its_answer_dropped() {
     settle(&mut session);
     assert_eq!(frames_of(&session, &answer["id"]), 1, "the late answer reached the client");
     let logged = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
-    assert!(logged.clone().any(|m| m["params"]["message"].as_str().unwrap().contains("textDocument/hover")));
+    let named = |m: &Value| m["params"]["message"].as_str().unwrap().contains("textDocument/hover within 300 ms");
+    assert!(logged.clone().any(named), "the deadline that passed");
     assert!(session.finish().success());
 }
 
@@ -3752,18 +3753,25 @@ fn a_late_server_leaves_the_proxy_s_hints_alone() {
 }
 
 #[test]
-fn a_late_server_is_logged_once_per_method() {
+fn a_late_server_is_logged_once_per_method_and_deadline() {
     let script = json!({"hold": ["textDocument/hover", "textDocument/inlayHint"]});
     let (mut session, _) = parsed_session("merge-logged", script);
     session.request("textDocument/hover", on_ref());
     session.request("textDocument/hover", on_ref());
     hints_of(&mut session, &fixture().join("models/marts/orders.sql"));
+    // A hover with nothing of the proxy's, dropped at the other deadline: logged too.
+    session.request("textDocument/hover", position_in(&fixture().join("models/marts/orders.sql"), "select", 1));
     settle(&mut session);
     let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
     let mut said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
     said.sort_unstable();
-    assert_eq!(said.len(), 2, "{said:?}");
-    assert!(said[0].contains("textDocument/hover") && said[1].contains("textDocument/inlayHint"), "{said:?}");
+    let expected = [
+        "textDocument/hover within 2000 ms",
+        "textDocument/hover within 300 ms",
+        "textDocument/inlayHint within 300 ms",
+    ];
+    assert_eq!(said.len(), 3, "{said:?}");
+    assert!(said.iter().zip(expected).all(|(said, expected)| said.contains(expected)), "{said:?}");
     assert!(session.finish().success());
 }
 

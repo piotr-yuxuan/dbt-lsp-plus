@@ -380,8 +380,8 @@ struct Proxy<W: Write> {
     /// When each merged request is answered with the proxy's part or
     /// nothing alone, and its method.
     deadlines: HashMap<String, (Instant, String)>,
-    /// The methods whose late answer the proxy logged.
-    late: HashSet<String>,
+    /// The methods whose late answer the proxy logged, each with the deadline that passed.
+    late: HashSet<(String, Duration)>,
     documents: HashMap<PathBuf, String>,
     /// The URI under which the client opened each of them, which an edit
     /// of it must name.
@@ -2205,10 +2205,10 @@ impl<W: Write> Proxy<W> {
         for (late, method) in due {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
-            let waited = pending.deadline().unwrap_or(MERGE_DEADLINE);
+            let Some(waited) = pending.deadline() else { continue };
             let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).alone(self.markdown));
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
-            if !self.shutdown && self.late.insert(method.clone()) {
+            if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();
                 let text = format!("dbt lsp did not answer {method} within {ms} ms: dbt-lsp-plus answered alone");
                 self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
