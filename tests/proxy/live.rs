@@ -203,7 +203,13 @@ fn without_project_dir(project: &Path) -> Session {
     let (home, ceiling) = (dir.join("home"), dir.to_owned());
     let server = ["dbt", "lsp", "--no-send-anonymous-usage-stats"].map(str::to_owned);
     // No repository: the checkout of the tests is no one's.
-    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1")), ("GIT_CEILING_DIRECTORIES", &ceiling)];
+    let env = [
+        ("HOME", home.as_path()),
+        ("DO_NOT_TRACK", Path::new("1")),
+        ("GIT_CEILING_DIRECTORIES", &ceiling),
+        ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
+        ("GIT_CONFIG_GLOBAL", Path::new("/dev/null")),
+    ];
     let mut session = Session::start(&server, &env, Some(dir));
     session.timeout = Duration::from_secs(180);
     session
@@ -233,6 +239,8 @@ fn found_from_a_document(project: &Path, venv: &Path) {
 /// lsp behind the proxy, which answers the definition of a ref; else the
 /// proxy alone.
 fn found_from_the_folder(project: &Path, lsp: bool) {
+    let route = if lsp { "dbt lsp behind the proxy" } else { "the proxy alone, the dbt having no lsp" };
+    let _ = writeln!(std::io::stderr(), "found_from_the_folder: {route}");
     let mut session = without_project_dir(project);
     let result = session.initialize(project);
     let expected = if lsp { "dbt-lsp" } else { "dbt-lsp-plus" };

@@ -258,6 +258,36 @@ fn given_project_dir_the_command_runs_as_written_and_nothing_is_said() {
     let server = format!("lsp --project-dir {}", project.display());
     assert_eq!(ran.lines().collect::<Vec<_>>(), ["lsp --help", &server], "the probe, then the server");
     assert!(!venv_log.exists(), "the project's .venv ran");
+    // In the proxy's working directory, this process's: dbt-mode's profiles.yml stays found.
+    let here = resolved(&std::env::current_dir().unwrap());
+    let dirs: Vec<PathBuf> = starts(&log).iter().map(|start| path_of(&start["cwd"])).collect();
+    assert_eq!(dirs, [here.clone(), here], "the probe and the server");
+}
+
+#[test]
+fn a_dbt_skipped_in_the_project_s_venv_is_named_in_the_line_before_path_s() {
+    let project = copy_fixture("routes-skipped");
+    let dir = project.parent().unwrap().to_owned();
+    let venv = project.join(".venv/bin/dbt");
+    script(&venv, "exit 0");
+    std::fs::set_permissions(&venv, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    let (path, _) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt-lsp")));
+    let (script_path, log, cache) = fake_env(&dir, &json!({}));
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+        ("PATH", Path::new(&path)),
+        ("GIT_CEILING_DIRECTORIES", dir.as_path()),
+        ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
+    ];
+    let mut session = Session::start(&[], &env, Some(&dir));
+    assert_eq!(session.initialize(&project)["serverInfo"]["name"], "dbt-lsp");
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    let said = log_messages(&session);
+    let named = format!("dbt {} (PATH); skipped {} (cannot run: ", dir.join("bin/dbt").display(), venv.display());
+    assert!(said.len() == 1 && said[0].contains(&named), "{said:?}");
+    assert!(session.finish().success());
 }
 
 #[test]
@@ -293,6 +323,8 @@ fn a_project_from_a_document_runs_dbt_in_its_directory() {
         let file = compiled["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("{compiled}"));
         assert!(url::Url::parse(file).unwrap().to_file_path().unwrap().is_file(), "{compiled}");
         assert_eq!(path_of(&started(&starts(&log), "compile")["cwd"]), resolved(&project), "the compile");
+    } else {
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), b"no cut here: the compile is not checked\n");
     }
     assert_eq!(node_info(&mut session, json!("model.shop.orders"))["result"]["unique_id"], "model.shop.orders");
     assert!(session.finish().success());

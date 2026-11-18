@@ -236,8 +236,11 @@ fn a_dbt_that_cannot_run_or_has_no_lsp_subcommand_is_skipped_and_named() {
     stub(&top, DBT_CORE, &log);
     let found = locate::dbt(&project, &command, &git);
     assert_eq!((found.source, found.lsp, &found.command), ("PATH", None, &command));
-    let skipped: Vec<(&PathBuf, bool)> = found.skipped.iter().map(|(path, why)| (path, why.is_empty())).collect();
-    assert_eq!(skipped, [(&own, false), (&top, false)], "{:?}", found.skipped);
+    // The reason of a program that cannot run is the system's, after a fixed prefix.
+    let reason = |why: &str| if why.starts_with("cannot run: ") { "cannot run: " } else { why }.to_owned();
+    let skipped: Vec<(&PathBuf, String)> = found.skipped.iter().map(|(path, why)| (path, reason(why))).collect();
+    let expected = [(&own, "cannot run: ".to_owned()), (&top, "lsp --help gives exit status: 2".to_owned())];
+    assert_eq!(skipped, expected, "{:?}", found.skipped);
 }
 
 #[test]
