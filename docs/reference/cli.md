@@ -26,13 +26,14 @@ follows; elsewhere it is a usage error.
 
 ## The project and its dbt
 
-Both subcommands find the project and its dbt exactly as the server
-does, from a path, doctor's PATH, else the current directory:
+Both subcommands find the project and its dbt as the server does, from
+a path, doctor's PATH, else the current directory:
 
 - **given**: the server command names `--project-dir`; the project is
-  that directory, made absolute, when it holds `dbt_project.yml` (else
-  there is none), and the dbt is the server command as written, run in
-  the current directory;
+  that directory, made absolute, when it holds `dbt_project.yml`, and
+  the dbt is the server command as written, run in the current
+  directory.  Else doctor and select say there is no project, where the
+  server takes the directory all the same and its dbt lsp fails;
 - **folder**: the path is a directory that holds `dbt_project.yml`, as a
   client's folder; the dbt is found as the server finds it (the project's
   `.venv`, its repository's, its main worktree's, else `PATH`; see
@@ -123,13 +124,14 @@ each node a line of `dbt list`'s output as dbt printed it.  On a failure,
 
 - `No nodes found`, when the selector selects nothing;
 - `dbt-lsp-plus runs dbt only cut off the network, which this system
-  cannot`, where `unshare -rnm` cannot run, as on macOS, checked first:
-  nothing else runs, neither git nor a dbt's probe;
+  cannot`, where `unshare -rnm` cannot run, as on macOS, checked first,
+  by the cut's probe, `unshare` on `true`: nothing else runs, neither
+  git nor a dbt's probe;
 - `no dbt_project.yml at or above DIR; run it within the project, or
   name it with -- dbt lsp --project-dir DIR`, outside every project:
-  nothing runs;
+  nothing runs but the cut's probe;
 - why a parse would be refused, as doctor's `packages`, checked before
-  the dbt is looked for: nothing runs;
+  the dbt is looked for: nothing runs but the cut's probe;
 - the first error dbt logged, or how dbt ended.
 
 Exit status: 0 when `error` is `null`; 1 otherwise, `No nodes found`

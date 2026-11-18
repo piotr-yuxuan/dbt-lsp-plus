@@ -9,7 +9,9 @@ file of the project and ARGUMENTS those the editor gives the server: it
 says which project and which dbt the server would take, whether that dbt
 has `lsp`, whether the proxy would answer alone and why, whether dbt can
 be cut off the network, and why a parse would be refused
-([the subcommands](../reference/cli.md)).
+([the subcommands](../reference/cli.md)).  A given `--project-dir`
+without `dbt_project.yml` is no project to doctor, where the server
+takes the directory all the same and its dbt lsp fails.
 
 ## Who answers a request
 
