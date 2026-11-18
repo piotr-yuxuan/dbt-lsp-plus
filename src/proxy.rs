@@ -2489,26 +2489,51 @@ mod tests {
         let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/use-with-an-agent.md"));
         let page = page.unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
         let sources = [
-            include_str!("proxy.rs"),
-            include_str!("cli.rs"),
-            include_str!("commands.rs"),
-            include_str!("packages.rs"),
+            ("proxy.rs", include_str!("proxy.rs")),
+            ("cli.rs", include_str!("cli.rs")),
+            ("commands.rs", include_str!("commands.rs")),
+            ("packages.rs", include_str!("packages.rs")),
+            ("locate.rs", include_str!("locate.rs")),
         ];
-        let code: Vec<&str> =
-            sources.iter().filter_map(|source| source.split("\n#[cfg(test)]\nmod tests {").next()).collect();
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let code = sources.map(|(name, source)| source.split_once(marker).expect(name).0);
+        // What the page quotes, then the code at the site it cites, with enough around it to be that site alone.
         let quoted = [
-            "it is running",
-            "waiting for dbt lsp to compile the project",
-            "dbt lsp is not running",
-            "dbt-lsp-plus answers alone.",
-            "give a path within the project",
-            "dbt-lsp-plus runs dbt only cut off the network, which this system cannot",
-            "a package from the network is named, and nothing cuts dbt parse off the network here",
-            "run dbt deps",
+            ("dbt parse has not finished: it is running", r#"(true, _) => "it is running""#),
+            ("dbt parse has not finished:", r#"format!("dbt parse has not finished: {why}")"#),
+            (
+                "dbt parse has not finished: waiting for dbt lsp to compile the project",
+                r#"(false, None) => "waiting for dbt lsp to compile the project""#,
+            ),
+            (
+                "dbt parse has not finished: dbt parse failed:",
+                r#"self.log_parse(&format!("dbt parse failed: {failure}"))"#,
+            ),
+            ("`dbt lsp is not running`", r#"None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running")"#),
+            ("ends `dbt-lsp-plus answers alone.`", r#"format!("; {why}: dbt-lsp-plus answers alone.")"#),
+            (
+                r#""alone":"dbt lsp is not started for a project found from a file""#,
+                r#"(_, Route::Document) => Some("dbt lsp is not started for a project found from a file")"#,
+            ),
+            (
+                "no dbt_project.yml at or above <root>; give a path within the project",
+                r#"Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project")"#,
+            ),
+            (
+                "`dbt-lsp-plus runs dbt only cut off the network, which this system cannot`",
+                r#"failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot")"#,
+            ),
+            (
+                "a package from the network is named, and nothing cuts dbt parse off the network here",
+                r#"Some("a package from the network is named, and nothing cuts dbt parse off the network here".into())"#,
+            ),
+            ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
+            ("A session finds one project, once", r#"method == "textDocument/didOpen" && self.root.is_none()"#),
         ];
-        for words in quoted {
-            assert!(page.contains(words), "the agent page quotes {words:?}");
-            assert!(code.iter().any(|source| source.contains(words)), "the code outside its tests says {words:?}");
+        for (words, site) in quoted {
+            assert!(page.contains(words), "the agent page says {words:?}");
+            let sites: usize = code.iter().map(|source| source.matches(site).count()).sum();
+            assert_eq!(sites, 1, "one site outside the tests: {site}");
         }
     }
 
