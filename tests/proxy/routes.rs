@@ -370,3 +370,33 @@ fn a_project_from_a_document_reads_dbt_s_paths_from_its_directory() {
     assert_eq!(text, "select 1");
     assert!(session.finish().success());
 }
+
+#[test]
+fn a_relative_dbt_and_profiles_dir_name_what_they_named_from_the_proxy_s_directory() {
+    let copy = copy_fixture("routes-relative");
+    let (dir, repo) = (copy.parent().unwrap().to_owned(), copy.with_file_name("repo"));
+    let project = repo.join("dbt");
+    fs::create_dir_all(&repo).unwrap();
+    fs::rename(&copy, &project).unwrap();
+    // The dbt and the profiles of the repository, not of the project.
+    let dbt = venv_fake(&repo);
+    let (script_path, log, cache) = fake_env(&dir.join("session"), &json!({"manifest": manifest()}));
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+    ];
+    let server = [".venv/bin/dbt", "lsp", "--profiles-dir", "config"].map(str::to_owned);
+    let mut session = Session::start(&server, &env, Some(&repo));
+    session.initialize(&repo);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert!(session.finish().success());
+    let parse = started(&starts(&log), "parse").clone();
+    let arguments: Vec<&str> = parse["arguments"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    let profiles = arguments.iter().position(|word| *word == "--profiles-dir").map(|at| arguments[at + 1]);
+    assert_eq!(parse["argv0"], json!(dbt.to_str().unwrap()), "{parse}");
+    assert_eq!(profiles, Some(repo.join("config").to_str().unwrap()), "{parse}");
+}
