@@ -85,11 +85,11 @@ owns all state and writes both outputs.
   server or alone, the same kinds: those of definitions and references,
   with their places, in [Where dbt-lsp-plus answers definitions and
   references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references),
-  which a unit test keeps equal to the flag; a rename's, a source in SQL,
-  YAML and Python and a CTE in SQL.  Until plan 037, `ref` in SQL and
-  Python, `macro` and `function` were listed alone only.  A kind listed
-  at a place is the proxy's at every position of that kind there,
-  possibly null or `[]`, never
+  which a unit test keeps equal to the flag; a rename's, which no test
+  holds this page to, a source in SQL, YAML and Python and a CTE in
+  SQL.  Until plan 037, `ref` in SQL and Python, `macro` and `function`
+  were listed alone only.  A kind listed at a place is the proxy's at
+  every position of that kind there, possibly null or `[]`, never
   forwarded, in any file under the root: references come from the scan
   whichever file asks, while a rename needs a file the scan holds, since
   it would leave the asking file as it is.  The kinds are by position, and
