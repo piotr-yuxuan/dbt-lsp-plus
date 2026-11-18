@@ -29,8 +29,9 @@ Both subcommands find the project and its dbt exactly as the server
 does, from a path, doctor's PATH, else the current directory:
 
 - **given**: the server command names `--project-dir`; the project is
-  that directory, made absolute, and the dbt is the server command as
-  written, run in the current directory;
+  that directory, made absolute, when it holds `dbt_project.yml` (else
+  there is none), and the dbt is the server command as written, run in
+  the current directory;
 - **folder**: the path is a directory that holds `dbt_project.yml`, as a
   client's folder; the dbt is found as the server finds it (the project's
   `.venv`, its repository's, its main worktree's, else `PATH`; see
@@ -79,6 +80,9 @@ Without a project, doctor runs nothing at all and says so:
 {"error":"no dbt_project.yml at or above /w/notes/x.sql; give a path within the project",
  "path":"/w/notes/x.sql","project":null,"version":"0.1.9"}
 ```
+
+On the given route the error is `no dbt_project.yml in DIR, the server
+command's --project-dir`.
 
 Exit status: 0 when a project is found whose dbt answers as a dbt 2 does
 (`dbt.lsp` `true` or `false`); 1 otherwise; 2 for a usage error.

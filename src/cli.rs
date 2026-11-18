@@ -130,6 +130,9 @@ pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
 
 /// Why no project was found.
 enum Missing {
+    /// The server command's `--project-dir` holds no `dbt_project.yml`; why,
+    /// in words that need no advice.
+    Given(String),
     /// No `dbt_project.yml` at or above the path, which the caller words.
     Above,
 }
@@ -140,7 +143,10 @@ enum Missing {
 /// project of PATH, as a document's.  Nothing runs.
 fn project(path: &Path, command: &[String]) -> Result<(PathBuf, Route), Missing> {
     if let Some(project) = proxy::project_dir(command) {
-        return Ok((project, Route::Given));
+        let why = || {
+            Missing::Given(format!("no dbt_project.yml in {}, the server command's --project-dir", project.display()))
+        };
+        return project.join("dbt_project.yml").is_file().then(|| (project.clone(), Route::Given)).ok_or_else(why);
     }
     match path.join("dbt_project.yml").is_file() {
         true => Ok((path.to_owned(), Route::Folder)),
@@ -170,8 +176,11 @@ fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
     let shown = path.display().to_string();
     let (project, route) = match project(&path, command) {
         Ok(found) => found,
-        Err(Missing::Above) => {
-            let error = format!("no dbt_project.yml at or above {shown}; give a path within the project");
+        Err(missing) => {
+            let error = match missing {
+                Missing::Given(why) => why,
+                Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project"),
+            };
             return (json!({"version": version, "path": shown, "project": null, "error": error}), false);
         }
     };
@@ -210,6 +219,7 @@ fn select(selector: &str, command: &[String]) -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
     let (project, route) = match project(&cwd, command) {
         Ok(found) => found,
+        Err(Missing::Given(why)) => return commands::failure(commands::NODES, &why),
         Err(Missing::Above) => {
             let advice = "run it within the project, or name it with -- dbt lsp --project-dir DIR";
             let why = format!("no dbt_project.yml at or above {}; {advice}", cwd.display());

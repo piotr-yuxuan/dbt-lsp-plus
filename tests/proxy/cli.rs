@@ -132,8 +132,8 @@ fn doctor_finds_a_document_s_project_and_runs_only_its_dbt_s_probe() {
 }
 
 #[test]
-fn doctor_on_the_folder_s_route_and_the_given_one() {
-    let case = Case::new("cli-doctor-routes", &json!({}));
+fn doctor_on_the_folder_s_route() {
+    let case = Case::new("cli-doctor-folder", &json!({}));
     venv_fake(&case.copy);
     let (status, answer) = case.run(&case.copy, &["doctor", "."]);
     assert_eq!((status, &answer["route"], &answer["alone"]), (Some(0), &json!("folder"), &Value::Null), "{answer}");
@@ -141,33 +141,50 @@ fn doctor_on_the_folder_s_route_and_the_given_one() {
     case.rescript(&json!({"no_lsp": true}));
     let (status, answer) = case.run(&case.copy, &["doctor", "."]);
     assert_eq!((status, &answer["dbt"]["lsp"], &answer["alone"]), (Some(0), &json!(false), &json!("it has no lsp")));
+}
 
-    // Given: the `.venv` is no one's, the server command's dbt is probed for doctor alone.
-    case.rescript(&json!({}));
+/// The case NAME for the given route, the fake playing SCRIPT: the copy's
+/// `.venv/bin/dbt` a stub that logs to the returned file, which nothing on
+/// that route should run, and a directory outside the copy to run in.
+fn given(name: &str, script_value: &Value) -> (Case, PathBuf, PathBuf) {
+    let case = Case::new(name, script_value);
     let stub_log = case.dir.join("venv.log");
-    fs::remove_file(case.copy.join(".venv/bin/dbt")).unwrap();
     script(&case.copy.join(".venv/bin/dbt"), &format!("echo \"$*\" >> '{}'", stub_log.display()));
-    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
     let elsewhere = case.dir.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
-    let given = ["doctor", ".", "--", "--backend", "never", "--", fake, "lsp", "--project-dir", copy];
-    let (status, answer) = case.run(&elsewhere, &given);
-    assert_eq!(
-        (status, &answer["route"], &answer["alone"]),
-        (Some(0), &json!("given"), &json!("the backend is never"))
-    );
-    assert_eq!(path_of(&answer["project"]), resolved(&case.copy));
+    (case, stub_log, elsewhere)
+}
+
+#[test]
+fn doctor_on_the_given_route_probes_the_command_as_written() {
+    let (case, stub_log, elsewhere) = given("cli-doctor-given", &json!({}));
+    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
+    let never = ["doctor", ".", "--", "--backend", "never", "--", fake, "lsp", "--project-dir", copy];
+    let (status, answer) = case.run(&elsewhere, &never);
+    let route = (&answer["route"], &answer["alone"], path_of(&answer["project"]));
+    assert_eq!((status, route), (Some(0), (&json!("given"), &json!("the backend is never"), resolved(&case.copy))));
     let dbt = &answer["dbt"];
-    assert_eq!(
-        (&dbt["command"], &dbt["source"]),
-        (&json!([fake, "lsp", "--project-dir", copy]), &json!("the server command"))
-    );
-    assert_eq!(dbt["lsp"], json!(true), "probed for doctor: {answer}");
+    let words = json!([fake, "lsp", "--project-dir", copy]);
+    assert_eq!((&dbt["command"], &dbt["source"]), (&words, &json!("the server command")));
+    // Under never the server probes nothing; doctor probes once, for itself.
+    let probes: Vec<Value> = starts(&case.log).iter().map(|start| start["arguments"].clone()).collect();
+    assert_eq!((&dbt["lsp"], probes), (&json!(true), vec![json!(["lsp", "--help"])]), "{answer}");
     case.rescript(&json!({"no_lsp": true}));
     let auto = ["doctor", ".", "--", "--backend", "auto", "--", fake, "lsp", "--project-dir", copy];
     let (_, answer) = case.run(&elsewhere, &auto);
     assert_eq!((&answer["dbt"]["lsp"], &answer["alone"]), (&json!(false), &json!("it has no lsp")), "{answer}");
     assert!(!stub_log.exists(), "the .venv's dbt ran on the given route");
+}
+
+#[test]
+fn doctor_finds_no_project_in_a_given_directory_without_one() {
+    let (case, _, elsewhere) = given("cli-doctor-given-none", &json!({}));
+    let (fake, empty) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), elsewhere.to_str().unwrap());
+    let (status, answer) = case.run(&elsewhere, &["doctor", "--", fake, "lsp", "--project-dir", empty]);
+    let error = format!("no dbt_project.yml in {empty}, the server command's --project-dir");
+    assert_eq!((status, &answer["project"], &answer["error"]), (Some(1), &Value::Null, &json!(error)), "{answer}");
+    assert_eq!(answer.as_object().unwrap().len(), 4, "only version, path, project and error: {answer}");
+    assert!(starts(&case.log).is_empty(), "{:#?}", starts(&case.log));
 }
 
 #[test]
