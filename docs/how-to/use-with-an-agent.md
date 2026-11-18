@@ -99,25 +99,27 @@ server starts at that call.  The answer says:
 - **No LSP plugin at all** in the session: ToolSearch answers `No
   matching deferred tools found` and the call `No such tool available:
   LSP. LSP is disabled for this session`.  With other LSP plugins and
-  not this one, a `.sql` file gives another error, not recorded here:
-  `claude plugin list` names the plugins.
+  not this one, a `.sql` file gives an answer without a unique id, or
+  another error, not recorded here: `claude plugin list` names the
+  plugins.
 
 ## Who answers what
 
 A session is **alone** with a dbt that has no `lsp` (dbt-oss), on a
-project found from a file (a session whose directory holds no
-`dbt_project.yml`, as at a repository's or a worktree's root over a
-nested `dbt/`), or with `--backend never`; it is **in front of dbt lsp**
-with a dbt that has `lsp`, the session opened in the project's folder,
-a worktree's whose root holds `dbt_project.yml` included, or given
-`--project-dir`.  Claude Code's debug log tells them apart: alone, the
-proxy's line ends `dbt-lsp-plus answers alone.`.  So does
-`dbt-lsp-plus doctor` with no PATH, run in the session's own directory,
-before any `cd`: there, `"alone":null` is in front of dbt lsp, and the
-error `no dbt_project.yml at or above ...` says that the project comes
-from a file, so the session is alone.  doctor on a file always takes the
-file's route, and shows `--backend never` only when given the server
-command after `--`.
+project found from a file (with no `--project-dir`, a session whose
+directory holds no `dbt_project.yml`, as at a repository's or a
+worktree's root over a nested `dbt/`), or with `--backend never`; it is
+**in front of dbt lsp** with a dbt that has `lsp`, the session opened in
+the project's folder, a worktree's whose root holds `dbt_project.yml`
+included, or given `--project-dir`.  Claude Code's debug log tells them
+apart: alone, the proxy's line ends `dbt-lsp-plus answers alone.`.  So
+does `dbt-lsp-plus doctor` with no PATH, run in the session's own
+directory, before any `cd`, given after `--` the arguments that the
+plugin's `.lsp.json` passes; this plugin passes none.  A non-null
+`alone`, or the error `no dbt_project.yml at or above ...`, means the
+session is alone; `"alone":null` means it is in front of dbt lsp.
+doctor on a file takes the file's route unless the arguments after `--`
+name `--project-dir`.
 
 | Operation | LSP method | Alone | In front of dbt lsp |
 |-----------|------------|-------|---------------------|
