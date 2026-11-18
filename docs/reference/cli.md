@@ -61,7 +61,7 @@ would work.  For a project found:
 | Key | Value |
 |-----|-------|
 | `version` | the version of dbt-lsp-plus |
-| `path` | PATH, made absolute from the current directory |
+| `path` | PATH, made absolute from the current directory, each `..` dropping the component before it, as written |
 | `project` | the project's directory |
 | `route` | `given`, `folder` or `document`, as above |
 | `dbt.command` | the server command that would run, its dbt in place of a bare `dbt` |

@@ -246,6 +246,23 @@ fn doctor_without_a_project_runs_nothing() {
 }
 
 #[test]
+fn doctor_walks_up_from_the_path_as_written_without_its_dots() {
+    let case = Case::new("cli-doctor-dots", &json!({}));
+    venv_fake(&case.copy);
+    let outside = case.dir.join("x/models/a.sql");
+    fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    fs::write(&outside, "select 1\n").unwrap();
+    // From inside the copy, a file beside it, in no project.
+    let (status, answer) = case.run(&case.copy, &["doctor", "../x/models/a.sql"]);
+    assert_eq!((status, &answer["project"]), (Some(1), &Value::Null), "{answer}");
+    assert_eq!(path_of(&answer["path"]), resolved(&outside), "{answer}");
+    assert!(!answer["path"].as_str().unwrap().contains(".."), "{answer}");
+    // And into the project from beside it.
+    let (status, answer) = case.run(outside.parent().unwrap(), &["doctor", "../../shop/models/marts/orders.sql"]);
+    assert_eq!((status, path_of(&answer["project"])), (Some(0), resolved(&case.copy)), "{answer}");
+}
+
+#[test]
 fn doctor_and_select_give_the_guard_s_reason() {
     let case = Case::new("cli-guard", &json!({}));
     let venv = venv_fake(&case.copy);

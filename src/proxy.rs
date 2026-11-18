@@ -448,7 +448,7 @@ struct Proxy<W: Write> {
 
 /// PATH with each `..` dropping the component before it, as written: no
 /// link is followed.
-fn lexical(path: &Path) -> PathBuf {
+pub fn lexical(path: &Path) -> PathBuf {
     path.components().fold(PathBuf::new(), |mut path, component| {
         match component {
             Component::ParentDir => {

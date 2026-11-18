@@ -172,7 +172,9 @@ fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Found, O
 /// project was found whose dbt answers as a dbt 2 does.
 fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
     let version = env!("CARGO_PKG_VERSION");
-    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    // `..` resolved as written, as a client's URI has none: the walk up to a
+    // project then never passes through a directory the file lies outside.
+    let path = proxy::lexical(&std::path::absolute(path).unwrap_or_else(|_| path.to_owned()));
     let shown = path.display().to_string();
     let (project, route) = match project(&path, command) {
         Ok(found) => found,
