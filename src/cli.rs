@@ -128,36 +128,37 @@ pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
-/// The project and its dbt, as the server finds them.
-struct Resolved {
-    project: PathBuf,
-    route: Route,
-    dbt: locate::Found,
-    /// Where dbt's processes run: the project, else the current directory.
-    dir: Option<PathBuf>,
+/// Why no project was found.
+enum Missing {
+    /// No `dbt_project.yml` at or above the path, which the caller words.
+    Above,
 }
 
-/// The project and its dbt as the server finds them from PATH, absolute,
-/// with the server command COMMAND: given, its `--project-dir`, and its dbt
-/// as written, run in the current directory; else PATH, when it holds
-/// `dbt_project.yml`, as a client's folder, else the project of PATH, as a
-/// document's, its dbt `locate::dbt`'s from COMMAND anchored in the current
-/// directory, run in the project.  Without a project, why, and nothing ran.
-fn resolve(path: &Path, command: &[String]) -> Result<Resolved, String> {
+/// The project as the server finds it from PATH, absolute, with the server
+/// command COMMAND, and by which route: given, its `--project-dir`; else
+/// PATH, when it holds `dbt_project.yml`, as a client's folder; else the
+/// project of PATH, as a document's.  Nothing runs.
+fn project(path: &Path, command: &[String]) -> Result<(PathBuf, Route), Missing> {
     if let Some(project) = proxy::project_dir(command) {
-        return Ok(Resolved { project, route: Route::Given, dbt: locate::Found::written(command), dir: None });
+        return Ok((project, Route::Given));
     }
-    let (project, route) = match path.join("dbt_project.yml").is_file() {
-        true => (path.to_owned(), Route::Folder),
-        false => {
-            let none = || format!("no dbt_project.yml at or above {}; give a path within the project", path.display());
-            (locate::project_of(path, command).ok_or_else(none)?, Route::Document)
-        }
-    };
-    let cwd = std::env::current_dir().map_err(|error| format!("no current directory: {error}"))?;
+    match path.join("dbt_project.yml").is_file() {
+        true => Ok((path.to_owned(), Route::Folder)),
+        false => locate::project_of(path, command).map(|project| (project, Route::Document)).ok_or(Missing::Above),
+    }
+}
+
+/// The dbt of PROJECT, found on ROUTE, as the server finds it from the
+/// server command COMMAND, and where its processes run: given, the command
+/// as written, in the current directory; else `locate::dbt`'s from COMMAND
+/// anchored in the current directory, in the project.
+fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Found, Option<PathBuf>) {
+    if route == Route::Given {
+        return (locate::Found::written(command), None);
+    }
     let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
-    let dbt = locate::dbt(&project, &config::anchored(command, &cwd), &git);
-    Ok(Resolved { dir: Some(project.clone()), project, route, dbt })
+    let anchored = std::env::current_dir().map_or_else(|_| command.to_vec(), |cwd| config::anchored(command, &cwd));
+    (locate::dbt(project, &anchored, &git), Some(project.to_owned()))
 }
 
 /// What the server would find and do from PATH with BACKEND and the server
@@ -167,10 +168,14 @@ fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
     let version = env!("CARGO_PKG_VERSION");
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     let shown = path.display().to_string();
-    let Resolved { project, route, dbt, dir } = match resolve(&path, command) {
-        Ok(resolved) => resolved,
-        Err(error) => return (json!({"version": version, "path": shown, "project": null, "error": error}), false),
+    let (project, route) = match project(&path, command) {
+        Ok(found) => found,
+        Err(Missing::Above) => {
+            let error = format!("no dbt_project.yml at or above {shown}; give a path within the project");
+            return (json!({"version": version, "path": shown, "project": null, "error": error}), false);
+        }
     };
+    let (dbt, dir) = dbt_of(&project, route, command);
     // What `locate::dbt` left unprobed is probed as the server probes it.
     let probed = match dbt.lsp {
         Some(lsp) => Ok(lsp),
@@ -196,20 +201,27 @@ fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
 /// The nodes that SELECTOR selects in the project of the current directory
 /// with the server command COMMAND, as `dbt-lsp-plus.nodes` answers them: by
 /// `dbt list` under the cut, in a run directory removed afterwards; or why
-/// it did not run.
+/// it did not run.  Refused before anything runs where the system cannot
+/// cut, without a project, or by the guard.
 fn select(selector: &str, command: &[String]) -> Value {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let Resolved { project, dbt, dir, .. } = match resolve(&cwd, command) {
-        Ok(resolved) => resolved,
-        Err(why) => return commands::failure(commands::NODES, &why),
-    };
     if let commands::Via::Refused(failure) = commands::route(commands::NODES, &|_| false, config::can_cut()) {
         return failure;
     }
-    // Under the cut, whether the session is alone is moot.
-    if let Some(why) = packages::refused(&project, &dbt.command, true, false) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (project, route) = match project(&cwd, command) {
+        Ok(found) => found,
+        Err(Missing::Above) => {
+            let advice = "run it within the project, or name it with -- dbt lsp --project-dir DIR";
+            let why = format!("no dbt_project.yml at or above {}; {advice}", cwd.display());
+            return commands::failure(commands::NODES, &why);
+        }
+    };
+    // Under the cut, whether the session is alone is moot; the guard reads
+    // the server command's install path, which finding its dbt leaves as is.
+    if let Some(why) = packages::refused(&project, command, true, false) {
         return commands::failure(commands::NODES, &why);
     }
+    let (dbt, dir) = dbt_of(&project, route, command);
     let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &project, &dbt.command);
     let (job, run) = (commands::nodes_job(selector), cache.join("run"));
     let Some(line) = config::dbt_command(&dbt.command, &project, &run, true, &job.words) else {

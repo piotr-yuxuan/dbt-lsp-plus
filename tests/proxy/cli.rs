@@ -241,6 +241,7 @@ fn doctor_and_select_give_the_guard_s_reason() {
     let refused = dbt_lsp_plus::packages::refused(&case.copy, &command, can_cut(), false).unwrap();
     assert!(refused.contains("a package from the network"), "{refused}");
     assert_eq!((status, &answer["packages"]), (Some(0), &json!(refused)), "{answer}");
+    let probes = starts(&case.log).len();
     let (status, answer) = case.run(&case.copy, &["select", "x"]);
     let expected = match cut("doctor_and_select_give_the_guard_s_reason") {
         true => dbt_lsp_plus::packages::refused(&case.copy, &command, true, false).unwrap(),
@@ -248,6 +249,7 @@ fn doctor_and_select_give_the_guard_s_reason() {
     };
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": expected})));
     assert!(case.runs().is_empty(), "{:?}", case.runs());
+    assert_eq!(starts(&case.log).len(), probes, "select probed a dbt it would not run");
 }
 
 /// The fake's lines for `orders` and `stg_orders`, as `dbt list` prints them.
@@ -295,6 +297,7 @@ fn select_without_the_cut_is_refused_and_runs_nothing() {
     let (status, answer) = case.run(&case.copy, &["select", "+stg_orders+"]);
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": REFUSED})));
     assert!(case.runs().is_empty(), "{:?}", case.runs());
+    assert!(starts(&case.log).is_empty(), "not even a probe: {:#?}", starts(&case.log));
 }
 
 #[test]
@@ -311,4 +314,11 @@ fn select_fails_with_dbt_s_error_or_with_no_nodes() {
     case.rescript(&json!({}));
     let (status, answer) = case.run(&case.copy, &["select", "nothing"]);
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": "No nodes found"})));
+    // Outside every project, the advice is select's own: it takes no path.
+    let (status, answer) = case.run(&case.dir, &["select", "x"]);
+    let why = answer["error"].as_str().unwrap();
+    assert!(
+        status == Some(1) && why.contains("run it within the project, or name it with -- dbt lsp --project-dir"),
+        "{why}"
+    );
 }

@@ -114,8 +114,13 @@ each node a line of `dbt list`'s output as dbt printed it.  On a failure,
 
 - `No nodes found`, when the selector selects nothing;
 - `dbt-lsp-plus runs dbt only cut off the network, which this system
-  cannot`, where `unshare -rnm` cannot run, as on macOS: nothing runs;
-- why a parse would be refused, as doctor's `packages`: nothing runs;
+  cannot`, where `unshare -rnm` cannot run, as on macOS, checked first:
+  nothing else runs, neither git nor a dbt's probe;
+- `no dbt_project.yml at or above DIR; run it within the project, or
+  name it with -- dbt lsp --project-dir DIR`, outside every project:
+  nothing runs;
+- why a parse would be refused, as doctor's `packages`, checked before
+  the dbt is looked for: nothing runs;
 - the first error dbt logged, or how dbt ended.
 
 Exit status: 0 when `error` is `null`; 1 otherwise, `No nodes found`
