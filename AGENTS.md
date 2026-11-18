@@ -148,9 +148,12 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     decisions on a command's request and on a run's output, with tests of
     their own; `commands::compile_job` and `commands::nodes_job`: one run
     per command, its words and its reader;
-  - `cli::asked`: the decision on a subcommand's words, with tests of its
-    own; `cli::doctor` and `cli::select`, one per subcommand, so that
-    `cli::main` stays a dispatch;
+  - `cli::named`: the rule that a subcommand is the first word, tested
+    without running the binary, apart from `main.rs`, whose `cli::main` is
+    the module's entry point; `cli::asked`: the decision on a
+    subcommand's words, with tests of its own; `cli::doctor` and
+    `cli::select`, one per subcommand, so that `cli::main` stays a
+    dispatch;
   - `Proxy::compare`: the shadow's work on a followed request's answer,
     once the client has it, so that `on_server_response` stays a dispatch;
   - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's

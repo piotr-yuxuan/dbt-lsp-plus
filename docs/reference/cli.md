@@ -65,7 +65,7 @@ would work.  For a project found:
 | `path` | PATH, made absolute from the current directory, each `..` dropping the component before it, as written |
 | `project` | the project's directory |
 | `route` | `given`, `folder` or `document`, as above |
-| `dbt.command` | the server command that would run, its dbt in place of a bare `dbt` |
+| `dbt.command` | the server command that would run, a `.venv`'s dbt in place of a bare `dbt`; a bare `dbt` stays for `PATH` |
 | `dbt.named` | the dbt: its path, or the words of the server command before `lsp` |
 | `dbt.source` | where it was found: `the server command`, `the project's .venv`, `the repository's .venv`, `the main worktree's project .venv`, `the main worktree's .venv` or `PATH` |
 | `dbt.skipped` | each place passed over, as `{"path": ..., "why": ...}`, such as a dbt-core 1.x whose `lsp --help` gives exit status 2 |
@@ -89,9 +89,9 @@ Exit status: 0 when a project is found whose dbt answers as a dbt 2 does
 (`dbt.lsp` `true` or `false`); 1 otherwise; 2 for a usage error.
 
 What it runs is what the server runs as it starts, and nothing else:
-`git rev-parse` once, on the folder's and a document's routes; `lsp
---help` of each dbt it looks at, the dbt that the server would leave
-unprobed included (the one on `PATH`, a first word of the user's own, the
+`git rev-parse` once, on the folder's and a document's routes when the
+server command's first word is `dbt`; `lsp --help` of each dbt it looks
+at, the dbt that the server would leave unprobed included (the one on `PATH`, a first word of the user's own, the
 command as written when given); and `unshare -rnm` on `true`.  None of
 these is cut off the network, as the server's are not: a launcher such as
 `uvx dbt` may reach it while it answers `lsp --help`.  doctor parses
@@ -108,8 +108,8 @@ current directory: `dbt list --select=SELECTOR --output json`, run cut off
 the network as the proxy's own runs are, in a run directory under the
 user's cache (`$XDG_CACHE_HOME`, else `~/.cache`, else the system's
 temporary directory) that it removes once it has the answer.  A select
-killed by a signal leaves its run directory, and dbt may run on to its
-deadline; the next select or proxy on the same project and server
+killed by a signal leaves its run directory, and, killed with SIGKILL,
+leaves dbt running on, unwatched; the next select or proxy on the same project and server
 command removes such directories once no parse has written them for a
 day.  The answer
 is what the command `dbt-lsp-plus.nodes` gives a client:
