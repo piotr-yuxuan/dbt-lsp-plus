@@ -57,7 +57,7 @@ repository where it is installed.  Its `.lsp.json` holds no path:
 
 The plugin's command is the default `dbt lsp`, with no flag: with dbt
 2.0.9 behind it, dbt sends its anonymous usage statistics, which
-`DO_NOT_TRACK` does not stop.  To keep them, declare the server in a
+`DO_NOT_TRACK` does not stop.  To stop them, declare the server in a
 plugin of your own, or at project scope, with the flag:
 
 ```json
