@@ -4,7 +4,7 @@
 //! of a session that has none.
 
 use crate::support::{Session, copy_fixture, scratch, script, uri};
-use crate::{lives, logged, manifest, node_info};
+use crate::{dbt_event, lives, logged, manifest, node_info, published};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -327,5 +327,46 @@ fn a_project_from_a_document_runs_dbt_in_its_directory() {
         let _ = std::io::Write::write_all(&mut std::io::stderr(), b"no cut here: the compile is not checked\n");
     }
     assert_eq!(node_info(&mut session, json!("model.shop.orders"))["result"]["unique_id"], "model.shop.orders");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_project_from_a_document_reads_dbt_s_paths_from_its_directory() {
+    let copy = copy_fixture("routes-dbt-paths");
+    let (dir, repo) = (copy.parent().unwrap().to_owned(), copy.with_file_name("repo"));
+    let project = repo.join("dbt");
+    fs::create_dir_all(&repo).unwrap();
+    fs::rename(&copy, &project).unwrap();
+    // dbt names a YAML error's file from its working directory, here the project.
+    let error = "[error] [YAML (dbt1013)]\n  --> models/staging/_sources.yml:3:5";
+    let parse_log = dir.join("parse.jsonl");
+    fs::write(&parse_log, dbt_event("error", "1013", error) + &dbt_event("info", "Q039", "Finished")).unwrap();
+    let script_value = json!({"manifest": manifest(), "parse_log": parse_log, "compiled": "select 1",
+                              "compiled_relative": true});
+    let (script_path, log, cache) = fake_env(&dir.join("session"), &script_value);
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", cache.as_path()),
+    ];
+    let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp").to_owned(), "lsp".into()];
+    let mut session = Session::start(&fake, &env, Some(&repo));
+    session.initialize(&repo);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    if !dbt_lsp_plus::config::can_cut() {
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), b"no cut here: neither the parse nor the compile\n");
+        return;
+    }
+    let found = published(&mut session, &project.join("models/staging/_sources.yml"), |params| {
+        params["diagnostics"] != json!([])
+    });
+    assert_eq!(found["diagnostics"][0]["code"], "1013", "{found}");
+    // The compiled file, named from the run's working directory through `..`.
+    let compiled = session
+        .request("workspace/executeCommand", json!({"command": "dbt-lsp-plus.compile", "arguments": [uri(&orders)]}));
+    let file = compiled["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("{compiled}"));
+    let text = fs::read_to_string(url::Url::parse(file).unwrap().to_file_path().unwrap()).unwrap();
+    assert_eq!(text, "select 1");
     assert!(session.finish().success());
 }

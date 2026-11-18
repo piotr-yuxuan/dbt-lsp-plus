@@ -56,7 +56,8 @@
 //!     `compile_writes` under `--target-path` (`compiled/shop/R` by
 //!     default), with a manifest whose node of R in the package shop names
 //!     that file as its `compiled_path`, from the working directory as dbt
-//!     does when it can; `list`, values that a list prints,
+//!     does when it can, or always, through `..`, when `compiled_relative`
+//!     is true; `list`, values that a list prints,
 //!     one JSON line each; `run_log`, text that either prints first, as
 //!     dbt's log; `run_exit`, the status of either; `run_gate`, a file
 //!     either waits for first; `run_hang`, true when either never exits;
@@ -361,7 +362,15 @@ fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
         std::fs::create_dir_all(file.parent().unwrap()).expect("create the compiled file's directory");
         std::fs::write(&file, text).expect("write the compiled file");
         let cwd = std::env::current_dir().expect("the working directory");
-        let compiled_path = file.strip_prefix(&cwd).unwrap_or(&file);
+        let compiled_path = match script["compiled_relative"] == json!(true) {
+            true => {
+                // Up from the working directory to the first directory both share, then down.
+                let shared = cwd.components().zip(file.components()).take_while(|(one, other)| one == other).count();
+                let up = (shared..cwd.components().count()).map(|_| Path::new(".."));
+                up.chain(file.components().skip(shared).map(|part| Path::new(part.as_os_str()))).collect()
+            }
+            false => file.strip_prefix(&cwd).unwrap_or(&file).to_owned(),
+        };
         let node = json!({"original_file_path": relative, "package_name": "shop", "compiled_path": compiled_path});
         let manifest = json!({"nodes": {"model.shop.compiled": node}});
         std::fs::write(Path::new(target).join("manifest.json"), manifest.to_string()).expect("write the manifest");
