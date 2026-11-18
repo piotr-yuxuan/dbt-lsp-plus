@@ -163,9 +163,10 @@ would do for the file PATH: `route`, `project`, `dbt` (`command`,
 `named`, `source`, `skipped`, `lsp`, `why`), `alone`, `cut` and
 `packages`; with no PATH, for the current directory.  `dbt-lsp-plus
 select SELECTOR`, run in the project, gives
-`{"error":null,"nodes":[...]}`, each node as `dbt list` prints it.  doctor exits 0 when it finds a
-project and a dbt 2, select when `error` is null; 1 otherwise; 2 for a
-usage error ([the subcommands](../reference/cli.md)).
+`{"error":null,"nodes":[...]}`, each node as `dbt list` prints it.
+doctor exits 0 when it finds a project and a dbt 2, select when `error`
+is null; 1 otherwise; 2 for a usage error ([the
+subcommands](../reference/cli.md)).
 
 From a repository's root over `dbt/`, doctor on a model's file gave
 `"route":"document"`, `"source":"the project's .venv"` and
