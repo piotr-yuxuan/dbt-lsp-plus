@@ -1250,8 +1250,10 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   `, properties <file>` when a properties file patches the node (its
   `patch_path` without `<package>://`), or a source's own file; then, when
   any column is declared, `columns ` and each one's name and declared
-  `data_type`, by name, as the manifest is read.  nodeInfo's `summary`
-  holds the summary alone.
+  `data_type`, by name, as the manifest is read.  In markdown, the
+  summary and the facts are escaped, so that a type such as
+  `map<string,int>` is not read as a tag; an underscore inside a word
+  stays as it is.  nodeInfo's `summary` holds the summary alone.
 - Where the proxy answers the hover itself, alone or in `plus`, a hover
   that names a node before any index exists (a `ref` or a `source`, an
   entry's `name:`, or 0:0 of a file but a properties file whose scan
