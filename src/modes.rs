@@ -68,6 +68,11 @@ const ADDED: [&str; 6] = [
 /// The methods whose empty answer is `[]` rather than null.
 const LISTS: [&str; 3] = ["textDocument/references", "textDocument/inlayHint", "workspace/symbol"];
 
+/// What METHOD answers when it has nothing: `[]` for a list, else null.
+pub fn empty(method: &str) -> Value {
+    if LISTS.contains(&method) { json!([]) } else { Value::Null }
+}
+
 /// A method of LSP: a namespace of the protocol's and a name.
 static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -281,7 +286,7 @@ impl Table {
     pub fn nothing(&self, method: &str) -> Option<Value> {
         let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
         let empty = known && (mode == Mode::Plus || (self.none && mode == Mode::Dbt));
-        empty.then(|| if LISTS.contains(&method) { json!([]) } else { Value::Null })
+        empty.then(|| self::empty(method))
     }
 
     /// `experimental.dbtLspPlus`, version 2, from ROWS (request, kind,

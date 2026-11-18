@@ -396,7 +396,7 @@ fn a_server_lost_after_it_listed_the_commands_leaves_compile_to_the_run_and_show
         json!({"textDocument": {"uri": uri(&orders())},
                                                               "position": {"line": 0, "character": 0}}),
     );
-    assert!(hover.get("error").is_some(), "{hover}");
+    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "the proxy's nothing: {hover}");
     let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
     let shown = execute(&mut session, SHOW, json!([{"inline": "select 1", "limit": 2}]));
     assert!(shown["result"]["error"].as_str().unwrap().contains("needs dbt lsp"), "{shown}");

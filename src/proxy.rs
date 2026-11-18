@@ -120,6 +120,11 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 /// server has not answered within this long: three times what dbt lsp 2.0.9
 /// took on the fixture during a compilation.
 const MERGE_DEADLINE: Duration = Duration::from_millis(300);
+/// A merged request to which the proxy has nothing to add is answered with
+/// that nothing if the server has not answered within this long: above the
+/// slowest answer of dbt lsp 2.0.9 seen, 1.9 s for the first hover on 2,000
+/// models during its compilation.
+const NOTHING_DEADLINE: Duration = Duration::from_secs(2);
 /// At most this many restarts of a server that died, within the window.
 const RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
@@ -243,6 +248,9 @@ enum Pending {
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
+    /// A merged request to which the proxy adds nothing: this nothing, null
+    /// or `[]`, is its answer when the server's is an error, late, or none.
+    Nothing(Value),
     /// Answered with the proxy's part alone once the server was late: its
     /// answer, when it comes, is dropped.
     Answered,
@@ -271,14 +279,27 @@ impl Pending {
     }
 
     /// The proxy's part alone, as the answer when the server gives none: a
-    /// hover's text, the hints; none for a request with no part.
+    /// hover's text, the hints, a merged request's nothing; none for a
+    /// request that is not merged.
     fn alone(&self, markdown: bool) -> Option<Value> {
         let nothing = match self {
             Pending::Hover(..) => json!({"result": null}),
             Pending::Hints(_) => json!({"result": []}),
+            Pending::Nothing(nothing) => return Some(nothing.clone()),
             _ => return None,
         };
         self.merged(&nothing, markdown).map(|merged| merged["result"].clone())
+    }
+
+    /// How long the server has to answer this kind of request before the
+    /// client gets the proxy's answer alone: a part is worth showing at
+    /// once, a nothing only once the server is clearly late.
+    fn deadline(&self) -> Option<Duration> {
+        match self {
+            Pending::Hover(..) | Pending::Hints(_) => Some(MERGE_DEADLINE),
+            Pending::Nothing(_) => Some(NOTHING_DEADLINE),
+            _ => None,
+        }
     }
 }
 
@@ -356,8 +377,8 @@ struct Proxy<W: Write> {
     initialize: Option<Value>,
     /// The client's requests that the server has yet to answer.
     forwarded: HashMap<String, (Value, Pending)>,
-    /// When each forwarded request with a part of the proxy's is answered
-    /// with it alone, and its method.
+    /// When each merged request is answered with the proxy's part or
+    /// nothing alone, and its method.
     deadlines: HashMap<String, (Instant, String)>,
     /// The methods whose late answer the proxy logged.
     late: HashSet<String>,
@@ -1454,8 +1475,7 @@ impl<W: Write> Proxy<W> {
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
-                let nothing = json!({"textDocument/hover": null, "textDocument/inlayHint": []});
-                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| nothing[method].clone())))
+                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| modes::empty(method))))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1640,10 +1660,13 @@ impl<W: Write> Proxy<W> {
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
     /// proxy must not cancel, the summary that a hover's answer gets, a
-    /// request that the shadow follows; and whether, once routed, it asks for
-    /// a fresh index: a hover keeps the index fresh, an inlay hint only makes
-    /// one, and in `dbt` neither; a shadowed request wants what `plus` reads.
+    /// request that the shadow follows, the nothing that a merged request
+    /// falls back to; and whether, once routed, it asks for a fresh index: a
+    /// hover keeps the index fresh, an inlay hint only makes one, and in
+    /// `dbt` neither; a shadowed request wants what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
+        // Outside `dbt`, a hover, hints, a definition or references with no part of the proxy's.
+        let nothing = Pending::Nothing(modes::empty(method));
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
                 self.on_initialize(params);
@@ -1673,10 +1696,7 @@ impl<W: Write> Proxy<W> {
                     );
                     navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
-                return (
-                    summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard)),
-                    true,
-                );
+                return (summary.or_else(block).map_or(nothing, |(text, hard)| Pending::Hover(text, hard)), true);
             }
             ("textDocument/inlayHint", _) if self.table.mode(method) != Mode::Dbt => {
                 // A panic leaves the server's answer as it is.
@@ -1690,7 +1710,7 @@ impl<W: Write> Proxy<W> {
                     Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
-                return (hints.map_or(Pending::Request, Pending::Hints), self.parsing.index.is_none());
+                return (hints.map_or(nothing, Pending::Hints), self.parsing.index.is_none());
             }
             // Followed only once forwarded: one the proxy answers is no one's to compare, and `plus` forwards none.
             ("textDocument/definition" | "textDocument/references", _) => {
@@ -1701,7 +1721,8 @@ impl<W: Write> Proxy<W> {
                     .filter(|_| self.table.mode(method) != Mode::Plus)
                     .map(|_| Pending::Shadow { method: method.to_owned(), params: params.clone(), changes });
                 let fresh = shadowed.is_some();
-                return (shadowed.unwrap_or(Pending::Request), fresh);
+                let mine = self.table.mode(method) != Mode::Dbt;
+                return (shadowed.unwrap_or(if mine { nothing } else { Pending::Request }), fresh);
             }
             _ => Pending::Request,
         };
@@ -1721,8 +1742,8 @@ impl<W: Write> Proxy<W> {
             (Route::Answer(result), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
             (Route::Command(command), ..) => self.on_command(command, id, params, pending),
             (Route::Forward, Some(_), _) => {
-                // dbt lsp adds to the proxy's part, but never holds it up.
-                let late = pending.alone(self.markdown).map(|_| (Instant::now() + MERGE_DEADLINE, method.to_owned()));
+                // dbt lsp adds to the proxy's part, or replaces its nothing, but never holds it up.
+                let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
                 self.deadlines.extend(late.map(|late| (key(id), late)));
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
@@ -1731,7 +1752,11 @@ impl<W: Write> Proxy<W> {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            (Route::Forward, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
+            // A merged request gets the proxy's answer alone, any other the failure.
+            (Route::Forward, None, _) => match pending.alone(self.markdown) {
+                Some(part) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
+                None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
+            },
         }
         // Once the request is forwarded, so that a listing takes no id of the client's.
         if fresh {
@@ -2165,16 +2190,17 @@ impl<W: Write> Proxy<W> {
     fn on_time(&mut self) {
         self.expire_listing();
         let now = Instant::now();
-        // A merge past its deadline: the proxy's part alone, the server's late answer dropped.
+        // A merge past its deadline: the proxy's part or nothing alone, the server's late answer dropped.
         let due: Vec<(String, String)> =
             self.deadlines.iter().filter(|(_, (at, _))| *at <= now).map(|(k, (_, m))| (k.clone(), m.clone())).collect();
         for (late, method) in due {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
+            let waited = pending.deadline().unwrap_or(MERGE_DEADLINE);
             let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).alone(self.markdown));
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
             if !self.shutdown && self.late.insert(method.clone()) {
-                let ms = MERGE_DEADLINE.as_millis();
+                let ms = waited.as_millis();
                 let text = format!("dbt lsp did not answer {method} within {ms} ms: dbt-lsp-plus answered alone");
                 self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
                                          "params": {"type": 4, "message": text}}));
