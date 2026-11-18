@@ -19,12 +19,15 @@ which says where Emacs shows each of the logs below.
   wait for it 300 ms where the proxy has something to add, 2 s where it
   has nothing; past that, or when `dbt lsp` fails, exits or is not
   running, the proxy answers with its part, else null or `[]`, and logs
-  once per method that `dbt lsp` was late (`window/logMessage`, type 4).
+  once per method and deadline that `dbt lsp` was late
+  (`window/logMessage`, type 4).
   Set a method to `dbt` (`--mode textDocument/hover=dbt`) to wait for
   `dbt lsp` however long it takes.  Any other slow answer is the
   server's.
-- **Alone**, with dbt-oss, the proxy fails every other request it does
-  not answer at once, with -32803, rather than leave it waiting.
+- **Alone**, with dbt-oss, references at a position the proxy does not
+  claim are `[]` and a definition there null; the proxy fails every other
+  request it does not answer at once, with -32803, rather than leave it
+  waiting.
 
 ## A request times out
 

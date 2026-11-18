@@ -76,7 +76,10 @@ proxy's own: its part, else null, or `[]` for references and hints.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
 ten minutes, and gives it the open documents as they stand.  Without
 `dbt lsp`, and while it restarts, the proxy keeps serving its own
-features, `dbt-lsp-plus.nodeInfo`, the summary and the hints included.
+features; while it restarts and after a fourth crash,
+`dbt-lsp-plus.nodeInfo`, the summary and the hints too, from its own
+parse.  With a `dbt lsp` that cannot start, that parse runs the same dbt
+and fails, and `nodeInfo` gives its failure.
 
 With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
 see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).

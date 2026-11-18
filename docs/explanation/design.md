@@ -155,8 +155,9 @@ nothing, null, or `[]` for references and hints.  The client gets that
 answer alone when dbt lsp has not answered within 300 ms of the
 forwarding where the proxy has a part (`MERGE_DEADLINE`), within 2 s
 where it has nothing (`NOTHING_DEADLINE`, plan 037); dbt lsp's late answer
-is then dropped, logged once per method (`window/logMessage`, type 4,
-naming the deadline that passed).  dbt lsp's error, its exit before it
+is then dropped, logged once per method and deadline (`window/logMessage`,
+type 4, naming the deadline that passed), so that a 2 s drop shows after a
+300 ms one.  dbt lsp's error, its exit before it
 answers, and no dbt lsp running when the request comes, give the
 proxy's answer too, where any other request gets dbt lsp's error or
 -32803.  dbt lsp's own null or `[]` passes byte for byte; any other answer
@@ -1182,8 +1183,9 @@ So the proxy runs the user's own `dbt parse`.
 dbt lsp 2.0.9 announces inlay hints and answers `[]` on a model, null on a
 macro file and on a properties file.  The proxy forwards each request and
 puts its own hints after the server's (appended to an array, alone in
-place of null, of an error, and of an answer later than 300 ms; see
-"Modes"): after each `ref` or `source`
+place of null, of an error, and of an answer later than 300 ms; with
+none of its own, `[]` in place of an error or of an answer later than
+2 s; see "Modes"): after each `ref` or `source`
 whose arguments are literals, right after its closing parenthesis, the
 relation dbt builds for its node, from the last parse's index, or
 `ephemeral` by the node's materialization; none for a disabled node, an
@@ -1320,9 +1322,10 @@ Alone, the proxy:
   (`dbt-lsp-plus-file-watcher`), so that an edit outside the editor
   parses again; dbt's own output is filtered as with a server.
 
-It runs no server, so nothing restarts, no `dbt/*` notification or progress
-comes, and any request it does not answer, `dbt.compileFile` among them,
-fails with -32803.
+It runs no server, so nothing restarts, and no `dbt/*` notification or
+progress comes.  References at a position it does not claim, in `merge`,
+are `[]`, and a definition there null; any other request it does not
+answer, `dbt.compileFile` among them, fails with -32803.
 
 ## Failure modes
 
@@ -1332,7 +1335,7 @@ fails with -32803.
 | A `.venv/bin/dbt` that cannot run or is not a dbt 2 | Skipped and named in the line; the next place, else `PATH` (see "Root") |
 | A repository whose `.venv/bin/dbt` is not to be trusted | Run, outside the cut, as soon as a file of its project opens, on the folder's route and a document's: its probe, then the parse or `dbt lsp`.  A server command with a path to dbt, or `--project-dir`, runs what it names |
 | The user's dbt has no `lsp` | Standalone mode, with no warning (see "Standalone mode") |
-| `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers a merged request with its part or nothing (null, or `[]` for references and hints), tries the parse with the same dbt, whose failure `nodeInfo` gives, and fails every other request with -32803 |
+| `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for whatever its mode, answers a merged request with its part or nothing (null, or `[]` for references and hints), tries the parse with the same dbt, whose failure `nodeInfo` gives, and fails every other request with -32803 |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but the merged ones, which get the proxy's part or nothing, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph, and parses (see "How the proxy runs it") |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
@@ -1392,9 +1395,11 @@ fails with -32803.
   is known to reuse an id.  A request answered at its deadline stays
   recorded until dbt lsp answers it or exits, a hung dbt lsp keeping one
   record per such request.
-- The deadline holds while a server runs: between restarts and after the
-  give-up, a hover or hints with a part of the proxy's fail with -32803,
-  as every request that would go to the server (plan 019's backend).
+- While no server runs (between restarts, after the give-up, or with
+  one that cannot start), a request that is not merged (completion,
+  rename, code actions and the like) fails with -32803, as every request
+  that would go to the server; only the merged ones get the proxy's
+  answer (plan 037).
 - Once the server has listed the graph, an unsaved edit of a `ref` in a node
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the
