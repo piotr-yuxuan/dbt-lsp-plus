@@ -296,12 +296,16 @@ impl Session {
     }
 }
 
-/// Writes at PATH an executable shell script of BODY.
+/// Writes at PATH an executable shell script of BODY, by a child process:
+/// a file this process held open for writing, inherited by a child another
+/// test thread spawns meanwhile, would fail to run with "Text file busy".
 pub fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut writer = Command::new("/bin/sh");
+    writer.args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(path).stdin(Stdio::piped());
+    let mut child = writer.spawn().expect("start the writer of a script");
+    child.stdin.take().unwrap().write_all(format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "write {path:?}");
 }
 
 /// The bodies the fake server received, one JSON value per line.
