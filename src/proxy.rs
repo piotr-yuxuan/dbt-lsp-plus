@@ -1193,10 +1193,11 @@ impl<W: Write> Proxy<W> {
         Some(Ok(node.map_or(Value::Null, summarised)))
     }
 
-    /// Starts a parse when the index is stale and dbt can parse: alone, or
-    /// with a server that compiled since the last change; packages that need
-    /// no network, no parse under way, no shutdown, a server command with
-    /// `lsp`.
+    /// Starts a parse when the index is stale and dbt can parse: with no
+    /// server running, or with one that compiled since the last change;
+    /// packages that need no network, guarded as alone while no server runs
+    /// and none compiled since the last change; no parse under way, no
+    /// shutdown, a server command with `lsp`.
     fn want_index(&mut self) {
         // A listing makes dbt lsp compile, as the first document opened does.
         if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
@@ -1204,11 +1205,13 @@ impl<W: Write> Proxy<W> {
         }
         self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
-        // Alone, no server resolves the packages first: their guard is enough.
-        let can = self.standalone || (parsing.compiled && self.server.is_some());
+        // With no server, none resolves the packages first: their guard is enough.
+        let can = self.server.is_none() || parsing.compiled;
         let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.standalone) {
+        // A server that compiled since the last change resolved the packages, though it may be gone since.
+        let alone = self.server.is_none() && !self.parsing.compiled;
+        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, alone) {
             return self.log_parse(&why);
         }
         let cache = self.cache(&root);
