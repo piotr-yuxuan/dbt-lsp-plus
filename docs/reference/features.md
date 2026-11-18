@@ -186,6 +186,17 @@ says what a line holds and the rule by which a later version reads them.
   answers that it has no `lsp` subcommand, as dbt-oss does, the proxy
   answers alone, from the files and its own `dbt parse` (see [Use it with
   dbt-oss alone](../how-to/use-with-dbt-oss.md)).
+- Without `--project-dir`, when the first word is the bare `dbt` (the
+  default included), the proxy runs the project's dbt: the first of the
+  project's `.venv/bin/dbt`, the repository's, and, from a linked
+  worktree, the main worktree's project's and the main worktree's own,
+  that answers `lsp --help` as dbt 2 does, with `lsp` or without; one that
+  answers otherwise, as dbt-core 1.x does, or cannot run, is skipped.
+  Else the `dbt` on `PATH`.  Any other first word is kept as written.
+  The proxy says once, on its standard error and in a `window/logMessage`,
+  `dbt-lsp-plus: project <root>, dbt <path> (<where it was found>)`, with
+  each place skipped and, when it answers alone, why.  With
+  `--project-dir`, the command runs as written.
 - A server command without the word `lsp` is run as it is, as a wrapper
   of the user's own: the proxy then runs no `dbt parse`.
 
@@ -196,13 +207,21 @@ It builds that command from the server command: the same launcher, then
 these flags when the server command has them, as `--flag X` or
 `--flag=X`.  `dbt lsp` reads them too.
 
-- `--project-dir DIR`: the dbt project.  Default: the client's first
-  workspace folder or `rootUri`, when it holds a `dbt_project.yml`; else
-  the proxy's working directory.  A relative `DIR` is taken from the
-  proxy's working directory.
-- `--profiles-dir DIR`: where `profiles.yml` is.  Default, as dbt's: the
-  proxy's working directory, then `~/.dbt`, not the project.  An editor
-  that starts the proxy in a subdirectory of the project needs it.
+- `--project-dir DIR`: the dbt project.  A relative `DIR` is taken from
+  the proxy's working directory.  Default: the client's first workspace
+  folder or `rootUri`, when it holds a `dbt_project.yml`; else the
+  project of the first file opened in one: the nearest directory above it
+  holding a `dbt_project.yml` that is no package of the next one above,
+  installed or local.  Before that the proxy runs nothing and answers
+  every request with null, and for such a project it runs no `dbt lsp`:
+  it answers alone, as with dbt-oss.  The working directory never names
+  the project.
+- `--profiles-dir DIR`: where `profiles.yml` is.  Default, as dbt's:
+  dbt's working directory, then `~/.dbt`.  dbt runs in the project when
+  the client's folder or a file named it, so a `profiles.yml` beside
+  `dbt_project.yml` is found; with `--project-dir`, in the proxy's
+  working directory, not the project's: an editor that starts the proxy
+  in a subdirectory of the project needs it.
 - `--profile NAME`: the profile.  Default: the `profile` of
   `dbt_project.yml`.
 - `--target NAME`: the target of the profile.  Default: the profile's

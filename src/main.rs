@@ -14,7 +14,10 @@ proxy answers itself documentSymbol, workspace/symbol and the call hierarchy
 when the server does not announce them.  With a dbt that has no `lsp`, such
 as dbt-oss, it answers alone, from the files and the user's `dbt parse`.
 The project is the --project-dir of SERVER COMMAND, else the client's root
-folder, else the current directory.
+folder when it holds dbt_project.yml, else the project of the first file
+opened in one; until then the proxy runs nothing.  Without --project-dir,
+a bare `dbt` is the project's .venv's, its repository's or its main
+worktree's, else the one on PATH, and dbt runs in the project.
 
   --mode METHOD=MODE    who answers the LSP method METHOD: ours (the proxy
                         alone), dbt (dbt lsp alone) or merge (both)

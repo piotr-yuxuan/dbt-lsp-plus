@@ -40,7 +40,9 @@ seconds, 10 by default.
 
 - **Its standard error**, for what happens before a client can be told:
   `dbt-lsp-plus: cannot start ...` when the server command does not run;
-  that `unshare -rnm` cannot cut its `dbt parse` off the network here.
+  that `unshare -rnm` cannot cut its `dbt parse` off the network here;
+  without `--project-dir`, which project and which dbt it found, the line
+  that `window/logMessage` repeats.
 - **`window/logMessage`**, once per reason, each prefixed
   `dbt-lsp-plus:`: that the dbt has no `lsp` and the proxy answers alone;
   that `dbt lsp` ended and restarts in so many seconds, at most three
@@ -49,10 +51,18 @@ seconds, 10 by default.
 ## Common problems
 
 - **No hover summary, inlay hints or node information.**  The proxy's `dbt
-  parse` failed: most often dbt found no `profiles.yml`, which it looks for
-  in the proxy's working directory and in `~/.dbt`, not in the project.
-  Pass `--profiles-dir` in the server command (see [the
+  parse` failed: most often dbt found no `profiles.yml`, which, with
+  `--project-dir`, it looks for in the proxy's working directory and in
+  `~/.dbt`, not in the project.  Pass `--profiles-dir` in the server
+  command (see [the
   configuration](../reference/features.md#configuration)).
+- **Every answer null, and nothing in the log.**  Without `--project-dir`,
+  neither the client's folder nor any file opened lies in a dbt project:
+  open a model, or pass `--project-dir`.
+- **Not the dbt expected.**  The line `dbt-lsp-plus: project ..., dbt ...`
+  says which it took and which it skipped, and why: a `.venv` whose `dbt`
+  is dbt-core 1.x is skipped.  A path in the server command, in place of
+  the bare `dbt`, is run as written.
 - **"dbt parse would install it, rewriting the install path; run dbt
   deps".**  A package is missing, or the lock is older than the files that
   name it: the proxy will not let its parse install packages.  Run `dbt
