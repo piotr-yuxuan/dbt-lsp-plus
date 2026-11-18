@@ -196,7 +196,9 @@ fn the_project_and_its_dbt_found_without_project_dir() {
     std::os::unix::fs::symlink(&dbt, &venv).unwrap();
     let before = paths(&project);
     found_from_a_document(&project, &venv);
-    found_from_the_folder(&project, lsp_of(&dbt, &home));
+    let lsp = lsp_of(&dbt, &home);
+    found_from_the_folder(&project, lsp);
+    from_a_shell(&project, lsp);
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
 }
@@ -260,6 +262,47 @@ fn found_from_the_folder(project: &Path, lsp: bool) {
     let stg_orders = json!(uri(&project.join("models/staging/stg_orders.sql")));
     assert!([&found["uri"], &found[0]["uri"], &found[0]["targetUri"]].contains(&&stg_orders), "{found}");
     assert!(session.finish().success());
+}
+
+/// doctor from the parent of the copy PROJECT, on a model, and select in
+/// PROJECT, as an agent runs them in a shell, with the default server
+/// command; LSP whether the dbt has `lsp`.
+fn from_a_shell(project: &Path, lsp: bool) {
+    let dir = project.parent().unwrap();
+    let run = |at: &Path, words: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
+        command.args(words).args(["--", "dbt", "lsp", "--no-send-anonymous-usage-stats"]).current_dir(at);
+        command.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        command.env("HOME", dir.join("home")).env("XDG_CACHE_HOME", dir.join("cache")).env("DO_NOT_TRACK", "1");
+        command
+            .env("GIT_CEILING_DIRECTORIES", dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        let output = command.output().expect("run dbt-lsp-plus");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.lines().count(), 1, "{words:?}: {stdout}");
+        (output.status.code(), serde_json::from_str::<Value>(&stdout).unwrap())
+    };
+    let (status, doctor) = run(dir, &["doctor", "shop/models/marts/orders.sql"]);
+    let found = (&doctor["route"], &doctor["dbt"]["source"], &doctor["dbt"]["lsp"]);
+    assert_eq!(
+        (status, found),
+        (Some(0), (&json!("document"), &json!("the project's .venv"), &json!(lsp))),
+        "{doctor}"
+    );
+    let cut = dbt_lsp_plus::config::can_cut();
+    assert_eq!((&doctor["cut"], &doctor["packages"]), (&json!(cut), &Value::Null), "{doctor}");
+    let (status, selected) = run(project, &["select", "+stg_orders+"]);
+    if !cut {
+        let _ = writeln!(std::io::stderr(), "from_a_shell: this system cannot cut: the refusal checked instead");
+        assert_eq!((status, &selected["nodes"]), (Some(1), &json!([])), "{selected}");
+        return assert!(selected["error"].as_str().unwrap().contains("cut off the network"), "{selected}");
+    }
+    let nodes = selected["nodes"].as_array().into_iter().flatten();
+    let orders = nodes.clone().find(|node| node["unique_id"] == "model.shop.orders");
+    let upstream = orders.and_then(|orders| orders["depends_on"]["nodes"].as_array());
+    let named = upstream.is_some_and(|nodes| nodes.contains(&json!("model.shop.stg_orders")));
+    assert!(status == Some(0) && named, "{selected}");
 }
 
 /// The information of a node, a hover's summary and the graph, as dbt
