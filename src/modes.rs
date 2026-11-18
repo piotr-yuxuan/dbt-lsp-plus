@@ -269,14 +269,10 @@ impl Table {
     }
 
     /// Whether the proxy answers METHOD at a position it claims, by a row of
-    /// `experimental.dbtLspPlus`, ALONE whether that row holds with no
-    /// backend only: every row in `plus`, today's in `merge`, none in `dbt`.
-    pub fn lists(&self, method: &str, alone: bool) -> bool {
-        match self.mode(method) {
-            Mode::Plus => true,
-            Mode::Merge => self.none || !alone,
-            Mode::Dbt => false,
-        }
+    /// `experimental.dbtLspPlus`: every row in `plus` and `merge`, with a
+    /// backend or none, none in `dbt`.
+    pub fn lists(&self, method: &str) -> bool {
+        self.mode(method) != Mode::Dbt
     }
 
     /// What the proxy answers METHOD where it has nothing of its own, if it
@@ -289,11 +285,11 @@ impl Table {
     }
 
     /// `experimental.dbtLspPlus`, version 2, from ROWS (request, kind,
-    /// places, alone only): each row the table lists, its places in order.
-    pub fn flag(&self, rows: &[(&str, &str, &[&str], bool)]) -> Value {
+    /// places): each row the table lists, its places in order.
+    pub fn flag(&self, rows: &[(&str, &str, &[&str])]) -> Value {
         let mut answered = json!({"version": 2});
-        for (request, kind, places, alone) in rows {
-            if self.lists(&format!("textDocument/{request}"), *alone) {
+        for (request, kind, places) in rows {
+            if self.lists(&format!("textDocument/{request}")) {
                 let listed = answered[*request][*kind].as_array().cloned().unwrap_or_default();
                 answered[*request][*kind] = json!([listed, places.iter().map(|place| json!(place)).collect()].concat());
             }
@@ -479,21 +475,21 @@ mod tests {
 
     #[test]
     fn the_flag_and_empty_answers_follow_the_modes() {
-        let rows: [(&str, &str, &[&str], bool); 3] = [
-            ("definition", "source", &["sql", "yaml"], false),
-            ("definition", "ref", &["sql"], true),
-            ("references", "source", &["sql"], false),
+        let rows: [(&str, &str, &[&str]); 4] = [
+            ("definition", "source", &["sql", "yaml"]),
+            ("definition", "ref", &["sql"]),
+            ("definition", "ref", &["python"]),
+            ("references", "source", &["sql"]),
         ];
-        let merged = Table::new(&Settings::default(), &|_| false, false);
-        assert_eq!(
-            merged.flag(&rows),
-            json!({"version": 2, "definition": {"source": ["sql", "yaml"]}, "references": {"source": ["sql"]}})
-        );
-        let alone = Table::new(&Settings::default(), &|_| false, true);
-        assert_eq!(alone.flag(&rows)["definition"]["ref"], json!(["sql"]), "alone, today's alone-only rows");
+        let every = json!({"version": 2, "definition": {"source": ["sql", "yaml"], "ref": ["sql", "python"]},
+                           "references": {"source": ["sql"]}});
+        for none in [false, true] {
+            assert_eq!(Table::new(&Settings::default(), &|_| false, none).flag(&rows), every, "merge, none {none}");
+        }
         let user = settings(&[("textDocument/definition", "plus"), ("textDocument/references", "dbt")], None);
         let table = Table::new(&user, &|_| false, false);
-        assert_eq!(table.flag(&rows), json!({"version": 2, "definition": {"source": ["sql", "yaml"], "ref": ["sql"]}}));
+        let definition = json!({"version": 2, "definition": every["definition"]});
+        assert_eq!(table.flag(&rows), definition, "plus lists, dbt does not");
         assert_eq!(table.nothing("textDocument/definition"), Some(Value::Null));
         assert_eq!(table.nothing("textDocument/references"), None, "dbt with a backend is forwarded");
         let none = Table::new(&user, &|_| false, true);

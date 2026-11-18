@@ -97,8 +97,9 @@ fn in_front_of_the_real_dbt_lsp() {
 }
 
 /// The shadow in front of the real dbt lsp: definitions on a `ref` and on
-/// a macro call, and references on the `ref`, as dbt lsp 2.0.9 answered
-/// them beside the proxy: the baseline that design.md records.
+/// a macro call, and references on the `ref`, left to dbt lsp so that the
+/// shadow follows them, as dbt lsp 2.0.9 answered them beside the proxy:
+/// the baseline that design.md records.
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
 fn the_shadow_in_front_of_the_real_dbt_lsp() {
@@ -113,7 +114,8 @@ fn the_shadow_in_front_of_the_real_dbt_lsp() {
     let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
     let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
     let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
-    let mut session = Session::start_with(&["--shadow"], &server, &env, Some(&project));
+    let options = ["--shadow", "--mode", "textDocument/definition=dbt", "--mode", "textDocument/references=dbt"];
+    let mut session = Session::start_with(&options, &server, &env, Some(&project));
     session.timeout = Duration::from_secs(180);
     session.initialize(&project);
     let orders = project.join("models/marts/orders.sql");

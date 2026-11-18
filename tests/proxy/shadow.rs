@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 const SUMMARY: &str = "dbt-lsp-plus.shadowSummary";
+/// Definitions left to dbt lsp, the only mode in which the shadow follows a
+/// definition on a `ref`.
+const DEFINITION_DBT: &str = "textDocument/definition=dbt";
 
 /// The shadow's log of the fake session NAME on the fixture.
 fn log_of(name: &str) -> PathBuf {
@@ -30,10 +33,11 @@ fn orders() -> PathBuf {
     fixture().join("models/marts/orders.sql")
 }
 
-/// A session NAME with the shadow on, in front of the fake with SCRIPT,
-/// initialized on the fixture.
+/// A session NAME with the shadow on, definitions and references left to
+/// dbt lsp, in front of the fake with SCRIPT, initialized on the fixture.
 fn shadowed(name: &str, script: Value) -> Session {
-    let (mut session, _) = with_options(name, script, &["--shadow"]);
+    let dbt = ["--mode", DEFINITION_DBT, "--mode", "textDocument/references=dbt"];
+    let (mut session, _) = with_options(name, script, &[&["--shadow"][..], &dbt].concat());
     assert!(announces_summary(&session.initialize(&fixture())));
     session
 }
@@ -89,7 +93,7 @@ fn a_session_logs_its_start_each_followed_request_and_its_counts() {
     let [start, request, end] = &lines[..] else { panic!("{lines:#?}") };
     assert_eq!((&start["type"], &start["proxy"]), (&json!("start"), &json!(env!("CARGO_PKG_VERSION"))));
     assert_eq!(start["server"], json!({"name": "dbt-lsp", "version": "2.0.9"}));
-    assert_eq!(start["modes"], json!({"definition": "merge", "references": "merge"}));
+    assert_eq!(start["modes"], json!({"definition": "dbt", "references": "dbt"}));
     assert_eq!(request["target"], json!({"kind": "ref", "package": null, "name": "stg_orders", "version": null}));
     assert_eq!((&request["relation"], &request["file"]), (&json!("equal"), &json!("models/marts/orders.sql")));
     assert_eq!(request["counts"], json!({"oursOnly": 0, "dbtOnly": 0, "both": 1}));
@@ -172,7 +176,8 @@ fn in_dbt_mode_every_definition_is_followed() {
 
 #[test]
 fn a_definition_the_proxy_answers_is_not_followed() {
-    let mut session = shadowed("shadow-listed", json!({}));
+    let (mut session, _) = with_options("shadow-listed", json!({}), &["--shadow"]);
+    assert!(announces_summary(&session.initialize(&fixture())));
     let on_source = position_in(&fixture().join("models/staging/stg_customers.sql"), "source('raw', 'customers')", 8);
     let answer = session.request("textDocument/definition", on_source);
     assert!(answer["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("_sources.yml")), "{answer}");
@@ -206,7 +211,8 @@ fn an_edit_before_dbt_lsp_answers_is_counted_as_changed() {
 #[test]
 fn initialization_options_set_the_shadow_too() {
     let (mut session, _) = with_options("shadow-options", json!({"answers": {"textDocument/definition": null}}), &[]);
-    assert!(announces_summary(&session.initialize_options(&fixture(), json!({"dbtLspPlus": {"shadow": true}}))));
+    let options = json!({"dbtLspPlus": {"shadow": true, "modes": {"textDocument/definition": "dbt"}}});
+    assert!(announces_summary(&session.initialize_options(&fixture(), options)));
     session.request("textDocument/definition", on_ref());
     assert_eq!(summary(&mut session)["counts"]["definition"]["ref"]["sql"], json!({"dbtEmpty": 1}));
     assert!(session.finish().success());
@@ -214,7 +220,7 @@ fn initialization_options_set_the_shadow_too() {
 
 #[test]
 fn a_full_log_is_renamed_and_a_new_one_begun() {
-    let (mut session, _) = with_options("shadow-rotation", json!({}), &["--shadow"]);
+    let (mut session, _) = with_options("shadow-rotation", json!({}), &["--shadow", "--mode", DEFINITION_DBT]);
     // Before `initialize`, when the proxy first writes.
     let log = log_of("shadow-rotation");
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
@@ -237,7 +243,7 @@ fn the_oracle_is_dbt_s_resolution_at_the_last_parse() {
     parsed["nodes"]["model.shop.orders"]["depends_on"] = json!({"nodes": ["model.shop.stg_orders"]});
     let stg_orders = location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0);
     let script = json!({"manifest": parsed, "answers": {"textDocument/definition": stg_orders}});
-    let (mut session, _) = with_options("shadow-oracle", script, &["--shadow"]);
+    let (mut session, _) = with_options("shadow-oracle", script, &["--shadow", "--mode", DEFINITION_DBT]);
     session.initialize(&fixture());
     parsed_orders(&mut session);
     session.request("textDocument/definition", on_ref());
@@ -257,7 +263,7 @@ fn with_no_cache_directory_the_shadow_counts_writes_nothing_and_says_so() {
     let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir", &fixture_arg].map(str::to_owned);
     // Neither XDG_CACHE_HOME nor HOME: the temporary directory is no place for it.
     let env = [("FAKE_DBT_LSP_SCRIPT", script.as_path()), ("TMPDIR", tmp.as_path())];
-    let mut session = Session::start_with(&["--shadow"], &server, &env, Some(&dir));
+    let mut session = Session::start_with(&["--shadow", "--mode", DEFINITION_DBT], &server, &env, Some(&dir));
     session.initialize(&fixture());
     session.request("textDocument/definition", on_ref());
     assert_eq!(summary(&mut session)["counts"]["definition"]["ref"]["sql"], json!({"dbtEmpty": 1}));

@@ -85,25 +85,22 @@ const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "
 /// What the proxy answers itself, as `experimental.dbtLspPlus` announces
 /// it, version 2: per request, each kind of target with the places where a
 /// request's position may be, `sql`, `yaml` or `python` by the file's
-/// extension; the last column says alone only, with a dbt without `lsp`.
-/// A kind listed at a place is the proxy's at every position of that kind
-/// there, never forwarded; the rows of a kind follow the order of places.
-const ANSWERED: [(&str, &str, &[&str], bool); 15] = [
-    ("definition", "source", &["sql", "yaml", "python"], false),
-    ("definition", "ref", &["sql"], true),
-    ("definition", "ref", &["yaml"], false),
-    ("definition", "ref", &["python"], true),
-    ("definition", "macro", &["sql", "yaml"], true),
-    ("definition", "doc", &["yaml"], false),
-    ("definition", "entry", &["yaml"], false),
-    ("definition", "test", &["yaml"], false),
-    ("definition", "function", &["sql", "yaml"], true),
-    ("references", "source", &["sql", "yaml", "python"], false),
-    ("references", "ref", &["sql", "yaml", "python"], true),
-    ("references", "macro", &["sql", "yaml"], true),
-    ("references", "function", &["sql", "yaml"], true),
-    ("rename", "source", &["sql", "yaml", "python"], false),
-    ("rename", "cte", &["sql"], false),
+/// extension.  A kind listed at a place is the proxy's at every position of
+/// that kind there, never forwarded, with dbt lsp or without.
+const ANSWERED: [(&str, &str, &[&str]); 13] = [
+    ("definition", "source", &["sql", "yaml", "python"]),
+    ("definition", "ref", &["sql", "yaml", "python"]),
+    ("definition", "macro", &["sql", "yaml"]),
+    ("definition", "doc", &["yaml"]),
+    ("definition", "entry", &["yaml"]),
+    ("definition", "test", &["yaml"]),
+    ("definition", "function", &["sql", "yaml"]),
+    ("references", "source", &["sql", "yaml", "python"]),
+    ("references", "ref", &["sql", "yaml", "python"]),
+    ("references", "macro", &["sql", "yaml"]),
+    ("references", "function", &["sql", "yaml"]),
+    ("rename", "source", &["sql", "yaml", "python"]),
+    ("rename", "cte", &["sql"]),
 ];
 
 /// The requests answered by the proxy that ask for the parse's index, in
@@ -1017,8 +1014,8 @@ impl<W: Write> Proxy<W> {
     /// PATH, as `ANSWERED` says.
     fn claims(&self, request: &str, target: &navigation::Target, path: &Path) -> bool {
         let Some(place) = place(path) else { return false };
-        let listed = |(answered, kind, places, alone): &&(&str, &str, &[&str], bool)| {
-            let listed = self.table.lists(&format!("textDocument/{answered}"), *alone);
+        let listed = |(answered, kind, places): &&(&str, &str, &[&str])| {
+            let listed = self.table.lists(&format!("textDocument/{answered}"));
             *answered == request && *kind == target.kind() && places.contains(&place) && listed
         };
         ANSWERED.iter().any(|row| listed(&row))
@@ -2355,6 +2352,27 @@ mod tests {
         for method in added.chain(PROVIDERS.iter().map(|(_, method, _)| method)) {
             assert_eq!(table.mode(method), Mode::Plus, "{method} is not among modes::METHODS");
         }
+    }
+
+    #[test]
+    fn the_flag_lists_every_row_in_plus_and_merge_with_a_backend_or_none() {
+        let every = json!({"version": 2,
+            "definition": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"], "macro": ["sql", "yaml"],
+                           "doc": ["yaml"], "entry": ["yaml"], "test": ["yaml"], "function": ["sql", "yaml"]},
+            "references": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"],
+                           "macro": ["sql", "yaml"], "function": ["sql", "yaml"]},
+            "rename": {"source": ["sql", "yaml", "python"], "cte": ["sql"]}});
+        let mut plus = modes::Settings::default();
+        plus.set_default("plus").unwrap();
+        for (settings, none) in [(modes::Settings::default(), false), (modes::Settings::default(), true), (plus, false)]
+        {
+            assert_eq!(modes::Table::new(&settings, &|_| false, none).flag(&ANSWERED), every, "{settings:?} {none}");
+        }
+        let mut dbt = modes::Settings::default();
+        dbt.set("textDocument/definition", "dbt").unwrap();
+        dbt.set("textDocument/references", "dbt").unwrap();
+        let rename = json!({"version": 2, "rename": every["rename"]});
+        assert_eq!(modes::Table::new(&dbt, &|_| false, false).flag(&ANSWERED), rename);
     }
 
     #[test]
