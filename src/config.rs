@@ -151,16 +151,21 @@ pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
     base.join("dbt-lsp-plus").join(hash(parts)).join(std::process::id().to_string())
 }
 
-/// Removes the caches beside CACHE that no parse wrote for a day, as a
-/// proxy killed by a signal leaves.  No process is asked whether it lives:
-/// a home shared between hosts holds the caches of processes this host
-/// cannot see, and a parse under way keeps its log fresh.
+/// Removes the caches beside CACHE that neither a parse nor a run wrote for
+/// a day, as a proxy or a select killed by a signal leaves: a sibling's
+/// time is its `parse.log`'s, else its own, as a select writes no parse's
+/// log, unless its `run/run.log` is newer.  No process is asked whether it
+/// lives: a home shared between hosts holds the caches of processes this
+/// host cannot see, and a parse or a run under way keeps its log fresh.
 pub fn remove_stale(cache: &Path) {
     let own = cache.file_name();
     let siblings = cache.parent().and_then(|parent| fs::read_dir(parent).ok()).into_iter().flatten().flatten();
+    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
     for sibling in siblings.filter(|sibling| Some(sibling.file_name().as_os_str()) != own) {
-        let log = fs::metadata(sibling.path().join("parse.log")).or_else(|_| sibling.metadata());
-        let age = log.and_then(|meta| meta.modified()).ok().and_then(|modified| modified.elapsed().ok());
+        let path = sibling.path();
+        let parsed = modified(&path.join("parse.log")).or_else(|| modified(&path));
+        let written = parsed.max(modified(&path.join("run/run.log")));
+        let age = written.and_then(|written| written.elapsed().ok());
         if age.is_some_and(|age| age > STALE_AFTER) {
             let _ = fs::remove_dir_all(sibling.path());
         }
@@ -650,15 +655,24 @@ mod tests {
 
     #[test]
     fn removes_the_caches_unwritten_for_a_day_only() {
-        let dir = scratch_project("stale-caches", &[("key/old/parse.log", ""), ("key/new/parse.log", "")]);
+        let files = [
+            ("key/old/parse.log", ""),
+            ("key/new/parse.log", ""),
+            ("key/busy/parse.log", ""),
+            ("key/busy/run/run.log", ""),
+        ];
+        let dir = scratch_project("stale-caches", &files);
         let day_ago = std::time::SystemTime::now() - STALE_AFTER - Duration::from_secs(60);
-        File::options().write(true).open(dir.join("key/old/parse.log")).unwrap().set_modified(day_ago).unwrap();
+        for old in ["key/old/parse.log", "key/busy/parse.log"] {
+            File::options().write(true).open(dir.join(old)).unwrap().set_modified(day_ago).unwrap();
+        }
         let own = dir.join("key").join(std::process::id().to_string());
         fs::create_dir_all(&own).unwrap();
         File::create(own.join("parse.log")).unwrap().set_modified(day_ago).unwrap();
         remove_stale(&own);
         assert!(!dir.join("key/old").exists(), "unwritten for a day");
         assert!(dir.join("key/new").exists() && own.exists(), "recent, or this process's own");
+        assert!(dir.join("key/busy").exists(), "a run under way, though no parse for a day");
         fs::remove_dir_all(&dir).unwrap();
     }
 
