@@ -713,13 +713,16 @@ impl<W: Write> Proxy<W> {
 
     /// Takes ROOT as the project, found from the client's folder, or from a
     /// document when DOCUMENT, on which the proxy stays alone: dbt's
-    /// processes run there, the server command's `dbt` becomes the
-    /// project's, the cut is probed, the server started unless alone, and
+    /// processes run there, the server command's relative paths are taken
+    /// from the proxy's directory, its `dbt` becomes the project's, the cut
+    /// is probed, the server started unless alone, and
     /// the line that says so is written on the standard error and kept for
     /// the client.
     fn take_project(&mut self, root: PathBuf, document: bool) {
         let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
-        let found = locate::dbt(&root, &self.parsing.server, &git);
+        // What the user wrote from the proxy's directory still names the same from the project.
+        let server = std::env::current_dir().map(|cwd| config::anchored(&self.parsing.server, &cwd));
+        let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.parsing.server.clone()), &git);
         let no_lsp =
             || found.lsp.map_or_else(|| locate::probe(&found.command, Some(&root)) == Probe::NoLsp, |lsp| !lsp);
         // Neither with `never` nor on a document is the dbt probed for a server.

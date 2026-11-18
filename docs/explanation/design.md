@@ -447,7 +447,11 @@ On those two routes, dbt's processes run in the root: `dbt lsp`, the
 probes, the parse and the runs of the commands for clients, so that a
 `profiles.yml` beside the project is found as under lsp-mode, which starts
 the server there; a YAML error's file and a compile's path are read from
-there too.  The proxy's own working directory does not change.
+there too.  The proxy's own working directory does not change, and what
+the server command names from it keeps naming it: a first word that is a
+relative path and a relative `--profiles-dir` are made absolute against
+it first (`config::anchored`); a relative `--packages-install-path` is
+the project's, for dbt as for the proxy.
 
 The URIs the proxy returns are built on the root, so the root keeps the
 spelling the user or the client gave it:

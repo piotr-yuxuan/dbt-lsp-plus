@@ -95,6 +95,25 @@ pub fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, word
     Some(command)
 }
 
+/// SERVER, a server command, with what it names from the directory DIR,
+/// the proxy's, made absolute: a first word that is a path, as
+/// `.venv/bin/dbt`, and `--profiles-dir`'s value, in either form, which
+/// dbt reads from its working directory; so that they name the same once
+/// dbt runs in the project.  `--packages-install-path` is the project's
+/// already.
+pub fn anchored(server: &[String], dir: &Path) -> Vec<String> {
+    let absolute = |value: &str| dir.join(value).to_string_lossy().into_owned();
+    let anchored = |(at, word): (usize, &String)| {
+        let valued = at > 0 && server[at - 1] == "--profiles-dir";
+        match word.strip_prefix("--profiles-dir=") {
+            Some(value) => format!("--profiles-dir={}", absolute(value)),
+            None if valued || (at == 0 && word.contains('/')) => absolute(word),
+            None => word.clone(),
+        }
+    };
+    server.iter().enumerate().map(anchored).collect()
+}
+
 /// Whether this system can run a command under the cut: Linux, where an
 /// unprivileged user may make a user namespace and mount there.  Probed by
 /// `true` under the cut of the system's temporary directory, killed past
@@ -554,6 +573,32 @@ mod tests {
         assert!(!command.status().unwrap().success());
         assert!(!marker.exists(), "the command ran");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_relative_program_and_profiles_dir_are_taken_from_the_proxy_s_directory() {
+        let dir = Path::new("/work/repo");
+        let cases = [
+            (
+                vec![".venv/bin/dbt", "lsp", "--profiles-dir", "config"],
+                vec!["/work/repo/.venv/bin/dbt", "lsp", "--profiles-dir", "/work/repo/config"],
+            ),
+            (
+                vec!["dbt", "lsp", "--profiles-dir=config", "--target", "dev"],
+                vec!["dbt", "lsp", "--profiles-dir=/work/repo/config", "--target", "dev"],
+            ),
+            (
+                vec!["/opt/dbt", "lsp", "--profiles-dir", "/etc/dbt"],
+                vec!["/opt/dbt", "lsp", "--profiles-dir", "/etc/dbt"],
+            ),
+            (
+                vec!["uvx", "dbt", "lsp", "--packages-install-path", "vendor"],
+                vec!["uvx", "dbt", "lsp", "--packages-install-path", "vendor"],
+            ),
+        ];
+        for (server, expected) in cases {
+            assert_eq!(anchored(&words(&server), dir), words(&expected), "{server:?}");
+        }
     }
 
     #[test]

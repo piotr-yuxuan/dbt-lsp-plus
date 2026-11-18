@@ -128,6 +128,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     `Proxy::on_problems`: one handler per kind of message or event, so that
     `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
     `on_parsed` stay dispatches;
+  - `config::anchored`: the server command's relative paths made the
+    proxy's directory's, apart from where dbt then runs, with tests of its
+    own;
   - `Proxy::on_first_project`: the start of a project that a document
     names, apart from the notification that brings it, so that
     `on_notification` stays a sequence;

@@ -221,7 +221,9 @@ these flags when the server command has them, as `--flag X` or
   the client's folder or a file named it, so a `profiles.yml` beside
   `dbt_project.yml` is found; with `--project-dir`, in the proxy's
   working directory, not the project's: an editor that starts the proxy
-  in a subdirectory of the project needs it.
+  in a subdirectory of the project needs it.  A relative `DIR`, as a
+  relative path to dbt in the server command, is taken from the proxy's
+  working directory, wherever dbt runs.
 - `--profile NAME`: the profile.  Default: the `profile` of
   `dbt_project.yml`.
 - `--target NAME`: the target of the profile.  Default: the profile's
