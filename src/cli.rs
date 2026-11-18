@@ -70,12 +70,12 @@ enum Asked {
 }
 
 /// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
-/// `--help` alone; else its operand, optional for doctor and needed by
+/// `--help` first, whatever follows; else its operand, optional for doctor and needed by
 /// select, then, after `--`, the server's arguments, as `modes::arguments`
 /// reads them.  Or why they cannot be read.
 fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
-    if let [only] = words
-        && (only == "-h" || only == "--help")
+    if let Some(first) = words.first()
+        && (first == "-h" || first == "--help")
     {
         return Ok(Asked::Help);
     }
@@ -295,8 +295,15 @@ mod tests {
         let default = ["dbt", "lsp"];
         assert_eq!(asked(Subcommand::Doctor, &[]), run(None, Backend::Auto, &default));
         assert_eq!(asked(Subcommand::Doctor, &words(&["x.sql"])), run(Some("x.sql"), Backend::Auto, &default));
-        assert_eq!(asked(Subcommand::Doctor, &words(&["-h"])), Ok(Asked::Help));
-        assert_eq!(asked(Subcommand::Select, &words(&["--help"])), Ok(Asked::Help));
+        let helped: [(Subcommand, &[&str]); 4] = [
+            (Subcommand::Doctor, &["-h"]),
+            (Subcommand::Select, &["--help"]),
+            (Subcommand::Doctor, &["--help", "--", "--backend", "never"]),
+            (Subcommand::Select, &["-h", "x"]),
+        ];
+        for (subcommand, line) in helped {
+            assert_eq!(asked(subcommand, &words(line)), Ok(Asked::Help), "{subcommand:?} {line:?}");
+        }
         let given = words(&["--", "--backend", "never", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
         assert_eq!(
             asked(Subcommand::Doctor, &given),
@@ -304,8 +311,9 @@ mod tests {
         );
         let selected = words(&["+m+", "--", "--shadow", "dbt", "lsp"]);
         assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), Backend::Auto, &default));
-        let refused: [(Subcommand, &[&str]); 6] = [
+        let refused: [(Subcommand, &[&str]); 7] = [
             (Subcommand::Doctor, &["--bogus"]),
+            (Subcommand::Doctor, &["x.sql", "-h"]),
             (Subcommand::Doctor, &["a", "b"]),
             (Subcommand::Select, &[]),
             (Subcommand::Select, &["--", "dbt", "lsp"]),

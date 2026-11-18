@@ -21,7 +21,8 @@ ARGUMENTS are the server's own command line, as an editor or `.lsp.json`'s
 command and `--backend`; `--mode`, `--default-mode` and `--shadow` are
 checked and unused.
 
-`-h` or `--help` right after the subcommand's name prints its usage.
+`-h` or `--help` right after the subcommand's name prints its usage, whatever
+follows; elsewhere it is a usage error.
 
 ## The project and its dbt
 
