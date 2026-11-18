@@ -1383,6 +1383,53 @@ progress comes.  References at a position it does not claim, in `merge`,
 are `[]`, and a definition there null; any other request it does not
 answer, `dbt.compileFile` among them, fails with -32803.
 
+## The CLI
+
+`doctor` and `select` (`src/cli.rs`, `docs/reference/cli.md`) answer an
+agent in a shell, without an LSP client.  A subcommand is the command
+line's first word and nothing else, so that every command line that
+starts the server, `--` first or an option first, keeps its meaning; a
+second binary would be one more file to install, put on a harness's
+`PATH` and allowlist.
+
+- **One resolution.**  Both find the project and its dbt as the server
+  does: the server command's `--project-dir` (`proxy::project_dir`),
+  else the path as a client's folder, else as a document's
+  (`locate::project_of`), the dbt then `locate::dbt`'s from the command
+  anchored in the current directory (`config::anchored`).  Whether a
+  session is alone, and why, is one function, `locate::alone`, which
+  `run`, `take_project` and doctor call, so that what doctor says is
+  what the server does; its probe stays lazy, so the server probes no
+  more than before.
+- **doctor runs what the server runs.**  git once, `lsp --help`,
+  `unshare` on `true`; it probes, as the server would, the dbt that
+  `locate::dbt` leaves unprobed (the one on `PATH`, the user's own first
+  word, the command as written when given), so that it says of every dbt
+  whether it answers as a dbt 2 does.  Its probes are not cut, as the
+  server's are not: cutting doctor's alone would make it disagree with
+  the server for a launcher, the one case where that matters.  Its
+  `packages` is `packages::refused` as the session's first parse asks
+  it: alone when no dbt lsp would start, else not, since that parse
+  waits for dbt lsp's compilation.  Without a project it runs nothing,
+  as the server stays quiet.  The cut's warning, which the server writes
+  on its standard error, is doctor's `cut`.
+- **select is `dbt-lsp-plus.nodes` from a shell.**  The same refusal
+  without the cut (`commands::route`), the same guard, the same run
+  (`commands::nodes_job`, `config::dbt_command` under the cut,
+  `commands::start` with the parse's deadline), in a run directory of
+  its own under the user's cache, removed once the answer is read; its
+  answer is `listed`'s, as a client gets it.
+- **The answers' form.**  One line of compact JSON, whatever the outcome,
+  with `error` when something is missing or failed; nothing on the
+  standard error but a usage error, status 2.  Neither answer has a time
+  or a parse's id, since neither reads an index; nor a `from`, since each
+  has one provider.
+
+Left for later: `node`, with a cache of a parse of the CLI's own; fields,
+limits and paging for `select`, and a fast path over a warm manifest,
+checked against dbt; the profile and the target in doctor, which need
+`dbt debug` and the warehouse.
+
 ## Failure modes
 
 | Situation | Behaviour |

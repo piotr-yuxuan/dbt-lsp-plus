@@ -4,6 +4,13 @@ In Emacs with dbt-mode, start with
 [dbt-mode's troubleshooting](https://github.com/piotr-yuxuan/dbt-mode/blob/main/docs/how-to/troubleshoot.md),
 which says where Emacs shows each of the logs below.
 
+First, from a shell, run `dbt-lsp-plus doctor PATH -- ARGUMENTS`, PATH a
+file of the project and ARGUMENTS those the editor gives the server: it
+says which project and which dbt the server would take, whether that dbt
+has `lsp`, whether the proxy would answer alone and why, whether dbt can
+be cut off the network, and why a parse would be refused
+([the subcommands](../reference/cli.md)).
+
 ## Who answers a request
 
 - **dbt-lsp-plus** answers the outline, workspace symbols, the call

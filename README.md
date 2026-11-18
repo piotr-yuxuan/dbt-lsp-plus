@@ -60,6 +60,10 @@ claude plugin install dbt-lsp-plus@dbt-lsp-plus
 
 [Use it with an agent](docs/how-to/use-with-an-agent.md) says more.
 
+From a shell, `dbt-lsp-plus doctor` says which project and dbt the server
+would find and whether it would work, and `dbt-lsp-plus select SELECTOR`
+lists what a dbt selector selects ([the subcommands](docs/reference/cli.md)).
+
 ## Documentation
 
 - Tutorial: [Your first session](docs/tutorials/first-session.md)
@@ -70,6 +74,7 @@ claude plugin install dbt-lsp-plus@dbt-lsp-plus
   [Troubleshoot](docs/how-to/troubleshoot.md)
 - Reference: [The features](docs/reference/features.md), by LSP method,
   then [the configuration](docs/reference/features.md#configuration), every option;
+  [The subcommands](docs/reference/cli.md), doctor and select;
   [The release pipeline](docs/reference/release-pipeline.md)
 - Explanation: [The design](docs/explanation/design.md), what `dbt lsp`
   was observed to do, and what it would take to finish
