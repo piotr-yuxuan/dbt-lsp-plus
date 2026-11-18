@@ -99,9 +99,10 @@ server starts at that call.  The answer says:
 - **No LSP plugin at all** in the session: ToolSearch answers `No
   matching deferred tools found` and the call `No such tool available:
   LSP. LSP is disabled for this session`.  With other LSP plugins and
-  not this one, a `.sql` file gives an answer without a unique id, or
-  another error, not recorded here: `claude plugin list` names the
-  plugins.
+  none that runs dbt-lsp-plus, a `.sql` file gives an answer without a
+  unique id, or another error, not recorded here: `claude plugin list`
+  names the plugins.  A plugin of your own that runs dbt-lsp-plus names
+  its server `plugin:<plugin>:<server>` in the messages above.
 
 ## Who answers what
 
@@ -111,13 +112,17 @@ directory holds no `dbt_project.yml`, as at a repository's or a
 worktree's root over a nested `dbt/`), or with `--backend never`; it is
 **in front of dbt lsp** with a dbt that has `lsp`, the session opened in
 the project's folder, a worktree's whose root holds `dbt_project.yml`
-included, or given `--project-dir`.  Claude Code's debug log tells them
-apart: alone, the proxy's line ends `dbt-lsp-plus answers alone.`.  So
-does `dbt-lsp-plus doctor` with no PATH, run in the session's own
+included, or given `--project-dir`.  Without `--project-dir`, Claude
+Code's debug log tells them apart: alone, the proxy's line ends
+`dbt-lsp-plus answers alone.`; with it, the log says neither.
+`dbt-lsp-plus doctor` tells them apart in every case, with no PATH, run
+in the session's own
 directory, before any `cd`, given after `--` the arguments that the
 plugin's `.lsp.json` passes; this plugin passes none.  A non-null
 `alone`, or the error `no dbt_project.yml at or above ...`, means the
-session is alone; `"alone":null` means it is in front of dbt lsp.
+session is alone; `"alone":null` with `"lsp":true` means it is in
+front of dbt lsp, and with `"lsp":null` its `why` says why no dbt lsp
+starts.
 doctor on a file takes the file's route unless the arguments after `--`
 name `--project-dir`.
 

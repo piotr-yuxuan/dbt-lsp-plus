@@ -2496,7 +2496,10 @@ mod tests {
             ("locate.rs", include_str!("locate.rs")),
         ];
         let marker = "\n#[cfg(test)]\nmod tests {";
-        let code = sources.map(|(name, source)| source.split_once(marker).expect(name).0);
+        // Whitespace collapsed as on the page, so that a site rustfmt rewraps is still found.
+        let code = sources.map(|(name, source)| {
+            source.split_once(marker).expect(name).0.split_whitespace().collect::<Vec<_>>().join(" ")
+        });
         // What the page quotes, then the code at the site it cites, with enough around it to be that site alone.
         let quoted = [
             ("dbt parse has not finished: it is running", r#"(true, _) => "it is running""#),
@@ -2509,6 +2512,8 @@ mod tests {
                 "dbt parse has not finished: dbt parse failed:",
                 r#"self.log_parse(&format!("dbt parse failed: {failure}"))"#,
             ),
+            // The arm that puts a failure after the prefix, which the quotes of a failure rest on.
+            ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
             ("`dbt lsp is not running`", r#"None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running")"#),
             ("ends `dbt-lsp-plus answers alone.`", r#"format!("; {why}: dbt-lsp-plus answers alone.")"#),
             (
