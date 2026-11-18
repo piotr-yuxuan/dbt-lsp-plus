@@ -512,7 +512,7 @@ fn key(id: &Value) -> String {
 /// returns read as the user wrote them: each `..` drops the component before
 /// it.  Resolved only when that names another directory, through a link
 /// before a `..`.
-fn project_dir(command: &[String]) -> Option<PathBuf> {
+pub fn project_dir(command: &[String]) -> Option<PathBuf> {
     let value = config::flag(command, "--project-dir")?;
     let spelt = lexical(&std::path::absolute(value).ok()?);
     match fs::canonicalize(value) {
@@ -1318,7 +1318,7 @@ impl<W: Write> Proxy<W> {
             }
             (Err(failure), ..) => failure,
             (_, Some(why), _) => commands::failure(command, &why),
-            (_, _, None) => commands::failure(command, "the server command has no lsp, so dbt-lsp-plus runs no dbt"),
+            (_, _, None) => commands::failure(command, commands::NO_LSP_WORD),
         };
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure}));
     }

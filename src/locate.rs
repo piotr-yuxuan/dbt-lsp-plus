@@ -129,6 +129,15 @@ pub struct Found {
     pub skipped: Vec<(PathBuf, String)>,
 }
 
+impl Found {
+    /// The dbt of the server command COMMAND as written, unprobed: named by
+    /// its words before `lsp`.
+    pub fn written(command: &[String]) -> Found {
+        let before = command.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>().join(" ");
+        Found { command: command.to_vec(), named: before, source: "the server command", lsp: None, skipped: Vec::new() }
+    }
+}
+
 /// The dbt of the project at PROJECT for the server command COMMAND.  When
 /// COMMAND's first word is `dbt`, the first of the `candidates` that is a
 /// file and answers its `probe`, in the project, as a dbt 2 does, with
@@ -137,14 +146,7 @@ pub struct Found {
 /// there.  Any other first word is the user's choice, kept and unprobed.
 /// GIT runs once, to find the project's repository.
 pub fn dbt(project: &Path, command: &[String], git: &Git) -> Found {
-    let before = command.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>().join(" ");
-    let mut found = Found {
-        command: command.to_vec(),
-        named: before,
-        source: "the server command",
-        lsp: None,
-        skipped: Vec::new(),
-    };
+    let mut found = Found::written(command);
     if command.first().map(String::as_str) != Some("dbt") {
         return found;
     }

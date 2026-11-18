@@ -55,6 +55,7 @@ src/locate.rs                 the project of a document, the dbt of a project, t
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
+src/cli.rs                    the subcommands doctor and select, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
 tests/proxy/shadow.rs         the shadow in front of the fake server
@@ -115,7 +116,6 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     cache changes only once the project is built;
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
     from the hierarchy's answer;
-  - `project_dir`: the parsing of the server command, at the boundary;
   - `Pending::merged`: what each kind of forwarded request does to the
     server's answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
@@ -147,6 +147,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     decisions on a command's request and on a run's output, with tests of
     their own; `commands::compile_job` and `commands::nodes_job`: one run
     per command, its words and its reader;
+  - `cli::asked`: the decision on a subcommand's words, with tests of its
+    own; `cli::doctor` and `cli::select`, one per subcommand, so that
+    `cli::main` stays a dispatch;
   - `Proxy::compare`: the shadow's work on a followed request's answer,
     once the client has it, so that `on_server_response` stays a dispatch;
   - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's

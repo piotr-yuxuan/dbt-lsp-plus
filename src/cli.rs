@@ -1,0 +1,293 @@
+// SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
+//! The subcommands, `doctor` and `select`: what an agent in a shell asks
+//! without an LSP client, each answered on one line of compact JSON.  The
+//! project and its dbt are found as the server finds them.
+
+use crate::locate::{self, Probe, Route};
+use crate::modes::{self, Arguments, Backend};
+use crate::{commands, config, packages, proxy};
+use serde_json::{Value, json};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::mpsc;
+
+const DOCTOR_USAGE: &str = "\
+usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
+
+Says on one line of JSON what the server would find from PATH, by default
+the current directory: the project and by which route; the dbt, where from,
+what was skipped, and whether it has `lsp`; whether the server would answer
+alone, and why; whether this system can cut dbt off the network; why a parse
+would be refused, if it would.  It runs only what the server runs as it
+starts: git, `lsp --help` of the dbt, `unshare` on `true`.  ARGUMENTS are
+the server's own, as an editor gives them: `--backend never`, `-- dbt lsp
+--project-dir DIR`.  Exit status 0 when a project is found whose dbt answers
+as a dbt 2 does, 1 otherwise, 2 for a usage error.
+
+  -h, --help   this text";
+
+const SELECT_USAGE: &str = "\
+usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
+
+Lists on one line of JSON the nodes that the dbt selector SELECTOR selects in
+the project of the current directory, as `dbt list` gives them, cut off the
+network: {\"nodes\": [...], \"error\": null}, or `error` set and no node.
+ARGUMENTS are the server's own, as for doctor.  Exit status 0 when nodes are
+listed, 1 otherwise, \"No nodes found\" included, 2 for a usage error.
+
+  -h, --help   this text";
+
+/// A subcommand, named by the first word of the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Subcommand {
+    Doctor,
+    Select,
+}
+
+/// The subcommand that WORDS, the command line after the program's name,
+/// name by their first word; none when it names none, and the words are the
+/// server's.
+pub fn named(words: &[String]) -> Option<Subcommand> {
+    match words.first().map(String::as_str) {
+        Some("doctor") => Some(Subcommand::Doctor),
+        Some("select") => Some(Subcommand::Select),
+        _ => None,
+    }
+}
+
+/// What a subcommand's words ask.
+#[derive(Debug, PartialEq)]
+enum Asked {
+    Help,
+    /// Its OPERAND, doctor's PATH or select's SELECTOR, and the server's
+    /// backend and command.
+    Run {
+        operand: Option<String>,
+        backend: Backend,
+        command: Vec<String>,
+    },
+}
+
+/// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
+/// `--help` alone; else its operand, optional for doctor and needed by
+/// select, then, after `--`, the server's arguments, as `modes::arguments`
+/// reads them.  Or why they cannot be read.
+fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
+    if let [only] = words
+        && (only == "-h" || only == "--help")
+    {
+        return Ok(Asked::Help);
+    }
+    let split = words.iter().position(|word| word == "--").unwrap_or(words.len());
+    let server = words.get(split + 1..).unwrap_or_default();
+    let operand = match &words[..split] {
+        [] => None,
+        [word] if !word.starts_with('-') => Some(word.clone()),
+        [word] => return Err(format!("{word} is no option of the subcommand")),
+        [_, extra, ..] => return Err(format!("{extra}: the server's arguments follow --")),
+    };
+    if subcommand == Subcommand::Select && operand.is_none() {
+        return Err("select needs a SELECTOR".into());
+    }
+    match modes::arguments(server)? {
+        Arguments::Run { backend, command, .. } => Ok(Asked::Run { operand, backend, command }),
+        _ => Err("-h and -V are not the server's arguments here".into()),
+    }
+}
+
+/// Runs SUBCOMMAND with WORDS, those after its name: its answer on the
+/// standard output, one line of compact JSON, or its usage; a usage error on
+/// the standard error, with status 2.
+pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
+    let usage = match subcommand {
+        Subcommand::Doctor => DOCTOR_USAGE,
+        Subcommand::Select => SELECT_USAGE,
+    };
+    let (operand, backend, command) = match asked(subcommand, words) {
+        Ok(Asked::Run { operand, backend, command }) => (operand, backend, command),
+        Ok(Asked::Help) => {
+            println!("{usage}");
+            return ExitCode::SUCCESS;
+        }
+        Err(why) => {
+            eprintln!("dbt-lsp-plus: {why}\n\n{usage}");
+            return ExitCode::from(2);
+        }
+    };
+    let (answer, ok) = match (subcommand, operand) {
+        (Subcommand::Doctor, path) => doctor(Path::new(path.as_deref().unwrap_or(".")), backend, &command),
+        (Subcommand::Select, selector) => {
+            let answer = select(&selector.unwrap_or_default(), &command);
+            let ok = answer["error"].is_null();
+            (answer, ok)
+        }
+    };
+    // A reader that closed the pipe, as `| head`, wants no more and no panic.
+    let _ = writeln!(std::io::stdout(), "{answer}");
+    if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// The project and its dbt, as the server finds them.
+struct Resolved {
+    project: PathBuf,
+    route: Route,
+    dbt: locate::Found,
+    /// Where dbt's processes run: the project, else the current directory.
+    dir: Option<PathBuf>,
+}
+
+/// The project and its dbt as the server finds them from PATH, absolute,
+/// with the server command COMMAND: given, its `--project-dir`, and its dbt
+/// as written, run in the current directory; else PATH, when it holds
+/// `dbt_project.yml`, as a client's folder, else the project of PATH, as a
+/// document's, its dbt `locate::dbt`'s from COMMAND anchored in the current
+/// directory, run in the project.  Without a project, why, and nothing ran.
+fn resolve(path: &Path, command: &[String]) -> Result<Resolved, String> {
+    if let Some(project) = proxy::project_dir(command) {
+        return Ok(Resolved { project, route: Route::Given, dbt: locate::Found::written(command), dir: None });
+    }
+    let (project, route) = match path.join("dbt_project.yml").is_file() {
+        true => (path.to_owned(), Route::Folder),
+        false => {
+            let none = || format!("no dbt_project.yml at or above {}; give a path within the project", path.display());
+            (locate::project_of(path, command).ok_or_else(none)?, Route::Document)
+        }
+    };
+    let cwd = std::env::current_dir().map_err(|error| format!("no current directory: {error}"))?;
+    let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
+    let dbt = locate::dbt(&project, &config::anchored(command, &cwd), &git);
+    Ok(Resolved { dir: Some(project.clone()), project, route, dbt })
+}
+
+/// What the server would find and do from PATH with BACKEND and the server
+/// command COMMAND, and whether it would work: its answer, and whether a
+/// project was found whose dbt answers as a dbt 2 does.
+fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
+    let version = env!("CARGO_PKG_VERSION");
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+    let shown = path.display().to_string();
+    let Resolved { project, route, dbt, dir } = match resolve(&path, command) {
+        Ok(resolved) => resolved,
+        Err(error) => return (json!({"version": version, "path": shown, "project": null, "error": error}), false),
+    };
+    // What `locate::dbt` left unprobed is probed as the server probes it.
+    let probed = match dbt.lsp {
+        Some(lsp) => Ok(lsp),
+        None => match locate::probe(&dbt.command, dir.as_deref()) {
+            Probe::Lsp => Ok(true),
+            Probe::NoLsp => Ok(false),
+            Probe::Other(why) => Err(why),
+        },
+    };
+    let alone = locate::alone(backend == Backend::Never, route, || probed == Ok(false));
+    let cut = config::can_cut();
+    let packages = packages::refused(&project, &dbt.command, cut, alone.is_some());
+    let skipped = dbt.skipped.iter().map(|(path, why)| json!({"path": path.display().to_string(), "why": why}));
+    let found = json!({"command": dbt.command, "named": dbt.named, "source": dbt.source,
+                       "skipped": skipped.collect::<Vec<_>>(), "lsp": probed.as_ref().ok(), "why": probed.as_ref().err()});
+    // The route's name as the enum spells it, in lower case.
+    let route = format!("{route:?}").to_lowercase();
+    let answer = json!({"version": version, "path": shown, "project": project.display().to_string(), "route": route,
+                        "dbt": found, "alone": alone, "cut": cut, "packages": packages});
+    (answer, probed.is_ok())
+}
+
+/// The nodes that SELECTOR selects in the project of the current directory
+/// with the server command COMMAND, as `dbt-lsp-plus.nodes` answers them: by
+/// `dbt list` under the cut, in a run directory removed afterwards; or why
+/// it did not run.
+fn select(selector: &str, command: &[String]) -> Value {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let Resolved { project, dbt, dir, .. } = match resolve(&cwd, command) {
+        Ok(resolved) => resolved,
+        Err(why) => return commands::failure(commands::NODES, &why),
+    };
+    if let commands::Via::Refused(failure) = commands::route(commands::NODES, &|_| false, config::can_cut()) {
+        return failure;
+    }
+    // Under the cut, whether the session is alone is moot.
+    if let Some(why) = packages::refused(&project, &dbt.command, true, false) {
+        return commands::failure(commands::NODES, &why);
+    }
+    let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &project, &dbt.command);
+    let (job, run) = (commands::nodes_job(selector), cache.join("run"));
+    let Some(line) = config::dbt_command(&dbt.command, &project, &run, true, &job.words) else {
+        return commands::failure(commands::NODES, commands::NO_LSP_WORD);
+    };
+    let (sender, answer) = mpsc::channel();
+    let report = Box::new(move |result| drop(sender.send(result)));
+    let running = commands::start(job, line, dir, run, config::PARSE_DEADLINE, report);
+    let ended = || commands::failure(commands::NODES, "the run ended without an answer");
+    let result = answer.recv().unwrap_or_else(|_| ended());
+    running.stop();
+    let _ = std::fs::remove_dir_all(&cache);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_first_word_alone_names_a_subcommand() {
+        let ours: [(&[&str], Subcommand); 3] = [
+            (&["doctor"], Subcommand::Doctor),
+            (&["doctor", "x"], Subcommand::Doctor),
+            (&["select", "+m"], Subcommand::Select),
+        ];
+        for (line, subcommand) in ours {
+            assert_eq!(named(&words(line)), Some(subcommand), "{line:?}");
+        }
+        let servers: [(&[&str], &[&str]); 6] = [
+            (&["--", "doctor"], &["doctor"]),
+            (&["--shadow", "select", "x"], &["select", "x"]),
+            (&["node", "x"], &["node", "x"]),
+            (&["dbt", "lsp"], &["dbt", "lsp"]),
+            (
+                &["--backend", "never", "--", "/p/dbt", "lsp", "--project-dir", "/p"],
+                &["/p/dbt", "lsp", "--project-dir", "/p"],
+            ),
+            (&[], &["dbt", "lsp"]),
+        ];
+        for (line, server) in servers {
+            assert_eq!(named(&words(line)), None, "{line:?}");
+            let Ok(Arguments::Run { command, .. }) = modes::arguments(&words(line)) else { panic!("{line:?}") };
+            assert_eq!(command, words(server), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_subcommand_reads_its_operand_then_the_server_s_arguments_after_dashes() {
+        let run = |operand: Option<&str>, backend: Backend, command: &[&str]| {
+            Ok(Asked::Run { operand: operand.map(str::to_owned), backend, command: words(command) })
+        };
+        let default = ["dbt", "lsp"];
+        assert_eq!(asked(Subcommand::Doctor, &[]), run(None, Backend::Auto, &default));
+        assert_eq!(asked(Subcommand::Doctor, &words(&["x.sql"])), run(Some("x.sql"), Backend::Auto, &default));
+        assert_eq!(asked(Subcommand::Doctor, &words(&["-h"])), Ok(Asked::Help));
+        assert_eq!(asked(Subcommand::Select, &words(&["--help"])), Ok(Asked::Help));
+        let given = words(&["--", "--backend", "never", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
+        assert_eq!(
+            asked(Subcommand::Doctor, &given),
+            run(None, Backend::Never, &["uvx", "dbt", "lsp", "--target", "prod"])
+        );
+        let selected = words(&["+m+", "--", "--shadow", "dbt", "lsp"]);
+        assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), Backend::Auto, &default));
+        let refused: [(Subcommand, &[&str]); 6] = [
+            (Subcommand::Doctor, &["--bogus"]),
+            (Subcommand::Doctor, &["a", "b"]),
+            (Subcommand::Select, &[]),
+            (Subcommand::Select, &["--", "dbt", "lsp"]),
+            (Subcommand::Doctor, &["--", "--mode", "x"]),
+            (Subcommand::Doctor, &["--", "-V"]),
+        ];
+        for (subcommand, line) in refused {
+            assert!(asked(subcommand, &words(line)).is_err(), "{subcommand:?} {line:?}");
+        }
+    }
+}
