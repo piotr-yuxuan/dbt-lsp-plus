@@ -297,7 +297,7 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
         probe.is_some_and(|probe| std::fs::write(&probe, "").and_then(|()| std::fs::remove_file(&probe)).is_ok());
     if let Some(mut log) = log {
         let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces(), "wrote": wrote});
-        writeln!(log, "{line}").expect("write the log");
+        log.write_all(format!("{line}\n").as_bytes()).expect("write the log");
     }
     if let Some(log) = script["parse_log"].as_str() {
         print!("{}", std::fs::read_to_string(log).expect("read the parse's log"));
@@ -339,7 +339,7 @@ fn flag<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
 fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
     if let Some(log) = &mut log {
         let line = json!({"run": arguments, "pid": std::process::id(), "interfaces": interfaces()});
-        writeln!(log, "{line}").expect("write the log");
+        log.write_all(format!("{line}\n").as_bytes()).expect("write the log");
     }
     if let Some(gate) = script["run_gate"].as_str() {
         let end = Instant::now() + Duration::from_secs(30);
@@ -371,7 +371,7 @@ fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
         println!("{node}");
     }
     if let Some(log) = &mut log {
-        writeln!(log, "{}", json!({"ended": std::process::id()})).expect("write the log");
+        log.write_all(format!("{}\n", json!({"ended": std::process::id()})).as_bytes()).expect("write the log");
     }
     std::process::exit(script["run_exit"].as_i64().unwrap_or(0) as i32);
 }
@@ -411,7 +411,7 @@ fn main() {
     let life = std::env::var("FAKE_DBT_LSP_LOG").map_or(1, |log| {
         let lives = format!("{log}.lives");
         let mut file = OpenOptions::new().create(true).append(true).open(&lives).expect("open the lives");
-        writeln!(file, "{}", std::process::id()).expect("count a life");
+        file.write_all(format!("{}\n", std::process::id()).as_bytes()).expect("count a life");
         std::fs::read_to_string(&lives).expect("read the lives").lines().count()
     });
     refuse_or_help(&script, &arguments, true);
