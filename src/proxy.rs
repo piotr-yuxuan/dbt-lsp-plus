@@ -654,8 +654,8 @@ impl<W: Write> Proxy<W> {
 
     /// Says once, after `initialize` is answered, what of the user's settings
     /// cannot take effect: each refusal, the methods set to `dbt` that no
-    /// backend answers, and a shadow with no dbt lsp to compare with; and a
-    /// mode named by its former name.
+    /// backend answers, a shadow with no dbt lsp to compare with, or with
+    /// nothing to follow; and a mode named by its former name.
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
         if !said.is_empty() {
@@ -668,6 +668,12 @@ impl<W: Write> Proxy<W> {
         }
         let off = self.settings.shadow && self.shadow.is_none();
         said.extend(off.then(|| "the shadow compares with dbt lsp, which does not run: it is off".to_owned()));
+        let followed = ["textDocument/definition", "textDocument/references"].map(|method| self.table.mode(method));
+        let idle = self.shadow.is_some() && !followed.contains(&Mode::Dbt);
+        said.extend(idle.then(|| {
+            "the shadow follows definitions and references in dbt only: with neither in dbt it has nothing to follow"
+                .to_owned()
+        }));
         if !said.is_empty() {
             let text = format!("dbt-lsp-plus: {}.", said.join("; "));
             self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
@@ -1712,17 +1718,17 @@ impl<W: Write> Proxy<W> {
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 return (hints.map_or(nothing, Pending::Hints), self.parsing.index.is_none());
             }
-            // Followed only once forwarded: one the proxy answers is no one's to compare, and `plus` forwards none.
+            // Followed in `dbt` only: one the proxy answers is no one's to compare, and `merge` forwards only
+            // where the proxy has no target.
             ("textDocument/definition" | "textDocument/references", _) => {
-                let changes = self.changes;
-                let shadowed = self
-                    .shadow
-                    .as_ref()
-                    .filter(|_| self.table.mode(method) != Mode::Plus)
-                    .map(|_| Pending::Shadow { method: method.to_owned(), params: params.clone(), changes });
+                let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
+                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Pending::Shadow {
+                    method: method.to_owned(),
+                    params: params.clone(),
+                    changes,
+                });
                 let fresh = shadowed.is_some();
-                let mine = self.table.mode(method) != Mode::Dbt;
-                return (shadowed.unwrap_or(if mine { nothing } else { Pending::Request }), fresh);
+                return (shadowed.unwrap_or(if dbt { Pending::Request } else { nothing }), fresh);
             }
             _ => Pending::Request,
         };

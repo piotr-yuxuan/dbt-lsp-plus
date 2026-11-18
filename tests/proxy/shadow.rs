@@ -175,6 +175,24 @@ fn in_dbt_mode_every_definition_is_followed() {
 }
 
 #[test]
+fn with_neither_definitions_nor_references_in_dbt_the_shadow_says_it_has_nothing_to_follow() {
+    let idle = |m: &Value| m["params"]["message"].as_str().is_some_and(|text| text.contains("nothing to follow"));
+    let (mut session, log) = with_options("shadow-idle", json!({}), &["--shadow"]);
+    session.initialize(&fixture());
+    let answer = session.request("textDocument/definition", on_ref());
+    assert!(answer["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("stg_orders.sql")), "{answer}");
+    assert_eq!((summary(&mut session)["requests"].clone(), received(&log, "textDocument/definition")), (json!(0), 0));
+    let shown: Vec<&Value> = session.received.iter().filter(|m| m["method"] == "window/showMessage").collect();
+    assert!(shown.len() == 1 && shown[0]["params"]["type"] == 2 && idle(shown[0]), "{shown:?}");
+    assert!(session.finish().success());
+    let (mut session, _) = with_options("shadow-not-idle", json!({}), &["--shadow", "--mode", DEFINITION_DBT]);
+    session.initialize(&fixture());
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    assert!(!session.received.iter().any(idle), "warned with definitions in dbt");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_definition_the_proxy_answers_is_not_followed() {
     let (mut session, _) = with_options("shadow-listed", json!({}), &["--shadow"]);
     assert!(announces_summary(&session.initialize(&fixture())));
