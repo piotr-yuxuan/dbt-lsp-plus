@@ -186,9 +186,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     the listing's deadline;
   - `features::escape_markdown`: the decision what plain text escapes in
     markdown, with tests of its own, apart from where a hover puts it;
-  - `Proxy::hover_part`: what a hover's answer gets first, or why it has
-    nothing, apart from what the proxy keeps of other requests, so that
-    `remember` stays a dispatch;
+  - `Proxy::hover_part`: one concern, what a hover's answer gets first (a
+    node's summary and facts, a docs block, a test's signature) or why it
+    has nothing, apart from what the proxy keeps of other requests, as
+    `on_definition` and the others are for `answer`;
   - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
     outcome and its end, each the end of a resource, as `stop_server`;
   - the sections of `tests/proxy/live.rs` (`document_features`,

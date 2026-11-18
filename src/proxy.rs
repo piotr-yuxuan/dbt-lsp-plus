@@ -243,8 +243,8 @@ enum Pending {
     /// Answered with null if the server dies first, as LSP asks of `shutdown`.
     Shutdown,
     /// A hover whose answer gets this text first: a node's summary and
-    /// facts, whose line breaks are hard, or a docs block's text or a test's signature,
-    /// markdown as written.
+    /// facts, plain text whose line breaks are hard, or a docs block's text
+    /// or a test's signature, markdown as written.
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
@@ -1143,8 +1143,9 @@ impl<W: Write> Proxy<W> {
 
     /// Whether the position of PARAMS names a node, and which node of INDEX:
     /// that of the `ref` or `source` there, or of the entry whose `name:` is
-    /// there, else, when FILE, the one node its document defines.  Without
-    /// an index, the scan tells what is named, but not its node.
+    /// there, else, when FILE, the one node its document defines.  None when
+    /// it names nothing; `Some(None)` when it names a node that INDEX lacks,
+    /// or that, without an index, the scan tells is named but cannot give.
     fn node_at<'a>(&self, index: Option<&'a config::Index>, params: &Value, file: bool) -> Option<Option<&'a Value>> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
@@ -1705,7 +1706,8 @@ impl<W: Write> Proxy<W> {
         let summary = index
             .zip(named.flatten())
             .map(|(index, node)| (format!("{}\n{}", index.summary(node), index.facts(node)), true));
-        // A doc's or a generic test's block, the project scanned only then.
+        // A doc's or a generic test's block, from the project's scan, which the cache keeps between requests, as
+        // for `node_at`'s entry and file's start.
         let block = || {
             let (path, text, offset) = self.document_at(params)?;
             let target = navigation::target_at(&path, &text, offset)
