@@ -448,7 +448,7 @@ struct Proxy<W: Write> {
 
 /// PATH with each `..` dropping the component before it, as written: no
 /// link is followed.
-fn lexical(path: &Path) -> PathBuf {
+pub fn lexical(path: &Path) -> PathBuf {
     path.components().fold(PathBuf::new(), |mut path, component| {
         match component {
             Component::ParentDir => {
@@ -512,7 +512,7 @@ fn key(id: &Value) -> String {
 /// returns read as the user wrote them: each `..` drops the component before
 /// it.  Resolved only when that names another directory, through a link
 /// before a `..`.
-fn project_dir(command: &[String]) -> Option<PathBuf> {
+pub fn project_dir(command: &[String]) -> Option<PathBuf> {
     let value = config::flag(command, "--project-dir")?;
     let spelt = lexical(&std::path::absolute(value).ok()?);
     match fs::canonicalize(value) {
@@ -757,12 +757,8 @@ impl<W: Write> Proxy<W> {
         let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.parsing.server.clone()), &git);
         let no_lsp =
             || found.lsp.map_or_else(|| locate::probe(&found.command, Some(&root)) == Probe::NoLsp, |lsp| !lsp);
-        // Neither with `never` nor on a document is the dbt probed for a server.
-        let alone = match (self.never, document) {
-            (true, _) => Some("the backend is never"),
-            (_, true) => Some("dbt lsp is not started for a project found from a file"),
-            _ => no_lsp().then_some("it has no lsp"),
-        };
+        let route = if document { locate::Route::Document } else { locate::Route::Folder };
+        let alone = locate::alone(self.never, route, no_lsp);
         self.parsing.cut = config::can_cut();
         if !self.parsing.cut {
             eprintln!("{NO_CUT}");
@@ -1322,7 +1318,7 @@ impl<W: Write> Proxy<W> {
             }
             (Err(failure), ..) => failure,
             (_, Some(why), _) => commands::failure(command, &why),
-            (_, _, None) => commands::failure(command, "the server command has no lsp, so dbt-lsp-plus runs no dbt"),
+            (_, _, None) => commands::failure(command, commands::NO_LSP_WORD),
         };
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure}));
     }
@@ -2389,7 +2385,13 @@ pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backen
     // With `never`, nothing of the user's dbt runs but its parse.
     let never = backend == modes::Backend::Never;
     let given = project_dir(command);
-    let standalone = never || (given.is_some() && locate::probe(command, None) == Probe::NoLsp);
+    // Without a project yet, `take_project` decides once one is named.
+    let standalone = match given {
+        Some(_) => {
+            locate::alone(never, locate::Route::Given, || locate::probe(command, None) == Probe::NoLsp).is_some()
+        }
+        None => never,
+    };
     let (server, absent) = match (given.is_some() && !standalone).then(|| spawn_server(command, &events, 0, None)) {
         Some(Ok(server)) => (Some(server), None),
         Some(Err(why)) => (None, Some(why)),

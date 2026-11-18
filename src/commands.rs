@@ -26,6 +26,10 @@ const COMMANDS: [(&str, &str, bool); 3] =
 /// The rows of a show whose client names no limit: `dbt show`'s default.
 const LIMIT: u64 = 10;
 
+/// Why a server command with no `lsp` word runs no command: dbt's words
+/// are those before it.
+pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
+
 /// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
 

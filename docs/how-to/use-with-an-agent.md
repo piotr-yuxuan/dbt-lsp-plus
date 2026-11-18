@@ -87,6 +87,13 @@ file is an error that says why, `dbt parse has not finished: it is
 running`, or names the parse's failure: ask again once it has ended.  In
 front of `dbt lsp`, such a hover may still come back empty.
 
+From Bash, `dbt-lsp-plus doctor PATH` checks the setup in one call, PATH a
+file of the project: which project and which dbt the server would take,
+whether it would answer alone and why, whether dbt can be cut off the
+network; `dbt-lsp-plus select SELECTOR`, run in the project, lists what a
+dbt selector selects ([the subcommands](../reference/cli.md)).  Allow them
+as `Bash(dbt-lsp-plus doctor:*)` and `Bash(dbt-lsp-plus select:*)`.
+
 When the LSP tool answers `Executable not found in $PATH:
 "dbt-lsp-plus"`, Claude Code did not find the binary: install it where
 the `PATH` of the shell or the desktop app that starts Claude Code

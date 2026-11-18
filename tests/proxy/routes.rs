@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// What every process of the fake logged as it started, beside LOG.
-fn starts(log: &Path) -> Vec<Value> {
+pub(crate) fn starts(log: &Path) -> Vec<Value> {
     logged(&log.with_extension("jsonl.starts"))
 }
 
@@ -22,7 +22,7 @@ fn started<'a>(starts: &'a [Value], first: &str) -> &'a Value {
 }
 
 /// PATH resolved.
-fn resolved(path: &Path) -> PathBuf {
+pub(crate) fn resolved(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap()
 }
 
@@ -33,7 +33,7 @@ fn path_of(value: &Value) -> PathBuf {
 
 /// The fake's script, SCRIPT_VALUE written, its log and the proxy's cache,
 /// as `Session::fake` places them, under DIR.
-fn fake_env(dir: &Path, script_value: &Value) -> (PathBuf, PathBuf, PathBuf) {
+pub(crate) fn fake_env(dir: &Path, script_value: &Value) -> (PathBuf, PathBuf, PathBuf) {
     let (script_path, log, cache) = (dir.join("script.json"), dir.join("log.jsonl"), dir.join("cache"));
     fs::create_dir_all(dir).unwrap();
     fs::write(&script_path, script_value.to_string()).unwrap();
@@ -41,7 +41,7 @@ fn fake_env(dir: &Path, script_value: &Value) -> (PathBuf, PathBuf, PathBuf) {
 }
 
 /// The fake linked as the `.venv/bin/dbt` of the project at PROJECT.
-fn venv_fake(project: &Path) -> PathBuf {
+pub(crate) fn venv_fake(project: &Path) -> PathBuf {
     let dbt = project.join(".venv/bin/dbt");
     fs::create_dir_all(dbt.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt-lsp"), &dbt).unwrap();
@@ -50,7 +50,7 @@ fn venv_fake(project: &Path) -> PathBuf {
 
 /// A PATH whose first directory, under DIR, holds a stub `dbt` that
 /// appends its arguments to the returned log, then runs BODY.
-fn path_with_stub(dir: &Path, body: &str) -> (std::ffi::OsString, PathBuf) {
+pub(crate) fn path_with_stub(dir: &Path, body: &str) -> (std::ffi::OsString, PathBuf) {
     let (bin, log) = (dir.join("bin"), dir.join("stub.log"));
     script(&bin.join("dbt"), &format!("echo \"$*\" >> '{}'\n{body}", log.display()));
     let path = std::env::join_paths([bin].into_iter().chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())));

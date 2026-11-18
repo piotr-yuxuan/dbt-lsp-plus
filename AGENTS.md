@@ -55,10 +55,12 @@ src/locate.rs                 the project of a document, the dbt of a project, t
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop, the server process, the listing
+src/cli.rs                    the subcommands doctor and select, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
 tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
+tests/proxy/cli.rs            the subcommands doctor and select, the binary run as from a shell
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
@@ -76,7 +78,7 @@ tests/tools/                  the tests of the scripts; tests/bin/fake-gh stands
 .github/workflows/            CI and CD, and the weekly runs on the latest dbt
 docs/tutorials/               a first session, from the build to the call hierarchy
 docs/how-to/                  configure an editor or an agent, use it with dbt-oss alone, build and test, troubleshoot
-docs/reference/               the features by LSP method and their configuration, the release pipeline
+docs/reference/               the features by LSP method and their configuration, the subcommands, the release pipeline
 docs/explanation/design.md    the design, what dbt lsp was observed to do, what is left
 docs/diagrams/                diagram sources, light and dark, in diagram-design's sanityinc-tomorrow profile
 docs/images/                  their PNG exports, by headless Chromium at twice the size
@@ -115,7 +117,6 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     cache changes only once the project is built;
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
     from the hierarchy's answer;
-  - `project_dir`: the parsing of the server command, at the boundary;
   - `Pending::merged`: what each kind of forwarded request does to the
     server's answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
@@ -147,6 +148,12 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     decisions on a command's request and on a run's output, with tests of
     their own; `commands::compile_job` and `commands::nodes_job`: one run
     per command, its words and its reader;
+  - `cli::named`: the rule that a subcommand is the first word, tested
+    without running the binary, apart from `main.rs`, whose `cli::main` is
+    the module's entry point; `cli::asked`: the decision on a
+    subcommand's words, with tests of its own; `cli::doctor` and
+    `cli::select`, one per subcommand, so that `cli::main` stays a
+    dispatch;
   - `Proxy::compare`: the shadow's work on a followed request's answer,
     once the client has it, so that `on_server_response` stays a dispatch;
   - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's
@@ -194,7 +201,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     `navigation`, `last_run`, `lineage`, `watcher` and the others): one
     per observed behaviour, so that `in_front_of_the_real_dbt_lsp` stays
     their sequence; `found_from_a_document` and `found_from_the_folder`,
-    one per route, so that
+    one per route, and `from_a_shell`, the subcommands, so that
     `the_project_and_its_dbt_found_without_project_dir` stays theirs;
   - `parse` in `tests/proxy/conformance.rs`: dbt's run, the corpus's one
     effect, apart from the comparisons, which decide;

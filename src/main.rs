@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! `dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]`: a language server on the standard
-//! input and output, in front of SERVER COMMAND, `dbt lsp` by default.
+//! input and output, in front of SERVER COMMAND, `dbt lsp` by default; or, by
+//! its first word, one of the subcommands `doctor` and `select`.
 
+use dbt_lsp_plus::cli;
 use dbt_lsp_plus::modes::{self, Arguments};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage: dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
+       dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
+       dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
 
 Runs SERVER COMMAND, by default `dbt lsp`, as a language server behind this
 one, on the standard input and output.  Every message passes unchanged; the
@@ -29,10 +33,20 @@ worktree's, else the one on PATH, and dbt runs in the project.
   -h, --help            this text
   -V, --version         the version
 
-`--` is needed only before a server command that starts with a dash.";
+doctor says, on one line of JSON, which project and which dbt the server
+would find from PATH and whether it would work; select lists the nodes that
+a dbt selector selects, by `dbt list` cut off the network.  ARGUMENTS are
+the server's, as above; `dbt-lsp-plus doctor -h` and `dbt-lsp-plus select
+-h` tell more.
+
+`--` is needed only before a server command that starts with a dash, or
+whose first word is doctor or select.";
 
 fn main() -> ExitCode {
     let words: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(subcommand) = cli::named(&words) {
+        return cli::main(subcommand, &words[1..]);
+    }
     match modes::arguments(&words) {
         Ok(Arguments::Help) => println!("{USAGE}"),
         Ok(Arguments::Version) => println!("dbt-lsp-plus {}", env!("CARGO_PKG_VERSION")),
