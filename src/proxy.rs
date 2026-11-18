@@ -1704,7 +1704,7 @@ impl<W: Write> Proxy<W> {
         let named = self.node_at(index, params, start);
         let summary = index
             .zip(named.flatten())
-            .map(|(index, node)| (format!("{}\n{}", index.summary(node), config::Index::facts(node)), true));
+            .map(|(index, node)| (format!("{}\n{}", index.summary(node), index.facts(node)), true));
         // A doc's or a generic test's block, the project scanned only then.
         let block = || {
             let (path, text, offset) = self.document_at(params)?;

@@ -1247,8 +1247,10 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   defaults: group and owner, access when not protected, an enforced
   contract, the version, tags, disabled, the number of tests.  The facts
   follow, each on a line of its own, hard in markdown: the unique id, with
-  `, properties <file>` when a properties file patches the node (its
-  `patch_path` without `<package>://`), or a source's own file; then, when
+  `, properties <file>` when a properties file patches the node, or a
+  source's own file: from the root, or, for a package's node,
+  `<package>://` and from the package's directory, as dbt writes
+  `patch_path`; then, when
   any column is declared, `columns ` and each one's name and declared
   `data_type`, by name, as the manifest is read.  In markdown, the
   summary and the facts are escaped, so that a type such as
