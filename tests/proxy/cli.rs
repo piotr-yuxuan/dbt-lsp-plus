@@ -382,13 +382,16 @@ fn select_sweeps_a_run_directory_left_for_a_day() {
     case.run(&case.copy, &["select", "+stg_orders+"]);
     let hashes: Vec<PathBuf> =
         fs::read_dir(case.dir.join("cache/dbt-lsp-plus")).unwrap().flatten().map(|e| e.path()).collect();
-    // As a select killed by a signal leaves it, two days ago.
+    // As a select killed by a signal two days ago leaves it: a run's log and
+    // dbt's target, no parse's log; its directory's time set once they exist.
     let stale = hashes[0].join("1");
-    fs::create_dir_all(&stale).unwrap();
+    fs::create_dir_all(stale.join("run/target")).unwrap();
     let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
-    fs::File::create(stale.join("parse.log")).unwrap().set_modified(two_days).unwrap();
+    fs::File::create(stale.join("run/run.log")).unwrap().set_modified(two_days).unwrap();
+    fs::File::open(&stale).unwrap().set_modified(two_days).unwrap();
     let fresh = hashes[0].join("2");
-    fs::create_dir_all(&fresh).unwrap();
+    fs::create_dir_all(fresh.join("run/target")).unwrap();
+    fs::File::create(fresh.join("run/run.log")).unwrap().set_modified(two_days).unwrap();
     case.run(&case.copy, &["select", "+stg_orders+"]);
     assert!(!stale.exists() && fresh.exists(), "{:?}", fs::read_dir(&hashes[0]).unwrap().collect::<Vec<_>>());
 }
