@@ -12,8 +12,9 @@ A language server that sits in front of `dbt lsp`, the language server
 of dbt 2, and adds what it lacks, for every editor and for agents: the
 outline of a model, every resource of a project as a workspace symbol,
 the call hierarchy of models, sources, macros and functions, references
-and renames of sources, definitions from YAML (and alone, of refs,
-macros and functions), and the last run's failures as diagnostics.  With
+and renames of sources, definitions from YAML, definitions and
+references of refs, macros and functions, and the last run's failures
+as diagnostics.  With
 dbt-oss, which has no `dbt lsp`, it works alone, from the files and your
 own `dbt parse`.  It uses only the server's interface, unlocks nothing
 that dbt gates behind an account, and does not ship dbt.  It is

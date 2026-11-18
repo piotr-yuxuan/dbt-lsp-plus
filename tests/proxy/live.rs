@@ -97,8 +97,9 @@ fn in_front_of_the_real_dbt_lsp() {
 }
 
 /// The shadow in front of the real dbt lsp: definitions on a `ref` and on
-/// a macro call, and references on the `ref`, as dbt lsp 2.0.9 answered
-/// them beside the proxy: the baseline that design.md records.
+/// a macro call, and references on the `ref`, left to dbt lsp so that the
+/// shadow follows them, as dbt lsp 2.0.9 answered them beside the proxy:
+/// the baseline that design.md records.
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
 fn the_shadow_in_front_of_the_real_dbt_lsp() {
@@ -113,7 +114,8 @@ fn the_shadow_in_front_of_the_real_dbt_lsp() {
     let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
     let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
     let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
-    let mut session = Session::start_with(&["--shadow"], &server, &env, Some(&project));
+    let options = ["--shadow", "--mode", "textDocument/definition=dbt", "--mode", "textDocument/references=dbt"];
+    let mut session = Session::start_with(&options, &server, &env, Some(&project));
     session.timeout = Duration::from_secs(180);
     session.initialize(&project);
     let orders = project.join("models/marts/orders.sql");
@@ -441,6 +443,12 @@ fn restart(session: &mut Session, project: &Path) {
     assert!(killed.success());
     let shown = session.wait_for(|m| m["method"] == "window/showMessage");
     assert!(shown["params"]["message"].as_str().unwrap().ends_with("restarting it in 1 s."), "{shown}");
+    // Meanwhile, the proxy's summary rather than a failure.
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+    let meanwhile = session.request("textDocument/hover", on_ref.clone());
+    let text = meanwhile["result"]["contents"]["value"].as_str().unwrap_or_default();
+    assert!(meanwhile.get("error").is_none() && text.starts_with("model view, \"shop\""), "{meanwhile}");
     let models = uri(&project.join("models/marts/_models.yml"));
     session.wait_for(|message| {
         let diagnostics = message["params"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
@@ -448,8 +456,6 @@ fn restart(session: &mut Session, project: &Path) {
             && message["params"]["uri"] == models.as_str()
             && diagnostics.iter().any(|d| d["source"] == "dbt")
     });
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
     assert_eq!(session.received.iter().filter(registration).count(), 0, "the second registration");
 }
@@ -565,12 +571,31 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(file(&session.request("textDocument/definition", at("order_status", 2))), "docs.md");
     assert_eq!(file(&session.request("textDocument/definition", at("name: orders", 8))), "orders.sql");
     // The server's null, observed: the proxy's text alone, and a position
-    // without a target forwarded and answered null.
+    // without a target forwarded and answered null by dbt lsp itself, in
+    // time: no deadline passed for it.
     let hover = session.request("textDocument/hover", at("order_status", 2));
     let text = "The status of an order: placed, shipped or returned.";
     assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
     let on_column = session.request("textDocument/definition", at("customer_id", 2));
     assert_eq!(on_column["result"], Value::Null, "{on_column}");
+    // An answer of the proxy's own, after which a log of that deadline would have come.
+    session.request("workspace/symbol", json!({"query": "orders"}));
+    let late = |m: &&Value| {
+        m["method"] == "window/logMessage"
+            && m["params"]["type"] == 4
+            && m["params"]["message"].as_str().is_some_and(|text| text.contains("textDocument/definition"))
+    };
+    assert_eq!(session.received.iter().filter(late).count(), 0, "dbt lsp was late on the column");
+    // A ref in SQL is the proxy's in front of dbt lsp too, and its references
+    // hold the snapshot's, which dbt lsp 2.0.9 leaves out.
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+    assert_eq!(file(&session.request("textDocument/definition", on_ref.clone())), "stg_orders.sql");
+    let mut references = on_ref;
+    references["context"] = json!({"includeDeclaration": false});
+    let used = session.request("textDocument/references", references);
+    let snapshot = json!(uri(&project.join("snapshots/orders_snapshot.sql")));
+    assert!(used["result"].as_array().is_some_and(|found| found.iter().any(|l| l["uri"] == snapshot)), "{used}");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! Who answers each method: the proxy alone (`ours`), `dbt lsp` alone
+//! Who answers each method: the proxy alone (`plus`), `dbt lsp` alone
 //! (`dbt`), or both, merged (`merge`).  The user's settings, from the
 //! command line and `initializationOptions.dbtLspPlus`, parsed here at the
 //! boundary; the table of a session, fixed once `initialize` is answered.
@@ -12,16 +12,17 @@ use std::sync::LazyLock;
 /// Who answers a method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    Ours,
+    Plus,
     Dbt,
     Merge,
 }
 
 impl Mode {
-    /// The mode that TEXT names, if any.
+    /// The mode that TEXT names, if any; `ours`, `plus`'s former name, is
+    /// still read.
     pub fn parse(text: &str) -> Option<Mode> {
         match text {
-            "ours" => Some(Mode::Ours),
+            "plus" | "ours" => Some(Mode::Plus),
             "dbt" => Some(Mode::Dbt),
             "merge" => Some(Mode::Merge),
             _ => None,
@@ -52,7 +53,7 @@ const FOLLOWERS: [(&str, &str); 2] = [
     ("callHierarchy/outgoingCalls", "textDocument/prepareCallHierarchy"),
 ];
 
-/// The methods whose shipped default is `ours` when the first server does
+/// The methods whose shipped default is `plus` when the first server does
 /// not announce their capability, else `dbt`: those the proxy adds.  Every
 /// other method of `METHODS` ships `merge`, today's merges.
 const ADDED: [&str; 6] = [
@@ -67,6 +68,11 @@ const ADDED: [&str; 6] = [
 /// The methods whose empty answer is `[]` rather than null.
 const LISTS: [&str; 3] = ["textDocument/references", "textDocument/inlayHint", "workspace/symbol"];
 
+/// What METHOD answers when it has nothing: `[]` for a list, else null.
+pub fn empty(method: &str) -> Value {
+    if LISTS.contains(&method) { json!([]) } else { Value::Null }
+}
+
 /// A method of LSP: a namespace of the protocol's and a name.
 static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -76,26 +82,30 @@ static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// The user's settings: a mode per method of `METHODS`, a default for them
-/// all, and whether the shadow compares the proxy's definitions and
-/// references with dbt lsp's.
+/// all, whether the shadow compares the proxy's definitions and
+/// references with dbt lsp's, and whether a mode was named `ours`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub modes: BTreeMap<String, Mode>,
     pub default: Option<Mode>,
     pub shadow: bool,
+    pub ours: bool,
 }
 
 impl Settings {
     /// Sets METHOD to the mode MODE names, or says why it cannot be.  `dbt`
     /// for a method the proxy does not answer is its behaviour already, and
-    /// accepted.
+    /// accepted.  A mode named `ours` is noted.
     pub fn set(&mut self, method: &str, mode: &str) -> Result<(), String> {
-        let named = Mode::parse(mode).ok_or_else(|| format!("{mode} is no mode: ours, dbt or merge"))?;
+        let named = Mode::parse(mode).ok_or_else(|| format!("{mode} is no mode: plus, dbt or merge"))?;
         if let Some((_, leader)) = FOLLOWERS.iter().find(|(follower, _)| *follower == method) {
             return Err(format!("{method} takes the mode of {leader}"));
         }
         match (METHODS.contains(&method), LSP_METHOD.is_match(method), named) {
-            (true, ..) => drop(self.modes.insert(method.to_owned(), named)),
+            (true, ..) => {
+                self.modes.insert(method.to_owned(), named);
+                self.ours |= mode == "ours";
+            }
             (false, true, Mode::Dbt) => {}
             (false, true, _) => return Err(format!("{method} has no answer of dbt-lsp-plus's: dbt only")),
             (false, false, _) => return Err(format!("{method} is no LSP method")),
@@ -104,8 +114,10 @@ impl Settings {
     }
 
     /// Sets the default to the mode MODE names, or says why it cannot be.
+    /// A mode named `ours` is noted.
     pub fn set_default(&mut self, mode: &str) -> Result<(), String> {
-        self.default = Some(Mode::parse(mode).ok_or_else(|| format!("{mode} is no mode: ours, dbt or merge"))?);
+        self.default = Some(Mode::parse(mode).ok_or_else(|| format!("{mode} is no mode: plus, dbt or merge"))?);
+        self.ours |= mode == "ours";
         Ok(())
     }
 
@@ -239,7 +251,7 @@ impl Table {
     /// the shipped one, today's behaviour.
     pub fn new(settings: &Settings, announced: &dyn Fn(&str) -> bool, none: bool) -> Table {
         let shipped = |method: &str| match (ADDED.contains(&method), announced(method)) {
-            (true, false) => Mode::Ours,
+            (true, false) => Mode::Plus,
             (true, true) => Mode::Dbt,
             (false, _) => Mode::Merge,
         };
@@ -262,31 +274,27 @@ impl Table {
     }
 
     /// Whether the proxy answers METHOD at a position it claims, by a row of
-    /// `experimental.dbtLspPlus`, ALONE whether that row holds with no
-    /// backend only: every row in `ours`, today's in `merge`, none in `dbt`.
-    pub fn lists(&self, method: &str, alone: bool) -> bool {
-        match self.mode(method) {
-            Mode::Ours => true,
-            Mode::Merge => self.none || !alone,
-            Mode::Dbt => false,
-        }
+    /// `experimental.dbtLspPlus`: every row in `plus` and `merge`, with a
+    /// backend or none, none in `dbt`.
+    pub fn lists(&self, method: &str) -> bool {
+        self.mode(method) != Mode::Dbt
     }
 
     /// What the proxy answers METHOD where it has nothing of its own, if it
-    /// answers it: null, or `[]` for a list, in `ours`, and in `dbt` with no
+    /// answers it: null, or `[]` for a list, in `plus`, and in `dbt` with no
     /// backend; none where the server answers.
     pub fn nothing(&self, method: &str) -> Option<Value> {
         let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
-        let empty = known && (mode == Mode::Ours || (self.none && mode == Mode::Dbt));
-        empty.then(|| if LISTS.contains(&method) { json!([]) } else { Value::Null })
+        let empty = known && (mode == Mode::Plus || (self.none && mode == Mode::Dbt));
+        empty.then(|| self::empty(method))
     }
 
     /// `experimental.dbtLspPlus`, version 2, from ROWS (request, kind,
-    /// places, alone only): each row the table lists, its places in order.
-    pub fn flag(&self, rows: &[(&str, &str, &[&str], bool)]) -> Value {
+    /// places): each row the table lists, its places in order.
+    pub fn flag(&self, rows: &[(&str, &str, &[&str])]) -> Value {
         let mut answered = json!({"version": 2});
-        for (request, kind, places, alone) in rows {
-            if self.lists(&format!("textDocument/{request}"), *alone) {
+        for (request, kind, places) in rows {
+            if self.lists(&format!("textDocument/{request}")) {
                 let listed = answered[*request][*kind].as_array().cloned().unwrap_or_default();
                 answered[*request][*kind] = json!([listed, places.iter().map(|place| json!(place)).collect()].concat());
             }
@@ -325,19 +333,53 @@ mod tests {
         assert_eq!(settings.modes["textDocument/hover"], Mode::Dbt);
         let refused = |method: &str, mode: &str| Settings::default().set(method, mode).unwrap_err();
         assert!(refused("textDocument/hover", "theirs").contains("no mode"));
-        assert!(refused("callHierarchy/incomingCalls", "ours").contains("prepareCallHierarchy"));
-        assert!(refused("textDocument/completion", "ours").contains("dbt only"));
+        assert!(refused("callHierarchy/incomingCalls", "plus").contains("prepareCallHierarchy"));
+        assert!(refused("textDocument/completion", "plus").contains("dbt only"));
         assert!(refused("hover", "dbt").contains("no LSP method"));
         assert_eq!(Settings::default().set("textDocument/completion", "dbt"), Ok(()), "already its behaviour");
+    }
+
+    #[test]
+    fn ours_is_read_as_plus_and_noted() {
+        assert_eq!(Mode::parse("plus"), Some(Mode::Plus));
+        let (mut method, mut default) = (Settings::default(), Settings::default());
+        method.set("textDocument/hover", "plus").unwrap();
+        assert!(!method.ours, "plus is no note");
+        method.set("textDocument/hover", "ours").unwrap();
+        default.set_default("ours").unwrap();
+        assert_eq!((method.modes["textDocument/hover"], method.ours), (Mode::Plus, true));
+        assert_eq!((default.default, default.ours), (Some(Mode::Plus), true));
+        let mut refused = Settings::default();
+        assert!(refused.set("textDocument/completion", "ours").is_err());
+        assert!(!refused.ours, "a refused setting notes nothing");
+        let named = Settings::default().set_default("theirs");
+        assert_eq!(named, Err("theirs is no mode: plus, dbt or merge".to_owned()));
+        let options = json!({"dbtLspPlus": {"defaultMode": "ours"}});
+        assert!(Settings::default().over(&options).0.ours, "from initializationOptions");
+        let options = json!({"dbtLspPlus": {"defaultMode": "plus"}});
+        assert!(method.over(&options).0.ours, "from the command line");
+    }
+
+    #[test]
+    fn the_command_line_reads_ours_as_plus() {
+        let read = |words: &[&str]| match arguments(&super::tests::words(words)) {
+            Ok(Arguments::Run { settings, .. }) => settings,
+            other => panic!("{other:?}"),
+        };
+        let method = read(&["--mode", "textDocument/hover=ours"]);
+        assert_eq!((method.modes["textDocument/hover"], method.ours), (Mode::Plus, true));
+        let default = read(&["--default-mode", "ours"]);
+        assert_eq!((default.default, default.ours), (Some(Mode::Plus), true));
+        assert!(!read(&["--default-mode", "plus"]).ours);
     }
 
     #[test]
     fn the_shipped_defaults_are_today_s_behaviour() {
         let announced = |method: &str| method == "textDocument/foldingRange";
         let table = Table::new(&Settings::default(), &announced, false);
-        assert_eq!(table.mode("textDocument/documentSymbol"), Mode::Ours, "a capability the server lacks");
+        assert_eq!(table.mode("textDocument/documentSymbol"), Mode::Plus, "a capability the server lacks");
         assert_eq!(table.mode("textDocument/foldingRange"), Mode::Dbt, "one it announces");
-        assert_eq!(table.mode("callHierarchy/outgoingCalls"), Mode::Ours, "its leader's");
+        assert_eq!(table.mode("callHierarchy/outgoingCalls"), Mode::Plus, "its leader's");
         for merged in ["textDocument/hover", "textDocument/definition", "textDocument/publishDiagnostics"] {
             assert_eq!(table.mode(merged), Mode::Merge, "{merged}");
         }
@@ -346,21 +388,21 @@ mod tests {
 
     #[test]
     fn a_method_s_mode_comes_before_the_default_and_the_default_before_the_shipped_one() {
-        let user = settings(&[("textDocument/hover", "dbt")], Some("ours"));
+        let user = settings(&[("textDocument/hover", "dbt")], Some("plus"));
         let table = Table::new(&user, &|_| false, false);
         assert_eq!(table.mode("textDocument/hover"), Mode::Dbt);
-        assert_eq!(table.mode("textDocument/definition"), Mode::Ours);
+        assert_eq!(table.mode("textDocument/definition"), Mode::Plus);
         assert_eq!(table.mode("textDocument/completion"), Mode::Dbt, "the default reaches the proxy's methods only");
     }
 
     #[test]
     fn initialization_options_go_over_the_command_line_method_by_method() {
         let command_line = settings(&[("textDocument/hover", "dbt")], Some("merge"));
-        let options = json!({"dbtLspPlus": {"modes": {"textDocument/definition": "ours"}}});
+        let options = json!({"dbtLspPlus": {"modes": {"textDocument/definition": "plus"}}});
         let (merged, refused) = command_line.over(&options);
         assert_eq!(refused, Vec::<String>::new());
         assert_eq!(merged.modes["textDocument/hover"], Mode::Dbt);
-        assert_eq!(merged.modes["textDocument/definition"], Mode::Ours);
+        assert_eq!(merged.modes["textDocument/definition"], Mode::Plus);
         assert_eq!(merged.default, Some(Mode::Merge));
         let replaced = command_line.over(&json!({"dbtLspPlus": {"defaultMode": "dbt"}})).0;
         assert_eq!(replaced.default, Some(Mode::Dbt));
@@ -372,14 +414,14 @@ mod tests {
 
     #[test]
     fn a_refused_option_is_named_and_the_rest_kept() {
-        let options = json!({"dbtLspPlus": {"modes": {"textDocument/hover": "ours", "textDocument/rename": "both",
+        let options = json!({"dbtLspPlus": {"modes": {"textDocument/hover": "plus", "textDocument/rename": "both",
                                                       "callHierarchy/incomingCalls": "dbt"},
                                             "backend": "never", "colour": "blue"}});
         let (merged, refused) = Settings::default().over(&options);
         assert_eq!(merged.modes.keys().collect::<Vec<_>>(), ["textDocument/hover"]);
         assert_eq!(refused.len(), 4, "{refused:?}");
         assert!(refused.iter().any(|why| why.contains("command line only")));
-        assert_eq!(Settings::default().over(&json!({"dbtLspPlus": "ours"})).1.len(), 1);
+        assert_eq!(Settings::default().over(&json!({"dbtLspPlus": "plus"})).1.len(), 1);
     }
 
     #[test]
@@ -403,7 +445,7 @@ mod tests {
         assert_eq!(settings.modes["textDocument/hover"], Mode::Dbt);
         assert_eq!(backend, Backend::Never);
         assert_eq!(command, words(&["dbt", "lsp", "--project-dir", "p"]));
-        assert_eq!(run(&["--default-mode=ours"]).0.default, Some(Mode::Ours));
+        assert_eq!(run(&["--default-mode=plus"]).0.default, Some(Mode::Plus));
         assert_eq!(run(&[]).2, words(&["dbt", "lsp"]), "dbt lsp by default");
         assert_eq!(run(&["--", "-strange", "lsp"]).2, words(&["-strange", "lsp"]), "-- before a dash");
         assert_eq!(arguments(&words(&["-V", "--mode"])), Ok(Arguments::Version));
@@ -438,21 +480,21 @@ mod tests {
 
     #[test]
     fn the_flag_and_empty_answers_follow_the_modes() {
-        let rows: [(&str, &str, &[&str], bool); 3] = [
-            ("definition", "source", &["sql", "yaml"], false),
-            ("definition", "ref", &["sql"], true),
-            ("references", "source", &["sql"], false),
+        let rows: [(&str, &str, &[&str]); 4] = [
+            ("definition", "source", &["sql", "yaml"]),
+            ("definition", "ref", &["sql"]),
+            ("definition", "ref", &["python"]),
+            ("references", "source", &["sql"]),
         ];
-        let merged = Table::new(&Settings::default(), &|_| false, false);
-        assert_eq!(
-            merged.flag(&rows),
-            json!({"version": 2, "definition": {"source": ["sql", "yaml"]}, "references": {"source": ["sql"]}})
-        );
-        let alone = Table::new(&Settings::default(), &|_| false, true);
-        assert_eq!(alone.flag(&rows)["definition"]["ref"], json!(["sql"]), "alone, today's alone-only rows");
-        let user = settings(&[("textDocument/definition", "ours"), ("textDocument/references", "dbt")], None);
+        let every = json!({"version": 2, "definition": {"source": ["sql", "yaml"], "ref": ["sql", "python"]},
+                           "references": {"source": ["sql"]}});
+        for none in [false, true] {
+            assert_eq!(Table::new(&Settings::default(), &|_| false, none).flag(&rows), every, "merge, none {none}");
+        }
+        let user = settings(&[("textDocument/definition", "plus"), ("textDocument/references", "dbt")], None);
         let table = Table::new(&user, &|_| false, false);
-        assert_eq!(table.flag(&rows), json!({"version": 2, "definition": {"source": ["sql", "yaml"], "ref": ["sql"]}}));
+        let definition = json!({"version": 2, "definition": every["definition"]});
+        assert_eq!(table.flag(&rows), definition, "plus lists, dbt does not");
         assert_eq!(table.nothing("textDocument/definition"), Some(Value::Null));
         assert_eq!(table.nothing("textDocument/references"), None, "dbt with a backend is forwarded");
         let none = Table::new(&user, &|_| false, true);

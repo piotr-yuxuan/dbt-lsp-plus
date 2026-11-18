@@ -7,7 +7,8 @@ parse`, run offline at each save or change of the project, node
 information, the hover summary, inlay hints, the call hierarchy as dbt
 resolves it, and dbt's errors and warnings as diagnostics (source `dbt
 parse`).  It says so once in the log, and warns of nothing.  Go to
-definition and references also cover a `ref` and a macro call in SQL, a
+definition and references cover, as in front of `dbt lsp`, a `ref` and a
+macro call in SQL, a
 `ref` in a Python model, a `function()` call in SQL or YAML, and a macro
 call in YAML: across the project, versions included.  Formatting,
 completion, compiled SQL and previews are `dbt lsp`'s, and absent.

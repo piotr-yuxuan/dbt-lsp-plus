@@ -19,7 +19,7 @@ opened in one; until then the proxy runs nothing.  Without --project-dir,
 a bare `dbt` is the project's .venv's, its repository's or its main
 worktree's, else the one on PATH, and dbt runs in the project.
 
-  --mode METHOD=MODE    who answers the LSP method METHOD: ours (the proxy
+  --mode METHOD=MODE    who answers the LSP method METHOD: plus (the proxy
                         alone), dbt (dbt lsp alone) or merge (both)
   --default-mode MODE   the mode of every method the proxy answers but
                         those set with --mode

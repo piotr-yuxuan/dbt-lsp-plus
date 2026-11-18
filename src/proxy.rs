@@ -52,7 +52,7 @@ const ADDED: [(&str, &[&str]); 6] = [
     ("selectionRangeProvider", &["textDocument/selectionRange"]),
 ];
 
-/// The capabilities of the requests that the proxy answers in `ours`
+/// The capabilities of the requests that the proxy answers in `plus`
 /// whatever the server announces, and whether it then answers them as a
 /// whole, as a hover, rather than by target.
 const PROVIDERS: [(&str, &str, bool); 5] = [
@@ -85,25 +85,22 @@ const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "
 /// What the proxy answers itself, as `experimental.dbtLspPlus` announces
 /// it, version 2: per request, each kind of target with the places where a
 /// request's position may be, `sql`, `yaml` or `python` by the file's
-/// extension; the last column says alone only, with a dbt without `lsp`.
-/// A kind listed at a place is the proxy's at every position of that kind
-/// there, never forwarded; the rows of a kind follow the order of places.
-const ANSWERED: [(&str, &str, &[&str], bool); 15] = [
-    ("definition", "source", &["sql", "yaml", "python"], false),
-    ("definition", "ref", &["sql"], true),
-    ("definition", "ref", &["yaml"], false),
-    ("definition", "ref", &["python"], true),
-    ("definition", "macro", &["sql", "yaml"], true),
-    ("definition", "doc", &["yaml"], false),
-    ("definition", "entry", &["yaml"], false),
-    ("definition", "test", &["yaml"], false),
-    ("definition", "function", &["sql", "yaml"], true),
-    ("references", "source", &["sql", "yaml", "python"], false),
-    ("references", "ref", &["sql", "yaml", "python"], true),
-    ("references", "macro", &["sql", "yaml"], true),
-    ("references", "function", &["sql", "yaml"], true),
-    ("rename", "source", &["sql", "yaml", "python"], false),
-    ("rename", "cte", &["sql"], false),
+/// extension.  A kind listed at a place is the proxy's at every position of
+/// that kind there, never forwarded, with dbt lsp or without.
+const ANSWERED: [(&str, &str, &[&str]); 13] = [
+    ("definition", "source", &["sql", "yaml", "python"]),
+    ("definition", "ref", &["sql", "yaml", "python"]),
+    ("definition", "macro", &["sql", "yaml"]),
+    ("definition", "doc", &["yaml"]),
+    ("definition", "entry", &["yaml"]),
+    ("definition", "test", &["yaml"]),
+    ("definition", "function", &["sql", "yaml"]),
+    ("references", "source", &["sql", "yaml", "python"]),
+    ("references", "ref", &["sql", "yaml", "python"]),
+    ("references", "macro", &["sql", "yaml"]),
+    ("references", "function", &["sql", "yaml"]),
+    ("rename", "source", &["sql", "yaml", "python"]),
+    ("rename", "cte", &["sql"]),
 ];
 
 /// The requests answered by the proxy that ask for the parse's index, in
@@ -123,6 +120,11 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 /// server has not answered within this long: three times what dbt lsp 2.0.9
 /// took on the fixture during a compilation.
 const MERGE_DEADLINE: Duration = Duration::from_millis(300);
+/// A merged request to which the proxy has nothing to add is answered with
+/// that nothing if the server has not answered within this long: above the
+/// slowest answer of dbt lsp 2.0.9 seen, 1.9 s for the first hover on 2,000
+/// models during its compilation.
+const NOTHING_DEADLINE: Duration = Duration::from_secs(2);
 /// At most this many restarts of a server that died, within the window.
 const RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
@@ -246,6 +248,9 @@ enum Pending {
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
+    /// A merged request to which the proxy adds nothing: this nothing, null
+    /// or `[]`, is its answer when the server's is an error, late, or none.
+    Nothing(Value),
     /// Answered with the proxy's part alone once the server was late: its
     /// answer, when it comes, is dropped.
     Answered,
@@ -274,14 +279,27 @@ impl Pending {
     }
 
     /// The proxy's part alone, as the answer when the server gives none: a
-    /// hover's text, the hints; none for a request with no part.
+    /// hover's text, the hints, a merged request's nothing; none for a
+    /// request that is not merged.
     fn alone(&self, markdown: bool) -> Option<Value> {
         let nothing = match self {
             Pending::Hover(..) => json!({"result": null}),
             Pending::Hints(_) => json!({"result": []}),
+            Pending::Nothing(nothing) => return Some(nothing.clone()),
             _ => return None,
         };
         self.merged(&nothing, markdown).map(|merged| merged["result"].clone())
+    }
+
+    /// How long the server has to answer this kind of request before the
+    /// client gets the proxy's answer alone: a part is worth showing at
+    /// once, a nothing only once the server is clearly late.
+    fn deadline(&self) -> Option<Duration> {
+        match self {
+            Pending::Hover(..) | Pending::Hints(_) => Some(MERGE_DEADLINE),
+            Pending::Nothing(_) => Some(NOTHING_DEADLINE),
+            _ => None,
+        }
     }
 }
 
@@ -359,11 +377,11 @@ struct Proxy<W: Write> {
     initialize: Option<Value>,
     /// The client's requests that the server has yet to answer.
     forwarded: HashMap<String, (Value, Pending)>,
-    /// When each forwarded request with a part of the proxy's is answered
-    /// with it alone, and its method.
+    /// When each merged request is answered with the proxy's part or
+    /// nothing alone, and its method.
     deadlines: HashMap<String, (Instant, String)>,
-    /// The methods whose late answer the proxy logged.
-    late: HashSet<String>,
+    /// The methods whose late answer the proxy logged, each with the deadline that passed.
+    late: HashSet<(String, Duration)>,
     documents: HashMap<PathBuf, String>,
     /// The URI under which the client opened each of them, which an edit
     /// of it must name.
@@ -604,7 +622,7 @@ impl<W: Write> Proxy<W> {
             capabilities.remove(*capability);
         }
         for (capability, method, owned) in
-            PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Ours)
+            PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Plus)
         {
             if lacks(capabilities, capability) {
                 capabilities.insert((*capability).to_owned(), json!(true));
@@ -636,18 +654,26 @@ impl<W: Write> Proxy<W> {
 
     /// Says once, after `initialize` is answered, what of the user's settings
     /// cannot take effect: each refusal, the methods set to `dbt` that no
-    /// backend answers, and a shadow with no dbt lsp to compare with.
+    /// backend answers, a shadow with no dbt lsp to compare with, or with
+    /// nothing to follow; and a mode named by its former name.
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
         if !said.is_empty() {
             said.push(format!("the methods that take a mode are {}", modes::METHODS.join(", ")));
         }
+        said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
         let unanswered = self.table.unanswered();
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
         }
         let off = self.settings.shadow && self.shadow.is_none();
         said.extend(off.then(|| "the shadow compares with dbt lsp, which does not run: it is off".to_owned()));
+        let followed = ["textDocument/definition", "textDocument/references"].map(|method| self.table.mode(method));
+        let idle = self.shadow.is_some() && !followed.contains(&Mode::Dbt);
+        said.extend(idle.then(|| {
+            "the shadow follows definitions and references in dbt only: with neither in dbt it has nothing to follow"
+                .to_owned()
+        }));
         if !said.is_empty() {
             let text = format!("dbt-lsp-plus: {}.", said.join("; "));
             self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
@@ -1015,8 +1041,8 @@ impl<W: Write> Proxy<W> {
     /// PATH, as `ANSWERED` says.
     fn claims(&self, request: &str, target: &navigation::Target, path: &Path) -> bool {
         let Some(place) = place(path) else { return false };
-        let listed = |(answered, kind, places, alone): &&(&str, &str, &[&str], bool)| {
-            let listed = self.table.lists(&format!("textDocument/{answered}"), *alone);
+        let listed = |(answered, kind, places): &&(&str, &str, &[&str])| {
+            let listed = self.table.lists(&format!("textDocument/{answered}"));
             *answered == request && *kind == target.kind() && places.contains(&place) && listed
         };
         ANSWERED.iter().any(|row| listed(&row))
@@ -1167,10 +1193,11 @@ impl<W: Write> Proxy<W> {
         Some(Ok(node.map_or(Value::Null, summarised)))
     }
 
-    /// Starts a parse when the index is stale and dbt can parse: alone, or
-    /// with a server that compiled since the last change; packages that need
-    /// no network, no parse under way, no shutdown, a server command with
-    /// `lsp`.
+    /// Starts a parse when the index is stale and dbt can parse: with no
+    /// server running, or with one that compiled since the last change;
+    /// packages that need no network, guarded as alone while no server runs
+    /// and none compiled since the last change; no parse under way, no
+    /// shutdown, a server command with `lsp`.
     fn want_index(&mut self) {
         // A listing makes dbt lsp compile, as the first document opened does.
         if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
@@ -1178,11 +1205,13 @@ impl<W: Write> Proxy<W> {
         }
         self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
-        // Alone, no server resolves the packages first: their guard is enough.
-        let can = self.standalone || (parsing.compiled && self.server.is_some());
+        // With no server, none resolves the packages first: their guard is enough.
+        let can = self.server.is_none() || parsing.compiled;
         let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.standalone) {
+        // A server that compiled since the last change resolved the packages, though it may be gone since.
+        let alone = self.server.is_none() && !self.parsing.compiled;
+        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, alone) {
             return self.log_parse(&why);
         }
         let cache = self.cache(&root);
@@ -1455,8 +1484,7 @@ impl<W: Write> Proxy<W> {
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
-                let nothing = json!({"textDocument/hover": null, "textDocument/inlayHint": []});
-                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| nothing[method].clone())))
+                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| modes::empty(method))))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1641,10 +1669,13 @@ impl<W: Write> Proxy<W> {
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
     /// proxy must not cancel, the summary that a hover's answer gets, a
-    /// request that the shadow follows; and whether, once routed, it asks for
-    /// a fresh index: a hover keeps the index fresh, an inlay hint only makes
-    /// one, and in `dbt` neither; a shadowed request wants what `ours` reads.
+    /// request that the shadow follows, the nothing that a merged request
+    /// falls back to; and whether, once routed, it asks for a fresh index: a
+    /// hover keeps the index fresh, an inlay hint only makes one, and in
+    /// `dbt` neither; a shadowed request wants what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
+        // Outside `dbt`, a hover, hints, a definition or references with no part of the proxy's.
+        let nothing = Pending::Nothing(modes::empty(method));
         let pending = match (method, params["command"].as_str()) {
             ("initialize", _) => {
                 self.on_initialize(params);
@@ -1674,10 +1705,7 @@ impl<W: Write> Proxy<W> {
                     );
                     navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
                 };
-                return (
-                    summary.or_else(block).map_or(Pending::Request, |(text, hard)| Pending::Hover(text, hard)),
-                    true,
-                );
+                return (summary.or_else(block).map_or(nothing, |(text, hard)| Pending::Hover(text, hard)), true);
             }
             ("textDocument/inlayHint", _) if self.table.mode(method) != Mode::Dbt => {
                 // A panic leaves the server's answer as it is.
@@ -1691,18 +1719,19 @@ impl<W: Write> Proxy<W> {
                     Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
-                return (hints.map_or(Pending::Request, Pending::Hints), self.parsing.index.is_none());
+                return (hints.map_or(nothing, Pending::Hints), self.parsing.index.is_none());
             }
-            // Followed only once forwarded: one the proxy answers is no one's to compare, and `ours` forwards none.
+            // Followed in `dbt` only: one the proxy answers is no one's to compare, and `merge` forwards only
+            // where the proxy has no target.
             ("textDocument/definition" | "textDocument/references", _) => {
-                let changes = self.changes;
-                let shadowed = self
-                    .shadow
-                    .as_ref()
-                    .filter(|_| self.table.mode(method) != Mode::Ours)
-                    .map(|_| Pending::Shadow { method: method.to_owned(), params: params.clone(), changes });
+                let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
+                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Pending::Shadow {
+                    method: method.to_owned(),
+                    params: params.clone(),
+                    changes,
+                });
                 let fresh = shadowed.is_some();
-                return (shadowed.unwrap_or(Pending::Request), fresh);
+                return (shadowed.unwrap_or(if dbt { Pending::Request } else { nothing }), fresh);
             }
             _ => Pending::Request,
         };
@@ -1722,8 +1751,8 @@ impl<W: Write> Proxy<W> {
             (Route::Answer(result), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
             (Route::Command(command), ..) => self.on_command(command, id, params, pending),
             (Route::Forward, Some(_), _) => {
-                // dbt lsp adds to the proxy's part, but never holds it up.
-                let late = pending.alone(self.markdown).map(|_| (Instant::now() + MERGE_DEADLINE, method.to_owned()));
+                // dbt lsp adds to the proxy's part, or replaces its nothing, but never holds it up.
+                let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
                 self.deadlines.extend(late.map(|late| (key(id), late)));
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
@@ -1732,7 +1761,11 @@ impl<W: Write> Proxy<W> {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            (Route::Forward, None, _) => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
+            // A merged request gets the proxy's answer alone, any other the failure.
+            (Route::Forward, None, _) => match pending.alone(self.markdown) {
+                Some(part) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
+                None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
+            },
         }
         // Once the request is forwarded, so that a listing takes no id of the client's.
         if fresh {
@@ -1908,7 +1941,7 @@ impl<W: Write> Proxy<W> {
     fn on_server_diagnostics(&mut self, message: &Value, body: &[u8]) {
         match self.table.mode("textDocument/publishDiagnostics") {
             Mode::Dbt => return self.send_client_body(body),
-            Mode::Ours => return,
+            Mode::Plus => return,
             Mode::Merge => {}
         }
         let uri = message.pointer("/params/uri").and_then(Value::as_str);
@@ -2166,16 +2199,17 @@ impl<W: Write> Proxy<W> {
     fn on_time(&mut self) {
         self.expire_listing();
         let now = Instant::now();
-        // A merge past its deadline: the proxy's part alone, the server's late answer dropped.
+        // A merge past its deadline: the proxy's part or nothing alone, the server's late answer dropped.
         let due: Vec<(String, String)> =
             self.deadlines.iter().filter(|(_, (at, _))| *at <= now).map(|(k, (_, m))| (k.clone(), m.clone())).collect();
         for (late, method) in due {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
+            let Some(waited) = pending.deadline() else { continue };
             let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).alone(self.markdown));
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
-            if !self.shutdown && self.late.insert(method.clone()) {
-                let ms = MERGE_DEADLINE.as_millis();
+            if !self.shutdown && self.late.insert((method.clone(), waited)) {
+                let ms = waited.as_millis();
                 let text = format!("dbt lsp did not answer {method} within {ms} ms: dbt-lsp-plus answered alone");
                 self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
                                          "params": {"type": 4, "message": text}}));
@@ -2347,12 +2381,33 @@ mod tests {
     #[test]
     fn every_method_the_proxy_adds_or_takes_has_a_mode() {
         let mut settings = modes::Settings::default();
-        settings.set_default("ours").unwrap();
+        settings.set_default("plus").unwrap();
         let table = modes::Table::new(&settings, &|_| false, false);
         let added = ADDED.iter().flat_map(|(_, methods)| methods.iter());
         for method in added.chain(PROVIDERS.iter().map(|(_, method, _)| method)) {
-            assert_eq!(table.mode(method), Mode::Ours, "{method} is not among modes::METHODS");
+            assert_eq!(table.mode(method), Mode::Plus, "{method} is not among modes::METHODS");
         }
+    }
+
+    #[test]
+    fn the_flag_lists_every_row_in_plus_and_merge_with_a_backend_or_none() {
+        let every = json!({"version": 2,
+            "definition": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"], "macro": ["sql", "yaml"],
+                           "doc": ["yaml"], "entry": ["yaml"], "test": ["yaml"], "function": ["sql", "yaml"]},
+            "references": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"],
+                           "macro": ["sql", "yaml"], "function": ["sql", "yaml"]},
+            "rename": {"source": ["sql", "yaml", "python"], "cte": ["sql"]}});
+        let mut plus = modes::Settings::default();
+        plus.set_default("plus").unwrap();
+        for (settings, none) in [(modes::Settings::default(), false), (modes::Settings::default(), true), (plus, false)]
+        {
+            assert_eq!(modes::Table::new(&settings, &|_| false, none).flag(&ANSWERED), every, "{settings:?} {none}");
+        }
+        let mut dbt = modes::Settings::default();
+        dbt.set("textDocument/definition", "dbt").unwrap();
+        dbt.set("textDocument/references", "dbt").unwrap();
+        let rename = json!({"version": 2, "rename": every["rename"]});
+        assert_eq!(modes::Table::new(&dbt, &|_| false, false).flag(&ANSWERED), rename);
     }
 
     #[test]
