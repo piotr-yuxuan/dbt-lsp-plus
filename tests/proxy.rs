@@ -2644,10 +2644,11 @@ fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
     assert_eq!([&capabilities["hoverProvider"], &capabilities["inlayHintProvider"]], [&json!(true), &json!(true)]);
     let orders = fixture().join("models/marts/orders.sql");
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
-    // Before any document, the hover asks for the parse whose reason it gives.
+    // Before any document, the hover asks for the parse whose reason it gives, which the proxy has started
+    // before it answers.
     let early = session.request("textDocument/hover", on_ref.clone());
-    let reason = early["error"]["message"].as_str().unwrap_or_default();
-    assert!(early["error"]["code"] == -32803 && reason.starts_with("dbt parse has not finished: "), "{early}");
+    let running = json!({"code": -32803, "message": "dbt parse has not finished: it is running"});
+    assert_eq!((early.get("result"), &early["error"]), (None, &running), "before a parse: {early}");
     session.open(&orders, None);
     let hover = session.poll(Duration::from_secs(10), ("textDocument/hover", on_ref), |result| !result.is_null());
     let summary =
@@ -2707,9 +2708,12 @@ fn alone_a_hover_on_a_node_before_any_index_says_why() {
     let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
     // The first document opened started the parse: on a ref and at the file's start, its reason.
     let running = json!({"code": -32803, "message": "dbt parse has not finished: it is running"});
-    for (line, character) in [(4, 28), (0, 0)] {
-        let hover = session.request("textDocument/hover", at(line, character));
-        assert_eq!((hover.get("result"), &hover["error"]), (None, &running), "{line}:{character}: {hover}");
+    let staging = fixture().join("models/staging/stg_customers.sql");
+    let on_source = json!({"textDocument": {"uri": uri(&staging)}, "position": {"line": 5, "character": 23}});
+    let on_entry = position_in(&fixture().join("models/staging/_sources.yml"), "name: customers", 8);
+    for params in [at(4, 28), at(0, 0), on_source, on_entry] {
+        let hover = session.request("textDocument/hover", params.clone());
+        assert_eq!((hover.get("result"), &hover["error"]), (None, &running), "{params}: {hover}");
     }
     // At `with`, in the argument of a macro call, at a properties file's start: nothing named, null.
     let properties = fixture().join("models/staging/_sources.yml");
@@ -3328,8 +3332,8 @@ fn alone_a_hover_left_to_dbt_asks_for_no_index() {
     let hover = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
     assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
     session.request("workspace/symbol", json!({"query": "orders"}));
-    std::thread::sleep(Duration::from_millis(500));
-    parses_stay(&log, 0);
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(parses(&log).len(), 0);
     assert!(session.finish().success());
 }
 
