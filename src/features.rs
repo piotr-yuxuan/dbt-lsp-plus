@@ -224,13 +224,12 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
 /// of an array of marked strings.  A null result becomes the summary alone,
 /// in markdown when MARKDOWN; an error, or contents of a shape LSP does not
 /// define, gives none, so that the answer passes as it came.  In markdown,
-/// a summary that is plain text, when HARD, is escaped and its line breaks
-/// hard; else, markdown already, it goes as written.
+/// the summary's line breaks are hard when HARD, else as written.
 pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -> Option<Value> {
     let mut merged = message.clone();
     let result = merged.get_mut("result")?;
     // A line break in markdown needs two spaces before it.
-    let marked = if hard { escape_markdown(summary).replace('\n', "  \n") } else { summary.to_owned() };
+    let marked = if hard { summary.replace('\n', "  \n") } else { summary.to_owned() };
     let kind = result.pointer("/contents/kind").and_then(Value::as_str).map(str::to_owned);
     let kind = kind.or_else(|| result.is_null().then(|| if markdown { "markdown" } else { "plaintext" }.to_owned()));
     let contents = result.get("contents").cloned().unwrap_or(Value::Null);
@@ -250,24 +249,6 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
     }
     result["contents"] = joined;
     Some(merged)
-}
-
-/// TEXT, plain, as markdown shows it: what CommonMark reads as markup
-/// escaped, a backslash, a backtick, `*`, `<` and `>`, as in a column's
-/// `map<string,int>`, and `_` but inside a word, where it never starts
-/// emphasis, so that `order_id` stays as it is.
-pub fn escape_markdown(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let word = |at: Option<usize>| at.and_then(|at| chars.get(at)).is_some_and(|c| c.is_alphanumeric());
-    let mut escaped = String::with_capacity(text.len());
-    for (at, &c) in chars.iter().enumerate() {
-        let inside = c == '_' && word(at.checked_sub(1)) && word(Some(at + 1));
-        if "\\`*<>_".contains(c) && !inside {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
 }
 
 /// The relation hints of TEXT, whose calls are CALLS: after each `ref` or
@@ -688,20 +669,6 @@ mod tests {
         let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
         assert_eq!(merge_hints(&error, std::slice::from_ref(&hint)), None);
         assert_eq!(merge_hints(&answer(json!({"odd": 1})), std::slice::from_ref(&hint)), None);
-    }
-
-    #[test]
-    fn escapes_a_plain_summary_s_markup_in_markdown_alone() {
-        let summary =
-            "model table, \"shop\".\"main\".\"order_items\"\ncolumns tags map<string,int>, __meta__, a*b, `c`, d\\e";
-        let null = json!({"jsonrpc": "2.0", "id": 1, "result": null});
-        let value = "model table, \"shop\".\"main\".\"order_items\"  \n\
-                     columns tags map\\<string,int\\>, \\_\\_meta\\_\\_, a\\*b, \\`c\\`, d\\\\e";
-        let markdown = merge_hover(&null, summary, true, true).unwrap();
-        assert_eq!(markdown["result"]["contents"], json!({"kind": "markdown", "value": value}));
-        let plain = merge_hover(&null, summary, true, false).unwrap();
-        assert_eq!(plain["result"]["contents"], json!({"kind": "plaintext", "value": summary}));
-        assert_eq!(escape_markdown("_x order_id y_"), "\\_x order_id y\\_", "an underscore at a word's edge");
     }
 
     #[test]

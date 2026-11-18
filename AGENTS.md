@@ -184,8 +184,6 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     the proxy's command; what the proxy keeps of a forwarded request apart
     from where it goes; one event's dispatch apart from the waiting with
     the listing's deadline;
-  - `features::escape_markdown`: the decision what plain text escapes in
-    markdown, with tests of its own, apart from where a hover puts it;
   - `Proxy::hover_part`: one concern, what a hover's answer gets first (a
     node's summary and facts, a docs block, a test's signature) or why it
     has nothing, apart from what the proxy keeps of other requests, as

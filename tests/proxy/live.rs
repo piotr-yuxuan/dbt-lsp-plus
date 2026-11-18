@@ -445,10 +445,10 @@ fn facts_in_the_hover(session: &mut Session, project: &Path) {
     let on_ref = session.request("textDocument/hover", at(4, 28));
     let value = on_ref["result"]["contents"]["value"].as_str().unwrap_or_default();
     let summary = value.starts_with("model view, \"shop\".\"main\".\"stg_orders\"");
-    assert!(summary && value.lines().any(|line| line.trim_end() == "model.shop.stg_orders"), "{on_ref}");
+    assert!(summary && value.lines().any(|line| line.trim_end() == "`model.shop.stg_orders`"), "{on_ref}");
     let own = session.request("textDocument/hover", at(0, 0));
     let value = own["result"]["contents"]["value"].as_str().unwrap_or_default();
-    for fact in ["model.shop.orders, properties models/marts/_models.yml", "columns customer_id"] {
+    for fact in ["`model.shop.orders`, properties `models/marts/_models.yml`", "columns `customer_id`"] {
         assert!(value.lines().any(|line| line.trim_end() == fact), "{fact}: {own}");
     }
 }

@@ -242,9 +242,10 @@ enum Pending {
     Listing,
     /// Answered with null if the server dies first, as LSP asks of `shutdown`.
     Shutdown,
-    /// A hover whose answer gets this text first: a node's summary and
-    /// facts, plain text whose line breaks are hard, or a docs block's text
-    /// or a test's signature, markdown as written.
+    /// A hover whose answer gets this text first, and whether its line
+    /// breaks are hard in markdown: true for a node's summary and facts,
+    /// lines of plain text and code spans; false for a docs block's text or
+    /// a test's signature, markdown as written.
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),

@@ -380,19 +380,28 @@ impl Index {
     /// own, from the root, or, in a package, `<package>://` and from the
     /// package's directory, as dbt writes `patch_path`; then, if any column
     /// is declared, one line of the columns, each its name and its type when
-    /// declared, in the manifest's order as read, which is by name.
+    /// declared, in the manifest's order as read, which is by name.  Each
+    /// value is a code span, so that markdown shows its bytes as they are,
+    /// which plain text gives as they are too.
     pub fn facts(&self, node: &Value) -> String {
+        // A fence longer than any run of backticks inside, and a space within
+        // it when the value begins or ends with one, which markdown drops.
+        let code = |text: &str| {
+            let fence = "`".repeat(text.split(|c| c != '`').map(str::len).max().unwrap_or(0) + 1);
+            let space = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
+            format!("{fence}{space}{text}{space}{fence}")
+        };
         let package = node["package_name"].as_str().filter(|package| *package != self.root_package);
         let patch = node["patch_path"].as_str().map(|path| path.split_once("://").map_or(path, |(_, file)| file));
         let source = || node["original_file_path"].as_str().filter(|_| node["resource_type"] == "source");
         let file = patch
             .or_else(source)
             .map(|file| package.map_or_else(|| file.to_owned(), |in_package| format!("{in_package}://{file}")));
-        let id = node["unique_id"].as_str().unwrap_or_default();
-        let first = file.map_or_else(|| id.to_owned(), |file| format!("{id}, properties {file}"));
+        let id = code(node["unique_id"].as_str().unwrap_or_default());
+        let first = file.map_or_else(|| id.clone(), |file| format!("{id}, properties {}", code(&file)));
         let columns = node["columns"].as_object().into_iter().flatten().map(|(name, column)| {
             let declared = column["data_type"].as_str().filter(|data_type| !data_type.is_empty());
-            declared.map_or_else(|| name.clone(), |data_type| format!("{name} {data_type}"))
+            declared.map_or_else(|| code(name), |data_type| format!("{} {}", code(name), code(data_type)))
         });
         let columns: Vec<String> = columns.collect();
         if columns.is_empty() { first } else { format!("{first}\ncolumns {}", columns.join(", ")) }
@@ -815,7 +824,10 @@ mod tests {
             "model.shop.untyped": {"unique_id": "model.shop.untyped", "resource_type": "model", "name": "untyped",
                 "package_name": "shop", "columns": untyped, "config": {}},
             "model.utils.dates": {"unique_id": "model.utils.dates", "resource_type": "model", "name": "dates",
-                "package_name": "utils", "patch_path": "utils://models/_dates.yml", "config": {}}},
+                "package_name": "utils", "patch_path": "utils://models/_dates.yml", "config": {}},
+            "model.shop.odd": {"unique_id": "model.shop.odd", "resource_type": "model", "name": "odd",
+                "package_name": "shop", "config": {},
+                "columns": {"a`b": {"data_type": "`x`"}, "tags": {"data_type": "array<string>"}}}},
             "sources": {"source.shop.raw.customers": {"unique_id": "source.shop.raw.customers",
                 "resource_type": "source", "name": "customers", "source_name": "raw", "package_name": "shop",
                 "original_file_path": "models/staging/_sources.yml"},
@@ -826,17 +838,19 @@ mod tests {
         let facts = |id: &str| index.facts(index.node(id).unwrap());
         assert_eq!(
             facts("model.shop.orders"),
-            "model.shop.orders, properties models/marts/_orders.yml\ncolumns order_id integer, status"
+            "`model.shop.orders`, properties `models/marts/_orders.yml`\ncolumns `order_id` `integer`, `status`"
         );
-        assert_eq!(facts("model.shop.bare"), "model.shop.bare", "a model's own file is no properties file");
+        assert_eq!(facts("model.shop.bare"), "`model.shop.bare`", "a model's own file is no properties file");
         assert_eq!(
             facts("source.shop.raw.customers"),
-            "source.shop.raw.customers, properties models/staging/_sources.yml"
+            "`source.shop.raw.customers`, properties `models/staging/_sources.yml`"
         );
-        assert_eq!(facts("model.shop.untyped"), "model.shop.untyped\ncolumns amount, status");
+        assert_eq!(facts("model.shop.untyped"), "`model.shop.untyped`\ncolumns `amount`, `status`");
         // A package's files, from its directory, which the package names.
-        assert_eq!(facts("model.utils.dates"), "model.utils.dates, properties utils://models/_dates.yml");
-        assert_eq!(facts("source.utils.raw.days"), "source.utils.raw.days, properties utils://models/_sources.yml");
+        assert_eq!(facts("model.utils.dates"), "`model.utils.dates`, properties `utils://models/_dates.yml`");
+        // Verbatim inside spans that markdown shows literally, backticks included.
+        assert_eq!(facts("model.shop.odd"), "`model.shop.odd`\ncolumns ``a`b`` `` `x` ``, `tags` `array<string>`");
+        assert_eq!(facts("source.utils.raw.days"), "`source.utils.raw.days`, properties `utils://models/_sources.yml`");
     }
 
     #[test]
