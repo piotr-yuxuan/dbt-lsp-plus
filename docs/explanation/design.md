@@ -1236,7 +1236,8 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   forwarded and augmented: on a `ref` or
   `source` argument, an entry's `name:` in YAML, or at position 0:0 (line
   1, column 1) of a file that defines one node, which stands for that
-  node as nodeInfo's position does, resolved from the
+  node as nodeInfo's position does, but in a properties file, where the
+  manifest also places the generic tests it declares, resolved from the
   document's text when the request arrives, the server's answer gets the
   node's summary and facts first, then a rule;
   plain text gets a blank line instead, an array of marked strings the
@@ -1253,8 +1254,9 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   holds the summary alone.
 - Where the proxy answers the hover itself, alone or in `plus`, a hover
   that names a node before any index exists (a `ref` or a `source`, an
-  entry's `name:`, or 0:0 of a file whose scan holds one model, seed,
-  snapshot, analysis or singular test of the root package) is error
+  entry's `name:`, or 0:0 of a file but a properties file whose scan
+  holds one model, seed, snapshot, analysis or singular test of the root
+  package) is error
   -32803 with nodeInfo's reason, word for word: `dbt parse has not
   finished: it is running`, its failure, or `waiting for dbt lsp to
   compile the project`.  The hover asks for the index first, as nodeInfo

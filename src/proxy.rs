@@ -1696,8 +1696,11 @@ impl<W: Write> Proxy<W> {
     /// turns into why the proxy has none.
     fn hover_part(&self, params: &Value) -> Pending {
         let index = self.parsing.index.as_ref();
-        // Line 1, column 1 of a file stands for the node it defines.
-        let start = params["position"] == json!({"line": 0, "character": 0});
+        // Line 1, column 1 of a resource file stands for the node it defines; not of a properties
+        // file, where the manifest also places the generic tests it declares.
+        let uri = params.pointer("/textDocument/uri").and_then(Value::as_str).unwrap_or_default();
+        let yaml = uri.ends_with(".yml") || uri.ends_with(".yaml");
+        let start = !yaml && params["position"] == json!({"line": 0, "character": 0});
         let named = self.node_at(index, params, start);
         let summary = index
             .zip(named.flatten())

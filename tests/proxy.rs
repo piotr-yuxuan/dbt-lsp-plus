@@ -2669,6 +2669,10 @@ fn alone_a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
     let orders = &mut manifest["nodes"]["model.shop.orders"];
     orders["patch_path"] = json!("shop://models/marts/_orders.yml");
     orders["columns"] = json!({"order_id": {"name": "order_id", "data_type": "integer"}, "status": {"name": "status"}});
+    // A generic test that a properties file declares: the manifest places it there.
+    manifest["nodes"]["test.shop.not_null_customers_id"] = json!({"unique_id": "test.shop.not_null_customers_id",
+        "name": "not_null_customers_id", "resource_type": "test", "package_name": "shop",
+        "original_file_path": "models/staging/_sources.yml", "attached_node": "source.shop.raw.customers"});
     let (mut session, _) = Session::fake("hover-start", json!({"no_lsp": true, "manifest": manifest}));
     session.initialize(&fixture());
     let at = |file: &str, line: u64| json!({"textDocument": {"uri": uri(&fixture().join(file))}, "position": {"line": line, "character": 0}});
@@ -2707,8 +2711,10 @@ fn alone_a_hover_on_a_node_before_any_index_says_why() {
         let hover = session.request("textDocument/hover", at(line, character));
         assert_eq!((hover.get("result"), &hover["error"]), (None, &running), "{line}:{character}: {hover}");
     }
-    // At `with`, and in the argument of a macro call: nothing named, null.
-    for params in [at(3, 0), position_in(&orders, "'orders.amount'", 3)] {
+    // At `with`, in the argument of a macro call, at a properties file's start: nothing named, null.
+    let properties = fixture().join("models/staging/_sources.yml");
+    let start = json!({"textDocument": {"uri": uri(&properties)}, "position": {"line": 0, "character": 0}});
+    for params in [at(3, 0), position_in(&orders, "'orders.amount'", 3), start] {
         let hover = session.request("textDocument/hover", params);
         assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
     }
