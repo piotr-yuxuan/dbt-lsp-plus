@@ -56,10 +56,11 @@ pub struct Git {
 /// work tree's top, and its main worktree's, the parent of its common
 /// directory when that is named `.git`; none outside a repository, or when
 /// git cannot run, fails or answers past the probe's deadline.  The common
-/// directory may come relative to PROJECT, as git before 2.31 gives it,
-/// which knows no `--path-format`: it is read from there as written, each
-/// `..` dropping the component before it, so that a `.git` reached
-/// through a link keeps its name.
+/// directory may come relative to where git ran, as git before 2.31 gives
+/// it, which knows no `--path-format`: it is read from PROJECT with its
+/// links resolved, as git resolved them, then as written, each `..`
+/// dropping the component before it, so that a `.git` reached through a
+/// link keeps its name.
 fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     let mut command = Command::new(&git.program);
     command.args(["rev-parse", "--show-toplevel", "--git-common-dir"]);
@@ -76,7 +77,8 @@ fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     if !status.success() || !top.is_absolute() {
         return None;
     }
-    let common = project.join(common).components().fold(PathBuf::new(), |mut path, part| {
+    let ran = fs::canonicalize(project).unwrap_or_else(|_| project.to_owned());
+    let common = ran.join(common).components().fold(PathBuf::new(), |mut path, part| {
         match part {
             Component::ParentDir => drop(path.pop()),
             Component::CurDir => {}
