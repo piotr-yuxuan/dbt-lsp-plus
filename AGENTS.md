@@ -88,9 +88,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
 ## Rules of the code
 
 - Forward what the proxy does not own byte for byte; never re-serialise it.
-- Route a method by its mode (`src/modes.rs`); unset, a mode is the
-  behaviour before modes: the methods the proxy adds its own only when
-  the server does not announce them.
+- Route a method by its mode (`src/modes.rs`); unset, a mode is its
+  shipped default: the methods the proxy adds its own only when the
+  server does not announce them, the others `merge`.
 - The proxy's own requests carry ids `dbt-lsp-plus/N`, and their answers
   never reach the client.
 - What `dbt lsp` does is observed, not documented: record each new

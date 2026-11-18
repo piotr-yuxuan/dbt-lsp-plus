@@ -9,22 +9,31 @@ which says where Emacs shows each of the logs below.
 - **dbt-lsp-plus** answers the outline, workspace symbols, the call
   hierarchy, folding, highlights, selection ranges, the rename of a CTE,
   inlay hints and `dbt-lsp-plus.nodeInfo`; references and renames on a
-  source; definitions of the kinds of target it lists.  The answer to
+  source; definitions and references of the kinds of target it lists, a
+  `ref`, a macro call and a function among them.  The answer to
   `initialize` names those kinds, per request, under
   `capabilities.experimental.dbtLspPlus`.
-- **`dbt lsp`** answers everything else, the references of a model or a
-  macro included: the proxy forwards the request and the answer
-  unchanged, byte for byte.  A slow answer there is the server's.
-- **Alone**, with dbt-oss, the proxy fails every request it does not
-  answer at once, with -32803, rather than leave it waiting.
+- **`dbt lsp`** answers everything else: the proxy forwards the request
+  and the answer unchanged, byte for byte.  In the default mode, `merge`,
+  a definition, references, hover or inlay hints it leaves to `dbt lsp`
+  wait for it 300 ms where the proxy has something to add, 2 s where it
+  has nothing; past that, or when `dbt lsp` fails, exits or is not
+  running, the proxy answers with its part, else null or `[]`, and logs
+  once per method that `dbt lsp` was late (`window/logMessage`, type 4).
+  Set a method to `dbt` (`--mode textDocument/hover=dbt`) to wait for
+  `dbt lsp` however long it takes.  Any other slow answer is the
+  server's.
+- **Alone**, with dbt-oss, the proxy fails every other request it does
+  not answer at once, with -32803, rather than leave it waiting.
 
 ## A request times out
 
 A client gives up after a while: lsp-mode after `lsp-response-timeout`
 seconds, 10 by default.
 
-1. Find who was asked, from the position (a source or not) and the list
-   in `experimental.dbtLspPlus`.
+1. Find who was asked, from the position and the list in
+   `experimental.dbtLspPlus`.  In `merge`, a definition, references,
+   hover or inlay hints never wait for `dbt lsp` more than 2 s.
 2. `dbt lsp` answers once it has compiled the project.  A large project
    may take longer than the client's timeout to compile, after the server
    starts or the project changes; the server reports its progress, then

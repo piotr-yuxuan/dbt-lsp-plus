@@ -31,7 +31,10 @@ method:
   `ref` to its model, a `source` to its table's entry, a `doc` to its docs
   block, a model's or a function's `name:` to its file, a generic test's
   name to its test block, by dbt 2.0.9's lookup across packages, versions
-  included; and from a `source()` in SQL; hover
+  included; and from a `source()` in SQL; and, with references
+  (`textDocument/references`), from a `ref` in SQL or a Python model, a
+  macro call and a `function()`, where dbt lsp misses a package's `ref`,
+  a version and the references in other files; hover
   (`textDocument/hover`) there shows the docs text, the test's signature,
   the node's summary;
 - the last run's failures as diagnostics
@@ -61,14 +64,19 @@ method:
 
 Every other message passes unchanged, byte for byte.  A feature that the
 server announces stays the server's, but for a source's definition,
-references and rename, a CTE's rename, and the definitions of refs,
-docs, entries (a function's included) and tests in YAML; the initialize
-result names those, per kind of target and kind of file, under
-`experimental.dbtLspPlus`.
+references and rename, a CTE's rename, the definitions of docs, entries
+(a function's included) and tests in YAML, and the definitions and
+references of refs, macros and functions; the initialize result names
+those, per kind of target and kind of file, under
+`experimental.dbtLspPlus`.  A definition, references, hover or inlay
+hints left to `dbt lsp` get its answer when it comes within 300 ms where
+the proxy adds something (a summary, hints), within 2 s where it adds
+nothing; else, and when `dbt lsp` fails, exits or is not running, the
+proxy's own: its part, else null, or `[]` for references and hints.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
 ten minutes, and gives it the open documents as they stand.  Without
 `dbt lsp`, and while it restarts, the proxy keeps serving its own
-features.
+features, `dbt-lsp-plus.nodeInfo`, the summary and the hints included.
 
 With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
 see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).
@@ -111,7 +119,7 @@ option, a missing value or a bad one is a usage error: the reason and
 the usage on standard error, exit status 2, nothing started.
 
 - `--mode METHOD=MODE`: who answers the LSP method METHOD, by its full
-  name, such as `textDocument/hover`: `ours`, `dbt` or `merge` (see
+  name, such as `textDocument/hover`: `plus`, `dbt` or `merge` (see
   "Modes").  Repeatable.
 - `--default-mode MODE`: the mode of every method the proxy answers but
   those `--mode` sets.
@@ -128,9 +136,13 @@ A value goes in the next word or after `=`, as `--backend=never`.
 
 ### Modes
 
-Each method the proxy answers has a mode: `ours`, the proxy alone; `dbt`,
-`dbt lsp` alone, its answer passed as it is; `merge`, both.  Set nothing
-and every method behaves as it always has.  The methods are
+Each method the proxy answers has a mode: `plus`, the proxy alone; `dbt`,
+`dbt lsp` alone, its answer passed as it is; `merge`, both.  `ours`,
+`plus`'s former name, is still read as `plus`, with one warning a
+session.  Set nothing and each method takes its shipped default: `merge`
+for hover, inlay hints, definition, references, rename and diagnostics;
+for the methods the proxy adds, `plus` unless `dbt lsp` announces them.
+The methods are
 `textDocument/documentSymbol`, `workspace/symbol`,
 `textDocument/prepareCallHierarchy` (with the call hierarchy's two
 others), `textDocument/foldingRange`, `textDocument/documentHighlight`,
@@ -147,7 +159,7 @@ method by method:
 
 For the methods the proxy adds (the outline, workspace symbols, the call
 hierarchy, folding, highlights and selection ranges), `merge` is the
-proxy's answer, as `ours` is, until a later version merges them; `dbt`
+proxy's answer, as `plus` is, until a later version merges them; `dbt`
 leaves the capability as `dbt lsp` announced it, so that a method it
 announces as absent is never asked.
 
@@ -161,7 +173,10 @@ starts again.  A refused key is ignored and shown once in a warning.
 
 With `--shadow`, or `{"dbtLspPlus": {"shadow": true}}` in
 `initializationOptions`, the proxy follows each definition and references
-request that it leaves to `dbt lsp`: the client gets `dbt lsp`'s answer
+request in `dbt`, which it leaves to `dbt lsp` (`--mode
+textDocument/definition=dbt --mode textDocument/references=dbt`); with
+neither in `dbt`, a warning says it has nothing to follow.  The client
+gets `dbt lsp`'s answer
 as it came, then the proxy computes its own and compares the two,
 location by location.  The session's counts, by method, kind of target,
 kind of file and how the two answers stand, answer the command
