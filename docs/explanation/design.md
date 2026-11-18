@@ -1404,7 +1404,8 @@ second binary would be one more file to install, put on a harness's
   what the server does; its probe stays lazy, so the server probes no
   more than before.  One divergence: a given `--project-dir` without
   `dbt_project.yml` is no project to doctor and select, where the server
-  takes the directory all the same and its dbt lsp fails.
+  takes the directory all the same, and dbt
+  fails there (its dbt lsp, else the proxy's parse).
 - **doctor runs what the server runs.**  git once, `lsp --help`,
   `unshare` on `true`; it probes, as the server would, the dbt that
   `locate::dbt` leaves unprobed (the one on `PATH`, the user's own first

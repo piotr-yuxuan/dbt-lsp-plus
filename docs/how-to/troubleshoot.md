@@ -11,7 +11,8 @@ has `lsp`, whether the proxy would answer alone and why, whether dbt can
 be cut off the network, and why a parse would be refused
 ([the subcommands](../reference/cli.md)).  A given `--project-dir`
 without `dbt_project.yml` is no project to doctor, where the server
-takes the directory all the same and its dbt lsp fails.
+takes the directory all the same, and dbt
+fails there (its dbt lsp, else the proxy's parse).
 
 ## Who answers a request
 

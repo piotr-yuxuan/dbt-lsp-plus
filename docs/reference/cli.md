@@ -33,7 +33,8 @@ a path, doctor's PATH, else the current directory:
   that directory, made absolute, when it holds `dbt_project.yml`, and
   the dbt is the server command as written, run in the current
   directory.  Else doctor and select say there is no project, where the
-  server takes the directory all the same and its dbt lsp fails;
+  server takes the directory all the same, and dbt
+  fails there (its dbt lsp, else the proxy's parse);
 - **folder**: the path is a directory that holds `dbt_project.yml`, as a
   client's folder; the dbt is found as the server finds it (the project's
   `.venv`, its repository's, its main worktree's, else `PATH`; see
@@ -110,8 +111,9 @@ the network as the proxy's own runs are, in a run directory under the
 user's cache (`$XDG_CACHE_HOME`, else `~/.cache`, else the system's
 temporary directory) that it removes once it has the answer.  A select
 killed by a signal leaves its run directory, and, killed with SIGKILL,
-leaves dbt running on, unwatched; the next select or proxy on the same project and server
-command removes such directories once neither a parse nor a run has
+leaves dbt running on, unwatched; the next select or proxy on the
+same project, as spelt, and server command removes such directories
+once neither a parse nor a run has
 written them for a day.  The answer
 is what the command `dbt-lsp-plus.nodes` gives a client:
 
@@ -130,6 +132,8 @@ each node a line of `dbt list`'s output as dbt printed it.  On a failure,
 - `no dbt_project.yml at or above DIR; run it within the project, or
   name it with -- dbt lsp --project-dir DIR`, outside every project:
   nothing runs but the cut's probe;
+- `no dbt_project.yml in DIR, the server command's --project-dir`, on
+  the given route: nothing runs but the cut's probe;
 - why a parse would be refused, as doctor's `packages`, checked before
   the dbt is looked for: nothing runs but the cut's probe;
 - the first error dbt logged, or how dbt ended.
