@@ -2454,6 +2454,34 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_page_lists_the_kinds_that_the_flag_announces() {
+        use std::collections::{BTreeMap, BTreeSet};
+        type Kinds = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+        let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/use-with-an-agent.md"));
+        let (page, heading) = (page.unwrap(), "### Where dbt-lsp-plus answers definitions and references");
+        let after = page.lines().skip_while(|line| *line != heading).skip(1);
+        let mut table = after.skip_while(|line| !line.starts_with('|')).take_while(|line| line.starts_with('|'));
+        let cells = |line: &str| -> Vec<String> {
+            let cells = line.trim().trim_matches('|').split('|');
+            cells.map(|cell| cell.trim_matches(|c| c == ' ' || c == '`').to_string()).collect()
+        };
+        let columns = ["request", "kind", "places", "meaning"].map(String::from).to_vec();
+        assert_eq!(table.next().map(cells), Some(columns), "the table under {heading}");
+        let mut listed = Kinds::new();
+        for row in table.skip(1).map(cells) {
+            let places = listed.entry(row[0].clone()).or_default().entry(row[1].clone()).or_default();
+            places.extend(row[2].split(',').map(|place| place.trim().to_string()));
+        }
+        let flag = modes::Table::new(&modes::Settings::default(), &|_| false, false).flag(&ANSWERED);
+        let known = ["version", "definition", "references", "rename"];
+        assert!(flag.as_object().unwrap().keys().all(|key| known.contains(&key.as_str())), "{flag}");
+        let announced = ["definition", "references"].map(|request| (request.to_string(), flag[request].clone()));
+        let announced: Kinds = serde_json::from_value(json!(BTreeMap::from(announced))).unwrap();
+        assert!(!listed.is_empty(), "no row under {heading}");
+        assert_eq!(listed, announced);
+    }
+
+    #[test]
     fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
         let root = Path::new("/work/a b/shop");
         // As the proxy gives them: a link of logs out of the project, resolved, included.
