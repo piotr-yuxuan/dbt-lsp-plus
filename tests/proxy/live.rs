@@ -578,6 +578,8 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
     let on_column = session.request("textDocument/definition", at("customer_id", 2));
     assert_eq!(on_column["result"], Value::Null, "{on_column}");
+    // An answer of the proxy's own, after which a log of that deadline would have come.
+    session.request("workspace/symbol", json!({"query": "orders"}));
     let late = |m: &&Value| {
         m["method"] == "window/logMessage"
             && m["params"]["type"] == 4
