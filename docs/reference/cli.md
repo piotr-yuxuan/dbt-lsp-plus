@@ -111,8 +111,8 @@ user's cache (`$XDG_CACHE_HOME`, else `~/.cache`, else the system's
 temporary directory) that it removes once it has the answer.  A select
 killed by a signal leaves its run directory, and, killed with SIGKILL,
 leaves dbt running on, unwatched; the next select or proxy on the same project and server
-command removes such directories once no parse has written them for a
-day.  The answer
+command removes such directories once neither a parse nor a run has
+written them for a day.  The answer
 is what the command `dbt-lsp-plus.nodes` gives a client:
 
 ```
