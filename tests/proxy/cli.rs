@@ -39,12 +39,10 @@ impl Case {
         fs::write(&self.script, script_value.to_string()).unwrap();
     }
 
-    /// `dbt-lsp-plus WORDS` run in AT from an empty environment but for the
-    /// case's PATH, the fake's, a scratch home and cache, and git kept to the
-    /// scratch directory: its exit status and its answer, after checking that
-    /// the standard output is one line of one JSON object and the standard
-    /// error empty.
-    fn run(&self, at: &Path, words: &[&str]) -> (Option<i32>, Value) {
+    /// `dbt-lsp-plus WORDS` to run in AT from an empty environment but for
+    /// the case's PATH, the fake's, a scratch home and cache, and git kept to
+    /// the scratch directory.
+    fn command(&self, at: &Path, words: &[&str]) -> Command {
         let home = self.dir.join("home");
         fs::create_dir_all(&home).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
@@ -53,7 +51,14 @@ impl Case {
         command.env("FAKE_DBT_LSP_SCRIPT", &self.script).env("FAKE_DBT_LSP_LOG", &self.log);
         command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null");
         command.env("GIT_CEILING_DIRECTORIES", &self.dir);
-        let output = command.output().expect("run dbt-lsp-plus");
+        command
+    }
+
+    /// `dbt-lsp-plus WORDS` run in AT, as `command` makes it: its exit
+    /// status and its answer, after checking that the standard output is one
+    /// line of one JSON object and the standard error empty.
+    fn run(&self, at: &Path, words: &[&str]) -> (Option<i32>, Value) {
+        let output = self.command(at, words).output().expect("run dbt-lsp-plus");
         let (stdout, stderr) = (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
         let lines: Vec<&str> = stdout.lines().collect();
         assert!(lines.len() == 1 && stdout.ends_with('\n'), "one line: {stdout:?}, {stderr}");
@@ -83,19 +88,36 @@ fn path_of(value: &Value) -> PathBuf {
     resolved(Path::new(value.as_str().unwrap_or_else(|| panic!("no path: {value}"))))
 }
 
+/// PATH with the links of its directory resolved, its last component as
+/// written: a link that the answer names, as a `.venv`'s dbt, stays itself.
+fn spelt(path: &Path) -> PathBuf {
+    resolved(path.parent().unwrap()).join(path.file_name().unwrap())
+}
+
+/// The packages' file of the guard's tests: the fixture's local package and
+/// a hub package that no lock names.
+const HUB: &str =
+    "packages:\n  - local: dbt_packages/shop_utils\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n";
+
+/// `packages::refused`'s reason for HUB, on any system, when the session
+/// is not alone.
+const NOT_LOCKED: &str = "a package from the network is not in a lock as recent as the files naming it: dbt parse would install it, \
+     rewriting the install path; run dbt deps";
+
 const REFUSED: &str = "dbt-lsp-plus runs dbt only cut off the network, which this system cannot";
 
 #[test]
 fn a_subcommand_s_usage_error_says_its_usage_on_the_standard_error_alone() {
+    let case = Case::new("cli-usage", &json!({}));
     for (words, usage) in
         [(&["doctor", "--bogus"][..], "usage: dbt-lsp-plus doctor"), (&["select"], "usage: dbt-lsp-plus select")]
     {
-        let output = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus")).args(words).output().unwrap();
+        let output = case.command(&case.copy, words).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!((output.status.code(), output.stdout), (Some(2), Vec::new()), "{words:?}");
         assert!(stderr.contains(usage), "{words:?}: {stderr}");
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus")).args(["doctor", "-h"]).output().unwrap();
+    let output = case.command(&case.copy, &["doctor", "-h"]).output().unwrap();
     assert!(
         output.status.success() && String::from_utf8(output.stdout).unwrap().starts_with("usage: dbt-lsp-plus doctor")
     );
@@ -112,14 +134,19 @@ fn doctor_finds_a_document_s_project_and_runs_only_its_dbt_s_probe() {
     let (path, stub_log) = path_with_stub(&case.dir, "exit 1");
     case.path = path;
     let before = paths(&repo);
-    let (status, answer) = case.run(&repo, &["doctor", "dbt/models/marts/orders.sql"]);
-    let venv = venv.to_str().unwrap();
-    let dbt = json!({"command": [venv, "lsp"], "named": venv, "source": "the project's .venv", "skipped": [],
+    let (status, mut answer) = case.run(&repo, &["doctor", "dbt/models/marts/orders.sql"]);
+    // The paths, as the binary spells them from its working directory, compared with links resolved.
+    let taken = [&["path"][..], &["project"], &["dbt", "named"], &["dbt", "command", "0"]].map(|pointer| {
+        let value = answer.pointer_mut(&format!("/{}", pointer.join("/"))).map(Value::take).unwrap_or_default();
+        spelt(Path::new(value.as_str().unwrap_or_else(|| panic!("no path at {pointer:?}"))))
+    });
+    let orders = case.copy.join("models/marts/orders.sql");
+    assert_eq!(taken, [&orders, &case.copy, &venv, &venv].map(|path| spelt(path)));
+    let dbt = json!({"command": [null, "lsp"], "named": null, "source": "the project's .venv", "skipped": [],
                      "lsp": true, "why": null});
-    let expected = json!({"version": env!("CARGO_PKG_VERSION"),
-        "path": case.copy.join("models/marts/orders.sql").to_str().unwrap(),
-        "project": case.copy.to_str().unwrap(), "route": "document", "dbt": dbt,
-        "alone": "dbt lsp is not started for a project found from a file", "cut": can_cut(), "packages": null});
+    let expected = json!({"version": env!("CARGO_PKG_VERSION"), "path": null, "project": null, "route": "document",
+        "dbt": dbt, "alone": "dbt lsp is not started for a project found from a file", "cut": can_cut(),
+        "packages": null});
     assert_eq!((status, answer), (Some(0), expected));
     assert!(!stub_log.exists(), "PATH's dbt ran: {}", fs::read_to_string(&stub_log).unwrap_or_default());
     let starts = starts(&case.log);
@@ -203,9 +230,10 @@ fn doctor_probes_what_the_lookup_left_unprobed() {
     assert_eq!(dbt["skipped"], json!([{"path": venv.to_str().unwrap(), "why": "lsp --help gives exit status: 2"}]));
     let named = bin.join("dbt");
     assert_eq!(
-        (&dbt["source"], &dbt["lsp"], &dbt["named"]),
-        (&json!("PATH"), &json!(true), &json!(named.to_str().unwrap()))
+        (&dbt["source"], &dbt["lsp"], spelt(Path::new(dbt["named"].as_str().unwrap()))),
+        (&json!("PATH"), &json!(true), spelt(&named))
     );
+    assert_eq!(dbt["command"], json!(["dbt", "lsp"]), "a bare dbt stays for PATH");
 
     // Nothing named dbt on PATH, as an empty directory gives.
     let empty = case.dir.join("empty");
@@ -265,25 +293,48 @@ fn doctor_walks_up_from_the_path_as_written_without_its_dots() {
 #[test]
 fn doctor_and_select_give_the_guard_s_reason() {
     let case = Case::new("cli-guard", &json!({}));
-    let venv = venv_fake(&case.copy);
-    let packages =
-        "packages:\n  - local: dbt_packages/shop_utils\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n";
-    fs::write(case.copy.join("packages.yml"), packages).unwrap();
-    let (status, answer) = case.run(&case.copy, &["doctor"]);
-    let command = [venv.to_string_lossy().into_owned(), "lsp".into()];
+    venv_fake(&case.copy);
+    fs::write(case.copy.join("packages.yml"), HUB).unwrap();
     // dbt lsp would start behind the proxy: its first parse is guarded as not alone.
-    let refused = dbt_lsp_plus::packages::refused(&case.copy, &command, can_cut(), false).unwrap();
-    assert!(refused.contains("a package from the network"), "{refused}");
-    assert_eq!((status, &answer["packages"]), (Some(0), &json!(refused)), "{answer}");
+    let (status, answer) = case.run(&case.copy, &["doctor"]);
+    assert_eq!((status, &answer["packages"]), (Some(0), &json!(NOT_LOCKED)), "{answer}");
     let probes = starts(&case.log).len();
     let (status, answer) = case.run(&case.copy, &["select", "x"]);
-    let expected = match cut("doctor_and_select_give_the_guard_s_reason") {
-        true => dbt_lsp_plus::packages::refused(&case.copy, &command, true, false).unwrap(),
-        false => REFUSED.to_owned(),
-    };
+    let expected = if cut("doctor_and_select_give_the_guard_s_reason") { NOT_LOCKED } else { REFUSED };
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": expected})));
     assert!(case.runs().is_empty(), "{:?}", case.runs());
     assert_eq!(starts(&case.log).len(), probes, "select probed a dbt it would not run");
+}
+
+#[test]
+fn doctor_asks_the_guard_as_the_session_s_first_parse_would() {
+    let mut case = Case::new("cli-guard-alone", &json!({}));
+    venv_fake(&case.copy);
+    fs::write(case.copy.join("packages.yml"), HUB).unwrap();
+    // Without the cut on any system, where whether the session is alone decides.
+    let (bin, _) = path_with_stub(&case.dir, "exit 1");
+    script(&case.dir.join("bin/unshare"), "exit 1");
+    case.path = bin;
+    let (_, document) = case.run(&case.copy, &["doctor", "models/marts/orders.sql"]);
+    let alone = "a package from the network is named, and nothing cuts dbt parse off the network here";
+    assert_eq!((&document["cut"], &document["packages"]), (&json!(false), &json!(alone)), "{document}");
+    let (_, folder) = case.run(&case.copy, &["doctor", "."]);
+    assert_eq!((&folder["alone"], &folder["packages"]), (&Value::Null, &json!(NOT_LOCKED)), "{folder}");
+}
+
+#[test]
+fn select_on_the_given_route_runs_dbt_where_it_is_run() {
+    let (case, stub_log, elsewhere) = given("cli-select-given", &json!({"list": listed()}));
+    if !cut("select_on_the_given_route_runs_dbt_where_it_is_run") {
+        return;
+    }
+    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
+    let (status, answer) = case.run(&elsewhere, &["select", "+stg_orders+", "--", fake, "lsp", "--project-dir", copy]);
+    assert_eq!((status, answer), (Some(0), json!({"nodes": listed(), "error": null})));
+    let starts = starts(&case.log);
+    let list = starts.iter().find(|start| start["arguments"][0] == "list").unwrap();
+    assert_eq!(path_of(&list["cwd"]), resolved(&elsewhere), "in the current directory");
+    assert!(!stub_log.exists(), "the .venv's dbt ran on the given route");
 }
 
 /// The fake's lines for `orders` and `stg_orders`, as `dbt list` prints them.
