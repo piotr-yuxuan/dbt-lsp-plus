@@ -2454,6 +2454,95 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_page_lists_the_kinds_that_the_flag_announces() {
+        use std::collections::{BTreeMap, BTreeSet};
+        type Kinds = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+        let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/use-with-an-agent.md"));
+        let (page, heading) = (page.unwrap(), "### Where dbt-lsp-plus answers definitions and references");
+        let section =
+            page.lines().skip_while(|line| *line != heading).skip(1).take_while(|line| !line.starts_with('#'));
+        let mut table = section.skip_while(|line| !line.starts_with('|')).take_while(|line| line.starts_with('|'));
+        let cells = |line: &str| -> Vec<String> {
+            let cells = line.trim().trim_matches('|').split('|');
+            cells.map(|cell| cell.trim_matches(|c| c == ' ' || c == '`').to_string()).collect()
+        };
+        let columns = ["request", "kind", "places", "meaning"].map(String::from).to_vec();
+        assert_eq!(table.next().map(cells), Some(columns), "the table in the section {heading}");
+        assert!(table.next().is_some_and(|line| line.starts_with("|--")), "the table's separator under {heading}");
+        let mut listed = Kinds::new();
+        for row in table.map(cells) {
+            assert_eq!(row.len(), 4, "a row of four cells under {heading}: {row:?}");
+            let places = listed.entry(row[0].clone()).or_default().entry(row[1].clone()).or_default();
+            places.extend(row[2].split(',').map(|place| place.trim().to_string()));
+        }
+        let flag = modes::Table::new(&modes::Settings::default(), &|_| false, false).flag(&ANSWERED);
+        let known = ["version", "definition", "references", "rename"];
+        assert!(flag.as_object().unwrap().keys().all(|key| known.contains(&key.as_str())), "{flag}");
+        let announced = ["definition", "references"].map(|request| (request.to_string(), flag[request].clone()));
+        let announced: Kinds = serde_json::from_value(json!(BTreeMap::from(announced))).unwrap();
+        assert!(!listed.is_empty(), "no row under {heading}");
+        assert_eq!(listed, announced);
+    }
+
+    #[test]
+    fn the_agent_page_quotes_the_proxy_s_own_words() {
+        let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/use-with-an-agent.md"));
+        let page = page.unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+        let sources = [
+            ("proxy.rs", include_str!("proxy.rs")),
+            ("cli.rs", include_str!("cli.rs")),
+            ("commands.rs", include_str!("commands.rs")),
+            ("packages.rs", include_str!("packages.rs")),
+            ("locate.rs", include_str!("locate.rs")),
+        ];
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        // Whitespace collapsed as on the page, so that a site rustfmt rewraps is still found.
+        let code = sources.map(|(name, source)| {
+            source.split_once(marker).expect(name).0.split_whitespace().collect::<Vec<_>>().join(" ")
+        });
+        // What the page quotes, then the code at the site it cites, with enough around it to be that site alone.
+        let quoted = [
+            ("dbt parse has not finished: it is running", r#"(true, _) => "it is running""#),
+            ("dbt parse has not finished:", r#"format!("dbt parse has not finished: {why}")"#),
+            (
+                "dbt parse has not finished: waiting for dbt lsp to compile the project",
+                r#"(false, None) => "waiting for dbt lsp to compile the project""#,
+            ),
+            (
+                "dbt parse has not finished: dbt parse failed:",
+                r#"self.log_parse(&format!("dbt parse failed: {failure}"))"#,
+            ),
+            // The arm that puts a failure after the prefix, which the quotes of a failure rest on.
+            ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
+            ("`dbt lsp is not running`", r#"None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running")"#),
+            ("ends `dbt-lsp-plus answers alone.`", r#"format!("; {why}: dbt-lsp-plus answers alone.")"#),
+            (
+                r#""alone":"dbt lsp is not started for a project found from a file""#,
+                r#"(_, Route::Document) => Some("dbt lsp is not started for a project found from a file")"#,
+            ),
+            (
+                "no dbt_project.yml at or above <root>; give a path within the project",
+                r#"Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project")"#,
+            ),
+            (
+                "`dbt-lsp-plus runs dbt only cut off the network, which this system cannot`",
+                r#"failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot")"#,
+            ),
+            (
+                "a package from the network is named, and nothing cuts dbt parse off the network here",
+                r#"Some("a package from the network is named, and nothing cuts dbt parse off the network here".into())"#,
+            ),
+            ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
+            ("A session finds one project, once", r#"method == "textDocument/didOpen" && self.root.is_none()"#),
+        ];
+        for (words, site) in quoted {
+            assert!(page.contains(words), "the agent page says {words:?}");
+            let sites: usize = code.iter().map(|source| source.matches(site).count()).sum();
+            assert_eq!(sites, 1, "one site outside the tests: {site}");
+        }
+    }
+
+    #[test]
     fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
         let root = Path::new("/work/a b/shop");
         // As the proxy gives them: a link of logs out of the project, resolved, included.

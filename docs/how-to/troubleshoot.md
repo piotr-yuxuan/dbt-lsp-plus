@@ -2,7 +2,10 @@
 
 In Emacs with dbt-mode, start with
 [dbt-mode's troubleshooting](https://github.com/piotr-yuxuan/dbt-mode/blob/main/docs/how-to/troubleshoot.md),
-which says where Emacs shows each of the logs below.
+which says where Emacs shows each of the logs below.  With an agent,
+start with [Use it with an agent](use-with-an-agent.md): its check in
+one call and [When nothing
+answers](use-with-an-agent.md#when-nothing-answers).
 
 First, from a shell, run `dbt-lsp-plus doctor PATH -- ARGUMENTS`, PATH a
 file of the project and ARGUMENTS those the editor gives the server: it
@@ -19,10 +22,13 @@ fails there (its dbt lsp, else the proxy's parse).
 - **dbt-lsp-plus** answers the outline, workspace symbols, the call
   hierarchy, folding, highlights, selection ranges, the rename of a CTE,
   inlay hints and `dbt-lsp-plus.nodeInfo`; references and renames on a
-  source; definitions and references of the kinds of target it lists, a
-  `ref`, a macro call and a function among them.  The answer to
-  `initialize` names those kinds, per request, under
-  `capabilities.experimental.dbtLspPlus`.
+  source; definitions and references of the kinds of target in [Where
+  dbt-lsp-plus answers definitions and
+  references](use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references).
+  The answer to `initialize` names those kinds, per request, under
+  `capabilities.experimental.dbtLspPlus`.  For each operation of an
+  agent's LSP tool, see [Who answers
+  what](use-with-an-agent.md#who-answers-what).
 - **`dbt lsp`** answers everything else: the proxy forwards the request
   and the answer unchanged, byte for byte.  In the default mode, `merge`,
   a definition, references, hover or inlay hints it leaves to `dbt lsp`

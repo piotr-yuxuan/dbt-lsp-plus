@@ -28,10 +28,11 @@ With Rust 1.89 or later and a C linker (or `nix develop`, which gives
 Rust):
 
 ```
-git clone https://github.com/piotr-yuxuan/dbt-lsp-plus
-cd dbt-lsp-plus
-cargo install --locked --path . --bin dbt-lsp-plus
+cargo install --locked --git https://github.com/piotr-yuxuan/dbt-lsp-plus --bin dbt-lsp-plus
 ```
+
+or, for a branch or a local checkout, `cargo install --locked --path .
+--bin dbt-lsp-plus` in a clone.
 
 Then have your editor's LSP client start, in place of `dbt lsp`:
 
@@ -54,11 +55,13 @@ For Claude Code, the repository is a plugin marketplace whose plugin
 starts `dbt-lsp-plus` from `PATH` for `.sql`, `.yml` and `.yaml` files:
 
 ```
-claude plugin marketplace add /path/to/dbt-lsp-plus
+claude plugin marketplace add piotr-yuxuan/dbt-lsp-plus
 claude plugin install dbt-lsp-plus@dbt-lsp-plus
 ```
 
-[Use it with an agent](docs/how-to/use-with-an-agent.md) says more.
+[Use it with an agent](docs/how-to/use-with-an-agent.md) gives the
+check in one call, who answers what, and what to do when nothing
+answers.
 
 From a shell, `dbt-lsp-plus doctor` says which project and dbt the server
 would find and whether it would work, and `dbt-lsp-plus select SELECTOR`

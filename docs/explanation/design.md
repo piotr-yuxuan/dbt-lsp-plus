@@ -82,11 +82,12 @@ owns all state and writes both outputs.
   "references": {...}, "rename": {...}}` names, per request, the kinds of
   target it answers itself and the places of a request's position, `sql`
   (a `.sql` file), `yaml` (`.yml`, `.yaml`) or `python` (`.py`).  With a
-  server or alone: definition `source` and `ref` [sql, yaml, python],
-  `macro` [sql, yaml], `doc`, `entry` and `test` [yaml], `function` [sql,
-  yaml]; references `source` and `ref` [sql, yaml, python], `macro` and
-  `function` [sql, yaml]; rename `source` [sql, yaml, python] and `cte`
-  [sql].  Until plan 037, `ref` in SQL and Python, `macro` and `function`
+  server or alone, the same kinds: those of definitions and references,
+  with their places, in [Where dbt-lsp-plus answers definitions and
+  references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references),
+  which a unit test keeps equal to the flag; a rename's, which no test
+  holds this page to, a source in SQL, YAML and Python and a CTE in
+  SQL.  Until plan 037, `ref` in SQL and Python, `macro` and `function`
   were listed alone only.  A kind listed at a place is the proxy's at
   every position of that kind there, possibly null or `[]`, never
   forwarded, in any file under the root: references come from the scan
