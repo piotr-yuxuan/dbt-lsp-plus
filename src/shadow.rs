@@ -6,10 +6,8 @@
 
 use crate::config::{self, ParseIndex};
 use crate::modes::Table;
-use crate::navigation::Target;
 use crate::project::Project;
 use crate::reference::{Kind, Name};
-use crate::sources;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -178,51 +176,45 @@ pub fn compare(ours: &[Location], dbt: &[Location]) -> Compared {
     Compared { relation, ours_only, dbt_only, both }
 }
 
-/// TARGET as the log shows it: its kind, package, name and version.
-pub fn target(target: &Target) -> Value {
-    let (package, name, version) = match target {
-        Target::Source(sources::Target::Table { source, table })
-        | Target::Call(Name { kind: Kind::Table { source }, name: table, .. }) => {
-            (None, format!("{source}.{table}"), None)
-        }
-        Target::Source(sources::Target::Source { source }) => (None, source.clone(), None),
-        Target::Call(Name { package, name, version, .. }) => (package.as_ref(), name.clone(), version.as_ref()),
-        Target::Named { package, name, .. } => (package.as_ref(), name.clone(), None),
+/// NAME as the log shows it: its kind, package, name and version, a
+/// table's name as `source.table`.
+pub fn target(name: &Name) -> Value {
+    let shown = match name.source_table() {
+        Some((source, Some(table))) => format!("{source}.{table}"),
+        _ => name.name.clone(),
     };
-    json!({"kind": target.kind(), "package": package, "name": name, "version": version})
+    json!({"kind": name.kind.flag(), "package": name.package, "name": shown, "version": name.version})
 }
 
 /// The ids and files of what dbt resolved a call to.
 pub type Oracle = Vec<(String, Option<PathBuf>)>;
 
-/// dbt's own resolution of TARGET, read in the file at RELATIVE, a path from
+/// dbt's own resolution of NAME, read in the file at RELATIVE, a path from
 /// the root, as INDEX holds it from the last parse: for a `ref` or a
 /// `function`, the ids among those the file's one node depends on that are
 /// of the call's kind and bear its name, in the package and at the version
 /// the call names, if it names them; each with its file in PROJECT, the
 /// node's own in its package, else, for a function, which the index does
-/// not hold, its id read and the scan's file.  None for any other target,
+/// not hold, its id read and the scan's file.  None for any other name,
 /// or for a file with no one node.
-pub fn oracle(index: &ParseIndex, project: &Project, relative: &str, target: &Target) -> Option<Oracle> {
-    let (kinds, package, name, version): (&[&str], _, _, _) = match target {
-        Target::Call(Name { kind: Kind::Ref, package, name, version }) => {
-            (&["model", "seed", "snapshot"], package, name, version.as_deref().filter(|v| !v.is_empty()))
-        }
-        Target::Call(Name { kind: Kind::Function, package, name, .. }) => (&["function"], package, name, None),
+pub fn oracle(index: &ParseIndex, project: &Project, relative: &str, name: &Name) -> Option<Oracle> {
+    let (kinds, version): (&[&str], _) = match name.kind {
+        Kind::Ref => (&["model", "seed", "snapshot"], name.version.as_deref().filter(|v| !v.is_empty())),
+        Kind::Function => (&["function"], None),
         _ => return None,
     };
-    let in_package = |named: Option<&str>| package.as_deref().is_none_or(|package| named == Some(package));
+    let in_package = |named: Option<&str>| name.package.as_deref().is_none_or(|package| named == Some(package));
     let resolved = |node: &Value| {
         let at = node["version"].as_str().map_or_else(|| node["version"].to_string(), str::to_owned);
         kinds.iter().any(|kind| node["resource_type"] == *kind)
-            && node["name"] == name.as_str()
+            && node["name"] == name.name.as_str()
             && in_package(node["package_name"].as_str())
             && version.is_none_or(|version| at == version)
     };
     // `KIND.PACKAGE.NAME`, as a function's id is.
     let by_id = |id: &str| {
         let parts: Vec<&str> = id.splitn(3, '.').collect();
-        kinds.contains(&parts[0]) && parts.get(2) == Some(&name.as_str()) && in_package(parts.get(1).copied())
+        kinds.contains(&parts[0]) && parts.get(2) == Some(&name.name.as_str()) && in_package(parts.get(1).copied())
     };
     let file = |id: &str| match index.node(id) {
         Some(node) => {
@@ -591,8 +583,8 @@ mod tests {
         }
     }
 
-    fn call(name: Name) -> Target {
-        Target::Call(name)
+    fn call(name: Name) -> Name {
+        name
     }
 
     fn resolved(name: Name) -> Option<Vec<(String, Option<PathBuf>)>> {
@@ -633,7 +625,7 @@ mod tests {
         let versioned =
             call(Name { kind: Kind::Ref, package: Some("p".into()), name: "m".into(), version: Some("2".into()) });
         assert_eq!(target(&versioned), json!({"kind": "ref", "package": "p", "name": "m", "version": "2"}));
-        let table = Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() });
+        let table = Name::new(Kind::Table { source: "raw".into() }, None, "orders");
         assert_eq!(target(&table), json!({"kind": "source", "package": null, "name": "raw.orders", "version": null}));
     }
 

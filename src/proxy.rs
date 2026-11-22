@@ -1162,11 +1162,11 @@ impl<W: Write> Proxy<W> {
     /// document it does not hold, such as a file not saved yet or one
     /// outside the resource paths, there is none, and the request goes to
     /// the server.
-    fn source_at(&self, params: &Value) -> Option<(Rc<Project>, sources::Target)> {
+    fn source_at(&self, params: &Value) -> Option<(Rc<Project>, reference::Name)> {
         let (path, text, offset) = self.document_at(params)?;
-        let target = sources::target_at(&path, &text, offset)?;
+        let name = sources::target_at(&path, &text, offset)?;
         let project = self.project().filter(|project| project.files.contains_key(&path))?;
-        Some((project, target))
+        Some((project, name))
     }
 
     /// How the proxy answers the client's request METHOD: itself, as an owned
@@ -1219,14 +1219,14 @@ impl<W: Write> Proxy<W> {
         let sql = path.extension().is_some_and(|extension| extension == "sql");
         let answered = match method {
             "textDocument/definition" => {
-                navigation::target_at(&path, &text, offset).is_some_and(|target| self.claims(method, &target, &path))
+                navigation::target_at(&path, &text, offset).is_some_and(|name| self.claims(method, &name, &path))
             }
             // A CTE lives in its file; a source only the scan sees whole, and so its references.
             "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
             // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
             "textDocument/references" => {
-                let claimed = navigation::target_at(&path, &text, offset)
-                    .is_some_and(|target| self.claims(method, &target, &path));
+                let claimed =
+                    navigation::target_at(&path, &text, offset).is_some_and(|name| self.claims(method, &name, &path));
                 claimed && self.root.as_ref().is_some_and(|root| path.starts_with(root))
             }
             _ => self.source_at(params).is_some(),
@@ -1234,12 +1234,12 @@ impl<W: Write> Proxy<W> {
         answered.then_some(method)
     }
 
-    /// Whether the proxy answers METHOD itself on TARGET in the file at
+    /// Whether the proxy answers METHOD itself on NAME in the file at
     /// PATH, as its capability's kinds say, when the table lists it.
-    fn claims(&self, method: &str, target: &navigation::Target, path: &Path) -> bool {
+    fn claims(&self, method: &str, name: &reference::Name, path: &Path) -> bool {
         let Some(place) = place(path) else { return false };
         let kinds = capability::of(method).map_or(&[][..], |capability| capability.kinds);
-        let listed = |(kind, places): &&(&str, &[&str])| *kind == target.kind() && places.contains(&place);
+        let listed = |(kind, places): &&(&str, &[&str])| *kind == name.kind.flag() && places.contains(&place);
         self.table.lists(method) && kinds.iter().any(|kind| listed(&kind))
     }
 
@@ -1248,10 +1248,10 @@ impl<W: Write> Proxy<W> {
     /// the position names no target.
     fn on_definition(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
-        let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
+        let Some(name) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
         let Some(project) = self.project() else { return Some(self.unreadable()) };
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
-        let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
+        let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &name));
         Some(match &locations[..] {
             [] => Answer::Found(Value::Null),
             [location] => Answer::Found(location.clone()),
@@ -1263,15 +1263,15 @@ impl<W: Write> Proxy<W> {
     /// position, with their declaration when the client asks.
     fn on_references(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
-        let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
+        let Some(name) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
         let Some(project) = self.project() else { return Some(self.unreadable()) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
-        if let navigation::Target::Source(source) = &target {
+        if name.source_table().is_some() {
             let uri_of = |path: &Path| self.uri_of(path);
-            return Some(Answer::Found(sources::references(&project, source, declaration, self.encoding, &uri_of)));
+            return Some(Answer::Found(sources::references(&project, &name, declaration, self.encoding, &uri_of)));
         }
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
-        let found = navigation::references(&lookup, &path, &target, declaration);
+        let found = navigation::references(&lookup, &path, &name, declaration);
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
     }
 
@@ -1301,10 +1301,10 @@ impl<W: Write> Proxy<W> {
     /// The rename of the source at the request's position, in a file the scan
     /// holds: a rename that left the asking file as it is would be wrong.
     fn on_source(&self, params: &Value) -> Option<Answer> {
-        let Some((project, target)) = self.source_at(params) else { return Some(Answer::Empty) };
+        let Some((project, name)) = self.source_at(params) else { return Some(Answer::Empty) };
         let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
-        Some(Answer::of_rename(sources::rename(&project, &target, new, self.encoding, &uri_of)))
+        Some(Answer::of_rename(sources::rename(&project, &name, new, self.encoding, &uri_of)))
     }
 
     /// The rename of the source, else of the CTE, at the request's position.
@@ -1364,13 +1364,16 @@ impl<W: Write> Proxy<W> {
             return named.then(|| index.and_then(|index| index.named(&call.name)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
-        let entry = navigation::target_at(&path, &text, offset).filter(|target| {
-            matches!(target, navigation::Target::Named { kind: "model" | "seed" | "snapshot" | "analysis", .. })
-                || matches!(target, navigation::Target::Source(sources::Target::Table { .. }))
+        let entry = navigation::target_at(&path, &text, offset).filter(|name| {
+            matches!(
+                name.kind,
+                reference::Kind::Entry { label: "model" | "seed" | "snapshot" | "analysis" }
+                    | reference::Kind::Table { .. }
+            )
         });
-        if let Some(target) = entry {
+        if let Some(name) = entry {
             let project = self.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
+            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
             return Some(index.zip(found.first()).and_then(|(index, found)| index.node(&found.id)));
         }
         let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
@@ -1901,11 +1904,11 @@ impl<W: Write> Proxy<W> {
         // for `node_at`'s entry and file's start.
         let block = || {
             let (path, text, offset) = self.document_at(params)?;
-            let target = navigation::target_at(&path, &text, offset)
-                .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
+            let name = navigation::target_at(&path, &text, offset)
+                .filter(|name| matches!(name.kind, reference::Kind::Doc | reference::Kind::Test))?;
             let project = self.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
-            navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
+            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
+            navigation::hover(&project, &name, found.first()?, self.markdown).map(|text| (text, false))
         };
         let nothing = if named.is_some() && index.is_none() { Part::Unindexed } else { Part::Nothing };
         summary.or_else(block).map_or(nothing, |(text, hard)| Part::Hover(text, hard))
@@ -2212,20 +2215,20 @@ impl<W: Write> Proxy<W> {
                 }
             };
             let read = self.document_at(params);
-            let target = read.and_then(|(path, text, offset)| navigation::target_at(&path, &text, offset));
+            let name = read.and_then(|(path, text, offset)| navigation::target_at(&path, &text, offset));
             let relative = file.as_deref().and_then(|file| file.strip_prefix(root).ok());
-            let known = self.parsing.index.as_ref().zip(self.project()).zip(relative.zip(target.as_ref()));
-            let oracle = known.and_then(|((index, project), (relative, target))| {
-                shadow::oracle(index, &project, &relative.to_string_lossy(), target)
+            let known = self.parsing.index.as_ref().zip(self.project()).zip(relative.zip(name.as_ref()));
+            let oracle = known.and_then(|((index, project), (relative, name))| {
+                shadow::oracle(index, &project, &relative.to_string_lossy(), name)
             });
             let parsing = &self.parsing;
             let index = json!({"present": parsing.index.is_some(), "fresh": parsing.fresh,
                                "running": parsing.running.is_some()});
             shadow::Record {
                 method: method.trim_start_matches("textDocument/").to_owned(),
-                kind: target.as_ref().map_or("none", navigation::Target::kind),
+                kind: name.as_ref().map_or("none", |name| name.kind.flag()),
                 place: file.as_deref().and_then(place).unwrap_or("other"),
-                target: target.as_ref().map_or(Value::Null, shadow::target),
+                target: name.as_ref().map_or(Value::Null, shadow::target),
                 file,
                 compared,
                 index,

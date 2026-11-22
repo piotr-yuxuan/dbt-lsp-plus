@@ -17,35 +17,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// What a position names.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Target {
-    /// A `source()` argument, or a source's or table's `name:`.
-    Source(sources::Target),
-    /// A call that dbt resolves, as `Lookup::call` does.
-    Call(Name),
-    /// A name that dbt looks up among the resources, as the row KIND of
-    /// `LOOKUP` says, in the package it gives, if any.
-    Named { kind: &'static str, package: Option<String>, name: String },
-}
-
-impl Target {
-    /// The kind of this target in `experimental.dbtLspPlus`: `source`, `ref`
-    /// (a unit test's `model:` too), `macro`, `function`, `doc`, `test`, or
-    /// `entry`, the `name:` of an entry, a function's included.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Target::Source(_) => "source",
-            Target::Call(name) => name.kind.flag(),
-            Target::Named { kind: "unit test model", .. } => "ref",
-            Target::Named { kind: kind @ ("doc" | "test"), .. } => kind,
-            Target::Named { .. } => "entry",
-        }
-    }
-}
-
-/// Where a target leads: dbt's unique id of what it names, and the range of
-/// that name in its file.
+/// Where a Name leads, the model's Target of a Node or a source group:
+/// dbt's unique id of what it names, or `source.<package>.<source>` for a
+/// whole source, which is no node of dbt's, and the range of that name in
+/// its file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Found {
     pub id: String,
@@ -71,24 +46,23 @@ const CALLS: &[Step] = &[Step::First, Step::Second, Step::Any];
 
 /// How dbt 2.0.9 looks up each kind of name with no package of its own,
 /// but a call's: the kind, the resource types it may name, the prefix of
-/// the name in their ids, and the packages searched in turn.  A `doc` or
-/// generic test names its kind; the `name:` of an entry, the entry's label;
-/// a unit test's `model:`, `unit test model`.  A `doc` ignores the calling
+/// the name in their ids, and the packages searched in turn.  The `name:`
+/// of an entry is an entry of its label.  A `doc` ignores the calling
 /// file's package: past the root, the first package by path, which is the
 /// byte order of their names, since dbt installs each at
 /// `dbt_packages/<name>`.  An entry describes a resource of its own package
 /// only: dbt 2.0.9 calls one naming another package's resource unused,
 /// where dbt-core 1.12 patches it.
-const LOOKUP: [(&str, &[&str], &str, &[Step]); 9] = [
-    ("doc", &["doc"], "", &[Step::Root, Step::Any]),
-    ("test", &["macro"], "test_", &[Step::Own, Step::Root]),
-    ("unit test model", &["model"], "", &[Step::Own]),
-    ("model", &["model"], "", &[Step::Own]),
-    ("seed", &["seed"], "", &[Step::Own]),
-    ("snapshot", &["snapshot"], "", &[Step::Own]),
-    ("analysis", &["analysis"], "", &[Step::Own]),
-    ("macro", &["macro"], "", &[Step::Own]),
-    ("function", &["function"], "", &[Step::Own]),
+const LOOKUP: [(Kind, &[&str], &str, &[Step]); 9] = [
+    (Kind::Doc, &["doc"], "", &[Step::Root, Step::Any]),
+    (Kind::Test, &["macro"], "test_", &[Step::Own, Step::Root]),
+    (Kind::UnitTestModel, &["model"], "", &[Step::Own]),
+    (Kind::Entry { label: "model" }, &["model"], "", &[Step::Own]),
+    (Kind::Entry { label: "seed" }, &["seed"], "", &[Step::Own]),
+    (Kind::Entry { label: "snapshot" }, &["snapshot"], "", &[Step::Own]),
+    (Kind::Entry { label: "analysis" }, &["analysis"], "", &[Step::Own]),
+    (Kind::Entry { label: "macro" }, &["macro"], "", &[Step::Own]),
+    (Kind::Entry { label: "function" }, &["function"], "", &[Step::Own]),
 ];
 
 /// One quote, as YAML writes it inside a quoted scalar too: `''` in single
@@ -108,9 +82,9 @@ static DOC: LazyLock<Regex> = LazyLock::new(|| {
 /// the Jinja of a value,
 /// the `name:` of a navigable entry, a generic test's name, or a unit
 /// test's `model:`.
-pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
+pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Name> {
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
-    let source = sources::target_at(path, text, offset).map(Target::Source);
+    let source = sources::target_at(path, text, offset);
     if source.is_some() {
         return source;
     }
@@ -123,48 +97,43 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         };
         let blocks = scan::blocks(text).into_iter().filter(|block| inside(&block.name_range));
         if let Some(name) = blocks.filter_map(|block| macro_named(&block)).next() {
-            return Some(Target::Call(Name::new(Kind::Macro, None, &name)));
+            return Some(Name::new(Kind::Macro, None, &name));
         }
         let named = |call: &scan::Call| match call.name.kind {
             Kind::Ref | Kind::Function => call.arguments.iter().any(inside),
             Kind::Macro => inside(&call.range),
             _ => false,
         };
-        return sources::file_calls(path, text).into_iter().find(named).map(|call| Target::Call(call.name));
+        return sources::file_calls(path, text).into_iter().find(named).map(|call| call.name);
     }
-    let named = |kind: &'static str, package: Option<&str>, name: &str| Target::Named {
-        kind,
-        package: package.map(str::to_owned),
-        name: name.to_owned(),
-    };
     let reference = scan::yaml_calls(text)
         .into_iter()
         .find(|call| matches!(call.name.kind, Kind::Ref) && call.arguments.iter().any(inside))
-        .map(|call| Target::Call(call.name));
+        .map(|call| call.name);
     let doc = || {
         let call = DOC
             .captures_iter(text)
             .find(|call| [call.get(1), call.get(2)].into_iter().flatten().any(|m| inside(&m.range())))?;
         Some(match call.get(2) {
-            Some(name) => named("doc", Some(&call[1]), name.as_str()),
-            None => named("doc", None, &call[1]),
+            Some(name) => Name::new(Kind::Doc, Some(&call[1]), name.as_str()),
+            None => Name::new(Kind::Doc, None, &call[1]),
         })
     };
     let entry = || {
         let entries = properties::entries(text).into_iter();
-        // An entry's label is its kind, when it is one of `LOOKUP`'s.
-        let navigable = |label: &str| LOOKUP.iter().any(|(kind, ..)| *kind == label);
+        // An entry of its label, when that is one of `LOOKUP`'s.
+        let navigable = |label: &'static str| LOOKUP.iter().any(|(kind, ..)| *kind == Kind::Entry { label });
         let found = entries.filter(|entry| navigable(entry.label)).find(|entry| inside(&entry.name_range))?;
-        Some(named(found.label, None, &found.name))
+        Some(Name::new(Kind::Entry { label: found.label }, None, &found.name))
     };
     let test = || {
         let found = properties::tests(text).into_iter().find(|test| inside(&test.range))?;
-        Some(named("test", found.package.as_deref(), &found.name))
+        Some(Name::new(Kind::Test, found.package.as_deref(), &found.name))
     };
     let model = || {
         let root = yaml::parse(text)?;
         let (name, _) = project::unit_test_models(text, &root).into_iter().find(|(_, range)| inside(range))?;
-        Some(named("unit test model", None, &name))
+        Some(Name::new(Kind::UnitTestModel, None, &name))
     };
     let macro_call = || {
         let called = |call: &scan::Call| match call.name.kind {
@@ -172,7 +141,7 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
             Kind::Function => call.arguments.iter().any(inside),
             _ => false,
         };
-        scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| Target::Call(call.name))
+        scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| call.name)
     };
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
 }
@@ -333,14 +302,14 @@ impl<'a> Lookup<'a> {
     }
 }
 
-/// What TARGET, named in the file at PATH, leads to by LOOKUP, dbt 2.0.9's:
-/// a call as `Lookup::call` resolves it; a source looked up as a `ref`,
-/// every declaration of the first package that has some; any other name in
-/// the package it gives, else as `LOOKUP` says, the first that exists, and
-/// for an entry of a model, seed or snapshot what the last parse knows that
-/// the scan does not, each version of a versioned model, as dbt patches
-/// them all from the entry.
-pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
+/// What NAME, named in the file at PATH, leads to by LOOKUP, dbt 2.0.9's:
+/// a source looked up as a `ref`, every declaration of the first package
+/// that has some; a kind of `LOOKUP` in the package it gives, else as
+/// `LOOKUP` says, the first that exists, and for an entry of a model, seed
+/// or snapshot what the last parse knows that the scan does not, each
+/// version of a versioned model, as dbt patches them all from the entry;
+/// any other, a call, as `Lookup::call` resolves it.
+pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
     let project = lookup.project;
     let (root, own) = (project.root_package.as_str(), lookup.package_of(path));
     let (first, second) = if lookup.root_first { (root, own) } else { (own, root) };
@@ -354,35 +323,29 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
         };
         steps.iter().map(package).collect()
     };
-    let (kind, package, name) = match target {
-        Target::Source(source) => {
-            let declared = project.sources.iter().filter(|declared| sources::declares(declared, source));
-            let found = declared.map(|declared| {
-                let (id, range) = match source {
-                    sources::Target::Source { source } => {
-                        (format!("source.{}.{source}", declared.package), declared.source_range.clone())
-                    }
-                    sources::Target::Table { source, table } => {
-                        (format!("source.{}.{source}.{table}", declared.package), declared.table_range.clone())
-                    }
-                };
-                (declared.package.as_str(), Found { id, path: declared.path.clone(), range })
-            });
-            return first_step(found.collect(), &packages(CALLS), true);
-        }
-        Target::Call(name) => return lookup.call(own, name),
-        Target::Named { kind, package, name } => (kind, package, name),
+    if let Some((source, table)) = name.source_table() {
+        let declared = project.sources.iter().filter(|declared| sources::declares(declared, name));
+        let found = declared.map(|declared| {
+            let (id, range) = match table {
+                None => (format!("source.{}.{source}", declared.package), declared.source_range.clone()),
+                Some(table) => (format!("source.{}.{source}.{table}", declared.package), declared.table_range.clone()),
+            };
+            (declared.package.as_str(), Found { id, path: declared.path.clone(), range })
+        });
+        return first_step(found.collect(), &packages(CALLS), true);
+    }
+    let Some((_, types, prefix, steps)) = LOOKUP.iter().find(|(row, ..)| *row == name.kind) else {
+        return lookup.call(own, name);
     };
-    let Some((_, types, prefix, steps)) = LOOKUP.iter().find(|(row, ..)| row == kind) else { return Vec::new() };
-    let steps = package.as_deref().map_or_else(|| packages(steps), |package| vec![Some(package)]);
+    let steps = name.package.as_deref().map_or_else(|| packages(steps), |package| vec![Some(package)]);
     // A versioned model's entry, or a unit test of it, names each version.
     let matching: Vec<&Entity> = project
         .entities
         .iter()
         .filter(|entity| {
             types.contains(&entity.resource_type)
-                && (entity.id == format!("{}.{}.{prefix}{name}", entity.resource_type, entity.package)
-                    || entity.version.is_some() && entity.name == *name)
+                && (entity.id == format!("{}.{}.{prefix}{}", entity.resource_type, entity.package, name.name)
+                    || entity.version.is_some() && entity.name == name.name)
         })
         .collect();
     let every = matching.iter().any(|entity| entity.version.is_some());
@@ -392,10 +355,15 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
     });
     // Once a parse knows the resource of an entry or of a unit test's model, its nodes decide, each version
     // of a versioned model, as dbt patches or tests them all.
-    let resource_type = if *kind == "unit test model" { "model" } else { kind };
-    let resource = ["model", "seed", "snapshot"].contains(&resource_type) && package.is_none();
-    let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, name));
-    let typed = nodes.into_iter().filter(|node| node["resource_type"] == resource_type);
+    let resource_type = match name.kind {
+        Kind::UnitTestModel => Some("model"),
+        Kind::Entry { label } => Some(label),
+        _ => None,
+    };
+    let resource =
+        resource_type.is_some_and(|kind| ["model", "seed", "snapshot"].contains(&kind)) && name.package.is_none();
+    let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, &name.name));
+    let typed = nodes.into_iter().filter(|node| node["resource_type"].as_str() == resource_type);
     let mut parsed: Vec<Found> = typed.filter_map(|node| lookup.parsed_at(node)).collect();
     if parsed.is_empty() {
         return first_step(found.collect(), &steps, every);
@@ -404,22 +372,21 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
     parsed
 }
 
-/// Where what TARGET, named in the file at PATH, is used, by LOOKUP: each
+/// Where what NAME, named in the file at PATH, is used, by LOOKUP: each
 /// call that resolves to it, as its definition would, at its name, a unit
 /// test's `model:` naming it, and a generic test's name in a properties file
 /// for the macro `test_<name>`; with DECLARATION, where it is declared
 /// too: its file's start or its block, and the `name:` of each properties
 /// entry declaring it in its own package.  Each leads to its id, in the
 /// order of their paths.
-pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declaration: bool) -> Vec<Found> {
-    let declared = resolve(lookup, path, target);
+pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration: bool) -> Vec<Found> {
+    let declared = resolve(lookup, path, name);
     let ids: HashSet<&str> = declared.iter().map(|found| found.id.as_str()).collect();
-    let name = match target {
-        Target::Call(Name { kind: Kind::Ref | Kind::Macro | Kind::Function, name, .. })
-        | Target::Named { name, .. } => name,
-        _ => return Vec::new(),
+    let wanted = match name.kind {
+        Kind::Table { .. } | Kind::Source | Kind::Dispatch => return Vec::new(),
+        _ => &name.name,
     };
-    // What a use at RANGE of FILE leads to, if it is TARGET's.
+    // What a use at RANGE of FILE leads to, if it is NAME's.
     let leading = |file: &Path, range: Range<usize>, led: Vec<Found>| {
         let id = led.into_iter().find(|found| ids.contains(found.id.as_str()))?.id;
         Some(Found { id, path: file.to_owned(), range })
@@ -433,12 +400,12 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
     };
     let calls = |file: &Path, scanned: &'a project::Scanned| -> Vec<Found> {
         let called = |call: &&scan::Call| match &call.name {
-            Name { kind: Kind::Ref | Kind::Macro | Kind::Function, name: called, .. } => called == name,
+            Name { kind: Kind::Ref | Kind::Macro | Kind::Function, name: called, .. } => called == wanted,
             _ => false,
         };
         let at = |call: &scan::Call| match &call.name.kind {
             Kind::Ref | Kind::Function => call.arguments.last().cloned().unwrap_or(call.range.clone()),
-            _ => call.range.end - name.len()..call.range.end,
+            _ => call.range.end - wanted.len()..call.range.end,
         };
         let own = lookup.package_of(file);
         scanned
@@ -450,17 +417,16 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
     };
     // A unit test's `model:`, a generic test, the macro `test_<name>`, and with DECLARATION an entry's
     // `name:`, those of the name only, looked up as their definitions.
-    let test_name = name.strip_prefix("test_");
+    let test_name = wanted.strip_prefix("test_");
     let named = |file: &Path, scanned: &project::Scanned| -> Vec<Found> {
-        let models = scanned.models.iter().filter(|(model, _)| model == name);
-        let models = models.map(|(model, range)| ("unit test model", None, model, range));
+        let models = scanned.models.iter().filter(|(model, _)| model == wanted);
+        let models = models.map(|(model, range)| (Kind::UnitTestModel, None, model, range));
         let tests = scanned.tests.iter().filter(|test| test_name == Some(test.name.as_str()));
-        let tests = tests.map(|test| ("test", test.package.as_deref(), &test.name, &test.range));
-        let entries = scanned.entries.iter().filter(|entry| declaration && entry.name == *name);
-        let entries = entries.map(|entry| (entry.label, None, &entry.name, &entry.name_range));
-        let found = |(kind, package, named, range): (&'static str, Option<&str>, &String, &Range<usize>)| {
-            let target = Target::Named { kind, package: package.map(str::to_owned), name: named.clone() };
-            leading(file, range.clone(), resolve(lookup, file, &target))
+        let tests = tests.map(|test| (Kind::Test, test.package.as_deref(), &test.name, &test.range));
+        let entries = scanned.entries.iter().filter(|entry| declaration && entry.name == *wanted);
+        let entries = entries.map(|entry| (Kind::Entry { label: entry.label }, None, &entry.name, &entry.name_range));
+        let found = |(kind, package, named, range): (Kind, Option<&str>, &String, &Range<usize>)| {
+            leading(file, range.clone(), resolve(lookup, file, &Name::new(kind, package, named)))
         };
         models.chain(tests).chain(entries).filter_map(found).collect()
     };
@@ -473,15 +439,17 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
     found
 }
 
-/// What a hover on a `doc` or a generic test, TARGET, shows of FOUND, the
+/// What a hover on a `doc` or a generic test, NAME, shows of FOUND, the
 /// block it leads to in PROJECT: a docs block's text between its tags, as
 /// written, if any; a test's opening tag and its package, in a code block
 /// and code spans when MARKDOWN.
-pub fn hover(project: &Project, target: &Target, found: &Found, markdown: bool) -> Option<String> {
-    let Target::Named { kind: kind @ ("doc" | "test"), .. } = target else { return None };
+pub fn hover(project: &Project, name: &Name, found: &Found, markdown: bool) -> Option<String> {
+    if !matches!(name.kind, Kind::Doc | Kind::Test) {
+        return None;
+    }
     let text = project.text(&found.path)?;
     let block = scan::blocks(text).into_iter().find(|block| block.name_range == found.range)?;
-    if *kind == "doc" {
+    if name.kind == Kind::Doc {
         return Some(text[block.inner].trim().to_owned()).filter(|docs| !docs.is_empty());
     }
     let tag = text[block.range.start..block.inner.start].trim_start_matches("{%").trim_end_matches("%}");
@@ -622,17 +590,17 @@ models:
     }
 
     /// The target at the first occurrence of NEEDLE in TEXT, DELTA bytes in.
-    fn at(path: &Path, text: &str, needle: &str, delta: usize) -> Option<Target> {
+    fn at(path: &Path, text: &str, needle: &str, delta: usize) -> Option<Name> {
         target_at(path, text, text.find(needle).unwrap() + delta)
     }
 
-    fn called(package: Option<&str>, name: &str) -> Option<Target> {
+    fn called(package: Option<&str>, name: &str) -> Option<Name> {
         let (package, name) = (package.map(str::to_owned), name.to_owned());
-        Some(Target::Call(Name { kind: Kind::Ref, package, name, version: None }))
+        Some(Name { kind: Kind::Ref, package, name, version: None })
     }
 
-    fn named(kind: &'static str, package: Option<&str>, name: &str) -> Option<Target> {
-        Some(Target::Named { kind, package: package.map(str::to_owned), name: name.to_owned() })
+    fn named(kind: Kind, package: Option<&str>, name: &str) -> Option<Name> {
+        Some(Name::new(kind, package, name))
     }
 
     const YML: &str = "/p/models/_models.yml";
@@ -643,21 +611,21 @@ models:
         assert_eq!(at(yml, MODELS, "ref('customers')", 6), called(None, "customers"));
         assert_eq!(at(yml, MODELS, "ref('pkg', 'orders')", 14), called(Some("pkg"), "orders"));
         // A doc's quotes as YAML escapes them in single and double quotes.
-        assert_eq!(at(yml, MODELS, "order_status''", 2), named("doc", None, "order_status"));
-        assert_eq!(at(yml, MODELS, "pkg_only", 2), named("doc", None, "pkg_only"));
-        assert_eq!(at(yml, MODELS, "'pkg', 'order_status'", 9), named("doc", Some("pkg"), "order_status"));
-        let table = sources::Target::Table { source: "raw".into(), table: "orders".into() };
-        assert_eq!(at(yml, MODELS, "'raw', 'orders'", 9), Some(Target::Source(table)));
+        assert_eq!(at(yml, MODELS, "order_status''", 2), named(Kind::Doc, None, "order_status"));
+        assert_eq!(at(yml, MODELS, "pkg_only", 2), named(Kind::Doc, None, "pkg_only"));
+        assert_eq!(at(yml, MODELS, "'pkg', 'order_status'", 9), named(Kind::Doc, Some("pkg"), "order_status"));
+        let table = Name::new(Kind::Table { source: "raw".into() }, None, "orders");
+        assert_eq!(at(yml, MODELS, "'raw', 'orders'", 9), Some(table));
         // A ref naming a version, which the last parse resolves.
         let versioned = Name { kind: Kind::Ref, package: None, name: "orders".into(), version: Some("2".into()) };
-        assert_eq!(at(yml, MODELS, "ref('orders', v=2)", 6), Some(Target::Call(versioned)));
+        assert_eq!(at(yml, MODELS, "ref('orders', v=2)", 6), Some(versioned));
     }
 
     #[test]
     fn a_macro_call_in_a_yaml_comment_is_no_target() {
         let path = Path::new("/p/dbt_project.yml");
         let hooks = "name: shop\non-run-start: \"{{ log_start() }}\"\n# on-run-end: \"{{ log_end() }}\"\n";
-        let macro_named = |name: &str| Some(Target::Call(Name::new(Kind::Macro, None, name)));
+        let macro_named = |name: &str| Some(Name::new(Kind::Macro, None, name));
         assert_eq!(at(path, hooks, "log_start", 1), macro_named("log_start"), "a hook's macro");
         assert_eq!(at(path, hooks, "log_end", 1), None, "dbt renders no comment");
     }
@@ -665,19 +633,22 @@ models:
     #[test]
     fn finds_the_names_of_yaml_from_the_document_alone() {
         let yml = Path::new(YML);
-        assert_eq!(at(yml, MODELS, "name: orders", 8), named("model", None, "orders"));
-        assert_eq!(at(yml, MODELS, "name: test_is_even", 8), named("macro", None, "test_is_even"));
-        assert_eq!(at(yml, MODELS, "name: a\n", 6), named("analysis", None, "a"));
-        assert_eq!(at(yml, MODELS, "name: raw\n", 7), named("seed", None, "raw"));
-        assert_eq!(at(yml, MODELS, "name: snap", 7), named("snapshot", None, "snap"));
+        assert_eq!(at(yml, MODELS, "name: orders", 8), named(Kind::Entry { label: "model" }, None, "orders"));
+        assert_eq!(
+            at(yml, MODELS, "name: test_is_even", 8),
+            named(Kind::Entry { label: "macro" }, None, "test_is_even")
+        );
+        assert_eq!(at(yml, MODELS, "name: a\n", 6), named(Kind::Entry { label: "analysis" }, None, "a"));
+        assert_eq!(at(yml, MODELS, "name: raw\n", 7), named(Kind::Entry { label: "seed" }, None, "raw"));
+        assert_eq!(at(yml, MODELS, "name: snap", 7), named(Kind::Entry { label: "snapshot" }, None, "snap"));
     }
 
     #[test]
     fn finds_the_tests_and_unit_test_models_of_yaml_from_the_document_alone() {
         let yml = Path::new(YML);
-        assert_eq!(at(yml, MODELS, "- is_even", 4), named("test", None, "is_even"));
-        assert_eq!(at(yml, MODELS, "pkg.pkg_test", 6), named("test", Some("pkg"), "pkg_test"));
-        assert_eq!(at(yml, MODELS, "model: orders", 9), named("unit test model", None, "orders"));
+        assert_eq!(at(yml, MODELS, "- is_even", 4), named(Kind::Test, None, "is_even"));
+        assert_eq!(at(yml, MODELS, "pkg.pkg_test", 6), named(Kind::Test, Some("pkg"), "pkg_test"));
+        assert_eq!(at(yml, MODELS, "model: orders", 9), named(Kind::UnitTestModel, None, "orders"));
         // A column's or an exposure's name leads nowhere of its own.
         assert_eq!(at(yml, MODELS, "customer_id", 2), None);
         assert_eq!(at(yml, MODELS, "weekly", 2), None);
@@ -687,22 +658,22 @@ models:
     fn finds_a_source_a_ref_and_a_macro_call_in_sql() {
         let sql = Path::new("/p/models/customers.sql");
         let text = "select * from {{ source('raw', 'orders') }} join {{ ref('orders') }} -- {{ doc('order_status') }}";
-        let table = sources::Target::Table { source: "raw".into(), table: "orders".into() };
-        assert_eq!(at(sql, text, "'orders') }} join", 2), Some(Target::Source(table)));
+        let table = Name::new(Kind::Table { source: "raw".into() }, None, "orders");
+        assert_eq!(at(sql, text, "'orders') }} join", 2), Some(table));
         let orders = Name { kind: Kind::Ref, package: None, name: "orders".into(), version: None };
-        assert_eq!(at(sql, text, "ref('orders')", 6), Some(Target::Call(orders)));
+        assert_eq!(at(sql, text, "ref('orders')", 6), Some(orders));
         // The keyword: a macro call, as a project may override `ref`.
         let keyword = Name::new(Kind::Macro, None, "ref");
-        assert_eq!(at(sql, text, "ref('orders')", 1), Some(Target::Call(keyword)));
+        assert_eq!(at(sql, text, "ref('orders')", 1), Some(keyword));
         // dbt has no doc in SQL: a call of a macro, which none defines.
         let doc = Name::new(Kind::Macro, None, "doc");
-        assert_eq!(at(sql, text, "doc(", 1), Some(Target::Call(doc)));
+        assert_eq!(at(sql, text, "doc(", 1), Some(doc));
         assert_eq!(at(sql, text, "order_status", 2), None);
     }
 
     /// Where TARGET, named in the file REL of the project at ROOT, leads:
     /// each id with its file relative to ROOT and the text of its range.
-    fn leads(root: &Path, rel: &str, target: Option<Target>) -> Vec<(String, String, String)> {
+    fn leads(root: &Path, rel: &str, target: Option<Name>) -> Vec<(String, String, String)> {
         let project = project::scan(root, &HashMap::new()).unwrap();
         let found = resolve(&Lookup::new(&project, None), &root.join(rel), &target.unwrap());
         let text = |found: &Found| project.text(&found.path).unwrap()[found.range.clone()].to_owned();
@@ -728,7 +699,7 @@ models:
         assert_eq!(leads(&root, root_yml, called(Some("pkg"), "orders"))[0].0, "model.pkg.orders");
         assert_eq!(leads(&root, root_yml, called(None, "only_pkg"))[0].0, "model.pkg.only_pkg");
         assert_eq!(leads(&root, root_yml, called(Some("shop"), "only_pkg")), Vec::new());
-        let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
+        let table = Some(Name::new(Kind::Table { source: "raw".into() }, None, "orders"));
         assert_eq!(
             leads(&root, root_yml, table.clone()),
             lead("source.shop.raw.orders", "models/_sources.yml", "orders")
@@ -752,7 +723,7 @@ models:
                 ("dbt_packages/pb/functions/k.sql", "x + 3".into()),
             ]
         };
-        let function = |package: Option<&str>, name: &str| Some(Target::Call(Name::new(Kind::Function, package, name)));
+        let function = |package: Option<&str>, name: &str| Some(Name::new(Kind::Function, package, name));
         let ids = |root: &Path, rel: &str, target| -> Vec<String> {
             leads(root, rel, target).into_iter().map(|(id, ..)| id).collect()
         };
@@ -789,8 +760,7 @@ models:
         ];
         let root = scratch_project("navigation-yaml-snapshot", &files);
         let project = project::scan(&root, &HashMap::new()).unwrap();
-        let named =
-            |name: &str| Target::Call(Name { kind: Kind::Ref, package: None, name: name.into(), version: None });
+        let named = |name: &str| Name { kind: Kind::Ref, package: None, name: name.into(), version: None };
         let at = |lookup: &Lookup, name: &str| -> Vec<(String, String)> {
             let found = resolve(lookup, &root.join("models/c.sql"), &named(name));
             found.iter().map(|f| (f.id.clone(), project.text(&f.path).unwrap()[f.range.clone()].to_owned())).collect()
@@ -824,12 +794,7 @@ models:
         ];
         let root = scratch_project("navigation-versions-scanned", &files);
         let reference = |name: &str, version: Option<&str>| {
-            Some(Target::Call(Name {
-                kind: Kind::Ref,
-                package: None,
-                name: name.into(),
-                version: version.map(str::to_owned),
-            }))
+            Some(Name { kind: Kind::Ref, package: None, name: name.into(), version: version.map(str::to_owned) })
         };
         let ids =
             |target| -> Vec<String> { leads(&root, "models/c.sql", target).into_iter().map(|(id, ..)| id).collect() };
@@ -838,12 +803,12 @@ models:
         assert_eq!(ids(reference("m", Some("1"))), ["model.r.m.v1"]);
         assert_eq!(ids(reference("x", Some("1"))), Vec::<String>::new(), "no version of a model without versions");
         assert_eq!(ids(reference("gone", None)), Vec::<String>::new(), "a latest with no file, which dbt fails on");
-        let named = |kind: &'static str| Some(Target::Named { kind, package: None, name: "m".into() });
+        let named = |kind: Kind| Some(Name::new(kind, None, "m"));
         let each = ["model.r.m.v1", "model.r.m.v2"];
-        let mut entry = ids(named("model"));
+        let mut entry = ids(named(Kind::Entry { label: "model" }));
         entry.sort();
         assert_eq!(entry, each, "an entry names each version");
-        let mut unit = ids(named("unit test model"));
+        let mut unit = ids(named(Kind::UnitTestModel));
         unit.sort();
         assert_eq!(unit, each, "as dbt tests each version");
         let used = used(&root, "models/c.sql", "ref('m')", 6, true);
@@ -882,18 +847,17 @@ models:
             "model.shop.fact.v2": node("model.shop.fact.v2", "fact", "models/fact_v2.sql", json!(2)),
             "model.shop.twin": enabled}, "disabled": {"model.shop.twin": [twin]}});
         let index = ParseIndex::of(&manifest);
-        let files_of = |lookup: &Lookup, target: Target| -> Vec<String> {
+        let files_of = |lookup: &Lookup, target: Name| -> Vec<String> {
             let found = resolve(lookup, &root.join("models/m.sql"), &target);
             found.iter().map(|found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()).collect()
         };
-        let reference =
-            |name: &str| Target::Call(Name { kind: Kind::Ref, package: None, name: name.into(), version: None });
+        let reference = |name: &str| Name { kind: Kind::Ref, package: None, name: name.into(), version: None };
         let parsed = Lookup::new(&project, Some(&index));
         assert_eq!(files_of(&parsed, reference("fact")), ["models/fact_v2.sql"], "the latest alone");
-        let v1 = Target::Call(Name { kind: Kind::Ref, package: None, name: "fact".into(), version: Some("1".into()) });
+        let v1 = Name { kind: Kind::Ref, package: None, name: "fact".into(), version: Some("1".into()) };
         assert_eq!(files_of(&parsed, v1), ["models/fact.sql"], "the version its file holds");
         assert_eq!(files_of(&parsed, reference("twin")), ["models/a/twin.sql"], "the one dbt keeps");
-        let unit = Target::Named { kind: "unit test model", package: None, name: "fact".into() };
+        let unit = Name::new(Kind::UnitTestModel, None, "fact");
         assert_eq!(files_of(&parsed, unit), ["models/fact.sql", "models/fact_v2.sql"], "each version");
         // Before a parse, two files of one name are both candidates: the scan reads no
         // `config(enabled=false)`, which only the parse knows.
@@ -987,7 +951,7 @@ models:
         );
         // Before a parse: no version, and the package's own model, which dbt disables.
         // An entry of a versioned model leads to each version, as dbt patches them all from it.
-        let entry = Target::Named { kind: "model", package: None, name: "dim".into() };
+        let entry = Name::new(Kind::Entry { label: "model" }, None, "dim");
         let ids: Vec<String> =
             resolve(&parsed, &root.join("models/orders.sql"), &entry).into_iter().map(|f| f.id).collect();
         assert_eq!(ids, ["model.shop.dim.v1", "model.shop.dim.v2"]);
@@ -1069,13 +1033,13 @@ models:
         let root = scratch_project("navigation-function-references", &files);
         let sql = Path::new("/p/models/a.sql");
         let text = files[3].1;
-        let function = |package: Option<&str>| Some(Target::Call(Name::new(Kind::Function, package, "f")));
+        let function = |package: Option<&str>| Some(Name::new(Kind::Function, package, "f"));
         assert_eq!(at(sql, text, "function('f')", 10), function(None), "at its name");
         assert_eq!(at(sql, text, "'r', 'f'", 1), function(Some("r")), "at its package");
-        let keyword = Some(Target::Call(Name::new(Kind::Macro, None, "function")));
+        let keyword = Some(Name::new(Kind::Macro, None, "function"));
         assert_eq!(at(sql, text, "function('f')", 2), keyword, "its keyword a macro call, which a project may define");
-        assert_eq!(at(sql, text, "function('f')", 2).unwrap().kind(), "macro");
-        assert_eq!(function(None).unwrap().kind(), "function");
+        assert_eq!(at(sql, text, "function('f')", 2).unwrap().kind.flag(), "macro");
+        assert_eq!(function(None).unwrap().kind.flag(), "function");
         let uses = [("dbt_project.yml", "f"), ("models/_a.yml", "f"), ("models/a.sql", "f"), ("models/a.sql", "f")];
         let uses = uses.map(|(file, text)| (file.to_owned(), text.to_owned()));
         assert_eq!(used(&root, "models/a.sql", "function('f')", 10, false), uses);
@@ -1164,8 +1128,8 @@ models:
     #[test]
     fn only_the_flag_as_a_yaml_false_puts_the_root_first() {
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
-        let table = Some(Target::Source(sources::Target::Table { source: "raw".into(), table: "orders".into() }));
-        let events = Some(Target::Source(sources::Target::Table { source: "ext".into(), table: "events".into() }));
+        let table = Some(Name::new(Kind::Table { source: "raw".into() }, None, "orders"));
+        let events = Some(Name::new(Kind::Table { source: "ext".into() }, None, "events"));
         // Each value of the flag, if any, and the package searched first, as
         // dbt 2.0.9 and dbt-oss 2.0.11 read it: a YAML 1.2 boolean.
         let values = [
@@ -1190,7 +1154,7 @@ models:
             // ignores the flag.
             let ids: Vec<String> = leads(&root, pkg_yml, events.clone()).into_iter().map(|(id, ..)| id).collect();
             assert_eq!(ids, ["source.pkg.ext.events"], "source in two packages with the flag {value:?}");
-            let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
+            let found = leads(&root, pkg_yml, named(Kind::Doc, None, "order_status"));
             assert_eq!(found[0].0, "doc.shop.order_status", "doc with the flag {value:?}");
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -1199,10 +1163,10 @@ models:
     #[test]
     fn a_source_leads_to_its_one_entry_and_any_package_to_every_declaration() {
         let root = shop("navigation-sources", "name: shop\n");
-        let source = Some(Target::Source(sources::Target::Source { source: "raw".into() }));
+        let source = Some(Name::new(Kind::Source, None, "raw"));
         // One entry for the source, however many tables it has.
         assert_eq!(leads(&root, "models/_models.yml", source), lead("source.shop.raw", "models/_sources.yml", "raw"));
-        let events = Some(Target::Source(sources::Target::Table { source: "ext".into(), table: "events".into() }));
+        let events = Some(Name::new(Kind::Table { source: "ext".into() }, None, "events"));
         let found: Vec<String> = leads(&root, "models/_models.yml", events).into_iter().map(|(id, ..)| id).collect();
         assert_eq!(found, ["source.other.ext.events", "source.pkg.ext.events"]);
         std::fs::remove_dir_all(root).unwrap();
@@ -1212,13 +1176,13 @@ models:
     fn a_doc_looks_in_the_root_first() {
         let root = shop("navigation-docs", "name: shop\n");
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
-        let found = leads(&root, pkg_yml, named("doc", None, "order_status"));
+        let found = leads(&root, pkg_yml, named(Kind::Doc, None, "order_status"));
         assert_eq!(found, lead("doc.shop.order_status", "models/docs.md", "order_status"));
         // From the root or a package, that of the package whose name sorts first.
-        assert_eq!(leads(&root, "models/_models.yml", named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
-        assert_eq!(leads(&root, pkg_yml, named("doc", None, "pkg_only"))[0].0, "doc.other.pkg_only");
+        assert_eq!(leads(&root, "models/_models.yml", named(Kind::Doc, None, "pkg_only"))[0].0, "doc.other.pkg_only");
+        assert_eq!(leads(&root, pkg_yml, named(Kind::Doc, None, "pkg_only"))[0].0, "doc.other.pkg_only");
         assert_eq!(
-            leads(&root, "models/_models.yml", named("doc", Some("pkg"), "order_status"))[0].0,
+            leads(&root, "models/_models.yml", named(Kind::Doc, Some("pkg"), "order_status"))[0].0,
             "doc.pkg.order_status"
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -1250,10 +1214,10 @@ models:
         // the package whose name sorts first.
         for package in ["", "dbt_packages/aaa/", "dbt_packages/pkg/", "dbt_packages/shop_utils/"] {
             let yml = format!("{package}models/_models.yml");
-            assert_eq!(leads(&root, &yml, named("doc", None, "shared"))[0].0, "doc.aaa.shared", "from {yml}");
+            assert_eq!(leads(&root, &yml, named(Kind::Doc, None, "shared"))[0].0, "doc.aaa.shared", "from {yml}");
         }
         let yml = "dbt_packages/shop_utils/models/_models.yml";
-        assert_eq!(leads(&root, yml, named("doc", None, "both")), lead("doc.shop.both", "models/docs.md", "both"));
+        assert_eq!(leads(&root, yml, named(Kind::Doc, None, "both")), lead("doc.shop.both", "models/docs.md", "both"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1263,18 +1227,18 @@ models:
         let yml = "models/_models.yml";
         // The test block, not the macro of the same name beside it.
         assert_eq!(
-            leads(&root, yml, named("test", None, "is_even")),
+            leads(&root, yml, named(Kind::Test, None, "is_even")),
             lead("macro.shop.test_is_even", "macros/tests.sql", "is_even")
         );
         // A root test overrides dbt's own; dbt's own are not in the project.
-        assert_eq!(leads(&root, yml, named("test", None, "unique"))[0].0, "macro.shop.test_unique");
-        assert_eq!(leads(&root, yml, named("test", None, "not_null")), Vec::new());
+        assert_eq!(leads(&root, yml, named(Kind::Test, None, "unique"))[0].0, "macro.shop.test_unique");
+        assert_eq!(leads(&root, yml, named(Kind::Test, None, "not_null")), Vec::new());
         // Never another installed package's without its name.
-        assert_eq!(leads(&root, yml, named("test", None, "pkg_test")), Vec::new());
-        assert_eq!(leads(&root, yml, named("test", Some("pkg"), "pkg_test"))[0].0, "macro.pkg.test_pkg_test");
+        assert_eq!(leads(&root, yml, named(Kind::Test, None, "pkg_test")), Vec::new());
+        assert_eq!(leads(&root, yml, named(Kind::Test, Some("pkg"), "pkg_test"))[0].0, "macro.pkg.test_pkg_test");
         // A package's file finds its own package's test first.
         let pkg_yml = "dbt_packages/pkg/models/_pkg.yml";
-        assert_eq!(leads(&root, pkg_yml, named("test", None, "is_even"))[0].0, "macro.pkg.test_is_even");
+        assert_eq!(leads(&root, pkg_yml, named(Kind::Test, None, "is_even"))[0].0, "macro.pkg.test_is_even");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1283,18 +1247,18 @@ models:
         let root = shop("navigation-hover", "name: shop\n");
         let project = project::scan(&root, &HashMap::new()).unwrap();
         let path = root.join("models/_models.yml");
-        let shown = |target: Option<Target>, markdown| {
+        let shown = |target: Option<Name>, markdown| {
             let target = target.unwrap();
             let found = resolve(&Lookup::new(&project, None), &path, &target);
             hover(&project, &target, &found[0], markdown)
         };
-        assert_eq!(shown(named("doc", None, "order_status"), true).as_deref(), Some("The root's."));
+        assert_eq!(shown(named(Kind::Doc, None, "order_status"), true).as_deref(), Some("The root's."));
         // An empty docs block shows nothing, so that the server's answer passes.
-        assert_eq!(shown(named("doc", None, "empty"), true), None);
+        assert_eq!(shown(named(Kind::Doc, None, "empty"), true), None);
         let signature = "```jinja\ntest is_even(model, column_name)\n```\n\nin package `shop`";
-        assert_eq!(shown(named("test", None, "is_even"), true).as_deref(), Some(signature));
+        assert_eq!(shown(named(Kind::Test, None, "is_even"), true).as_deref(), Some(signature));
         let plain = "test is_even(model, column_name)\n\nin package shop";
-        assert_eq!(shown(named("test", None, "is_even"), false).as_deref(), Some(plain));
+        assert_eq!(shown(named(Kind::Test, None, "is_even"), false).as_deref(), Some(plain));
         assert_eq!(shown(called(None, "orders"), true), None);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1305,23 +1269,26 @@ models:
         let (yml, pkg_yml) = ("models/_models.yml", "dbt_packages/pkg/models/_pkg.yml");
         // dbt 2.0.9 lets no entry describe another package's resource.
         let expected = [
-            (yml, "model", "orders", Some("model.shop.orders")),
-            (pkg_yml, "model", "orders", Some("model.pkg.orders")),
-            (yml, "model", "only_pkg", None),
-            (yml, "seed", "raw", Some("seed.shop.raw")),
-            (yml, "snapshot", "snap", Some("snapshot.shop.snap")),
-            (yml, "macro", "test_is_even", Some("macro.shop.test_is_even")),
-            (yml, "macro", "pkg_macro", None),
-            (yml, "analysis", "a", Some("analysis.shop.a")),
-            (pkg_yml, "analysis", "a", Some("analysis.pkg.a")),
-            (yml, "unit test model", "orders", Some("model.shop.orders")),
-            (yml, "unit test model", "only_pkg", None),
+            (yml, Kind::Entry { label: "model" }, "orders", Some("model.shop.orders")),
+            (pkg_yml, Kind::Entry { label: "model" }, "orders", Some("model.pkg.orders")),
+            (yml, Kind::Entry { label: "model" }, "only_pkg", None),
+            (yml, Kind::Entry { label: "seed" }, "raw", Some("seed.shop.raw")),
+            (yml, Kind::Entry { label: "snapshot" }, "snap", Some("snapshot.shop.snap")),
+            (yml, Kind::Entry { label: "macro" }, "test_is_even", Some("macro.shop.test_is_even")),
+            (yml, Kind::Entry { label: "macro" }, "pkg_macro", None),
+            (yml, Kind::Entry { label: "analysis" }, "a", Some("analysis.shop.a")),
+            (pkg_yml, Kind::Entry { label: "analysis" }, "a", Some("analysis.pkg.a")),
+            (yml, Kind::UnitTestModel, "orders", Some("model.shop.orders")),
+            (yml, Kind::UnitTestModel, "only_pkg", None),
         ];
         for (file, kind, name, id) in expected {
-            let found = leads(&root, file, named(kind, None, name));
-            assert_eq!(found.first().map(|(found, ..)| found.as_str()), id, "{kind} {name} from {file}");
+            let found = leads(&root, file, named(kind.clone(), None, name));
+            assert_eq!(found.first().map(|(found, ..)| found.as_str()), id, "{kind:?} {name} from {file}");
         }
-        assert_eq!(leads(&root, yml, named("seed", None, "raw")), lead("seed.shop.raw", "seeds/raw.csv", ""));
+        assert_eq!(
+            leads(&root, yml, named(Kind::Entry { label: "seed" }, None, "raw")),
+            lead("seed.shop.raw", "seeds/raw.csv", "")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

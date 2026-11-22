@@ -270,15 +270,15 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         Name { kind: Kind::Ref, package, name, version } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
             let version = version.as_ref().map_or_else(String::new, |version| format!(", v={version}"));
-            (format!("ref({}{version})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+            (format!("ref({}{version})", quoted.join(", ")), Some(target.clone()))
         }
         Name { kind: Kind::Table { source }, name: table, .. } => {
-            let table_target = sources::Target::Table { source: source.clone(), table: table.clone() };
-            (format!("source('{source}', '{table}')"), Some(navigation::Target::Source(table_target)))
+            let table_target = Name::new(Kind::Table { source: source.clone() }, None, table);
+            (format!("source('{source}', '{table}')"), Some(table_target))
         }
         Name { kind: Kind::Macro, package, name, .. } => {
             let written = format!("{}{name}()", package.iter().map(|p| format!("{p}.")).collect::<String>());
-            (written, Some(navigation::Target::Call(target.clone())))
+            (written, Some(target.clone()))
         }
         Name { kind: Kind::Dispatch, package, name, .. } => (
             format!("adapter.dispatch('{name}'{})", package.iter().map(|p| format!(", '{p}'")).collect::<String>()),
@@ -286,7 +286,7 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         ),
         Name { kind: Kind::Function, package, name, .. } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
-            (format!("function({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+            (format!("function({})", quoted.join(", ")), Some(target.clone()))
         }
         _ => unreachable!("no call names {target:?}"),
     };
@@ -312,7 +312,7 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         reached
     };
     // What the graph and navigation answer for CALL, in the file of HOLDER.
-    let answers = |holder: &project::Entity, call: &scan::Call, target: Option<navigation::Target>| {
+    let answers = |holder: &project::Entity, call: &scan::Call, target: Option<Name>| {
         let edges = graph.edges.iter().filter(|edge| edge.from == holder.id && edge.sites.contains(&call.range));
         let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
         let navigated = target.map(|target| {
@@ -379,7 +379,7 @@ fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<Stri
                 Name { kind: Kind::Macro, name, .. } => call.range.end - name.len()..call.range.end,
                 _ => continue,
             };
-            let target = navigation::Target::Call(call.name.clone());
+            let target = call.name.clone();
             if navigation::resolve(lookup, path, &target).is_empty() {
                 continue;
             }
@@ -405,7 +405,7 @@ static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(
 /// rendered in the description that holds the call, a column's or the
 /// node's own.
 fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lookup) -> Vec<Divergence> {
-    let resolved = |path: &Path, target: &navigation::Target| -> BTreeSet<String> {
+    let resolved = |path: &Path, target: &Name| -> BTreeSet<String> {
         navigation::resolve(lookup, path, target).into_iter().map(|found| found.id).collect()
     };
     let ids = |section: &str, keep: &dyn Fn(&Value) -> bool| -> BTreeSet<String> {
@@ -427,8 +427,8 @@ fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lo
             let name_on = text[offset..].trim_start_matches(['\'', '"', '\\']);
             let literal: String = name_on.chars().take_while(|c| !matches!(c, '\'' | '"' | '\\')).collect();
             let (name, ours) = match navigation::target_at(path, text, offset) {
-                Some(navigation::Target::Named { kind: "doc", package, name }) => {
-                    let ours = resolved(path, &navigation::Target::Named { kind: "doc", package, name: name.clone() });
+                Some(Name { kind: Kind::Doc, package, name, .. }) => {
+                    let ours = resolved(path, &Name::new(Kind::Doc, package.as_deref(), &name));
                     (name, ours)
                 }
                 _ => (literal, BTreeSet::new()),
