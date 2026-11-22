@@ -1203,7 +1203,7 @@ impl<W: Write> Proxy<W> {
         // Without a server, a definition with no target is null, not a failure, and `shutdown` is null as LSP asks.
         let lifecycle = ["textDocument/definition", "shutdown"].contains(&method);
         let unserved = (lifecycle && self.backend.running().is_none()).then_some(Answer::Empty);
-        let nothing = self.table.nothing(method, self.backend.alone()).and(Some(Answer::Empty));
+        let nothing = self.table.answers_nothing(method, self.backend.alone()).then_some(Answer::Empty);
         nothing.or(unserved).map_or(Route::Forward, Route::Answer)
     }
 
