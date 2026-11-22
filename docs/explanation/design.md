@@ -808,7 +808,11 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
   packages (dbt1005) (in a macro, dbt looks in the calling node's package:
   see "Known limitations"), and an unqualified macro in the caller's
   package and the root project only, as dbt does: another package's macros
-  need its name.
+  need its name.  Once a parse has given an index, the scan's calls are
+  looked up with it: a node or a source table that the last manifest
+  disables is no call's target, a name the parse knows leads to its
+  nodes, a call keeps its site on the edge that the listing or the
+  manifest gives, and a target no file holds is left out.
   A dispatch names every
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
@@ -1893,6 +1897,10 @@ checked against dbt; the profile and the target in doctor, which need
   `to:` aside) and a `config:` block lead nowhere.
 - Where one package has two files of a model's name, one of them disabled,
   a definition before the first parse leads to both.
+- A source table that the root disables still leads a definition, a
+  hover and nodeInfo to its own declaration, which navigation reads from
+  the scan alone, while the call hierarchy, once a parse exists, skips it
+  for another package's declaration of the same name.
 - A hook given in a string inside a tag, such as `{{ config(post_hook="{{
   m() }}") }}`, is not read: its macro calls are no references.
 - With a server, a `ref` or a macro call in SQL goes to dbt lsp, which
@@ -1958,8 +1966,8 @@ checked against dbt; the profile and the target in doctor, which need
 - The corpus's `divergences.txt` lists each divergence from dbt that it
   shows, with its reason (see "Conformance").  Beyond those above: a
   package's model that the root project disables (`+enabled: false`)
-  still resolves, ahead of the root's, in the call hierarchy, and in
-  navigation before the first parse; a `function()` inside a package's
+  still resolves, ahead of the root's, in navigation and the call
+  hierarchy before the first parse; a `function()` inside a package's
   macro resolves in the macro's package, as a `ref` there does, where dbt
   resolves it in the calling node's; the graph names every implementation
   of a dispatch, where dbt lists the adapter's alone from a macro, and
@@ -2004,8 +2012,10 @@ library's answers, each named by a lookup:
   and the docs block of the doc's name whose text dbt rendered in the
   description that holds the call, a column's or the node's;
 - `graph`: each call of a node or a macro, by the edges whose sites hold
-  it, against the dependencies (nodes, and the project's macros) that bear
-  the call's name, a dispatch's being its `*__name` implementations.
+  it, in the graph built with the case's manifest as its index, as the
+  proxy builds it once a parse exists, against the dependencies (nodes,
+  and the project's macros) that bear the call's name, a dispatch's being
+  its `*__name` implementations.
 
 A node is compared on its own calls and on the `ref`, `source` and macro
 calls of each macro it reaches through the graph by plain calls, as

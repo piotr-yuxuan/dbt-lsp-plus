@@ -54,7 +54,7 @@ fn corpus() {
         missed.extend(references_missed(&project, &lookup).into_iter().map(|call| format!("{name}\t{call}")));
         let compared = [
             nodes_compared(&project, &manifest),
-            calls_compared(&project, &manifest, &lookup),
+            calls_compared(&project, &manifest, &lookup, &index),
             entries_compared(&project, &manifest, &lookup),
         ];
         for (subject, lookup, answers) in compared.into_iter().flatten() {
@@ -217,9 +217,15 @@ fn nodes_compared(project: &Project, manifest: &Value) -> Vec<Divergence> {
 /// compared on its own calls and on the `ref` and `source` of each macro it
 /// reaches through the graph; a macro, on its own calls of macros.  Then
 /// each dependency that no call of the caller, or of a macro it reaches,
-/// names.
-fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Lookup) -> Vec<Divergence> {
-    let graph = Graph::scanned(project);
+/// names.  The graph is built with INDEX, as the proxy builds it once a
+/// parse exists.
+fn calls_compared(
+    project: &Project,
+    manifest: &Value,
+    lookup: &navigation::Lookup,
+    index: &config::ParseIndex,
+) -> Vec<Divergence> {
+    let graph = Graph::scanned(project, Some(index));
     let entities: HashMap<&str, &project::Entity> = project.entities.iter().map(|e| (e.id.as_str(), e)).collect();
     let field = |id: &str, key: &str| {
         manifest_entry(manifest, id).and_then(|entry| entry[key].as_str()).unwrap_or_default().to_owned()

@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(symbols("py"), [symbol("py", 5, "model.r.py")]);
         let snap = workspace_symbols(&project, "snap", Encoding::Utf16);
         assert_eq!(snap[0]["location"]["range"]["start"], json!({"line": 1, "character": 10}), "at its name");
-        let graph = Graph::scanned(&project);
+        let graph = Graph::scanned(&project, None);
         assert_eq!(graph.items["model.r.m.v1"].name, "m.v1");
         // At column 0 of a YAML snapshot's `name:` line, where dbt-mode's lineage asks.
         let yml = root.join("snapshots/_s.yml");
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn call_hierarchy_goes_both_ways_from_a_call_site_or_a_definition() {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
-        let graph = Graph::scanned(&project);
+        let graph = Graph::scanned(&project, None);
         let orders = fixture().join("models/marts/orders.sql");
         let text = project.text(&orders).unwrap();
         let on_ref = text.find("stg_orders").unwrap();
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn nothing_to_prepare_outside_any_resource() {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
-        let graph = Graph::scanned(&project);
+        let graph = Graph::scanned(&project, None);
         let readme = fixture().join("packages.yml");
         assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), None);
     }

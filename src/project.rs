@@ -759,7 +759,7 @@ mod tests {
         ];
         assert_eq!(ids("proj"), expected);
         let project = scan(&dir.join("proj"), &HashMap::new()).unwrap();
-        let graph = crate::graph::Graph::scanned(&project);
+        let graph = crate::graph::Graph::scanned(&project, None);
         let edges: Vec<(&str, &str)> = graph.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect();
         assert_eq!(edges, [("model.r.c", "model.shared.s_m")], "as dbt resolves it once installed");
         let deps = scan(&dir.join("deps"), &HashMap::new()).unwrap();

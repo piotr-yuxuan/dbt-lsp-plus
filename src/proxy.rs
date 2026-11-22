@@ -1096,14 +1096,15 @@ impl<W: Write> Proxy<W> {
 
     /// The graph of PROJECT with the server's nodes once listed, or, alone,
     /// the last parse's: made again only when the project, the nodes or the
-    /// index changed, as the call hierarchy asks for it at each step.
+    /// index changed, as the call hierarchy asks for it at each step.  Its
+    /// calls are looked up with the last parse's index.
     fn graph(&self, project: &Project) -> Rc<Graph> {
         let alone = self.backend.alone();
         let made_of = (self.cache.borrow().generation, self.backend.nodes_generation, self.parsing.generation, alone);
         if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
             return graph.clone();
         }
-        let scanned = Graph::scanned(project);
+        let scanned = Graph::scanned(project, self.parsing.index.as_ref());
         let parsed = self.parsing.index.as_ref().filter(|_| alone).map(config::ParseIndex::listed);
         let nodes = self.backend.running().and_then(|running| running.listings.nodes.as_ref());
         let graph = Rc::new(match parsed.as_ref().or(nodes) {
