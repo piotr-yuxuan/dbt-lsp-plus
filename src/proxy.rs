@@ -706,7 +706,7 @@ impl<W: Write> Proxy<W> {
         };
         let announced =
             |method: &str| capability::of(method).and_then(|c| c.key).is_some_and(|key| !lacks(capabilities, key));
-        self.table = modes::Table::new(&self.settings, &announced, self.backend.alone());
+        self.table = modes::Table::new(&self.settings, &announced);
         // A method the proxy answers is announced; one left to the server, as the server announced it,
         // and with no backend, not at all.
         let added = CAPABILITIES.iter().filter(|c| c.added && self.table.mode(c.name) != Mode::Dbt);
@@ -766,7 +766,7 @@ impl<W: Write> Proxy<W> {
             ));
         }
         said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
-        let unanswered = self.table.unanswered();
+        let unanswered = self.table.unanswered(self.backend.alone());
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
         }
@@ -1104,7 +1104,7 @@ impl<W: Write> Proxy<W> {
             return if own.providers == [Provider::Plus] { Route::Here(own.name) } else { Route::Command(own.name) };
         }
         // Where it unites, dbt lsp is asked at every position, and the proxy's part kept.
-        if self.table.unites(method) {
+        if self.table.unites(method, self.backend.alone()) {
             return Route::Forward;
         }
         // In `dbt`, the proxy looks at nothing.
@@ -1115,7 +1115,7 @@ impl<W: Write> Proxy<W> {
         // Without a server, a definition with no target is null, not a failure, and `shutdown` is null as LSP asks.
         let lifecycle = ["textDocument/definition", "shutdown"].contains(&method);
         let unserved = (lifecycle && self.backend.running().is_none()).then_some(Value::Null);
-        self.table.nothing(method).or(unserved).map_or(Route::Forward, Route::Answer)
+        self.table.nothing(method, self.backend.alone()).or(unserved).map_or(Route::Forward, Route::Answer)
     }
 
     /// A request of a capability with kinds of target that the proxy
@@ -1884,7 +1884,9 @@ impl<W: Write> Proxy<W> {
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 (hints.map_or(nothing, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
             }
-            "textDocument/definition" | "textDocument/references" if self.table.unites(method) => {
+            "textDocument/definition" | "textDocument/references"
+                if self.table.unites(method, self.backend.alone()) =>
+            {
                 let part = self.union_part(method, params);
                 let fresh = part.is_some() && capability::of(method).is_some_and(|capability| capability.wants_index);
                 (Kept::Part(part.unwrap_or(Part::Nothing)), fresh)
@@ -2628,7 +2630,7 @@ mod tests {
             let places = listed.entry(row[0].clone()).or_default().entry(row[1].clone()).or_default();
             places.extend(row[2].split(',').map(|place| place.trim().to_string()));
         }
-        let flag = modes::Table::new(&modes::Settings::default(), &|_| false, false).flag();
+        let flag = modes::Table::new(&modes::Settings::default(), &|_| false).flag();
         let known = ["version", "definition", "references", "rename"];
         assert!(flag.as_object().unwrap().keys().all(|key| known.contains(&key.as_str())), "{flag}");
         let announced = ["definition", "references"].map(|request| (request.to_string(), flag[request].clone()));
