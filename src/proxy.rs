@@ -1708,26 +1708,33 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Answers a request that the proxy answers itself, which it remembers as
-    /// PENDING.  A refusal fails it with its reason; a panic while answering
-    /// fails that request alone, never the session.
+    /// PENDING, with `plus_answer`'s Answer, after asking for the index where
+    /// that answer reads it, so that a reason is that of the parse it may
+    /// start: as its capability says, and for a hover whose part names a node
+    /// before any index.  A refusal fails it with its reason; a panic while
+    /// answering fails that request alone, never the session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
-        // Alone, the call hierarchy's graph needs the index too; a hover on a node before any index asks for it, as
-        // nodeInfo does, so that the reason is that of the parse it may start.
-        let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
-        if capability::of(method).is_some_and(|capability| capability.wants_index)
-            || (self.backend.alone() && hierarchy)
-            || pending.kept == Kept::Part(Part::Unindexed)
-        {
+        let alone = self.backend.alone();
+        let reads = capability::of(method).is_some_and(|c| c.wants_index || (alone && c.reads_graph));
+        if reads || pending.kept == Kept::Part(Part::Unindexed) {
             self.want_index();
         }
-        let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
+        let computed = panic::catch_unwind(AssertUnwindSafe(|| self.plus_answer(method, params, pending)));
+        match computed {
+            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
+            Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
+            Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
+        }
+    }
+
+    /// The Answer of the `plus` provider, the proxy itself, to METHOD at
+    /// PARAMS, which it remembers as PENDING, by the method's handler: for a
+    /// hover or inlay hints, the part kept, alone; none for invalid
+    /// parameters.  It sends nothing.
+    fn plus_answer(&self, method: &str, params: &Value, pending: &Pending) -> Option<Answer> {
+        match method {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
-            "workspace/symbol" => params.get("query").and_then(Value::as_str).map(|query| {
-                self.project().map_or_else(
-                    || Answer::Unanswered(vec![self.unreadable()]),
-                    |project| Answer::Found(features::workspace_symbols(&project, query, self.encoding)),
-                )
-            }),
+            "workspace/symbol" => self.symbols(params),
             config::NODE_INFO => self.node_info(params),
             "textDocument/references" => self.on_references(params),
             "textDocument/definition" => self.on_definition(params),
@@ -1742,12 +1749,15 @@ impl<W: Write> Proxy<W> {
                 Some(pending.unserved(self.markdown, None, &self.parsing))
             }
             _ => self.hierarchy(method, params),
-        }));
-        match computed {
-            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
-            Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
-            Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
+    }
+
+    /// The workspace's symbols that match the request's query; why none
+    /// over a project that does not read.
+    fn symbols(&self, params: &Value) -> Option<Answer> {
+        let query = params.get("query")?.as_str()?;
+        let Some(project) = self.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        Some(Answer::Found(features::workspace_symbols(&project, query, self.encoding)))
     }
 
     fn client_listing(&self) -> bool {

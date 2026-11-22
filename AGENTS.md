@@ -107,8 +107,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   observation in `docs/explanation/design.md`, make the fake server
   behave the same, and let the live test check it.
 - No single-use private helper, but for these, each with its reason:
-  - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
-    so that `answer` stays a dispatch;
+  - `Proxy::outline`, `Proxy::symbols` and `Proxy::hierarchy`: one
+    function per owned method, so that `plus_answer` stays a dispatch;
+    `Proxy::plus_answer`: the proxy's Answer by the handler of its
+    method, which sends nothing, apart from `answer`, which asks for the
+    index first, contains a panic and sends the Answer or the failure;
   - `Proxy::expire_listing`, `Proxy::tell_stalled`, `Proxy::start_restart`
     and `Proxy::stop_server`: the deadline of a listing and that of a
     compilation's end, and the start and the teardown of the server
@@ -222,7 +225,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Proxy::hover_part`: one concern, what a hover's answer gets first (a
     node's summary and facts, a docs block, a test's signature) or why it
     has nothing, apart from what the proxy keeps of other requests, as
-    `on_definition` and the others are for `answer`;
+    `on_definition` and the others are for `plus_answer`;
   - `Proxy::union_part`: one concern, what a definition or references
     gets first when the proxy unites dbt lsp's answer with its own, or
     nothing, apart from what the proxy keeps of other requests, as

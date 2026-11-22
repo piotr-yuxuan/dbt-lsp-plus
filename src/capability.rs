@@ -70,6 +70,10 @@ pub struct Capability {
     /// The proxy's answer asks for the parse's index, in both modes: a
     /// stale index is parsed again, as for a hover.
     pub wants_index: bool,
+    /// Its answer reads the call hierarchy's graph (`Proxy::graph`),
+    /// which, alone, is the last parse's: alone, it asks for the parse's
+    /// index too, as `wants_index` does in both modes.
+    pub reads_graph: bool,
     /// What the proxy answers itself, as `experimental.dbtLspPlus`
     /// announces it, version 2, since dbt lsp 2.0.9 answers with nothing
     /// there: each kind of target with the places where a request's
@@ -100,6 +104,7 @@ const DEFAULT: Capability = Capability {
     combine: Combine::First,
     list: false,
     wants_index: false,
+    reads_graph: false,
     kinds: &[],
     reads_project: false,
 };
@@ -113,11 +118,22 @@ pub static CAPABILITIES: [Capability; 18] = [
         name: "textDocument/prepareCallHierarchy",
         key: Some("callHierarchyProvider"),
         added: true,
+        reads_graph: true,
         reads_project: true,
         ..DEFAULT
     },
-    Capability { name: "callHierarchy/incomingCalls", leader: Some("textDocument/prepareCallHierarchy"), ..DEFAULT },
-    Capability { name: "callHierarchy/outgoingCalls", leader: Some("textDocument/prepareCallHierarchy"), ..DEFAULT },
+    Capability {
+        name: "callHierarchy/incomingCalls",
+        leader: Some("textDocument/prepareCallHierarchy"),
+        reads_graph: true,
+        ..DEFAULT
+    },
+    Capability {
+        name: "callHierarchy/outgoingCalls",
+        leader: Some("textDocument/prepareCallHierarchy"),
+        reads_graph: true,
+        ..DEFAULT
+    },
     Capability { name: "textDocument/foldingRange", key: Some("foldingRangeProvider"), added: true, ..DEFAULT },
     Capability {
         name: "textDocument/documentHighlight",
