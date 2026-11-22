@@ -85,15 +85,17 @@ server starts at that call.  The answer says:
   LSP request 'textDocument/hover' failed for server
   'plugin:dbt-lsp-plus:dbt': dbt parse has not finished: it is
   running`.  Ask again: three seconds later, the fixture's project gave
-  the summary.
+  the summary.  In front of `dbt lsp`, the reason may be `waiting for dbt
+  lsp to compile the project`, and may end with `; ` and why `dbt lsp`
+  gave no answer either.
 - **The project and its dbt are found, the parse fails or is
   refused**: `dbt parse has not finished:` then other words, such as
   `dbt parse failed: ...` with dbt's first error and the path of its
   log.  Symbols and navigation still answer; see [When nothing
   answers](#when-nothing-answers).
 - **Nothing to show yet, or here**: `No hover information available`.
-  In front of `dbt lsp` before its first compilation; in a YAML file or
-  a file that defines no single node; or with no project found.  Ask
+  In a YAML file or a file that defines no single node; or with no
+  project found.  Ask
   `workspaceSymbol` next, then run `dbt-lsp-plus doctor` on the file.
 - **No binary**: `Executable not found in $PATH: "dbt-lsp-plus"`.
 - **No LSP plugin at all** in the session: ToolSearch answers `No
@@ -235,7 +237,8 @@ By what the agent reads:
 - `dbt parse has not finished: it is running`: ask again.
 - `dbt parse has not finished: waiting for dbt lsp to compile the
   project`: in front of `dbt lsp`, whose first compilation is under way;
-  ask again.  Followed by `; ` and why `dbt lsp` gave no answer either.
+  ask again.  When `dbt lsp` gave no answer either, followed by `; ` and
+  why.
 - `dbt parse has not finished: dbt parse failed: ...`: dbt's first error;
   its log is the path in parentheses.  `Read-only file system (os error
   30)` there, from a project that has a `.gitignore` without the line
