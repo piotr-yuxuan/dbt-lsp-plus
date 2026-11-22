@@ -175,6 +175,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     proxy reads what they hold;
   - `Log::open`, `Log::append` and `Shadow::write`: the start of the
     shadow's log and its writes, a resource's start and use;
+  - `run::Running::spawn`: the start of a run's thread and its stop flag,
+    which `Running::stop` ends, a resource's start, as `Log::open`,
+    `Proxy::start_restart` and `Proxy::stop_server` are;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart
