@@ -138,15 +138,16 @@ seconds, 10 by default.
   not get the shell's); a hook (`on-run-start`) that fails; a package
   that is not installed; the warehouse's connection or authentication.
   Once a file is fixed (`profiles.yml`, `dbt_project.yml`, a hook, a
-  package), save it: `dbt lsp` compiles again.  Once an environment
-  variable is set where the editor gets its environment, restart the
-  editor's language server: `dbt lsp` and the proxy keep the environment
-  they started with, and the proxy restarts a lost `dbt lsp` with its
-  own.  An error in one
-  model is no such case: the other models compile, and the diagnostic on
-  that model says it; nor is a first compilation that a save cuts short,
-  which reports no count and no error, says nothing, and is followed by
-  the next.
+  package), save it: `dbt lsp` compiles again.  A file outside the
+  project, as dbt's default `~/.dbt/profiles.yml` is, brings `dbt lsp` no
+  save nor watched change: save any model of the project then.  Once an
+  environment variable is set where the editor gets its environment,
+  restart the editor's language server: `dbt lsp` and the proxy keep the
+  environment they started with, and the proxy restarts a lost `dbt lsp`
+  with its own.  An error in one model is no such case: the other models
+  compile, and the diagnostic on that model says it; nor is a first
+  compilation that a save cuts short, which reports no count and no
+  error, says nothing, and is followed by the next.
 - **"dbt lsp has been compiling for 60 s with no end yet".**  `dbt lsp`
   started a compilation and has not finished it; a merged request gets
   the proxy's answer alone at its deadline (see "Who answers a request").
