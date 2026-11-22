@@ -1023,6 +1023,48 @@ fn the_fake_compiles_as_dbt_lsp_2_0_9_does() {
 }
 
 #[test]
+fn a_compilation_that_compiled_nothing_is_said_once() {
+    let warning = json!({"code": "1005", "severity": "Warning",
+                         "message": "[InvalidConfig (dbt1005)]: doc macro reference 'no_such_doc' not found\n  --> models/marts/_models.yml:7:22"});
+    let error = json!({"code": "1005", "severity": "Error",
+                       "message": "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found\n(in :1:1)"});
+    // Every compilation fails as dbt lsp 2.0.9's does with a profile's env_var missing.
+    let failed = json!({"errors": [warning, error], "models_count": null});
+    let (mut session, log) = Session::fake("compiled-nothing", json!({"compile_complete": failed}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    until_logged(&log, "the first listing", |_| listings(&log, "*") == 1);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    until_logged(&log, "the listing after the save", |_| listings(&log, "*") == 2);
+    // Once shutdown is answered, every compilation before it has reached the client.
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    let compiling: Vec<&Value> =
+        session.received.iter().filter(|m| m["method"].as_str().is_some_and(|m| m.contains("Compile"))).collect();
+    let methods: Vec<&str> = compiling.iter().map(|m| m["method"].as_str().unwrap()).collect();
+    let one = ["dbt/lspCompileStart", "dbt/lspCompileComplete", "dbt/lspBackgroundCompileComplete"];
+    // The first didOpen's, the listings' and the save's, each with its background completion alone.
+    assert!(methods.len() >= 9 && methods.chunks(3).all(|three| three == one), "{methods:?}");
+    let completions: Vec<&Value> =
+        compiling.iter().filter(|m| m["method"] != "dbt/lspCompileStart").map(|m| &m["params"]).collect();
+    let as_sent = |params: &&Value| {
+        params["errors"] == failed["errors"]
+            && params["models_count"].is_null()
+            && params["compile_type"] == "incremental"
+    };
+    assert!(completions.iter().all(as_sent), "as the fake sent them: {completions:?}");
+    let shown: Vec<&Value> =
+        session.received.iter().filter(|m| m["method"] == "window/showMessage").map(|m| &m["params"]).collect();
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    let text = shown[0]["message"].as_str().unwrap();
+    assert_eq!(shown[0]["type"], 1);
+    assert!(text.contains("environment variable 'X' not found") && text.contains("logs/dbt-lsp.log"), "{text}");
+    assert!(!text.contains("no_such_doc"), "a warning quoted: {text}");
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+}
+
+#[test]
 fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let (mut session, log) = Session::fake("no-feedback", json!({"answers": {ALL: all}}));

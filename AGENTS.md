@@ -111,6 +111,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     with tests of its own;
   - `changes_graph`: the decision whether a client's notification may
     change the graph, free of the file system, with tests of its own;
+  - `compile_failure`: what a compilation that compiled nothing reports,
+    read at the boundary, free of the session, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
     free of the file system, with tests of its own;
   - `project::versions_of`: the decision which versions a model's file
@@ -128,10 +130,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     failed;
   - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
     `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,
-    `Proxy::on_restarted`, `Proxy::on_time`, `Proxy::on_notification` and
-    `Proxy::on_problems`: one handler per kind of message or event, so that
-    `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
-    `on_parsed` stay dispatches;
+    `Proxy::on_restarted`, `Proxy::on_time`, `Proxy::on_notification`,
+    `Proxy::on_problems` and `Proxy::on_compiled`: one handler per kind of
+    message or event, so that `on_server`, `on_own_response`, `serve`,
+    `handle`, `on_client` and `on_parsed` stay dispatches;
   - `config::anchored`: the server command's relative paths made the
     proxy's directory's, apart from where dbt then runs, with tests of its
     own;
