@@ -82,7 +82,9 @@ pub struct Capability {
     /// Whether a request on a document of another project, which it names
     /// by `textDocument.uri`, gets `Elsewhere` (`Proxy::outside`): its
     /// answer there would read the session's project, its scan or its
-    /// index, beyond the document's text.
+    /// index, beyond the document's text.  Inlay hints never get it: they
+    /// get `[]`, or dbt lsp's answer in `merge` in front of a running dbt
+    /// lsp.
     pub reads_project: bool,
 }
 
