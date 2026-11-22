@@ -2795,12 +2795,35 @@ mod tests {
         assert_eq!(said(&proxy), std::slice::from_ref(&told), "told once");
         started(&mut proxy, COMPILE_STALL);
         proxy.on_time();
-        assert_eq!((said(&proxy), proxy.compiling.due()), (vec![told], None), "once a session");
+        assert_eq!((said(&proxy), proxy.compiling.due()), (vec![told.clone()], None), "once a session");
         let mut after = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
         after.shutdown = true;
         started(&mut after, COMPILE_STALL);
         after.on_time();
         assert_eq!((said(&after), after.compiling.due()), (Vec::new(), None), "nothing after shutdown");
+        // `serve` wakes for that deadline when nothing else comes, here a client that closes once written to.
+        struct Closing(Vec<u8>, Sender<Event>);
+        impl Write for Closing {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let _ = self.1.send(Event::ClientClosed);
+                self.0.write(bytes)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (events, inbox) = mpsc::channel();
+        let watchdog = events.clone();
+        // Only a `serve` that never wakes waits for it, and ends untold.
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(10));
+            let _ = watchdog.send(Event::ClientClosed);
+        });
+        let mut serving = Proxy::new(Closing(Vec::new(), events), None, None, Some(PathBuf::from("/p")));
+        serving.compiling.since = Some(Instant::now() - COMPILE_STALL);
+        serving.serve(inbox);
+        let frames: Vec<Value> = written(&serving.client.0).into_iter().filter_map(|frame| frame.value).collect();
+        assert_eq!(frames, [told], "told through serve");
     }
 
     #[test]
