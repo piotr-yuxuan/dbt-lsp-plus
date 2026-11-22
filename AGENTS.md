@@ -90,7 +90,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
 
 ## Rules of the code
 
-- Forward what the proxy does not own byte for byte; never re-serialise it.
+- Forward what the proxy does not own or merge byte for byte; never
+  re-serialise it.
 - Route a method by its capability (`src/capability.rs`) and its mode
   (`src/modes.rs`); unset, a mode is its shipped default: the methods
   the proxy adds its own only when the server does not announce them,
@@ -197,6 +198,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     node's summary and facts, a docs block, a test's signature) or why it
     has nothing, apart from what the proxy keeps of other requests, as
     `on_definition` and the others are for `answer`;
+  - `Proxy::union_part`: one concern, what a definition or references
+    gets first when the proxy unites dbt lsp's answer with its own, or
+    nothing, apart from what the proxy keeps of other requests, as
+    `hover_part` is for a hover;
   - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
     outcome and its end, each the end of a resource, as `stop_server`;
   - the sections of `tests/proxy/live.rs` (`document_features`,

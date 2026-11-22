@@ -181,7 +181,7 @@ fn with_neither_definitions_nor_references_in_dbt_the_shadow_says_it_has_nothing
     session.initialize(&fixture());
     let answer = session.request("textDocument/definition", on_ref());
     assert!(answer["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("stg_orders.sql")), "{answer}");
-    assert_eq!((summary(&mut session)["requests"].clone(), received(&log, "textDocument/definition")), (json!(0), 0));
+    assert_eq!((summary(&mut session)["requests"].clone(), received(&log, "textDocument/definition")), (json!(0), 1));
     let shown: Vec<&Value> = session.received.iter().filter(|m| m["method"] == "window/showMessage").collect();
     assert!(shown.len() == 1 && shown[0]["params"]["type"] == 2 && idle(shown[0]), "{shown:?}");
     assert!(session.finish().success());

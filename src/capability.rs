@@ -75,8 +75,9 @@ pub struct Capability {
     /// there: each kind of target with the places where a request's
     /// position may be, `sql`, `yaml` or `python` by the file's extension.
     /// A kind listed at a place is the proxy's at every position of that
-    /// kind there, never forwarded, with dbt lsp or without.  Empty for a
-    /// method the proxy answers whole.
+    /// kind there, with dbt lsp or without; in `merge` with a backend, dbt
+    /// lsp is asked too, and its locations that match none of the proxy's
+    /// follow them.  Empty for a method the proxy answers whole.
     pub kinds: &'static [(&'static str, &'static [&'static str])],
 }
 

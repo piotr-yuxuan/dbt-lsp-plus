@@ -4,7 +4,7 @@
 //! command line and `initializationOptions.dbtLspPlus`, parsed here at the
 //! boundary; the table of a session, fixed once `initialize` is answered.
 
-use crate::capability::{self, CAPABILITIES};
+use crate::capability::{self, CAPABILITIES, Combine};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -240,6 +240,14 @@ impl Table {
         self.mode(method) != Mode::Dbt
     }
 
+    /// Whether the proxy unites dbt lsp's answer to METHOD with its own: in
+    /// `merge`, with a backend, for a capability whose answers are a union
+    /// of locations.
+    pub fn unites(&self, method: &str) -> bool {
+        let union = capability::of(method).is_some_and(|capability| capability.combine == Combine::Union);
+        union && !self.none && self.mode(method) == Mode::Merge
+    }
+
     /// What the proxy answers METHOD where it has nothing of its own, if it
     /// answers it: null, or `[]` for a list, in `plus`, and in `dbt` with no
     /// backend; none where the server answers.
@@ -461,6 +469,19 @@ mod tests {
         dbt.set("textDocument/references", "dbt").unwrap();
         let rename = json!({"version": 2, "rename": every["rename"]});
         assert_eq!(Table::new(&dbt, &|_| false, false).flag(), rename);
+    }
+
+    #[test]
+    fn unites_definitions_and_references_in_merge_with_a_backend() {
+        let united = ["textDocument/definition", "textDocument/references"];
+        let merge = Table::new(&Settings::default(), &|_| false, false);
+        assert_eq!(united.map(|method| merge.unites(method)), [true, true]);
+        assert!(!merge.unites("textDocument/hover"), "a hover's parts are sections");
+        assert!(!Table::new(&Settings::default(), &|_| false, true).unites(united[0]), "without a backend");
+        for mode in ["plus", "dbt"] {
+            let table = Table::new(&settings(&[], Some(mode)), &|_| false, false);
+            assert_eq!(united.map(|method| table.unites(method)), [false, false], "{mode}");
+        }
     }
 
     #[test]

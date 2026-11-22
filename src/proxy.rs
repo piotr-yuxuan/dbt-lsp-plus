@@ -204,6 +204,9 @@ enum Part {
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
+    /// A definition or references at a position the proxy claims, whose
+    /// answer gets the server's other locations after these.
+    Locations(Value),
     /// A hover whose position names a node while no index exists: in front
     /// of the server, a nothing, null; answered by the proxy, why it has
     /// no index yet.
@@ -212,15 +215,17 @@ enum Part {
 
 impl Pending {
     /// The server's answer, MESSAGE, as this kind of part makes it, for a
-    /// client that reads markdown when MARKDOWN; none to pass it unchanged.
-    /// An error to a request with a part of the proxy's gives that part.
-    fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
+    /// client that reads markdown when MARKDOWN, its locations' URIs read as
+    /// paths by PATH_OF; none to pass it unchanged.  An error to a request
+    /// with a part of the proxy's gives that part.
+    fn merged(&self, message: &Value, markdown: bool, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Value> {
         if message.get("error").is_some() {
             return self.part(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
         }
         match &self.kept {
             Kept::Part(Part::Hover(text, hard)) => features::merge_hover(message, text, *hard, markdown),
             Kept::Part(Part::Hints(hints)) => features::merge_hints(message, hints),
+            Kept::Part(Part::Locations(found)) => Some(features::merge_locations(message, found, path_of)),
             _ => None,
         }
     }
@@ -238,6 +243,7 @@ impl Pending {
                 alone.map(|alone| alone["result"].clone())
             }
             Part::Hints(hints) => Some(Value::Array(hints.clone())),
+            Part::Locations(found) => Some(found.clone()),
         }
     }
 
@@ -958,6 +964,10 @@ impl<W: Write> Proxy<W> {
         // A command of the proxy's alone is answered here, one of dbt's goes by `commands::route`.
         if let Some(own) = command.and_then(capability::of).filter(|own| own.is_command()) {
             return if own.providers == [Provider::Plus] { Route::Here(own.name) } else { Route::Command(own.name) };
+        }
+        // Where it unites, dbt lsp is asked at every position, and the proxy's part kept.
+        if self.table.unites(method) {
+            return Route::Forward;
         }
         // In `dbt`, the proxy looks at nothing.
         let mine = self.table.mode(method) != Mode::Dbt;
@@ -1680,13 +1690,29 @@ impl<W: Write> Proxy<W> {
         summary.or_else(block).map_or(nothing, |(text, hard)| Part::Hover(text, hard))
     }
 
+    /// What a definition or references at PARAMS gets first when the proxy
+    /// unites dbt lsp's answer with its own: where it claims the position,
+    /// its locations, or nothing for null or `[]`; none where it claims
+    /// nothing.  A panic gives nothing.
+    fn union_part(&self, method: &str, params: &Value) -> Option<Part> {
+        let claimed = self.targeted(method, params)?;
+        let found = panic::catch_unwind(AssertUnwindSafe(|| match claimed {
+            "textDocument/references" => self.on_references(params),
+            _ => self.on_definition(params),
+        }));
+        let found = found.ok().flatten().and_then(Result::ok).filter(|found| !found.is_null() && *found != json!([]));
+        Some(found.map_or(Part::Nothing, Part::Locations))
+    }
+
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
-    /// proxy must not cancel, the summary that a hover's answer gets, a
-    /// request that the shadow follows, the nothing that a merged request
-    /// falls back to; and whether, once routed, it asks for a fresh index: a
-    /// hover keeps the index fresh, an inlay hint only makes one, and in
-    /// `dbt` neither; a shadowed request wants what `plus` reads.
+    /// proxy must not cancel, the summary that a hover's answer gets, the
+    /// locations that a united one's gets, a request that the shadow
+    /// follows, the nothing that a merged request falls back to; and
+    /// whether, once routed, it asks for a fresh index: a hover keeps the
+    /// index fresh, an inlay hint only makes one, and in `dbt` neither; a
+    /// united request at a position the proxy claims wants what its answer
+    /// reads, and a shadowed one what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
         let name = command.unwrap_or(method).to_owned();
@@ -1718,8 +1744,12 @@ impl<W: Write> Proxy<W> {
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 (hints.map_or(nothing, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
             }
-            // Followed in `dbt` only: one the proxy answers is no one's to compare, and `merge` forwards only
-            // where the proxy has no target.
+            "textDocument/definition" | "textDocument/references" if self.table.unites(method) => {
+                let part = self.union_part(method, params);
+                let fresh = part.is_some() && capability::of(method).is_some_and(|capability| capability.wants_index);
+                (Kept::Part(part.unwrap_or(Part::Nothing)), fresh)
+            }
+            // Followed in `dbt` only: one the proxy answers or unites is no one's to compare.
             "textDocument/definition" | "textDocument/references" => {
                 let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
                 let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Kept::Shadow(params.clone(), changes));
@@ -1833,7 +1863,8 @@ impl<W: Write> Proxy<W> {
         if pending.as_ref().is_some_and(|(_, pending)| pending.listing()) {
             self.resume();
         }
-        if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown)) {
+        let path_of = |uri: &str| self.path_of(uri);
+        if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown, &path_of)) {
             return self.send_client(&merged);
         }
         if self.initialize.as_ref() == Some(id) {
@@ -1870,11 +1901,7 @@ impl<W: Write> Proxy<W> {
     fn compare(&mut self, method: &str, params: &Value, changes: u64, message: &Value) {
         let record = panic::catch_unwind(AssertUnwindSafe(|| {
             let root = self.root.as_deref().unwrap_or(Path::new(""));
-            // Outside the root, each side may spell a file its own way.
-            let path_of = |uri: &str| {
-                let path = self.local_path(Some(uri))?;
-                Some(if path.starts_with(root) { path } else { fs::canonicalize(&path).unwrap_or(path) })
-            };
+            let path_of = |uri: &str| self.path_of(uri);
             let file = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
             let inside = file.as_deref().is_some_and(|file| file.starts_with(root));
             let compared = match shadow::read(message, self.changes != changes, &path_of, &|path| path.is_file()) {
@@ -1917,6 +1944,15 @@ impl<W: Write> Proxy<W> {
             shadow.counts.add(&record);
         }
         self.shadow_line(&line);
+    }
+
+    /// The path of URI as both answers of a comparison or a union read it:
+    /// under the root as the client spells it, resolved elsewhere, where
+    /// each side may spell a file its own way.
+    fn path_of(&self, uri: &str) -> Option<PathBuf> {
+        let root = self.root.as_deref().unwrap_or(Path::new(""));
+        let path = self.local_path(Some(uri))?;
+        Some(if path.starts_with(root) { path } else { fs::canonicalize(&path).unwrap_or(path) })
     }
 
     /// Logs LINE in the shadow, if on; a log that cannot be written is said

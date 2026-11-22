@@ -37,6 +37,15 @@ pub struct Location {
     pub end: (u64, u64),
 }
 
+impl Location {
+    /// Whether it and OTHER are one location to the shadow: in one file,
+    /// the range of one holding the other's.
+    pub fn matches(&self, other: &Location) -> bool {
+        let holds = |outer: &Location, inner: &Location| outer.start <= inner.start && inner.end <= outer.end;
+        self.path == other.path && (holds(self, other) || holds(other, self))
+    }
+}
+
 /// How the proxy's answer and dbt lsp's stand, or why they were not compared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Relation {
@@ -80,7 +89,7 @@ pub enum Response {
 
 /// The entries of RESULT, an answer to a definition or references: none
 /// for null, the one location or link, or each of a list.
-fn entries(result: &Value) -> Vec<&Value> {
+pub fn entries(result: &Value) -> Vec<&Value> {
     match result {
         Value::Null => Vec::new(),
         Value::Array(entries) => entries.iter().collect(),
@@ -90,7 +99,7 @@ fn entries(result: &Value) -> Vec<&Value> {
 
 /// The location of ENTRY, a `Location` or a `LocationLink` by its target's
 /// name, its URI read as a path by PATH_OF; none for one it cannot read.
-fn location(entry: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Location> {
+pub fn location(entry: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Location> {
     let uri = entry.get("uri").or_else(|| entry.get("targetUri"))?.as_str()?;
     let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
     let position = |at: &str| Some((range[at]["line"].as_u64()?, range[at]["character"].as_u64()?));
@@ -141,16 +150,15 @@ pub struct Compared {
 }
 
 /// The proxy's locations OURS against dbt lsp's DBT, each sorted, as
-/// `locations` gives them: two match when they are in one file and the
-/// range of one holds the other's.  `both` counts the proxy's that match.
+/// `locations` gives them: two match as `Location::matches` says.  `both`
+/// counts the proxy's that match.
 pub fn compare(ours: &[Location], dbt: &[Location]) -> Compared {
-    let holds = |outer: &Location, inner: &Location| outer.start <= inner.start && inner.end <= outer.end;
     // A location is looked for among the other side's of its file alone.
     let unmatched = |side: &[Location], other: &[Location]| -> Vec<Location> {
         let matched = |location: &&Location| {
             let first = other.partition_point(|candidate| candidate.path < location.path);
             let in_file = other[first..].iter().take_while(|candidate| candidate.path == location.path);
-            in_file.into_iter().any(|candidate| holds(location, candidate) || holds(candidate, location))
+            in_file.into_iter().any(|candidate| location.matches(candidate))
         };
         side.iter().filter(|location| !matched(location)).cloned().collect()
     };
