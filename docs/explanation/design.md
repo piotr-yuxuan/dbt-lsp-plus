@@ -134,9 +134,13 @@ request's position names nothing to look up; or unanswered, with each
 provider's reason, the proxy's first.  A target that resolves to
 nothing is found, a definition's null or references' `[]`; a position
 that names no target is empty, for a definition, references and the
-call hierarchy alike.  LSP renders found and empty alike; a rendering
-that tells them apart (plan 052) reads only empty as nothing to look
-up.  An
+call hierarchy alike.  That holds for what the proxy's handlers answer,
+alone and in `plus`; in `merge`, the proxy's nothing at a claimed
+position is its empty part, which the client gets as empty when dbt
+lsp gives none, whether the target resolved to nothing or not; and
+nodeInfo by an id that names no node is empty.  LSP renders found and
+empty alike; a rendering that tells them apart (plan 052) reads only
+empty as nothing to look up, and those two cases with it.  An
 unanswered request is error -32803 whose message is its reasons, joined
 by `; `, as nodeInfo's has been since plan 038.  The protocol's own
 errors (-32600, -32602, -32603) say that the request is wrong or that

@@ -15,9 +15,11 @@ const REQUEST_FAILED: i64 = -32803;
 /// What a session sends for one request: the model's Answer.  `Empty` is
 /// "nothing to look up": the request's position names no target.  What a
 /// lookup gave is `Found`, its nothing included: a target that resolves to
-/// nothing is a definition's null, references' `[]`.  LSP renders both
-/// alike; a rendering that tells them apart reads only `Empty` as nothing
-/// to look up.
+/// nothing is a definition's null, references' `[]`, as the proxy's
+/// handlers answer; in `merge` the proxy's nothing at a claimed position
+/// is given back as `Empty`, and nodeInfo by an id that names no node is
+/// `Empty`.  LSP renders both alike; a rendering that tells them apart
+/// reads only `Empty` as nothing to look up.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Answer {
     /// A result, as its provider built it, an empty one included.
