@@ -13,7 +13,7 @@ use crate::project::{self, Project, Scanned};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
 use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, reference, runs, scan, shadow,
+    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, scan, shadow,
     sources,
 };
 use serde_json::{Value, json};
@@ -472,7 +472,7 @@ struct Parsing {
     server: Vec<String>,
     /// Where a parse reports; none in the unit tests, which parse nothing.
     events: Option<Sender<Event>>,
-    running: Option<config::Running>,
+    running: Option<run::Running>,
     index: Option<config::ParseIndex>,
     /// Whether no change came since the last parse started.
     fresh: bool,
@@ -612,7 +612,7 @@ struct Proxy<W: Write> {
     /// waiting, with the client's id, their command line and their
     /// directory, and the one under way.
     runs: VecDeque<(Value, commands::Job, Vec<String>, PathBuf)>,
-    run: Option<config::Running>,
+    run: Option<run::Running>,
 }
 
 /// PATH with each `..` dropping the component before it, as written: no
@@ -1458,8 +1458,14 @@ impl<W: Write> Proxy<W> {
         let Some(events) = self.parsing.events.clone() else { return };
         self.parsing.fresh = true;
         let report = Box::new(move |outcome| drop(events.send(Event::Parsed(outcome))));
-        let dir = self.parsing.dir.clone();
-        self.parsing.running = Some(config::start(command, dir, cache, config::PARSE_DEADLINE, report));
+        let run = run::Run {
+            line: command,
+            cwd: self.parsing.dir.clone(),
+            dir: cache,
+            log: "parse.log",
+            deadline: config::PARSE_DEADLINE,
+        };
+        self.parsing.running = Some(config::start(run, report));
     }
 
     /// Whether dbt's packages are guarded as alone: no dbt lsp runs, and
@@ -1558,7 +1564,8 @@ impl<W: Write> Proxy<W> {
         };
         let report = Box::new(move |result| drop(events.send(Event::Ran(id, result))));
         let cwd = self.parsing.dir.clone();
-        self.run = Some(commands::start(job, line, cwd, dir, config::PARSE_DEADLINE, report));
+        let run = run::Run { line, cwd, dir, log: "run.log", deadline: config::PARSE_DEADLINE };
+        self.run = Some(commands::start(job, run, report));
     }
 
     /// A run's RESULT, the answer to the client's request ID; then the next
@@ -1698,7 +1705,7 @@ impl<W: Write> Proxy<W> {
     /// Stops a parse and a run under way and removes this process's cache.
     fn stop_parse(&mut self) {
         let under_way = [self.parsing.running.take(), self.run.take()];
-        under_way.into_iter().flatten().for_each(config::Running::stop);
+        under_way.into_iter().flatten().for_each(run::Running::stop);
         if let Some(cache) = self.parsing.cache.take() {
             let _ = fs::remove_dir_all(cache);
         }
@@ -3200,7 +3207,7 @@ mod tests {
     #[test]
     fn a_give_up_during_a_parse_starts_no_second_one() {
         // Whether the index is still fresh once the last restart of the window is spent, a parse under way or not.
-        let fresh_after_give_up = |running: Option<config::Running>| {
+        let fresh_after_give_up = |running: Option<run::Running>| {
             let mut proxy = Proxy::new(Vec::new(), Life::default(), None);
             proxy.initialized = true;
             let ago = |seconds| Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap();
@@ -3213,7 +3220,7 @@ mod tests {
             fresh
         };
         // A parse in flight, whose `Parsed` event `on_parsed` has yet to take.
-        assert!(fresh_after_give_up(Some(config::Running::spawn(|_| {}))), "a parse under way");
+        assert!(fresh_after_give_up(Some(run::Running::spawn(|_| {}))), "a parse under way");
         assert!(!fresh_after_give_up(None), "no parse under way");
     }
 

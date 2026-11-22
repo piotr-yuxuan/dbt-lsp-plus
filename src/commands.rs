@@ -5,14 +5,11 @@
 //! words of a run, and what its output answers, in dbt lsp 2.0.9's shapes.
 
 use crate::capability::{self, CAPABILITIES, Provider};
-use crate::config::{self, Running};
-use crate::parse_log;
 use crate::project::Project;
+use crate::run::{self, Ending, Output, Run, Running};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
-use std::time::Duration;
 use url::Url;
 
 pub const COMPILE: &str = "dbt-lsp-plus.compile";
@@ -92,15 +89,6 @@ pub fn arguments(command: &str, params: &Value) -> Option<Vec<Value>> {
     argument.map(|argument| vec![argument])
 }
 
-/// What a run of dbt gave: how it ended, none when it was stopped or ran
-/// past its deadline, a reason when it could not start; both its outputs;
-/// the manifest it wrote, if it wrote one.
-struct Output {
-    status: Result<Option<ExitStatus>, String>,
-    log: String,
-    manifest: Option<Value>,
-}
-
 /// A run of dbt for a request of a command: the command, the words after
 /// dbt's own, and how its output answers.
 pub struct Job {
@@ -109,24 +97,17 @@ pub struct Job {
     read: Box<dyn FnOnce(&Output) -> Value + Send>,
 }
 
-/// Why a run failed, if it did: dbt's first error, from its JSON log when
-/// JSON, else from its first `[error]` line; else how it ended, after the
-/// first line that is none of its events, as a launcher's own.
-fn first_error(output: &Output, json: bool) -> Option<String> {
-    let status = match &output.status {
-        Err(why) => return Some(why.clone()),
-        Ok(None) => return Some("dbt was stopped, or ran past its deadline".into()),
-        Ok(Some(status)) => status,
+/// Why a run failed, if it did: dbt's first error, whatever its exit
+/// status; else, for a failed run, how it ended, after the first line that
+/// is none of its events, as a launcher's own.
+fn first_error(output: &Output) -> Option<String> {
+    let status = match &output.ending {
+        Ending::NotStarted(why) => return Some(why.clone()),
+        Ending::Stopped => return Some("dbt was stopped, or ran past its deadline".into()),
+        Ending::Exited(status) => status,
     };
-    let logged = match json {
-        true => {
-            parse_log::read(&output.log).problems.into_iter().find(|problem| problem.severity == 1).map(|p| p.message)
-        }
-        false => output.log.lines().map(str::trim).find(|line| line.starts_with("[error]")).map(str::to_owned),
-    };
-    let other = || output.log.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'));
-    let ended = || other().map_or_else(|| format!("dbt {status}"), |line| format!("{line} (dbt {status})"));
-    logged.or_else(|| (!status.success()).then(ended))
+    let ended = || output.line().map_or_else(|| format!("dbt {status}"), |line| format!("{line} (dbt {status})"));
+    output.error().or_else(|| (!status.success()).then(ended))
 }
 
 /// The compile of the file at PATH, of the project at ROOT that PROJECT
@@ -154,7 +135,7 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
         return Err(refused(format!("{relative} holds a space or a comma, which dbt's selector would split")));
     }
     let words = ["compile", "--select", &format!("path:{relative}"), "--log-format", "json"].map(str::to_owned);
-    let read = move |output: &Output| match first_error(output, true) {
+    let read = move |output: &Output| match first_error(output) {
         Some(why) => failure(COMPILE, &why),
         None => compiled(output.manifest.as_ref(), &package, &relative, &cwd),
     };
@@ -182,9 +163,9 @@ pub fn compiled(manifest: Option<&Value>, package: &str, relative: &str, cwd: &P
 /// log event; its answer, `listed`'s.
 pub fn nodes_job(selector: &str) -> Job {
     let words = ["list".into(), format!("--select={selector}"), "--output".into(), "json".into()];
-    let read = |output: &Output| match first_error(output, false) {
+    let read = |output: &Output| match first_error(output) {
         Some(why) => failure(NODES, &why),
-        None => listed(&output.log),
+        None => listed(&output.text),
     };
     Job { command: NODES, words: words.into(), read: Box::new(read) }
 }
@@ -201,56 +182,21 @@ pub fn listed(text: &str) -> Value {
     }
 }
 
-/// Hands a run's answer over once: the one the thread sends, else a failure
-/// of the command, should the thread end without one, as on a panic.
-struct Report(Option<Box<dyn FnOnce(Value) + Send>>, &'static str);
-
-impl Drop for Report {
-    fn drop(&mut self) {
-        if let Some(report) = self.0.take() {
-            report(failure(self.1, "the run ended without an answer"));
-        }
-    }
-}
-
-/// Runs COMMAND, JOB's dbt command writing under DIR, in CWD when given, in
-/// a thread of its own, with no input and both outputs in `DIR/run.log`, DIR's manifest
-/// removed first so that only this run's counts, the compiled files of
-/// earlier runs kept; hands REPORT the answer.  dbt is killed past
-/// DEADLINE, or when the run is stopped.
-pub fn start(
-    job: Job,
-    command: Vec<String>,
-    cwd: Option<PathBuf>,
-    dir: PathBuf,
-    deadline: Duration,
-    report: Box<dyn FnOnce(Value) + Send>,
-) -> Running {
-    Running::spawn(move |stopped| {
-        let mut report = Report(Some(report), job.command);
-        let _ = fs::remove_file(dir.join("target/manifest.json"));
-        let _ = fs::create_dir_all(&dir);
-        let log = dir.join("run.log");
-        let status =
-            config::spawn_logged(&command, cwd.as_deref(), &log).map(|child| config::finish(child, deadline, stopped));
-        let status = status.map_err(|error| format!("cannot run {}: {error}", command[0]));
-        let manifest = fs::read_to_string(dir.join("target/manifest.json")).ok();
-        let manifest = manifest.and_then(|text| serde_json::from_str(&text).ok());
-        let output = Output { status, log: fs::read_to_string(&log).unwrap_or_default(), manifest };
-        let read = (job.read)(&output);
-        if let Some(report) = report.0.take() {
-            report(read);
-        }
-    })
+/// Runs JOB as RUN, as `run::start` runs it, and hands REPORT the answer;
+/// one that ends with no answer, as on a panic, fails the command.
+pub fn start(job: Job, run: Run, report: Box<dyn FnOnce(Value) + Send>) -> Running {
+    run::start(run, job.read, failure(job.command, "the run ended without an answer"), report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config;
     use crate::project::scratch_project;
     use std::collections::HashMap;
-    use std::process::Command;
+    use std::process::{Command, ExitStatus};
     use std::sync::mpsc;
+    use std::time::Duration;
 
     fn served(listed: &'static [&'static str]) -> impl Fn(&str) -> bool {
         move |dbt: &str| listed.contains(&dbt)
@@ -388,7 +334,24 @@ mod tests {
     }
 
     fn output(status: Result<Option<ExitStatus>, String>, log: &str) -> Output {
-        Output { status, log: log.to_owned(), manifest: None }
+        let ending = match status {
+            Err(why) => Ending::NotStarted(why),
+            Ok(None) => Ending::Stopped,
+            Ok(Some(status)) => Ending::Exited(status),
+        };
+        Output { ending, log: PathBuf::new(), text: log.to_owned(), manifest: None }
+    }
+
+    /// `start` with the Run's parts as it took them before the Run.
+    fn start(
+        job: Job,
+        line: Vec<String>,
+        cwd: Option<PathBuf>,
+        dir: PathBuf,
+        deadline: Duration,
+        report: Box<dyn FnOnce(Value) + Send>,
+    ) -> Running {
+        super::start(job, Run { line, cwd, dir, log: "run.log", deadline }, report)
     }
 
     fn exited(code: i32) -> Option<ExitStatus> {

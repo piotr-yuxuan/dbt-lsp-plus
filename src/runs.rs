@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The failures of the user's last dbt run, from the `run_results.json` and
 //! `manifest.json` it wrote, and the stale sources of its last freshness
-//! check, from `sources.json`; and where each is written.  Pure.
+//! check, from `sources.json`; and where each is written.  Pure.  These
+//! are the model's Artefacts: files dbt left, read when they change, with
+//! no deadline and nothing to report, apart from the proxy's own runs
+//! (`run.rs`).
 
 use crate::properties::{Entry, Test};
 use serde_json::Value;

@@ -494,12 +494,14 @@ refused.  Its answer is the `compiled_path` of the node of the root package
 whose `original_file_path` is R, a test's never (as of a properties file),
 in the manifest the run wrote, resolved from the working directory; none
 answers dbt lsp's "Compiled file path not
-found."; a failed run, dbt's first error from its JSON log.  `nodes` runs
+found."; a failed run, dbt's first error (below).  `nodes` runs
 `dbt list --select=SELECTOR --output json` with dbt's text log and
-`--quiet`, and answers its JSON lines with a `unique_id`; a failed run, its
-first `[error]` line; else, for either, the first line that is none of
-dbt's events, as a launcher's own, with how the run ended.  The compiled
-file lives while the session does, as the cache.
+`--quiet`, and answers its JSON lines with a `unique_id`.  Either answers
+dbt's first error, whatever its exit status: an error event of a JSON
+log, else an `[error]` line of a text one, as for the parse; else, for a
+failed run, the first line that is none of dbt's events, as a launcher's
+own, with how the run ended.  The compiled file lives while the session
+does, as the cache.
 
 ### What dbt does for these commands, observed on 2026-11-17
 
@@ -1423,8 +1425,10 @@ So the proxy runs the user's own `dbt parse`.
   the dbt binary itself, which needs only the C and C++ runtimes.
 - The child: no input; both outputs in `parse.log` in the cache, never on
   the client's channel; a failure names that file and gives dbt's first
-  error's message from its JSON log, else the first line that is none of
-  its events, as a launcher's own.  A thread waits on it and
+  error, an error event of its JSON log or else an `[error]` line, else
+  the first line that is none of its events, as a launcher's own: one
+  rule for every run of dbt, the commands' too (`run::Output`).  A thread
+  waits on it and
   reports to the event loop; it is killed past two minutes, and at `exit`
   or when the client closes.  Only the direct child is killed: a launcher's
   grandchild may outlive it.

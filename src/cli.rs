@@ -245,7 +245,8 @@ fn select(selector: &str, command: &[String]) -> Value {
     };
     let (sender, answer) = mpsc::channel();
     let report = Box::new(move |result| drop(sender.send(result)));
-    let running = commands::start(job, line, dir, run, config::PARSE_DEADLINE, report);
+    let run = crate::run::Run { line, cwd: dir, dir: run, log: "run.log", deadline: config::PARSE_DEADLINE };
+    let running = commands::start(job, run, report);
     let ended = || commands::failure(commands::NODES, "the run ended without an answer");
     let result = answer.recv().unwrap_or_else(|_| ended());
     running.stop();

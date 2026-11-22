@@ -50,6 +50,8 @@ src/navigation.rs             the Name at a position, from the document's scan, 
 src/features.rs               the answers of the added features, as LSP JSON
 src/answer.rs                 what a request gets: found, empty, or unanswered with its reasons, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
+src/run.rs                    the proxy's children but dbt lsp: one run of dbt, the parse's or a command's, and the one wait for each child
+src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command
 src/modes.rs                  who answers each method: the user's settings and the session's table
 src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
@@ -214,7 +216,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     gets first when the proxy unites dbt lsp's answer with its own, or
     nothing, apart from what the proxy keeps of other requests, as
     `hover_part` is for a hover;
-  - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
+  - `Proxy::on_parsed`, `Proxy::stop_parse` and `run::finish`: a parse's
     outcome and its end, each the end of a resource, as `stop_server`;
   - the sections of `tests/proxy/live.rs` (`document_features`,
     `navigation`, `last_run`, `lineage`, `watcher` and the others): one
