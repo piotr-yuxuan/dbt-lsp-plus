@@ -4,7 +4,7 @@
 //! what it names in the project, by dbt 2.0.9's lookup.  Pure.
 
 use crate::config::ParseIndex;
-use crate::project::{self, Entity, Project};
+use crate::project::{self, Entity, Project, Scanned};
 use crate::reference::{Kind, Name};
 use crate::sources;
 use crate::yaml::{self, Tree};
@@ -142,6 +142,60 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Name> {
             _ => false,
         };
         scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| call.name)
+    };
+    reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
+}
+
+/// What the position OFFSET of the file at PATH names, from SCANNED, its
+/// scan: a `source` anywhere; elsewhere than in YAML, a `ref`'s or a
+/// function's argument, a macro call's name or package, or the name in the
+/// tag of a macro or a generic test, which looks itself up; in YAML, a
+/// `ref`, a `doc`, the `name:` of a navigable entry, a generic test's name,
+/// a unit test's `model:`, or a macro or function call in the Jinja of a
+/// value, in that order.
+pub fn reference_at(path: &Path, scanned: &Scanned, offset: usize) -> Option<Name> {
+    let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
+    // A call names what it calls at an argument of a `ref` or a function, at its name for a macro.
+    let called = |call: &&scan::Call| match call.name.kind {
+        Kind::Ref | Kind::Function => call.arguments.iter().any(inside),
+        Kind::Macro => inside(&call.range),
+        _ => false,
+    };
+    let source = sources::name_at(scanned, offset);
+    if source.is_some() {
+        return source;
+    }
+    if !sources::is_yaml(path) {
+        // A generic test is the macro `test_<name>`, as dbt names it.
+        let macro_named = |block: &scan::Symbol| match block.kind {
+            scan::Kind::Macro => Some(block.name.clone()),
+            scan::Kind::Test => Some(format!("test_{}", block.name)),
+            _ => None,
+        };
+        let blocks = scanned.blocks.iter().filter(|block| inside(&block.name_range));
+        if let Some(name) = blocks.filter_map(macro_named).next() {
+            return Some(Name::new(Kind::Macro, None, &name));
+        }
+        return scanned.calls.iter().find(called).map(|call| call.name.clone());
+    }
+    let reference = scanned.calls.iter().find(|call| call.name.kind == Kind::Ref && called(call));
+    let reference = reference.map(|call| call.name.clone());
+    let doc = || scanned.docs.iter().find(|call| call.arguments.iter().any(inside)).map(|call| call.name.clone());
+    let entry = || {
+        let found = scanned.entries.iter().find(|entry| inside(&entry.name_range))?;
+        Some(Name::new(Kind::Entry { label: found.label }, None, &found.name))
+    };
+    let test = || {
+        let found = scanned.tests.iter().find(|test| inside(&test.range))?;
+        Some(Name::new(Kind::Test, found.package.as_deref(), &found.name))
+    };
+    let model = || {
+        let (name, _) = scanned.models.iter().find(|(_, range)| inside(range))?;
+        Some(Name::new(Kind::UnitTestModel, None, name))
+    };
+    let macro_call = || {
+        let found = scanned.calls.iter().find(|call| call.name.kind != Kind::Ref && called(call));
+        found.map(|call| call.name.clone())
     };
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
 }
@@ -669,6 +723,51 @@ models:
         let doc = Name::new(Kind::Macro, None, "doc");
         assert_eq!(at(sql, text, "doc(", 1), Some(doc));
         assert_eq!(at(sql, text, "order_status", 2), None);
+    }
+
+    #[test]
+    fn in_yaml_that_does_not_parse_a_doc_and_a_ref_are_still_named() {
+        let yml = Path::new(YML);
+        let text = "models:\n  - name: m\n    description: \"{{ doc('d') }}\"\n    data_tests:\n      - relationships:\n\
+                    \x20         to: ref('x')\n[";
+        assert!(yaml::parse(text).is_none(), "an unclosed flow sequence");
+        let scanned = Scanned::of(yml, text.to_owned());
+        assert_eq!(reference_at(yml, &scanned, text.find("d')").unwrap()), named(Kind::Doc, None, "d"));
+        assert_eq!(reference_at(yml, &scanned, text.find("x')").unwrap()), called(None, "x"));
+    }
+
+    #[test]
+    fn reference_at_names_what_target_at_did() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let corpus = std::fs::read_dir(fixtures.join("conformance")).unwrap().map(|entry| entry.unwrap().path());
+        let mut roots: Vec<PathBuf> = corpus.filter(|path| path.is_dir()).collect();
+        roots.push(fixtures.join("shop"));
+        // Each offset of SCANNED, the file at PATH, from its start to its end, both included.
+        let compare = |path: &Path, scanned: &Scanned| {
+            for offset in 0..=scanned.text.len() {
+                let (scan, text) = (reference_at(path, scanned, offset), target_at(path, &scanned.text, offset));
+                assert_eq!(scan, text, "{} at {offset}", path.display());
+                let (scan, text) = (sources::name_at(scanned, offset), sources::target_at(path, &scanned.text, offset));
+                assert_eq!(scan, text, "a source in {} at {offset}", path.display());
+            }
+            scanned.text.len() + 1
+        };
+        let (mut files, mut offsets, mut broken) = (0, 0, 0);
+        for root in &roots {
+            let project = project::scan(root, &HashMap::new()).unwrap();
+            for (path, file) in &project.files {
+                (files, offsets) = (files + 1, offsets + compare(path, file));
+                if sources::is_yaml(path) {
+                    let text = format!("{}\n[", file.text);
+                    assert!(yaml::parse(&text).is_none(), "{} broken", path.display());
+                    (broken, offsets) = (broken + 1, offsets + compare(path, &Scanned::of(path, text)));
+                }
+            }
+        }
+        println!(
+            "{} projects, {files} files, {offsets} offsets, {broken} YAML files also compared broken",
+            roots.len()
+        );
     }
 
     /// Where TARGET, named in the file REL of the project at ROOT, leads:

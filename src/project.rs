@@ -67,6 +67,9 @@ pub struct Scanned {
     pub blocks: Vec<Symbol>,
     /// Its calls, as `sources::file_calls` reads them.
     pub calls: Vec<Call>,
+    /// The `doc()` calls of a properties file, as `scan::docs` reads them,
+    /// which name no resource that the graph or references follow.
+    pub docs: Vec<Call>,
     /// The source tables of a properties file, their package left empty.
     pub tables: Vec<SourceTable>,
     /// The entries of a properties file that declare a resource, which a
@@ -97,7 +100,8 @@ impl Scanned {
         };
         calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
         calls.sort_by_key(|call| call.range.start);
-        let Some(root) = yaml::parse(&text) else { return Scanned { calls, text, ..Scanned::default() } };
+        let docs = scan::docs(&text);
+        let Some(root) = yaml::parse(&text) else { return Scanned { calls, docs, text, ..Scanned::default() } };
         let resource =
             |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
         let entries: Vec<Entry> = properties::entries_in(&text, &root, false).into_iter().filter(resource).collect();
@@ -130,6 +134,7 @@ impl Scanned {
             models: unit_test_models(&text, &root),
             tests: properties::tests_in(&text, &root),
             calls,
+            docs,
             text,
             ..Scanned::default()
         }

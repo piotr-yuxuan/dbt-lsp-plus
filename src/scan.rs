@@ -511,6 +511,31 @@ pub fn yaml_calls(text: &str) -> Vec<Call> {
     found
 }
 
+/// One quote, as YAML writes it inside a quoted scalar too: `''` in single
+/// quotes, `\"` in double quotes.
+const QUOTE: &str = r#"(?:''|\\?["'])"#;
+
+/// `doc('name')` or `doc('package', 'name')`.
+static DOC: LazyLock<Regex> = LazyLock::new(|| {
+    let argument = format!(r#"{QUOTE}([^'"\\]*){QUOTE}"#);
+    Regex::new(&format!(r"\bdoc\s*\(\s*{argument}(?:\s*,\s*{argument})?\s*\)")).unwrap()
+});
+
+/// The `doc()` calls of a YAML properties file, in its raw text, quotes as
+/// YAML escapes them: each names a docs block, in the package that its
+/// first argument names when it has two.
+pub fn docs(text: &str) -> Vec<Call> {
+    let doc = |call: regex::Captures| {
+        let name = match call.get(2) {
+            Some(name) => Name::new(reference::Kind::Doc, Some(&call[1]), name.as_str()),
+            None => Name::new(reference::Kind::Doc, None, &call[1]),
+        };
+        let arguments = [call.get(1), call.get(2)].into_iter().flatten().map(|argument| argument.range()).collect();
+        Call { name, range: call.get(0).unwrap().range(), arguments }
+    };
+    DOC.captures_iter(text).map(doc).collect()
+}
+
 /// TEXT, YAML, its comments outside quotes blanked, offsets kept: what dbt
 /// renders of it.
 pub fn without_yaml_comments(text: &str) -> String {
@@ -770,6 +795,18 @@ select * from final
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers"));
         assert_eq!(&text[found[0].arguments[1].clone()], "customers");
+    }
+
+    #[test]
+    fn finds_the_docs_of_yaml_with_their_package_and_quotes_as_yaml_escapes_them() {
+        let text = "description: '{{ doc(''a'') }}'\ncolumns:\n  - description: \"{{ doc(\\\"p\\\", \\\"b\\\") }}\"\n\
+                    \x20 - description: \"{{ doc(var('x')) }}\"\n";
+        let found: Vec<(Name, Vec<&str>)> = docs(text)
+            .into_iter()
+            .map(|call| (call.name, call.arguments.iter().map(|range| &text[range.clone()]).collect()))
+            .collect();
+        let doc = |package: Option<&str>, name: &str| Name::new(reference::Kind::Doc, package, name);
+        assert_eq!(found, [(doc(None, "a"), vec!["a"]), (doc(Some("p"), "b"), vec!["p", "b"])], "no literal, no doc");
     }
 
     #[test]

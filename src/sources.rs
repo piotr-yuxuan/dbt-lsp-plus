@@ -4,7 +4,7 @@
 //! Jinja tags and in YAML without them, and declared under `sources:` in a
 //! properties file.  Every function here is pure.
 
-use crate::project::{self, Insertion, Project, SourceTable};
+use crate::project::{self, Insertion, Project, Scanned, SourceTable};
 use crate::reference::{self, Name};
 use crate::scan::{self, Call};
 use crate::text::{Encoding, LineStarts};
@@ -63,6 +63,26 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Name> {
     tables.into_iter().find_map(|declared| match (inside(&declared.source_range), inside(&declared.table_range)) {
         (true, _) => Some(Name::new(reference::Kind::Source, None, &declared.source)),
         (_, true) => Some(Name::new(reference::Kind::Table { source: declared.source }, None, &declared.table)),
+        _ => None,
+    })
+}
+
+/// The source or table named at OFFSET of the file whose scan is SCANNED:
+/// an argument of a `source()` call, or a source's or table's `name:` under
+/// `sources:`.
+pub fn name_at(scanned: &Scanned, offset: usize) -> Option<Name> {
+    let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
+    for call in &scanned.calls {
+        let Name { kind: reference::Kind::Table { source }, .. } = &call.name else { continue };
+        match (call.arguments.first().is_some_and(inside), call.arguments.get(1).is_some_and(inside)) {
+            (true, _) => return Some(Name::new(reference::Kind::Source, None, source)),
+            (_, true) => return Some(call.name.clone()),
+            _ => {}
+        }
+    }
+    scanned.tables.iter().find_map(|declared| match (inside(&declared.source_range), inside(&declared.table_range)) {
+        (true, _) => Some(Name::new(reference::Kind::Source, None, &declared.source)),
+        (_, true) => Some(Name::new(reference::Kind::Table { source: declared.source.clone() }, None, &declared.table)),
         _ => None,
     })
 }
