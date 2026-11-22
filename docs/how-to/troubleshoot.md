@@ -129,8 +129,9 @@ seconds, 10 by default.
 - **"...: dbt-lsp-plus answers alone." after restarts, or at the start.**
   `dbt lsp` ended four times in ten minutes, could not start, or exited
   before it answered `initialize`.  The message names why: its exit
-  status, or why it could not start; when it ran, its standard error, in
-  the client's log, says more.  The proxy then answers as with dbt-oss
+  status, why it could not start, or that it did not answer or refused its
+  `initialize`; when it ran, its standard error, in the client's log, says
+  more.  The proxy then answers as with dbt-oss
   (see [Use it with dbt-oss alone](use-with-dbt-oss.md)).
 - **"dbt lsp compiled nothing: …".**  `dbt lsp` compiled none of the
   project, so it has nothing to answer from (a listing answers

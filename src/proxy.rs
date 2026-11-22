@@ -2392,7 +2392,8 @@ impl<W: Write> Proxy<W> {
             published.sort();
             published.iter().for_each(|path| self.publish(path));
             // As after a change alone, with no request: the problems of a parse made in front were never kept.
-            self.parsing.fresh = false;
+            // A parse under way, or whose end is queued behind this, is of the project as it is: no second one.
+            self.parsing.fresh &= self.parsing.running.is_some();
             return self.want_index();
         };
         self.backend.life = Life::Waiting(now + delay);
@@ -3066,6 +3067,26 @@ mod tests {
         after_shutdown.lost_server(why);
         assert!(matches!(&after_shutdown.backend.life, Life::Lost(lost) if lost == why));
         assert!(after_shutdown.client.is_empty(), "nothing after shutdown");
+    }
+
+    #[test]
+    fn a_give_up_during_a_parse_starts_no_second_one() {
+        // Whether the index is still fresh once the last restart of the window is spent, a parse under way or not.
+        let fresh_after_give_up = |running: Option<config::Running>| {
+            let mut proxy = Proxy::new(Vec::new(), Life::default(), None);
+            proxy.initialized = true;
+            let ago = |seconds| Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap();
+            proxy.backend.restarts = vec![ago(30), ago(20), ago(10)];
+            (proxy.parsing.fresh, proxy.parsing.running) = (true, running);
+            proxy.lost_server("dbt lsp exited (x)");
+            assert!(matches!(proxy.backend.life, Life::Lost(_)), "given up");
+            let fresh = proxy.parsing.fresh;
+            proxy.stop_parse();
+            fresh
+        };
+        // A parse in flight, whose `Parsed` event `on_parsed` has yet to take.
+        assert!(fresh_after_give_up(Some(config::Running::spawn(|_| {}))), "a parse under way");
+        assert!(!fresh_after_give_up(None), "no parse under way");
     }
 
     #[test]
