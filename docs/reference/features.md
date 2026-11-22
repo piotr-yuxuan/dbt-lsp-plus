@@ -95,12 +95,13 @@ references and hints.  A hover's text from `dbt lsp` follows the
 proxy's part under a line `**dbt lsp**`, or `dbt lsp:` in plain text.
 The mode `plus` gives the proxy's answer by itself, at once.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
-ten minutes, and gives it the open documents as they stand.  Without
-`dbt lsp`, and while it restarts, the proxy keeps serving its own
-features; while it restarts and after a fourth crash,
+ten minutes, and gives it the open documents as they stand; while it
+restarts, the proxy keeps serving its own features, and
 `dbt-lsp-plus.nodeInfo`, the summary and the hints too, from its own
-parse.  With a `dbt lsp` that cannot start, that parse runs the same dbt
-and fails, and `nodeInfo` gives its failure.
+parse.  After a fourth crash, and when `dbt lsp` cannot start or exits
+before it answers `initialize`, the proxy answers alone, as with dbt-oss.
+With a `dbt lsp` that cannot start, its parse runs the same dbt and
+fails, and `nodeInfo` and a hover on a node give its failure.
 
 With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
 see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).

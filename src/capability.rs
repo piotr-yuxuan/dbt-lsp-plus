@@ -186,6 +186,13 @@ impl Capability {
         !self.name.contains('/')
     }
 
+    /// Whether it is a method the proxy does not add, announced by a key,
+    /// with no kinds of target: hover and inlay hints, which the proxy
+    /// answers whole when alone.
+    pub fn whole(&self) -> bool {
+        !self.added && self.key.is_some() && self.kinds.is_empty()
+    }
+
     /// How long a merged request waits for dbt lsp before the client gets
     /// the proxy's answer alone: `MERGE_DEADLINE` when the proxy has a
     /// PART, `NOTHING_DEADLINE` when it has nothing; none for a rule that

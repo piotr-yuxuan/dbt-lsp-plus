@@ -55,7 +55,7 @@ src/packages.rs               whether dbt would install packages before it parse
 src/locate.rs                 the project of a document, the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
-src/proxy.rs                  the event loop, the server process, the listing
+src/proxy.rs                  the event loop; the Backend, dbt lsp's process: its life, its listings
 src/cli.rs                    the subcommands doctor and select, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in

@@ -21,7 +21,7 @@ use std::fs;
 use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitCode, ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -116,27 +116,162 @@ const RUNS_EVERY: Duration = Duration::from_secs(1);
 const NO_CUT: &str = "dbt-lsp-plus: unshare -rnm cannot cut dbt parse off the network and the project here: \
                       dbt's flags and the guard on packages alone keep it offline and the project as it is";
 
-/// What the proxy knows to start a server that died again.
+/// Why no dbt lsp runs before any project, said to no one.
+const NO_PROJECT: &str = "no dbt project yet";
+
+/// The `dbt lsp` process behind the session, at most one, since one
+/// `initialize` answer gives one capability set, and what it told the
+/// client: the model's Backend.
 #[derive(Default)]
-struct Restart {
+struct Backend {
+    life: Life,
     /// When each restart of the window began.
-    past: Vec<Instant>,
-    /// When the next restart starts.
-    due: Option<Instant>,
-    /// A server started again, until it answers its `initialize`: its id,
-    /// and the deadline of that answer.
-    starting: Option<(Server, String, Instant)>,
-    /// The client's `initialize` parameters, which a restart sends again.
+    restarts: Vec<Instant>,
+    /// The generation of the last process started, from 0.
+    spawned: u64,
+    /// The ids of its registrations, which the client holds across lives.
+    registered: HashSet<String>,
+    /// The progress tokens it began and has not ended.
+    progress: HashMap<String, Value>,
+    /// The commands it listed in its answer to the client's `initialize`.
+    commands: HashSet<String>,
+    /// How many times its nodes changed or went: the graph holds while this stays.
+    nodes_generation: u64,
+    /// The failures said this session, each by its first error's key.
+    said: HashSet<String>,
+    /// Whether a compilation with no end was said: once a session.
+    stalled: bool,
+}
+
+/// Where the Backend is in its life.
+enum Life {
+    /// None was started: why, as the client is told (the backend is
+    /// never; on the given route `<dbt> has no lsp`, on the folder's `it
+    /// has no lsp`; dbt lsp is not started for a project found from a
+    /// file), after which none will be; or no project yet, before which
+    /// none can be.
+    NotStarted(String),
+    /// This process runs: the first, which the client's `initialize`
+    /// reaches, or a restarted one that answered its own.
+    Running(Running),
+    /// Lost: a restart is due then.
+    Waiting(Instant),
+    /// Restarted, until it answers its `initialize`: the process, the id
+    /// of that request, the deadline of its answer.
+    Starting(Server, String, Instant),
+    /// None runs, and none will: why (it could not start, it exited
+    /// before the client's `initialize` was answered or after `shutdown`,
+    /// or past its restarts).
+    Lost(String),
+}
+
+impl Default for Life {
+    fn default() -> Self {
+        Life::NotStarted(NO_PROJECT.to_owned())
+    }
+}
+
+/// A running `dbt lsp`: its process, and what the proxy asked of it and
+/// timed, which end with it.
+struct Running {
+    server: Server,
+    listings: Listings,
+    compiling: Compiling,
+}
+
+impl Running {
+    fn new(server: Server) -> Running {
+        Running { server, listings: Listings::default(), compiling: Compiling::default() }
+    }
+
+    /// Sends the listing of selector SLOT, under an id past NEXT_ID that no
+    /// request of the client's in FORWARDED carries, as the listing in
+    /// flight; nothing once the client asked for SHUTDOWN, after which LSP
+    /// allows only `exit`.
+    fn send_list(
+        &mut self,
+        slot: usize,
+        next_id: &mut u64,
+        forwarded: &HashMap<String, (Value, Pending)>,
+        shutdown: bool,
+    ) {
+        if shutdown {
+            return;
+        }
+        let id = loop {
+            *next_id += 1;
+            let id = format!("{OWN_ID}{next_id}");
+            if !forwarded.contains_key(&key(&json!(id))) {
+                break id;
+            }
+        };
+        let params = json!({"command": "dbt.listNodes", "arguments": [SELECTORS[slot]]});
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
+        self.listings.listing = Some((id, slot, Instant::now()));
+        // A failed write means the server is gone; its reader reports it.
+        let _ = rpc::write_body(&mut self.server.stdin, &serde_json::to_vec(&request).unwrap_or_default());
+    }
+}
+
+/// The proxy's listings of one process, and the nodes they gave: a new
+/// process's are the default.
+#[derive(Default)]
+struct Listings {
+    /// The proxy's `dbt.listNodes` in flight: its id, its selector's slot, when it was sent.
+    listing: Option<(String, usize, Instant)>,
+    /// The nodes of the first selector, while the second is listed.
+    listed: Vec<ServerNode>,
+    attempts: u32,
+    /// The graph may have changed while it could not be listed: list it later.
+    relist: bool,
+    nodes: Option<Vec<ServerNode>>,
+}
+
+impl Backend {
+    /// Whether no dbt lsp answers now, nor will in this session: none was
+    /// started, or it was lost for good.
+    fn alone(&self) -> bool {
+        matches!(self.life, Life::NotStarted(_) | Life::Lost(_))
+    }
+
+    fn running(&self) -> Option<&Running> {
+        match &self.life {
+            Life::Running(running) => Some(running),
+            _ => None,
+        }
+    }
+
+    fn running_mut(&mut self) -> Option<&mut Running> {
+        match &mut self.life {
+            Life::Running(running) => Some(running),
+            _ => None,
+        }
+    }
+
+    /// The next instant at which the life needs the loop: a restart's
+    /// due, a restarted process's deadline, a running one's listing's
+    /// deadline or its compilation's.
+    fn due(&self) -> Option<Instant> {
+        match &self.life {
+            Life::Waiting(due) => Some(*due),
+            Life::Starting(.., deadline) => Some(*deadline),
+            Life::Running(running) => {
+                let listing = running.listings.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
+                [listing, running.compiling.due()].into_iter().flatten().min()
+            }
+            Life::NotStarted(_) | Life::Lost(_) => None,
+        }
+    }
+}
+
+/// The client's, which a restart sends again.
+#[derive(Default)]
+struct Replay {
+    /// The client's `initialize` parameters.
     initialize: Option<Value>,
     /// The language and last version of each open document.
     languages: HashMap<PathBuf, Value>,
     versions: HashMap<PathBuf, Value>,
-    /// The ids of the registrations the client holds.
-    registered: HashSet<String>,
-    /// The progress tokens the server began and has not ended.
-    progress: HashMap<String, Value>,
-    /// The generation of the last server started.
-    spawned: u64,
 }
 
 /// The wait before restarting a server that died at NOW, after the restarts
@@ -171,6 +306,25 @@ struct Server {
     /// Which process of the session it is, from 0: its events carry it, so
     /// that those of a process the proxy let go of are dropped.
     generation: u64,
+}
+
+impl Server {
+    /// Ends the process: its input closed, GRACE to exit, then killed
+    /// unless it exited, and reaped; its status, if known.
+    fn reap(self, grace: Duration) -> Option<ExitStatus> {
+        let Server { mut child, stdin, .. } = self;
+        drop(stdin);
+        let deadline = Instant::now() + grace;
+        let mut status = child.try_wait().ok().flatten();
+        while status.is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+            status = child.try_wait().ok().flatten();
+        }
+        if status.is_none() {
+            let _ = child.kill();
+        }
+        status.or_else(|| child.wait().ok())
+    }
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
@@ -299,17 +453,13 @@ struct Parsing {
     generation: u64,
 }
 
-/// What dbt lsp said of its compilations.
+/// What a dbt lsp process said of its compilations: whether one runs.
 #[derive(Default)]
 struct Compiling {
     /// Since when it has compiled, from its last start, with no end since.
     since: Option<Instant>,
     /// Whether that compilation's deadline has passed, said or not.
     told: bool,
-    /// Whether a compilation with no end was said: once a session.
-    stalled: bool,
-    /// The failures said this session, each by its first error's key.
-    said: HashSet<String>,
 }
 
 impl Compiling {
@@ -321,17 +471,12 @@ impl Compiling {
 }
 
 /// The generations of the project, the server's nodes and the index a
-/// graph was made of.
-type MadeOf = (u64, u64, u64);
+/// graph was made of, and whether it took the index's edges, alone.
+type MadeOf = (u64, u64, u64, bool);
 
 struct Proxy<W: Write> {
     client: W,
-    server: Option<Server>,
-    /// Whether the user's dbt has no `lsp`, as dbt-oss: no server runs, and
-    /// the proxy answers alone, from its scan and the user's `dbt parse`.
-    standalone: bool,
-    /// Why there is no server, told to the client once it is initialized.
-    absent: Option<String>,
+    backend: Backend,
     /// The line that says which project and which dbt the proxy found,
     /// told to the client once it can be.
     line: Option<String>,
@@ -376,16 +521,6 @@ struct Proxy<W: Write> {
     /// Whether the client opened a document, the first of which prompts a listing.
     opened: bool,
     next_id: u64,
-    /// The proxy's `dbt.listNodes` in flight: its id, its selector's slot, when it was sent.
-    listing: Option<(String, usize, Instant)>,
-    /// The nodes of the first selector, while the second is listed.
-    listed: Vec<ServerNode>,
-    attempts: u32,
-    /// The graph may have changed while it could not be listed: list it later.
-    relist: bool,
-    nodes: Option<Vec<ServerNode>>,
-    /// How many times the server's nodes changed: the graph holds while this stays.
-    nodes_generation: u64,
     shutdown: bool,
     /// Whether the client reads markdown in a hover.
     markdown: bool,
@@ -396,9 +531,8 @@ struct Proxy<W: Write> {
     /// The proxy's own requests to the client, whose answers stay here.
     asked: HashSet<String>,
     diagnostics: Diagnostics,
-    restart: Restart,
+    replay: Replay,
     parsing: Parsing,
-    compiling: Compiling,
     /// The scan of the project, kept between requests, and refreshed once
     /// an epoch: one a request or event.
     cache: RefCell<cache::Cache>,
@@ -419,8 +553,6 @@ struct Proxy<W: Write> {
     /// The shadow, on from the server's answer to `initialize` when the user
     /// set it.
     shadow: Option<shadow::Shadow>,
-    /// The commands that the server listed in its answer to `initialize`.
-    server_commands: HashSet<String>,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
     /// waiting, with the client's id, their command line and their
     /// directory, and the one under way.
@@ -524,12 +656,10 @@ pub fn project_dir(command: &[String]) -> Option<PathBuf> {
 }
 
 impl<W: Write> Proxy<W> {
-    fn new(client: W, server: Option<Server>, absent: Option<String>, root: Option<PathBuf>) -> Self {
+    fn new(client: W, life: Life, root: Option<PathBuf>) -> Self {
         let mut proxy = Proxy {
             client,
-            server,
-            standalone: false,
-            absent,
+            backend: Backend { life, ..Backend::default() },
             line: None,
             root: None,
             canonical_root: None,
@@ -550,21 +680,14 @@ impl<W: Write> Proxy<W> {
             uris: HashMap::new(),
             opened: false,
             next_id: 0,
-            listing: None,
-            listed: Vec::new(),
-            attempts: 0,
-            relist: false,
-            nodes: None,
-            nodes_generation: 0,
             shutdown: false,
             markdown: false,
             hint_refresh: false,
             watches: false,
             asked: HashSet::new(),
             diagnostics: Diagnostics::default(),
-            restart: Restart::default(),
+            replay: Replay::default(),
             parsing: Parsing::default(),
-            compiling: Compiling::default(),
             cache: RefCell::default(),
             filling: RefCell::default(),
             epoch: 0,
@@ -573,7 +696,6 @@ impl<W: Write> Proxy<W> {
             changes: 0,
             graph: RefCell::default(),
             shadow: None,
-            server_commands: HashSet::new(),
             runs: VecDeque::new(),
             run: None,
         };
@@ -598,9 +720,9 @@ impl<W: Write> Proxy<W> {
     }
 
     fn send_server(&mut self, body: &[u8]) {
-        if let Some(server) = &mut self.server {
+        if let Some(running) = self.backend.running_mut() {
             // A failed write means the server is gone; its reader reports it.
-            let _ = rpc::write_body(&mut server.stdin, body);
+            let _ = rpc::write_body(&mut running.server.stdin, body);
         }
     }
 
@@ -616,7 +738,7 @@ impl<W: Write> Proxy<W> {
         };
         let announced =
             |method: &str| capability::of(method).and_then(|c| c.key).is_some_and(|key| !lacks(capabilities, key));
-        self.table = modes::Table::new(&self.settings, &announced, self.standalone);
+        self.table = modes::Table::new(&self.settings, &announced);
         // A method the proxy answers is announced; one left to the server, as the server announced it,
         // and with no backend, not at all.
         let added = CAPABILITIES.iter().filter(|c| c.added && self.table.mode(c.name) != Mode::Dbt);
@@ -627,7 +749,7 @@ impl<W: Write> Proxy<W> {
             let followers = CAPABILITIES.iter().filter(|c| c.leader == Some(added.name)).map(|c| c.name);
             self.owned.extend(std::iter::once(added.name).chain(followers));
         }
-        let unanswered = CAPABILITIES.iter().filter(|c| self.standalone && self.table.mode(c.name) == Mode::Dbt);
+        let unanswered = CAPABILITIES.iter().filter(|c| self.backend.alone() && self.table.mode(c.name) == Mode::Dbt);
         for key in unanswered.filter_map(|c| c.key) {
             capabilities.remove(key);
         }
@@ -652,8 +774,8 @@ impl<W: Write> Proxy<W> {
         // The proxy's own commands, beside the server's, which it may forward its commands for clients to.
         let provider = capabilities.entry("executeCommandProvider").or_insert_with(|| json!({}));
         let listed = provider.get("commands").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-        self.server_commands = listed.map(str::to_owned).collect();
-        let clients = commands::announced(&|dbt| self.server_commands.contains(dbt), self.runs_cli());
+        self.backend.commands = listed.map(str::to_owned).collect();
+        let clients = commands::announced(&|dbt| self.backend.commands.contains(dbt), self.runs_cli());
         let plus = CAPABILITIES.iter().filter(|c| c.is_command() && c.providers == [Provider::Plus]).map(|c| c.name);
         let own = plus.chain(self.shadow.as_ref().map(|_| shadow::SUMMARY));
         if let Some(commands) = provider.as_object_mut().map(|provider| provider.entry("commands").or_insert(json!([])))
@@ -676,7 +798,7 @@ impl<W: Write> Proxy<W> {
             ));
         }
         said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
-        let unanswered = self.table.unanswered();
+        let unanswered = self.table.unanswered(self.backend.alone());
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
         }
@@ -695,24 +817,22 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// Answers `initialize` without a server: the proxy's own features only.
+    /// Answers `initialize` with no dbt lsp running, which leaves the
+    /// session alone: the proxy's own features, and hovers and hints from
+    /// the parse.
     fn initialize_alone(&mut self, id: &Value) {
         let mut capabilities = serde_json::Map::new();
-        capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2}));
         // Alone, the proxy still answers references and renames of sources,
         // and definitions on the targets of `navigation`: its kinds.
         let provided = CAPABILITIES.iter().filter(|c| !c.added).filter_map(|c| c.key.map(|key| (key, c)));
-        for (key, _) in provided.clone().filter(|(_, c)| !c.kinds.is_empty()) {
+        for (key, _) in provided.filter(|(_, c)| !c.kinds.is_empty()) {
             capabilities.insert(key.into(), json!(true));
         }
         // Alone for good, it wants saves, which start a parse, and answers
         // hovers and hints from the parse alone: whole.
-        if self.standalone {
-            capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2, "save": {}}));
-            for (key, whole) in provided.filter(|(_, c)| c.kinds.is_empty()) {
-                capabilities.insert(key.into(), json!(true));
-                self.owned.insert(whole.name);
-            }
+        capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2, "save": {}}));
+        for key in CAPABILITIES.iter().filter(|c| c.whole()).filter_map(|c| c.key) {
+            capabilities.insert(key.into(), json!(true));
         }
         self.add_capabilities(&mut capabilities);
         self.watch_runs();
@@ -727,17 +847,15 @@ impl<W: Write> Proxy<W> {
         }
         // A dbt without `lsp` is no failure: said once, out of the user's way,
         // by the line of the dbt found, when one was looked for.
-        if self.standalone {
-            let dbt = self.parsing.server.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>();
-            let text = match self.never {
-                true => "dbt-lsp-plus: the backend is never: dbt-lsp-plus answers alone.".to_owned(),
-                false => format!("dbt-lsp-plus: {} has no lsp: dbt-lsp-plus answers alone.", dbt.join(" ")),
-            };
-            self.line.get_or_insert(text);
-            return self.say_found();
-        }
-        let why = self.absent.take().unwrap_or_else(|| "dbt lsp is not running".into());
-        let text = format!("{why}: dbt-lsp-plus serves only its own features: symbols, lineage, folding, renames.");
+        let why = match &self.backend.life {
+            Life::NotStarted(why) => {
+                self.line.get_or_insert(format!("dbt-lsp-plus: {why}: dbt-lsp-plus answers alone."));
+                return self.say_found();
+            }
+            Life::Lost(why) => why.clone(),
+            _ => "dbt lsp is not running".to_owned(),
+        };
+        let text = format!("{why}: dbt-lsp-plus answers alone.");
         self.send_client(
             &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 2, "message": text}}),
         );
@@ -780,13 +898,16 @@ impl<W: Write> Proxy<W> {
         let line = format!("dbt-lsp-plus: project {root_shown}, dbt {named} ({source}){skipped}{tail}");
         eprintln!("{line}");
         self.line = Some(line);
-        (self.parsing.server, self.parsing.dir, self.standalone) = (found.command, Some(root.clone()), alone.is_some());
-        if let (None, Some(events)) = (alone, self.parsing.events.clone()) {
-            match spawn_server(&self.parsing.server, &events, 0, Some(&root)) {
-                Ok(server) => self.server = Some(server),
-                Err(why) => self.absent = Some(why),
-            }
-        }
+        (self.parsing.server, self.parsing.dir) = (found.command, Some(root.clone()));
+        // Without a channel, in the unit tests, in front with none started.
+        self.backend.life = match (alone, self.parsing.events.clone()) {
+            (Some(why), _) => Life::NotStarted(why.to_owned()),
+            (None, Some(events)) => match spawn_server(&self.parsing.server, &events, 0, Some(&root)) {
+                Ok(server) => Life::Running(Running::new(server)),
+                Err(why) => Life::Lost(why),
+            },
+            (None, None) => Life::Lost("dbt lsp is not running".into()),
+        };
         self.set_root(root);
     }
 
@@ -809,7 +930,7 @@ impl<W: Write> Proxy<W> {
         let options = params.get("initializationOptions").unwrap_or(&Value::Null);
         (self.settings, self.refused) = self.settings.over(options);
         // As the server got it before modes, at a restart too.
-        self.restart.initialize = Some(modes::without_section(params));
+        self.replay.initialize = Some(modes::without_section(params));
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
@@ -827,7 +948,6 @@ impl<W: Write> Proxy<W> {
         match (folder, &self.root) {
             (Some(folder), None) => self.take_project(folder, false),
             (Some(folder), Some(_)) if same(&folder) => self.set_root(folder),
-            (None, None) => self.standalone = true,
             _ => {}
         }
         self.scan_first();
@@ -864,7 +984,7 @@ impl<W: Write> Proxy<W> {
         if matches!(method, "textDocument/didChange" | "textDocument/didSave") {
             self.diagnostics.edited.insert(path.clone(), SystemTime::now());
             // A server gone publishes no more: its old set is no reason to wait.
-            let server = self.diagnostics.server.get(&path).filter(|_| self.server.is_some());
+            let server = self.diagnostics.server.get(&path).filter(|_| self.backend.running().is_some());
             // So are the parse's problems, alone.
             let parsed = self.diagnostics.parsed.get(&path).is_some_and(|problems| !problems.is_empty());
             let ranged = server.is_some_and(|(_, diagnostics)| !diagnostics.is_empty()) || parsed;
@@ -878,12 +998,12 @@ impl<W: Write> Proxy<W> {
                 self.documents.insert(path.clone(), text.to_owned());
                 self.edited += 1;
                 self.edits.insert(path.clone(), self.edited);
-                self.restart.languages.insert(path.clone(), params["textDocument"]["languageId"].clone());
-                self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
+                self.replay.languages.insert(path.clone(), params["textDocument"]["languageId"].clone());
+                self.replay.versions.insert(path.clone(), params["textDocument"]["version"].clone());
                 self.uris.insert(path, uri.unwrap_or_default().to_owned());
             }
             "textDocument/didChange" => {
-                self.restart.versions.insert(path.clone(), params["textDocument"]["version"].clone());
+                self.replay.versions.insert(path.clone(), params["textDocument"]["version"].clone());
                 self.changes += 1;
                 self.edited += 1;
                 self.edits.insert(path.clone(), self.edited);
@@ -895,8 +1015,8 @@ impl<W: Write> Proxy<W> {
             "textDocument/didClose" => {
                 // An unsaved text gives way to the file's.
                 self.changes += 1;
-                self.restart.languages.remove(&path);
-                self.restart.versions.remove(&path);
+                self.replay.languages.remove(&path);
+                self.replay.versions.remove(&path);
                 self.documents.remove(&path);
                 self.edits.remove(&path);
                 self.uris.remove(&path);
@@ -923,13 +1043,15 @@ impl<W: Write> Proxy<W> {
     /// the last parse's: made again only when the project, the nodes or the
     /// index changed, as the call hierarchy asks for it at each step.
     fn graph(&self, project: &Project) -> Rc<Graph> {
-        let made_of = (self.cache.borrow().generation, self.nodes_generation, self.parsing.generation);
+        let alone = self.backend.alone();
+        let made_of = (self.cache.borrow().generation, self.backend.nodes_generation, self.parsing.generation, alone);
         if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
             return graph.clone();
         }
         let scanned = Graph::scanned(project);
-        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::ParseIndex::listed);
-        let graph = Rc::new(match parsed.as_ref().or(self.nodes.as_ref()) {
+        let parsed = self.parsing.index.as_ref().filter(|_| alone).map(config::ParseIndex::listed);
+        let nodes = self.backend.running().and_then(|running| running.listings.nodes.as_ref());
+        let graph = Rc::new(match parsed.as_ref().or(nodes) {
             Some(nodes) => scanned.with_server(nodes, project),
             None => scanned,
         });
@@ -1002,7 +1124,9 @@ impl<W: Write> Proxy<W> {
         if self.root.is_none() && method != "initialize" {
             return Route::Answer(Value::Null);
         }
-        if let Some(owned) = self.owned.get(method) {
+        // Alone, hovers and hints are the proxy's, whole.
+        let whole = || capability::of(method).filter(|c| self.backend.alone() && c.whole()).map(|c| c.name);
+        if let Some(owned) = self.owned.get(method).copied().or_else(whole) {
             return Route::Here(owned);
         }
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
@@ -1014,7 +1138,7 @@ impl<W: Write> Proxy<W> {
             return if own.providers == [Provider::Plus] { Route::Here(own.name) } else { Route::Command(own.name) };
         }
         // Where it unites, dbt lsp is asked at every position, and the proxy's part kept.
-        if self.table.unites(method) {
+        if self.table.unites(method, self.backend.alone()) {
             return Route::Forward;
         }
         // In `dbt`, the proxy looks at nothing.
@@ -1024,8 +1148,8 @@ impl<W: Write> Proxy<W> {
         }
         // Without a server, a definition with no target is null, not a failure, and `shutdown` is null as LSP asks.
         let lifecycle = ["textDocument/definition", "shutdown"].contains(&method);
-        let unserved = (lifecycle && self.server.is_none()).then_some(Value::Null);
-        self.table.nothing(method).or(unserved).map_or(Route::Forward, Route::Answer)
+        let unserved = (lifecycle && self.backend.running().is_none()).then_some(Value::Null);
+        self.table.nothing(method, self.backend.alone()).or(unserved).map_or(Route::Forward, Route::Answer)
     }
 
     /// A request of a capability with kinds of target that the proxy
@@ -1238,18 +1362,17 @@ impl<W: Write> Proxy<W> {
     /// shutdown, a server command with `lsp`.
     fn want_index(&mut self) {
         // A listing makes dbt lsp compile, as the first document opened does.
-        if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
+        let listing = self.backend.running().is_some_and(|running| running.listings.listing.is_some());
+        if !self.parsing.compiled && !listing && !self.shutdown {
             self.list_nodes();
         }
         self.parsing.wanted |= !self.parsing.compiled;
         let parsing = &self.parsing;
         // With no server, none resolves the packages first: their guard is enough.
-        let can = self.server.is_none() || parsing.compiled;
+        let can = self.backend.running().is_none() || parsing.compiled;
         let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        // A server that compiled since the last change resolved the packages, though it may be gone since.
-        let alone = self.server.is_none() && !self.parsing.compiled;
-        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, alone) {
+        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.guards_packages()) {
             return self.log_parse(&why);
         }
         let cache = self.cache(&root);
@@ -1262,6 +1385,13 @@ impl<W: Write> Proxy<W> {
         let report = Box::new(move |outcome| drop(events.send(Event::Parsed(outcome))));
         let dir = self.parsing.dir.clone();
         self.parsing.running = Some(config::start(command, dir, cache, config::PARSE_DEADLINE, report));
+    }
+
+    /// Whether dbt's packages are guarded as alone: no dbt lsp runs, and
+    /// none compiled since the last change, as one that did resolved them,
+    /// though it may be gone since.
+    fn guards_packages(&self) -> bool {
+        self.backend.running().is_none() && !self.parsing.compiled
     }
 
     /// This process's cache of ROOT, under the user's, made at its first
@@ -1287,7 +1417,7 @@ impl<W: Write> Proxy<W> {
         let Some(arguments) = commands::arguments(command, params) else {
             return self.reply_error(id, INVALID_PARAMS, "invalid parameters");
         };
-        let serves = |dbt: &str| self.server.is_some() && self.server_commands.contains(dbt);
+        let serves = |dbt: &str| self.backend.running().is_some() && self.backend.commands.contains(dbt);
         match commands::route(command, &serves, self.runs_cli()) {
             Ok(Provider::DbtLsp) => {
                 let dbt = capability::of(command).and_then(|own| own.server);
@@ -1327,7 +1457,7 @@ impl<W: Write> Proxy<W> {
             }
             _ => Ok(commands::nodes_job(argument.as_str().unwrap_or_default())),
         };
-        let refused = packages::refused(&root, &self.parsing.server, true, self.standalone);
+        let refused = packages::refused(&root, &self.parsing.server, true, self.guards_packages());
         let dir = self.cache(&root).join("run");
         let line =
             job.as_ref().ok().and_then(|job| config::dbt_command(&self.parsing.server, &root, &dir, true, &job.words));
@@ -1404,7 +1534,7 @@ impl<W: Write> Proxy<W> {
         self.on_problems(outcome.problems);
         // Alone, a change during this parse wants the next one now: no
         // request may come to ask for it.
-        if self.standalone {
+        if self.backend.alone() {
             self.want_index();
         }
     }
@@ -1416,7 +1546,7 @@ impl<W: Write> Proxy<W> {
     /// such file is logged, once.  Each file with problems, before or now,
     /// is published again.
     fn on_problems(&mut self, problems: Option<Vec<parse_log::Problem>>) {
-        let (true, Some(problems)) = (self.standalone, problems) else { return };
+        let (true, Some(problems)) = (self.backend.alone(), problems) else { return };
         // The packages, while the project's configuration still reads.
         let packages: Vec<PathBuf> =
             self.project().map_or_else(Vec::new, |project| project.packages.values().cloned().collect());
@@ -1505,7 +1635,9 @@ impl<W: Write> Proxy<W> {
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
         // Alone, the call hierarchy's graph needs the index too.
         let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
-        if capability::of(method).is_some_and(|capability| capability.wants_index) || (self.standalone && hierarchy) {
+        if capability::of(method).is_some_and(|capability| capability.wants_index)
+            || (self.backend.alone() && hierarchy)
+        {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
@@ -1549,46 +1681,29 @@ impl<W: Write> Proxy<W> {
     /// Asks the server for the graph, unless a listing is under way, the
     /// proxy's own or the client's, or there is no server.
     fn list_nodes(&mut self) {
-        if self.listing.is_some() || self.client_listing() {
-            self.relist = true;
-        } else if self.server.is_some() {
-            self.send_list(0);
+        let client = self.client_listing();
+        let Some(running) = self.backend.running_mut() else { return };
+        if running.listings.listing.is_some() || client {
+            running.listings.relist = true;
+        } else {
+            running.send_list(0, &mut self.next_id, &self.forwarded, self.shutdown);
         }
-    }
-
-    /// Sends the listing of selector SLOT, under an id that no pending
-    /// request of the client's carries; nothing once the client asked for
-    /// shutdown, after which LSP allows only `exit`.
-    fn send_list(&mut self, slot: usize) {
-        if self.shutdown {
-            return;
-        }
-        let id = loop {
-            self.next_id += 1;
-            let id = format!("{OWN_ID}{}", self.next_id);
-            if !self.forwarded.contains_key(&key(&json!(id))) {
-                break id;
-            }
-        };
-        let params = json!({"command": "dbt.listNodes", "arguments": [SELECTORS[slot]]});
-        let request = json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
-        self.listing = Some((id, slot, Instant::now()));
-        self.send_server(&serde_json::to_vec(&request).unwrap_or_default());
     }
 
     /// Lists the graph if a change came while it could not be.
     fn resume(&mut self) {
-        if std::mem::take(&mut self.relist) {
+        if self.backend.running_mut().is_some_and(|running| std::mem::take(&mut running.listings.relist)) {
             self.list_nodes();
         }
     }
 
     /// Abandons a listing unanswered for LIST_TIMEOUT; the graph stays.
     fn expire_listing(&mut self) {
-        if self.listing.as_ref().is_some_and(|(_, _, sent)| sent.elapsed() >= LIST_TIMEOUT) {
-            self.listing = None;
-            self.listed.clear();
-            self.attempts = 0;
+        let Some(listings) = self.backend.running_mut().map(|running| &mut running.listings) else { return };
+        if listings.listing.as_ref().is_some_and(|(_, _, sent)| sent.elapsed() >= LIST_TIMEOUT) {
+            listings.listing = None;
+            listings.listed.clear();
+            listings.attempts = 0;
             self.resume();
         }
     }
@@ -1596,35 +1711,39 @@ impl<W: Write> Proxy<W> {
     /// Takes the server's answer to the proxy's listing in flight; the answer
     /// to an abandoned one is dropped.  A failed listing keeps the graph.
     fn on_own_response(&mut self, id: &str, message: &Value) {
-        if self.restart.starting.as_ref().is_some_and(|(_, own, _)| own == id) {
+        if matches!(&self.backend.life, Life::Starting(_, own, _) if own == id) {
             return self.on_restarted(message);
         }
-        let Some((_, slot, _)) = self.listing.take_if(|(own, ..)| own == id) else { return };
+        let client = self.client_listing();
+        // The process's listings beside the Backend's count of their nodes.
+        let Life::Running(running) = &mut self.backend.life else { return };
+        let listings = &mut running.listings;
+        let Some((_, slot, _)) = listings.listing.take_if(|(own, ..)| own == id) else { return };
         let result = message.get("result").unwrap_or(&Value::Null);
-        if result.get("error") == Some(&json!("Operation cancelled")) && self.attempts < MAX_ATTEMPTS {
-            self.attempts += 1;
-            self.listed.clear();
-            self.relist = true;
+        if result.get("error") == Some(&json!("Operation cancelled")) && listings.attempts < MAX_ATTEMPTS {
+            listings.attempts += 1;
+            listings.listed.clear();
+            listings.relist = true;
             return self.resume();
         }
         // `*` lists nothing only when the project failed to compile: the scan found resources.
         let listed = graph::parse_list_nodes(result).into_nodes().filter(|nodes| slot == 1 || !nodes.is_empty());
         match (slot, listed) {
-            (0, Some(nodes)) if !self.client_listing() => {
-                self.listed = nodes;
-                return self.send_list(1);
+            (0, Some(nodes)) if !client => {
+                listings.listed = nodes;
+                return running.send_list(1, &mut self.next_id, &self.forwarded, self.shutdown);
             }
             // The client's own listing would cancel the second selector: start again after it.
-            (0, Some(_)) => self.relist = true,
+            (0, Some(_)) => listings.relist = true,
             (_, Some(sources)) => {
-                let mut nodes = std::mem::take(&mut self.listed);
+                let mut nodes = std::mem::take(&mut listings.listed);
                 nodes.extend(sources);
-                self.nodes = Some(nodes);
-                self.nodes_generation += 1;
+                listings.nodes = Some(nodes);
+                self.backend.nodes_generation += 1;
             }
-            (_, None) => self.listed.clear(),
+            (_, None) => listings.listed.clear(),
         }
-        self.attempts = 0;
+        listings.attempts = 0;
         self.resume();
     }
 
@@ -1668,7 +1787,7 @@ impl<W: Write> Proxy<W> {
         }
         // The server gets the change before the listing it prompts.
         self.send_server(body);
-        if method == "initialized" && self.standalone && self.root.is_some() {
+        if method == "initialized" && self.backend.alone() && self.root.is_some() {
             self.register_watcher();
         }
         // The first document opened in the project.
@@ -1682,7 +1801,7 @@ impl<W: Write> Proxy<W> {
         if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
             (self.parsing.fresh, self.parsing.compiled) = (false, false);
             self.list_nodes();
-            if self.standalone {
+            if self.backend.alone() {
                 self.want_index();
             }
         }
@@ -1792,7 +1911,9 @@ impl<W: Write> Proxy<W> {
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 (hints.map_or(nothing, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
             }
-            "textDocument/definition" | "textDocument/references" if self.table.unites(method) => {
+            "textDocument/definition" | "textDocument/references"
+                if self.table.unites(method, self.backend.alone()) =>
+            {
                 let part = self.union_part(method, params);
                 let fresh = part.is_some() && capability::of(method).is_some_and(|capability| capability.wants_index);
                 (Kept::Part(part.unwrap_or(Part::Nothing)), fresh)
@@ -1813,27 +1934,28 @@ impl<W: Write> Proxy<W> {
     /// `initialize` is answered here, and any other forwarded request fails.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         // The server would get two requests under one id.
-        if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) {
+        let listing = self.backend.running().and_then(|running| running.listings.listing.as_ref());
+        if listing.is_some_and(|(own, ..)| id.as_str() == Some(own)) {
             return self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id");
         }
         let (pending, fresh) = self.remember(method, id, params);
-        match (self.route(method, params), &self.server, method) {
+        match (self.route(method, params), self.backend.running().is_some(), method) {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
             (Route::Answer(result), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
             (Route::Command(command), ..) => self.on_command(command, id, params, pending),
-            (Route::Forward, Some(_), _) => {
+            (Route::Forward, true, _) => {
                 // dbt lsp adds to the proxy's part, or replaces its nothing, but never holds it up.
                 let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
                 self.deadlines.extend(late.map(|late| (key(id), late)));
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(body);
             }
-            (Route::Forward, None, "initialize") => {
+            (Route::Forward, false, "initialize") => {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
             // A merged request gets the proxy's answer alone, any other the failure.
-            (Route::Forward, None, _) => match pending.part(self.markdown) {
+            (Route::Forward, false, _) => match pending.part(self.markdown) {
                 Some(part) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
                 None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
             },
@@ -1852,7 +1974,10 @@ impl<W: Write> Proxy<W> {
             (None, Some(id)) => self.on_server_response(id, message, &frame.body),
             // Two compilations that overlap are timed from the last start.
             (Some("dbt/lspCompileStart" | "dbt/lspBackgroundCompileStart"), _) => {
-                (self.compiling.since, self.compiling.told) = (Some(Instant::now()), false);
+                // A process starting again arms none: its frames pass `handle`'s filter too.
+                if let Some(running) = self.backend.running_mut() {
+                    running.compiling = Compiling { since: Some(Instant::now()), told: false };
+                }
                 self.send_client_body(&frame.body);
             }
             (Some(method @ ("dbt/lspCompileComplete" | "dbt/lspBackgroundCompileComplete")), _) => {
@@ -1878,10 +2003,13 @@ impl<W: Write> Proxy<W> {
                 self.want_index();
             }
         }
-        self.compiling.since = None;
+        // A process starting again has no timer to end: its frames pass `handle`'s filter too.
+        if let Some(running) = self.backend.running_mut() {
+            running.compiling.since = None;
+        }
         self.send_client_body(body);
         let Some((text, key)) = compile_failure(&message["params"]) else { return };
-        if self.shutdown || !self.compiling.said.insert(key) {
+        if self.shutdown || !self.backend.said.insert(key) {
             return;
         }
         let text = format!("dbt lsp compiled nothing: {text} (its log: {})", self.server_log().display());
@@ -1889,14 +2017,13 @@ impl<W: Write> Proxy<W> {
                                  "params": {"type": 1, "message": text}}));
     }
 
-    /// A compilation past its deadline, `told` from now on: said once a
-    /// session, with dbt lsp's log, but after `shutdown`.
+    /// A compilation past its deadline, which the caller marks `told`: said
+    /// once a session, with dbt lsp's log, but after `shutdown`.
     fn tell_stalled(&mut self) {
-        self.compiling.told = true;
-        if self.compiling.stalled || self.shutdown {
+        if self.backend.stalled || self.shutdown {
             return;
         }
-        self.compiling.stalled = true;
+        self.backend.stalled = true;
         let (stall, log) = (COMPILE_STALL.as_secs(), self.server_log());
         let text = format!("dbt lsp has been compiling for {stall} s with no end yet (its log: {})", log.display());
         self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
@@ -1914,8 +2041,8 @@ impl<W: Write> Proxy<W> {
     fn on_progress(&mut self, message: &Value, body: &[u8]) {
         let (token, kind) = (&message["params"]["token"], message.pointer("/params/value/kind"));
         match kind.and_then(Value::as_str) {
-            Some("begin") => drop(self.restart.progress.insert(key(token), token.clone())),
-            Some("end") => drop(self.restart.progress.remove(&key(token))),
+            Some("begin") => drop(self.backend.progress.insert(key(token), token.clone())),
+            Some("end") => drop(self.backend.progress.remove(&key(token))),
             _ => {}
         }
         self.send_client_body(body);
@@ -1928,11 +2055,11 @@ impl<W: Write> Proxy<W> {
         let registrations = message.pointer("/params/registrations").and_then(Value::as_array);
         let ids: Vec<String> =
             registrations.into_iter().flatten().filter_map(|r| r["id"].as_str()).map(str::to_owned).collect();
-        if !ids.is_empty() && ids.iter().all(|id| self.restart.registered.contains(id)) {
+        if !ids.is_empty() && ids.iter().all(|id| self.backend.registered.contains(id)) {
             let answer = json!({"jsonrpc": "2.0", "id": id, "result": null}).to_string();
             return self.send_server(answer.as_bytes());
         }
-        self.restart.registered.extend(ids);
+        self.backend.registered.extend(ids);
         self.send_client_body(body);
     }
 
@@ -2201,18 +2328,21 @@ impl<W: Write> Proxy<W> {
         self.send_client(&publish(&uri, diagnostics));
     }
 
-    /// The server is gone: answer what it left unanswered, once each, and
-    /// carry on alone, on the scanned graph.  Before the client's
+    /// The server is gone: answer what it left unanswered, once each, then
+    /// the client's `initialize`, alone, if it is pending; else restart it
+    /// or lose it for good (`lost_server`).  Before the client's
     /// `initialize`, only remember why, for its answer.
     fn on_server_closed(&mut self) {
-        let starting = || self.restart.starting.take().map(|(server, ..)| server);
-        let Some(mut server) = self.server.take().or_else(starting) else { return };
-        let status = server.child.try_wait().ok().flatten();
-        if status.is_none() {
-            let _ = server.child.kill();
-        }
-        let status = status.or_else(|| server.child.wait().ok());
+        let server = match std::mem::take(&mut self.backend.life) {
+            Life::Running(Running { server, .. }) | Life::Starting(server, ..) => server,
+            other => {
+                self.backend.life = other;
+                return;
+            }
+        };
+        let status = server.reap(Duration::ZERO);
         let why = format!("dbt lsp exited ({})", status.map_or("unknown status".into(), |s| s.to_string()));
+        self.backend.life = Life::Lost(why.clone());
         if let Some(id) = &self.initialize {
             self.forwarded.remove(&key(id));
         }
@@ -2225,63 +2355,72 @@ impl<W: Write> Proxy<W> {
                 _ => self.reply_error(&id, REQUEST_FAILED, &why),
             }
         }
-        self.listing = None;
-        self.attempts = 0;
-        self.listed.clear();
-        self.relist = false;
-        self.compiling.since = None;
-        self.nodes = None;
-        self.nodes_generation += 1;
-        self.absent = Some(why.clone());
+        self.backend.nodes_generation += 1;
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
         }
         self.lost_server(&why);
     }
 
-    /// The server lost for WHY during a session: the progress it began is
+    /// The server lost for WHY: during a session, the progress it began is
     /// ended, and a restart follows after its delay, else the proxy is alone
-    /// from now on; the client is told which.
+    /// from now on; the client is told which.  Lost for good, its last
+    /// diagnostics go and the project is parsed again.  Before the client's
+    /// `initialize` or after `shutdown`, lost for good, and nothing said.
     fn lost_server(&mut self, why: &str) {
+        self.backend.life = Life::Lost(why.to_owned());
         if !self.initialized || self.shutdown {
             return;
         }
-        for (_, token) in std::mem::take(&mut self.restart.progress) {
+        for (_, token) in std::mem::take(&mut self.backend.progress) {
             self.send_client(&json!({"jsonrpc": "2.0", "method": "$/progress",
                                      "params": {"token": token, "value": {"kind": "end"}}}));
         }
         let now = Instant::now();
-        self.restart.past.retain(|at| now.saturating_duration_since(*at) < RESTART_WINDOW);
-        let delay = restart_delay(&self.restart.past, now);
-        self.restart.due = delay.map(|delay| now + delay);
+        self.backend.restarts.retain(|at| now.saturating_duration_since(*at) < RESTART_WINDOW);
+        let delay = restart_delay(&self.backend.restarts, now);
         let text = match delay {
             Some(delay) => format!("{why}: restarting it in {} s.", delay.as_secs()),
-            None => format!("{why}: dbt-lsp-plus keeps its own features: symbols, lineage, folding, renames."),
+            None => format!("{why}: dbt-lsp-plus answers alone."),
         };
         self.send_client(
             &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),
         );
+        let Some(delay) = delay else {
+            // None will publish dbt lsp's last diagnostics again, and the parse's would double them.
+            let mut published: Vec<PathBuf> = std::mem::take(&mut self.diagnostics.server).into_keys().collect();
+            published.sort();
+            published.iter().for_each(|path| self.publish(path));
+            // As after a change alone, with no request: the problems of a parse made in front were never kept.
+            self.parsing.fresh = false;
+            return self.want_index();
+        };
+        self.backend.life = Life::Waiting(now + delay);
     }
 
     /// Starts the server again with the command of the session, and sends it
     /// the client's `initialize` under an id of the proxy's own; a failure to
-    /// start it is a server lost again.
+    /// start it is a server lost again.  After `shutdown`, or where none can
+    /// start (no client's parameters, no channel in the unit tests), lost
+    /// for good, so that its due never wakes the loop again.
     fn start_restart(&mut self) {
-        let (Some(params), Some(events)) = (self.restart.initialize.clone(), self.parsing.events.clone()) else {
+        let (Some(params), Some(events)) = (self.replay.initialize.clone(), self.parsing.events.clone()) else {
+            self.backend.life = Life::Lost("dbt lsp is not running".into());
             return;
         };
         if self.shutdown {
+            self.backend.life = Life::Lost("the client asked for shutdown".into());
             return;
         }
-        self.restart.past.push(Instant::now());
-        self.restart.spawned += 1;
-        match spawn_server(&self.parsing.server, &events, self.restart.spawned, self.parsing.dir.as_deref()) {
+        self.backend.restarts.push(Instant::now());
+        self.backend.spawned += 1;
+        match spawn_server(&self.parsing.server, &events, self.backend.spawned, self.parsing.dir.as_deref()) {
             Ok(mut server) => {
                 self.next_id += 1;
                 let id = format!("{OWN_ID}{}", self.next_id);
                 let initialize = json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": params});
                 let _ = rpc::write_value(&mut server.stdin, &initialize);
-                self.restart.starting = Some((server, id, Instant::now() + REPLAY_TIMEOUT));
+                self.backend.life = Life::Starting(server, id, Instant::now() + REPLAY_TIMEOUT);
             }
             Err(why) => self.lost_server(&why),
         }
@@ -2291,22 +2430,26 @@ impl<W: Write> Proxy<W> {
     /// the server, initialized, given the client's open documents as they
     /// stand, and listed; refused, or after `shutdown`, it is stopped.
     fn on_restarted(&mut self, message: &Value) {
-        let Some((mut server, ..)) = self.restart.starting.take() else { return };
+        let server = match std::mem::take(&mut self.backend.life) {
+            Life::Starting(server, ..) => server,
+            other => {
+                self.backend.life = other;
+                return;
+            }
+        };
         if message.get("error").is_some() || self.shutdown {
-            let _ = server.child.kill();
-            let _ = server.child.wait();
+            server.reap(Duration::ZERO);
             return self.lost_server("dbt lsp refused its initialize");
         }
-        self.server = Some(server);
-        self.absent = None;
+        self.backend.life = Life::Running(Running::new(server));
         self.send_server(json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}).to_string().as_bytes());
         let mut documents: Vec<(&PathBuf, &String)> = self.documents.iter().collect();
         documents.sort();
         let opened: Vec<Value> = documents
             .into_iter()
             .map(|(path, text)| {
-                let document = json!({"uri": self.uris.get(path), "languageId": self.restart.languages.get(path),
-                                      "version": self.restart.versions.get(path), "text": text});
+                let document = json!({"uri": self.uris.get(path), "languageId": self.replay.languages.get(path),
+                                      "version": self.replay.versions.get(path), "text": text});
                 json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": document}})
             })
             .collect();
@@ -2337,16 +2480,23 @@ impl<W: Write> Proxy<W> {
                                          "params": {"type": 4, "message": text}}));
             }
         }
-        if self.restart.due.take_if(|due| *due <= now).is_some() {
-            self.start_restart();
-        }
-        if self.compiling.due().is_some_and(|due| due <= now) {
+        let stalled =
+            self.backend.running_mut().filter(|running| running.compiling.due().is_some_and(|due| due <= now));
+        if let Some(running) = stalled {
+            running.compiling.told = true;
             self.tell_stalled();
         }
-        if let Some((mut server, ..)) = self.restart.starting.take_if(|(.., deadline)| *deadline <= now) {
-            let _ = server.child.kill();
-            let _ = server.child.wait();
-            self.lost_server("dbt lsp did not answer its initialize");
+        // A restart's due, or a restarted process's deadline: a running process's deadlines are spent above,
+        // and its life is put back as it was.
+        if self.backend.due().is_some_and(|due| due <= now) {
+            match std::mem::take(&mut self.backend.life) {
+                Life::Waiting(_) => self.start_restart(),
+                Life::Starting(server, ..) => {
+                    server.reap(Duration::ZERO);
+                    self.lost_server("dbt lsp did not answer its initialize");
+                }
+                life => self.backend.life = life,
+            }
         }
     }
 
@@ -2354,10 +2504,8 @@ impl<W: Write> Proxy<W> {
     /// its output; a listing past its deadline is abandoned on time.
     fn serve(&mut self, inbox: Receiver<Event>) {
         loop {
-            let listing = self.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
-            let replay = self.restart.starting.as_ref().map(|(.., deadline)| *deadline);
             let merge = self.deadlines.values().map(|(at, _)| *at).min();
-            let next = [listing, self.restart.due, replay, merge, self.compiling.due()].into_iter().flatten().min();
+            let next = [self.backend.due(), merge].into_iter().flatten().min();
             let wait = next.map_or(Duration::MAX, |at| at.saturating_duration_since(Instant::now()));
             let event = match inbox.recv_timeout(wait) {
                 Ok(event) => event,
@@ -2380,8 +2528,8 @@ impl<W: Write> Proxy<W> {
         self.epoch += 1;
         // The last frames and the end of a process the proxy let go of.
         if let Event::Server(generation, _) | Event::ServerClosed(generation) = &event {
-            let starting = self.restart.starting.as_ref().map(|(server, ..)| server);
-            if !self.server.iter().chain(starting).any(|server| server.generation == *generation) {
+            let (life, current) = (&self.backend.life, |server: &Server| server.generation == *generation);
+            if !matches!(life, Life::Running(Running { server, .. }) | Life::Starting(server, ..) if current(server)) {
                 return false;
             }
         }
@@ -2403,18 +2551,11 @@ impl<W: Write> Proxy<W> {
 
     /// Waits for the server to exit after `exit`, within EXIT_GRACE, then kills it.
     fn stop_server(&mut self) {
-        if let Some((mut starting, ..)) = self.restart.starting.take() {
-            let _ = starting.child.kill();
-            let _ = starting.child.wait();
+        match std::mem::replace(&mut self.backend.life, Life::Lost("the session ended".into())) {
+            Life::Starting(server, ..) => drop(server.reap(Duration::ZERO)),
+            Life::Running(running) => drop(running.server.reap(EXIT_GRACE)),
+            _ => {}
         }
-        let Some(mut server) = self.server.take() else { return };
-        drop(server.stdin);
-        let deadline = Instant::now() + EXIT_GRACE;
-        while Instant::now() < deadline && matches!(server.child.try_wait(), Ok(None)) {
-            thread::sleep(Duration::from_millis(20));
-        }
-        let _ = server.child.kill();
-        let _ = server.child.wait();
     }
 }
 
@@ -2473,17 +2614,16 @@ pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch)
     // With `never`, nothing of the user's dbt runs but its parse.
     let never = launch == modes::Launch::Never;
     let given = project_dir(command);
+    let dbt = command.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>().join(" ");
+    let no_lsp = || locate::probe(command, None) == Probe::NoLsp;
     // Without a project yet, `take_project` decides once one is named.
-    let standalone = match given {
-        Some(_) => {
-            locate::alone(never, locate::Route::Given, || locate::probe(command, None) == Probe::NoLsp).is_some()
-        }
-        None => never,
-    };
-    let (server, absent) = match (given.is_some() && !standalone).then(|| spawn_server(command, &events, 0, None)) {
-        Some(Ok(server)) => (Some(server), None),
-        Some(Err(why)) => (None, Some(why)),
-        None => (None, None),
+    let life = match given.as_ref().map(|_| locate::alone(never, locate::Route::Given, no_lsp)) {
+        None => Life::default(),
+        Some(Some(why)) => Life::NotStarted(if never { why.to_owned() } else { format!("{dbt} has no lsp") }),
+        Some(None) => match spawn_server(command, &events, 0, None) {
+            Ok(server) => Life::Running(Running::new(server)),
+            Err(why) => Life::Lost(why),
+        },
     };
     let cut = given.is_some() && config::can_cut();
     if given.is_some() && !cut {
@@ -2491,8 +2631,7 @@ pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch)
     }
     let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), cut, ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), server, absent, given);
-    proxy.standalone = standalone;
+    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), life, given);
     (proxy.never, proxy.settings) = (never, settings);
     proxy.parsing = parsing;
     proxy.serve(inbox);
@@ -2531,7 +2670,7 @@ mod tests {
             let places = listed.entry(row[0].clone()).or_default().entry(row[1].clone()).or_default();
             places.extend(row[2].split(',').map(|place| place.trim().to_string()));
         }
-        let flag = modes::Table::new(&modes::Settings::default(), &|_| false, false).flag();
+        let flag = modes::Table::new(&modes::Settings::default(), &|_| false).flag();
         let known = ["version", "definition", "references", "rename"];
         assert!(flag.as_object().unwrap().keys().all(|key| known.contains(&key.as_str())), "{flag}");
         let announced = ["definition", "references"].map(|request| (request.to_string(), flag[request].clone()));
@@ -2572,6 +2711,15 @@ mod tests {
             ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
             ("`dbt lsp is not running`", r#"None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running")"#),
             ("ends `dbt-lsp-plus answers alone.`", r#"format!("; {why}: dbt-lsp-plus answers alone.")"#),
+            // The warnings of a dbt lsp that could not start or exited first, and of one lost for good.
+            (
+                "`window/showMessage` ending `dbt-lsp-plus answers alone.`",
+                r#"let text = format!("{why}: dbt-lsp-plus answers alone.");"#,
+            ),
+            (
+                "`window/showMessage` ending `dbt-lsp-plus answers alone.`",
+                r#"None => format!("{why}: dbt-lsp-plus answers alone."),"#,
+            ),
             (
                 r#""alone":"dbt lsp is not started for a project found from a file""#,
                 r#"(_, Route::Document) => Some("dbt lsp is not started for a project found from a file")"#,
@@ -2679,6 +2827,14 @@ mod tests {
         std::iter::from_fn(|| rpc::read_frame(&mut client).unwrap()).collect()
     }
 
+    /// A running life, its process a shell that reads what it is sent,
+    /// until `stop_server` or `on_server_closed` reaps it.
+    fn a_running_life() -> Life {
+        let mut child = Command::new("sh").args(["-c", "cat > /dev/null"]).stdin(Stdio::piped()).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        Life::Running(Running::new(Server { child, stdin, generation: 0 }))
+    }
+
     #[test]
     fn reads_what_a_compilation_that_compiled_nothing_reports() {
         let [e, _, f, w, h] = reported();
@@ -2717,7 +2873,7 @@ mod tests {
     #[test]
     fn a_failure_is_said_once_per_first_error() {
         let [e, e2, f, w, h] = reported();
-        let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        let mut proxy = Proxy::new(Vec::new(), Life::Lost("dbt lsp is not running".into()), Some(PathBuf::from("/p")));
         let completion = |method: &str, count: Value, errors: &[&Value]| {
             frame_of(&json!({"method": method, "params": {"models_count": count, "errors": errors}}))
         };
@@ -2778,16 +2934,17 @@ mod tests {
             ("its completion", compiling("dbt/lspCompileComplete"), false, (false, true)),
             ("a start after one told", compiling("dbt/lspCompileStart"), true, (true, true)),
         ];
-        let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         for (name, message, told, expected) in steps {
-            proxy.compiling.told = told;
+            proxy.backend.running_mut().unwrap().compiling.told = told;
             let before = Instant::now();
             proxy.on_server(frame_of(&message));
-            let due = proxy.compiling.due();
+            let due = proxy.backend.running().unwrap().compiling.due();
             let after = Instant::now();
             assert!(due.is_none_or(|due| before + COMPILE_STALL <= due && due <= after + COMPILE_STALL), "{name}");
             assert_eq!((due.is_some(), proxy.parsing.compiled), expected, "{name}");
         }
+        proxy.stop_server();
     }
 
     #[test]
@@ -2799,12 +2956,13 @@ mod tests {
         // A start AGO, as dbt lsp sends it.
         let started = |proxy: &mut Proxy<Vec<u8>>, ago: Duration| {
             proxy.on_server(frame_of(&json!({"method": "dbt/lspCompileStart", "params": {}})));
-            proxy.compiling.since = Some(Instant::now() - ago);
+            proxy.backend.running_mut().unwrap().compiling.since = Some(Instant::now() - ago);
         };
-        let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        let due = |proxy: &Proxy<Vec<u8>>| proxy.backend.running().unwrap().compiling.due();
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         started(&mut proxy, Duration::ZERO);
         proxy.on_time();
-        assert!(said(&proxy).is_empty() && proxy.compiling.due().is_some(), "started just now");
+        assert!(said(&proxy).is_empty() && due(&proxy).is_some(), "started just now");
         started(&mut proxy, COMPILE_STALL);
         proxy.on_time();
         let text = "dbt lsp has been compiling for 60 s with no end yet (its log: /p/logs/dbt-lsp.log)";
@@ -2814,12 +2972,14 @@ mod tests {
         assert_eq!(said(&proxy), std::slice::from_ref(&told), "told once");
         started(&mut proxy, COMPILE_STALL);
         proxy.on_time();
-        assert_eq!((said(&proxy), proxy.compiling.due()), (vec![told.clone()], None), "once a session");
-        let mut after = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        assert_eq!((said(&proxy), due(&proxy)), (vec![told.clone()], None), "once a session");
+        proxy.stop_server();
+        let mut after = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         after.shutdown = true;
         started(&mut after, COMPILE_STALL);
         after.on_time();
-        assert_eq!((said(&after), after.compiling.due()), (Vec::new(), None), "nothing after shutdown");
+        assert_eq!((said(&after), due(&after)), (Vec::new(), None), "nothing after shutdown");
+        after.stop_server();
         // `serve` wakes for that deadline when nothing else comes, here a client that closes once written to.
         struct Closing(Vec<u8>, Sender<Event>);
         impl Write for Closing {
@@ -2838,19 +2998,17 @@ mod tests {
             thread::sleep(Duration::from_secs(10));
             let _ = watchdog.send(Event::ClientClosed);
         });
-        let mut serving = Proxy::new(Closing(Vec::new(), events), None, None, Some(PathBuf::from("/p")));
-        serving.compiling.since = Some(Instant::now() - COMPILE_STALL);
+        let mut serving = Proxy::new(Closing(Vec::new(), events), a_running_life(), Some(PathBuf::from("/p")));
+        serving.backend.running_mut().unwrap().compiling.since = Some(Instant::now() - COMPILE_STALL);
         serving.serve(inbox);
+        serving.stop_server();
         let frames: Vec<Value> = written(&serving.client.0).into_iter().filter_map(|frame| frame.value).collect();
         assert_eq!(frames, [told], "told through serve");
     }
 
     #[test]
     fn a_lost_server_keeps_the_failures_said_and_clears_its_deadline() {
-        let mut child = Command::new("sh").args(["-c", "cat > /dev/null"]).stdin(Stdio::piped()).spawn().unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let server = Server { child, stdin, generation: 0 };
-        let mut proxy = Proxy::new(Vec::new(), Some(server), None, Some(PathBuf::from("/p")));
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         let [e, ..] = reported();
         let failed = json!({"method": "dbt/lspCompileComplete", "params": {"models_count": null, "errors": [e]}});
         let shown = |proxy: &Proxy<Vec<u8>>| {
@@ -2860,9 +3018,9 @@ mod tests {
         proxy.on_server(frame_of(&failed));
         assert_eq!(shown(&proxy), 1);
         proxy.on_server(frame_of(&json!({"method": "dbt/lspCompileStart", "params": {}})));
-        assert!(proxy.compiling.due().is_some());
+        assert!(proxy.backend.running().unwrap().compiling.due().is_some());
         proxy.on_server_closed();
-        assert!(proxy.server.is_none() && proxy.compiling.due().is_none(), "no deadline of a lost server");
+        assert!(proxy.backend.running().is_none() && proxy.backend.due().is_none(), "no deadline of a lost server");
         // The next server's first failure, the same.
         proxy.on_server(frame_of(&failed));
         assert_eq!(shown(&proxy), 1);
@@ -2880,6 +3038,57 @@ mod tests {
         // A restart that left the window counts no more.
         let one_old = [now - Duration::from_secs(601), now - Duration::from_secs(20), now - Duration::from_secs(10)];
         assert_eq!(seconds(&one_old), Some(3));
+    }
+
+    #[test]
+    fn a_loss_waits_for_a_restart_while_one_is_left_and_is_lost_for_good_after() {
+        let why = "dbt lsp exited (x)";
+        let mut proxy = Proxy::new(Vec::new(), Life::default(), None);
+        proxy.initialized = true;
+        let before = Instant::now();
+        proxy.lost_server(why);
+        let after = Instant::now();
+        let Life::Waiting(due) = proxy.backend.life else { panic!("no restart awaited") };
+        let second = Duration::from_secs(1);
+        assert!(before + second <= due && due <= after + second && !proxy.backend.alone(), "{due:?}");
+        // Nor is a restart under way, its process reaped once checked.
+        let Life::Running(Running { server, .. }) = a_running_life() else { panic!("a running life") };
+        proxy.backend.life = Life::Starting(server, "dbt-lsp-plus/1".into(), Instant::now() + REPLAY_TIMEOUT);
+        assert!(!proxy.backend.alone(), "starting again");
+        proxy.stop_server();
+        // Three restarts in the window: none is left.
+        let ago = |seconds| Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap();
+        proxy.backend.restarts = vec![ago(30), ago(20), ago(10)];
+        proxy.lost_server(why);
+        assert!(matches!(&proxy.backend.life, Life::Lost(lost) if lost == why) && proxy.backend.alone());
+        let mut after_shutdown = Proxy::new(Vec::new(), Life::default(), None);
+        (after_shutdown.initialized, after_shutdown.shutdown) = (true, true);
+        after_shutdown.lost_server(why);
+        assert!(matches!(&after_shutdown.backend.life, Life::Lost(lost) if lost == why));
+        assert!(after_shutdown.client.is_empty(), "nothing after shutdown");
+    }
+
+    #[test]
+    fn lost_for_good_a_hover_on_a_node_before_any_index_says_why() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let orders = features::uri(&root.join("models/marts/orders.sql"));
+        let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+        // No `initialize` answered: only the life says who answers.  The parse failed, as with a missing dbt.
+        let hover = |life: Life| {
+            let mut proxy = Proxy::new(Vec::new(), life, Some(root.clone()));
+            proxy.table = modes::Table::new(&modes::Settings::default(), &|_| false);
+            (proxy.parsing.fresh, proxy.parsing.failure) = (true, Some("dbt parse failed: x".into()));
+            proxy.on_request("textDocument/hover", &json!(1), &inside_ref, b"");
+            written(&proxy.client).into_iter().filter_map(|frame| frame.value).find(|m| m["id"] == 1).unwrap()
+        };
+        let lost = hover(Life::Lost("dbt lsp exited (x)".into()));
+        assert_eq!(
+            lost["error"],
+            json!({"code": REQUEST_FAILED, "message": "dbt parse has not finished: dbt parse failed: x"})
+        );
+        // In front, a restart awaited: the merge's part alone, null.
+        let waiting = hover(Life::Waiting(Instant::now() + Duration::from_secs(60)));
+        assert_eq!((waiting.get("error"), &waiting["result"]), (None, &Value::Null), "{waiting}");
     }
 
     fn args(words: &[&str]) -> Vec<String> {
@@ -2914,10 +3123,11 @@ mod tests {
 
     #[test]
     fn a_listing_past_its_deadline_is_abandoned_and_the_graph_kept() {
-        let mut proxy = Proxy::new(Vec::new(), None, None, None);
-        proxy.nodes = Some(Vec::new());
-        proxy.listing = Some(("dbt-lsp-plus/1".into(), 1, Instant::now() - LIST_TIMEOUT));
-        proxy.listed = vec![ServerNode {
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), None);
+        let listings = &mut proxy.backend.running_mut().unwrap().listings;
+        listings.nodes = Some(Vec::new());
+        listings.listing = Some(("dbt-lsp-plus/1".into(), 1, Instant::now() - LIST_TIMEOUT));
+        listings.listed = vec![ServerNode {
             id: "model.shop.a".into(),
             name: "a".into(),
             resource_type: "model".into(),
@@ -2926,11 +3136,13 @@ mod tests {
             depends_on: Vec::new(),
         }];
         proxy.expire_listing();
-        assert!(proxy.listing.is_none() && proxy.listed.is_empty());
-        assert_eq!(proxy.nodes, Some(Vec::new()));
+        let listings = &proxy.backend.running().unwrap().listings;
+        assert!(listings.listing.is_none() && listings.listed.is_empty());
+        assert_eq!(listings.nodes, Some(Vec::new()));
         // A listing within its deadline stays.
-        proxy.listing = Some(("dbt-lsp-plus/2".into(), 0, Instant::now()));
+        proxy.backend.running_mut().unwrap().listings.listing = Some(("dbt-lsp-plus/2".into(), 0, Instant::now()));
         proxy.expire_listing();
-        assert!(proxy.listing.is_some());
+        assert!(proxy.backend.running().unwrap().listings.listing.is_some());
+        proxy.stop_server();
     }
 }

@@ -196,19 +196,17 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
 }
 
 /// The mode of each method that takes one in a session, fixed when its
-/// `initialize` is answered, and whether it has no backend.
+/// `initialize` is answered.
 #[derive(Clone, Debug, Default)]
 pub struct Table {
     modes: HashMap<&'static str, Mode>,
-    none: bool,
 }
 
 impl Table {
     /// The table of SETTINGS, ANNOUNCED saying whether the first server
-    /// announces a method's capability, and NONE whether there is no
-    /// backend: the user's mode for a method, else the user's default, else
-    /// the shipped one, today's behaviour.
-    pub fn new(settings: &Settings, announced: &dyn Fn(&str) -> bool, none: bool) -> Table {
+    /// announces a method's capability: the user's mode for a method, else
+    /// the user's default, else the shipped one, today's behaviour.
+    pub fn new(settings: &Settings, announced: &dyn Fn(&str) -> bool) -> Table {
         let added = |method: &str| capability::of(method).is_some_and(|capability| capability.added);
         let shipped = |method: &str| match (added(method), announced(method)) {
             (true, false) => Mode::Plus,
@@ -219,7 +217,7 @@ impl Table {
             let set = settings.modes.get(method).copied().or(settings.default);
             (method, set.unwrap_or_else(|| shipped(method)))
         };
-        Table { modes: capability::with_mode().map(mode).collect(), none }
+        Table { modes: capability::with_mode().map(mode).collect() }
     }
 
     /// The mode of METHOD: a follower's leader's, `dbt` for a method that
@@ -241,19 +239,19 @@ impl Table {
     }
 
     /// Whether the proxy unites dbt lsp's answer to METHOD with its own: in
-    /// `merge`, with a backend, for a capability whose answers are a union
-    /// of locations.
-    pub fn unites(&self, method: &str) -> bool {
+    /// `merge`, unless ALONE, with no dbt lsp answering now, for a capability
+    /// whose answers are a union of locations.
+    pub fn unites(&self, method: &str, alone: bool) -> bool {
         let union = capability::of(method).is_some_and(|capability| capability.combine == Combine::Union);
-        union && !self.none && self.mode(method) == Mode::Merge
+        union && !alone && self.mode(method) == Mode::Merge
     }
 
     /// What the proxy answers METHOD where it has nothing of its own, if it
-    /// answers it: null, or `[]` for a list, in `plus`, and in `dbt` with no
-    /// backend; none where the server answers.
-    pub fn nothing(&self, method: &str) -> Option<Value> {
+    /// answers it: null, or `[]` for a list, in `plus`, and in `dbt` when
+    /// ALONE, with no dbt lsp answering now; none where the server answers.
+    pub fn nothing(&self, method: &str, alone: bool) -> Option<Value> {
         let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
-        let empty = known && (mode == Mode::Plus || (self.none && mode == Mode::Dbt));
+        let empty = known && (mode == Mode::Plus || (alone && mode == Mode::Dbt));
         empty.then(|| capability::empty(method))
     }
 
@@ -270,9 +268,10 @@ impl Table {
         answered
     }
 
-    /// The methods set to `dbt` that no backend can answer.
-    pub fn unanswered(&self) -> Vec<&'static str> {
-        let unanswered = capability::with_mode().filter(|method| self.none && self.mode(method) == Mode::Dbt);
+    /// The methods set to `dbt` that no one answers when ALONE, with no dbt
+    /// lsp answering now.
+    pub fn unanswered(&self, alone: bool) -> Vec<&'static str> {
+        let unanswered = capability::with_mode().filter(|method| alone && self.mode(method) == Mode::Dbt);
         unanswered.collect()
     }
 }
@@ -344,7 +343,7 @@ mod tests {
     #[test]
     fn the_shipped_defaults_are_today_s_behaviour() {
         let announced = |method: &str| method == "textDocument/foldingRange";
-        let table = Table::new(&Settings::default(), &announced, false);
+        let table = Table::new(&Settings::default(), &announced);
         assert_eq!(table.mode("textDocument/documentSymbol"), Mode::Plus, "a capability the server lacks");
         assert_eq!(table.mode("textDocument/foldingRange"), Mode::Dbt, "one it announces");
         assert_eq!(table.mode("callHierarchy/outgoingCalls"), Mode::Plus, "its leader's");
@@ -357,7 +356,7 @@ mod tests {
     #[test]
     fn a_method_s_mode_comes_before_the_default_and_the_default_before_the_shipped_one() {
         let user = settings(&[("textDocument/hover", "dbt")], Some("plus"));
-        let table = Table::new(&user, &|_| false, false);
+        let table = Table::new(&user, &|_| false);
         assert_eq!(table.mode("textDocument/hover"), Mode::Dbt);
         assert_eq!(table.mode("textDocument/definition"), Mode::Plus);
         assert_eq!(table.mode("textDocument/completion"), Mode::Dbt, "the default reaches the proxy's methods only");
@@ -461,47 +460,45 @@ mod tests {
         let every = every();
         let mut plus = Settings::default();
         plus.set_default("plus").unwrap();
-        for (settings, none) in [(Settings::default(), false), (Settings::default(), true), (plus, false)] {
-            assert_eq!(Table::new(&settings, &|_| false, none).flag(), every, "{settings:?} {none}");
+        for settings in [Settings::default(), plus] {
+            assert_eq!(Table::new(&settings, &|_| false).flag(), every, "{settings:?}");
         }
         let mut dbt = Settings::default();
         dbt.set("textDocument/definition", "dbt").unwrap();
         dbt.set("textDocument/references", "dbt").unwrap();
         let rename = json!({"version": 2, "rename": every["rename"]});
-        assert_eq!(Table::new(&dbt, &|_| false, false).flag(), rename);
+        assert_eq!(Table::new(&dbt, &|_| false).flag(), rename);
     }
 
     #[test]
     fn unites_definitions_and_references_in_merge_with_a_backend() {
         let united = ["textDocument/definition", "textDocument/references"];
-        let merge = Table::new(&Settings::default(), &|_| false, false);
-        assert_eq!(united.map(|method| merge.unites(method)), [true, true]);
-        assert!(!merge.unites("textDocument/hover"), "a hover's parts are sections");
-        assert!(!Table::new(&Settings::default(), &|_| false, true).unites(united[0]), "without a backend");
+        let merge = Table::new(&Settings::default(), &|_| false);
+        assert_eq!(united.map(|method| merge.unites(method, false)), [true, true]);
+        assert!(!merge.unites("textDocument/hover", false), "a hover's parts are sections");
+        assert!(!merge.unites(united[0], true), "without a backend");
         for mode in ["plus", "dbt"] {
-            let table = Table::new(&settings(&[], Some(mode)), &|_| false, false);
-            assert_eq!(united.map(|method| table.unites(method)), [false, false], "{mode}");
+            let table = Table::new(&settings(&[], Some(mode)), &|_| false);
+            assert_eq!(united.map(|method| table.unites(method, false)), [false, false], "{mode}");
         }
     }
 
     #[test]
     fn the_flag_and_empty_answers_follow_the_modes() {
         let every = every();
-        for none in [false, true] {
-            assert_eq!(Table::new(&Settings::default(), &|_| false, none).flag(), every, "merge, none {none}");
-        }
+        assert_eq!(Table::new(&Settings::default(), &|_| false).flag(), every, "merge");
         let user = settings(&[("textDocument/definition", "plus"), ("textDocument/references", "dbt")], None);
-        let table = Table::new(&user, &|_| false, false);
+        let table = Table::new(&user, &|_| false);
         let definition = json!({"version": 2, "definition": every["definition"], "rename": every["rename"]});
         assert_eq!(table.flag(), definition, "plus lists, dbt does not");
-        assert_eq!(table.nothing("textDocument/definition"), Some(Value::Null));
-        assert_eq!(table.nothing("textDocument/references"), None, "dbt with a backend is forwarded");
-        let none = Table::new(&user, &|_| false, true);
-        assert_eq!(none.nothing("textDocument/references"), Some(json!([])), "dbt with no backend");
-        assert_eq!(none.unanswered(), ["textDocument/references"]);
+        assert_eq!(table.nothing("textDocument/definition", false), Some(Value::Null));
+        assert_eq!(table.nothing("textDocument/references", false), None, "dbt with a backend is forwarded");
+        let none = Table::new(&user, &|_| false);
+        assert_eq!(none.nothing("textDocument/references", true), Some(json!([])), "dbt with no backend");
+        assert_eq!(none.unanswered(true), ["textDocument/references"]);
         let hierarchy = settings(&[("textDocument/prepareCallHierarchy", "dbt")], None);
-        let none = Table::new(&hierarchy, &|_| false, true);
-        assert_eq!(none.nothing("callHierarchy/incomingCalls"), Some(Value::Null), "a follower too");
-        assert!(table.unanswered().is_empty());
+        let none = Table::new(&hierarchy, &|_| false);
+        assert_eq!(none.nothing("callHierarchy/incomingCalls", true), Some(Value::Null), "a follower too");
+        assert!(table.unanswered(false).is_empty());
     }
 }

@@ -190,10 +190,6 @@ fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
     let quoted = text.starts_with("dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error");
     assert!(quoted && text.contains("DBT_LSP_PLUS_TEST_MISSING") && text.contains("logs/dbt-lsp.log"), "{text}");
     assert_eq!(shown["params"]["type"], 1, "{shown}");
-    // A listing of the client's, which the fake answers alike in a project that compiles nothing.
-    let listed = session.request("workspace/executeCommand", json!({"command": "dbt.listNodes", "arguments": ["*"]}));
-    let failed = (&listed["result"]["error"], &listed["result"]["error_kind"]);
-    assert_eq!(failed, (&json!("Compilation failed"), &json!("compilation_failed")), "{listed}");
     // A foreground completion, then its background one, which says the same failure: 2.0.9 sends
     // the two at once where nothing compiled, so every foreground one has its background one.
     let completed = |session: &Session| {
@@ -211,6 +207,10 @@ fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
     assert!(both(completed(&session)), "no compilation after a save, or not both completions");
     let said = session.received.iter().filter(|m| compiled_nothing(m)).count();
     assert_eq!(said, 1, "said once");
+    // A listing of the client's, which the fake answers alike in a project that compiles nothing.
+    let listed = session.request("workspace/executeCommand", json!({"command": "dbt.listNodes", "arguments": ["*"]}));
+    let failed = (&listed["result"]["error"], &listed["result"]["error_kind"]);
+    assert_eq!(failed, (&json!("Compilation failed"), &json!("compilation_failed")), "{listed}");
     assert!(session.finish().success());
 }
 
