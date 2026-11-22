@@ -108,7 +108,9 @@ mod tests {
 
     #[test]
     fn ids_are_written_as_dbt_writes_them() {
-        // As the manifest of the fixture writes them.
+        // dbt's shapes of ids, the fixture's names for a model and a source table: a version's ends `.v<version>`,
+        // a generic test's block is the macro `test_<name>`, and a source, the group of its tables, which is no
+        // node, is the prefix of their ids.
         assert_eq!(id(&MODEL, "shop", "orders"), "model.shop.orders");
         assert_eq!(version_id("shop", "dim", "2"), "model.shop.dim.v2");
         assert_eq!(table_id("shop", "raw", "customers"), "source.shop.raw.customers");
@@ -128,7 +130,8 @@ mod tests {
         // dbt's docs: a `ref` names a model, a seed or a snapshot.
         let refable: HashSet<&str> = TYPES.iter().filter(|row| row.refable).map(|row| row.name).collect();
         assert_eq!(refable, HashSet::from(["model", "seed", "snapshot"]));
-        // Of the types the manifest's `nodes` and `sources` hold, dbt builds all but an analysis.
+        // Of the types that the manifest's `nodes` and `sources` hold, and a function, which it keeps apart but a
+        // dbt could write among its nodes, dbt builds all but an analysis.
         let held = ["model", "seed", "snapshot", "analysis", "test", "source", "function"];
         let unbuilt: Vec<&str> = held.into_iter().filter(|name| !Type::named(name).built).collect();
         assert_eq!(unbuilt, ["analysis"]);
