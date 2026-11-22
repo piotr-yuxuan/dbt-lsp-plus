@@ -121,8 +121,8 @@ fails, and `nodeInfo` and a hover on a node give its failure.
 Once a session has a project, a hover, a definition, references or a
 call hierarchy on a file of another dbt project fails with
 `<file> lies in the dbt project at <other>, and this session serves only
-the one at <root>`; in `merge` in front of `dbt lsp`, only when `dbt
-lsp` gives no answer.
+the one at <root>`; in `merge` in front of `dbt lsp`, a hover, a
+definition or references fails only when `dbt lsp` gives no answer.
 
 With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
 see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).

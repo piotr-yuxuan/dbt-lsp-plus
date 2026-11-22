@@ -612,9 +612,13 @@ method that reads the project and names its document by
 `textDocument.uri` (a hover, a definition, references,
 `prepareCallHierarchy`), fails with `<document> lies in the dbt project
 at <project>, and this session serves only the one at <root>`, alone and
-in `plus`; in `merge` in front of dbt lsp, dbt lsp's answer stands, and
-when it gives none that reason comes first.  Inlay hints there are `[]`,
-and a method set to `dbt` goes to dbt lsp.  The rest is answered as
+in `plus`; in `merge` in front of dbt lsp, a hover, a definition or
+references goes to dbt lsp, whose answer stands, and when it gives none
+that reason comes first, while `prepareCallHierarchy`, the proxy's own
+in `merge` too, fails at once.  Inlay hints there are `[]` alone and in
+`plus`, and dbt lsp's answer as it came in `merge` (null on a macro or
+properties file: see "Inlay hints"); a method set to `dbt` goes to dbt
+lsp.  The rest is answered as
 before: the methods of the document's own text, a rename, which there
 is a CTE's alone, a document in no project, every request while the
 root's `dbt_project.yml` does not read, and a project nested under the

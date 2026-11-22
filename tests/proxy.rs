@@ -3224,24 +3224,34 @@ fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why(
     std::fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
     std::fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
     let script = json!({"refuse_on": "textDocument/hover"});
-    let (mut session, _) = Session::fake_with("elsewhere-merge", script, &[Path::new("--project-dir"), &project], None);
+    // References in `plus`, and the call hierarchy, which the proxy owns, in `merge`.
+    let modes = ["--mode", "textDocument/references=plus", "--mode", "textDocument/prepareCallHierarchy=merge"];
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_options("elsewhere-merge", script, &modes, &flags, None);
     session.initialize(&project);
     session.open(&m, None);
     let on_ref = position_in(&m, "ref('orders')", 6);
     // dbt lsp gives no answer: the proxy's reason first, then dbt lsp's.
     let refused = session.request("textDocument/hover", on_ref.clone());
-    let message = format!(
-        "{} lies in the dbt project at {}, and this session serves only the one at {}; \
-         dbt lsp failed: refused by the script",
+    let elsewhere = format!(
+        "{} lies in the dbt project at {}, and this session serves only the one at {}",
         m.display(),
         other.display(),
         project.display()
     );
-    let why = json!({"code": -32803, "message": message});
+    let why = json!({"code": -32803, "message": format!("{elsewhere}; dbt lsp failed: refused by the script")});
     assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
-    // dbt lsp's answer stands.
+    // Where dbt lsp is not asked, the reason alone, at once.
+    let alone = json!({"code": -32803, "message": elsewhere});
+    for method in ["textDocument/references", "textDocument/prepareCallHierarchy"] {
+        let answer = session.request(method, without_declaration(on_ref.clone()));
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &alone), "{method}: {answer}");
+    }
+    // dbt lsp's answer stands; the requests before it reached dbt lsp first, if at all.
     let definition = session.request("textDocument/definition", on_ref);
     assert_eq!((definition.get("error"), &definition["result"]["echo"]), (None, &json!("textDocument/definition")));
+    let asked = |method: &str| logged(&log).iter().any(|message| message["method"] == method);
+    assert!(!asked("textDocument/references") && !asked("textDocument/prepareCallHierarchy"), "dbt lsp was asked");
     assert!(session.finish().success());
 }
 

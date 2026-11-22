@@ -376,12 +376,13 @@ enum Part {
     /// proxy has no index yet, where dbt lsp's answer is null or none, and
     /// before why dbt lsp gave none.
     Unindexed,
-    /// A definition or references at a position the proxy claims, or a
-    /// hover at a `ref` or a `source` once there is an index, that it
-    /// cannot answer, for these reasons, as over a project that does not
-    /// read: dbt lsp's answer passes as it came; when it gives none, these
-    /// reasons, then why.  Alone and in `plus`, these reasons are the
-    /// answer.
+    /// What the proxy cannot answer, for these reasons: a definition or
+    /// references at a position it claims, or a hover at a `ref` or a
+    /// `source` once there is an index, over a project that does not read;
+    /// a hover, a definition or references at any position of a document
+    /// of another project (`on_elsewhere`).  dbt lsp's answer passes as it
+    /// came; when it gives none, these reasons, then why.  Alone and in
+    /// `plus`, a hover's reasons are its answer.
     Unanswered(Vec<Reason>),
 }
 
