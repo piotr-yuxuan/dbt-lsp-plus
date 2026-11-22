@@ -369,7 +369,7 @@ struct Proxy<W: Write> {
     settings: modes::Settings,
     /// The mode of each method, fixed when `initialize` is answered.
     table: modes::Table,
-    /// Whether the backend is `never`, which the proxy says once alone.
+    /// Whether `--backend` is `never`, which the proxy says once alone.
     never: bool,
     /// The user's settings that `initializationOptions` held and the proxy
     /// refused, said once `initialize` is answered.
