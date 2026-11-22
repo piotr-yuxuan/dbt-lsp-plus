@@ -4,7 +4,7 @@
 
 use crate::config::ParseIndex;
 use crate::graph::{Edge, Graph, Item};
-use crate::node::Type;
+use crate::node::{self, TYPES, Type};
 use crate::project::Project;
 use crate::properties;
 use crate::reference;
@@ -20,49 +20,29 @@ use url::Url;
 /// At most this many workspace symbols per answer.
 pub const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 
-/// LSP's `SymbolKind` of a dbt resource type.
-fn resource_kind(resource_type: &str) -> u32 {
-    match resource_type {
-        "seed" => 23,               // Struct
-        "source" => 11,             // Interface
-        "macro" | "function" => 12, // Function
-        "test" => 24,               // Event
-        "doc" => 15,                // String
-        _ => 5,                     // Class: model, snapshot, analysis, and what dbt adds
-    }
-}
-
 /// LSP's `SymbolKind` and a label of each kind of block or CTE of the
-/// outline.
+/// outline: a block that defines a node has its resource type's kind, a
+/// generic test's or a materialization's that of a macro, as dbt holds
+/// them.
 const OUTLINE_KINDS: [(Kind, u32, &str); 10] = [
-    (Kind::Macro, 12, "macro"),                     // Function
-    (Kind::Test, 12, "test"),                       // Function
-    (Kind::Materialization, 12, "materialization"), // Function
-    (Kind::Snapshot, 5, "snapshot"),                // Class
-    (Kind::Docs, 15, "docs"),                       // String
-    (Kind::Set, 13, "set"),                         // Variable
-    (Kind::Cte, 23, "CTE"),                         // Struct
-    (Kind::If, 3, "if"),                            // Namespace, as agreed with dbt-mode
-    (Kind::For, 3, "for"),                          // Namespace
-    (Kind::Call, 3, "call"),                        // Namespace
+    (Kind::Macro, node::MACRO.symbol, "macro"),
+    (Kind::Test, node::MACRO.symbol, "test"),
+    (Kind::Materialization, node::MACRO.symbol, "materialization"),
+    (Kind::Snapshot, node::SNAPSHOT.symbol, "snapshot"),
+    (Kind::Docs, node::DOC.symbol, "docs"),
+    (Kind::Set, 13, "set"),  // Variable
+    (Kind::Cte, 23, "CTE"),  // Struct
+    (Kind::If, 3, "if"),     // Namespace, as agreed with dbt-mode
+    (Kind::For, 3, "for"),   // Namespace
+    (Kind::Call, 3, "call"), // Namespace
 ];
 
-/// LSP's `SymbolKind` of an entry of a properties file, by its label;
-/// any other entry, a model, snapshot, analysis or semantic model, is 5,
-/// Class.
-const ENTRY_KINDS: [(&str, u32); 12] = [
-    ("seed", 23),       // Struct
-    ("macro", 12),      // Function
-    ("function", 12),   // Function
-    ("data test", 24),  // Event, as a test is a workspace symbol
-    ("source", 2),      // Module
-    ("table", 11),      // Interface, as a source table is a workspace symbol
-    ("column", 8),      // Field
-    ("exposure", 19),   // Object
-    ("metric", 16),     // Number
-    ("saved query", 6), // Method
-    ("unit test", 24),  // Event
-    ("group", 3),       // Namespace
+/// LSP's `SymbolKind` of an entry of a properties file that declares no
+/// node, by its label.  An entry that declares one has its resource
+/// type's kind, found by its label in `node::TYPES`.
+const ENTRY_KINDS: [(&str, u32); 2] = [
+    ("source", 2), // Module: a source, the group of its tables, which `table` entries declare
+    ("column", 8), // Field
 ];
 
 /// A symbol of an outline: a block or CTE, or an entry of a properties file.
@@ -105,7 +85,12 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
     };
     let symbols: Vec<Outlined> = if uri.ends_with(".yml") || uri.ends_with(".yaml") {
         let outlined = |entry: properties::Entry| Outlined {
-            kind: ENTRY_KINDS.iter().find(|(label, _)| *label == entry.label).map_or(5, |(_, kind)| *kind),
+            kind: TYPES
+                .iter()
+                .find(|row| row.label == Some(entry.label))
+                .map(|row| row.symbol)
+                .or_else(|| ENTRY_KINDS.iter().find(|(label, _)| *label == entry.label).map(|(_, kind)| *kind))
+                .unwrap_or(node::OTHER.symbol),
             detail: entry.label,
             name: entry.name,
             range: entry.range,
@@ -159,7 +144,7 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
         let starts = by_file.entry(&entity.path).or_insert_with(|| LineStarts::new(text));
         symbols.push(json!({
             "name": entity.shown(),
-            "kind": resource_kind(entity.resource_type),
+            "kind": Type::named(entity.resource_type).symbol,
             "location": {"uri": uri(&entity.path), "range": starts.range(entity.name_range.start, entity.name_range.end, encoding)},
             "containerName": entity.id,
             "data": {"uniqueId": entity.id, "resourceType": entity.resource_type},
@@ -173,7 +158,7 @@ fn hierarchy_item(item: &Item, project: &Project, encoding: Encoding) -> Value {
     let starts = LineStarts::new(project.text(&item.path).unwrap_or_default());
     json!({
         "name": item.name,
-        "kind": resource_kind(&item.resource_type),
+        "kind": Type::named(&item.resource_type).symbol,
         "detail": item.id,
         "uri": uri(&item.path),
         "range": starts.range(item.range.start, item.range.end, encoding),
@@ -616,6 +601,42 @@ mod tests {
         ];
         assert_eq!(kinds, expected, "each resource's type and kind, a generic test's block a macro");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_resource_type_has_the_outline_s_kind_in_the_call_hierarchy() {
+        let project = project::scan(&fixture(), &HashMap::new()).unwrap();
+        // The kinds of the outline agreed with dbt-mode, which dbt lsp's listing may bring to the hierarchy; a
+        // type that dbt adds, or a hook, stays a Class.
+        let expected = [
+            ("model", 5),
+            ("seed", 23),
+            ("snapshot", 5),
+            ("analysis", 5),
+            ("test", 24),
+            ("unit_test", 24),
+            ("macro", 12),
+            ("function", 12),
+            ("doc", 15),
+            ("source", 11),
+            ("exposure", 19),
+            ("metric", 16),
+            ("semantic_model", 5),
+            ("saved_query", 6),
+            ("group", 3),
+            ("operation", 5),
+        ];
+        for (resource_type, kind) in expected {
+            let item = Item {
+                id: format!("{resource_type}.shop.x"),
+                name: "x".to_owned(),
+                resource_type: resource_type.to_owned(),
+                path: fixture().join("models/x.sql"),
+                range: 0..0,
+                name_range: 0..0,
+            };
+            assert_eq!(hierarchy_item(&item, &project, Encoding::Utf16)["kind"], kind, "{resource_type}");
+        }
     }
 
     #[test]
