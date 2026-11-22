@@ -271,6 +271,9 @@ By what the agent reads:
   gives it only when `dbt lsp` gave no answer either, followed by `; `
   and why; workspace symbols and the call hierarchy give it alone; at a
   kind not listed, the request is `dbt lsp`'s and never gives it.
+- `<file> lies in the dbt project at <other>, and this session serves
+  only the one at <root>`: a session serves the first project it finds;
+  for that file's answers, start a session in its project's directory.
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not

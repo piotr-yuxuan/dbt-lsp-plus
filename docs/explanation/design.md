@@ -154,6 +154,7 @@ are one closed set, whose words live in one place, `Reason`'s
 | `Unreadable` | the proxy | `no dbt project at <root>: its dbt_project.yml is missing, is not YAML, or names no project` |
 | `Unindexed` | the proxy | `dbt parse has not finished: <why>`, why `it is running`, the parse's failure, or `waiting for dbt lsp to compile the project` |
 | `Refused` | the proxy | a rename's refusal, as written |
+| `Elsewhere` | the proxy | `<document> lies in the dbt project at <project>, and this session serves only the one at <root>` |
 | `NotRunning` | dbt lsp | `dbt lsp is not running` |
 | `Lost` | dbt lsp | `dbt lsp is lost for good: <why>`, as the give-up or the failed start said it |
 | `Late` | dbt lsp | `dbt lsp did not answer within 2 s`, then `: it is compiling the project` while a compilation it started has not ended, nor gone 60 s with no end, said or not |
@@ -588,18 +589,33 @@ that applies:
   before any document comes (Claude Code opens the first one right after
   `initialized`), so such a session is alone for its life: its answer is
   the alone one, without the alone message, and `dbt lsp` never starts
-  (plan 049 may start it).  At that document, before it is tracked: the
-  root, the dbt, the cut's probe, the first scan, the watcher of runs,
-  the watcher of files when the client lets the proxy register it, and the
-  line; then the parse, as alone.
+  (no plan starts it: the proxy role goes with plan 075).  At that
+  document, before it is tracked: the root, the dbt, the cut's probe, the
+  first scan, the watcher of runs, the watcher of files when the client
+  lets the proxy register it, and the line; then the parse, as alone.
 
 The working directory no longer names the project.  Before a project, and
 for ever when no document lies in one, the proxy is quiet: no process (no
 probe, no `unshare`, no git, no dbt), no polling, no watcher, nothing on
 its standard error, no message but a refused setting's at `initialize`,
 and every request but `initialize` gets null, valid for each method the
-proxy announces and each one an agent was seen to send; a reason for a
-document outside every project is plan 049's.
+proxy announces and each one an agent was seen to send.
+
+Once there is a project, a document lies in it when under the root or
+in one of its packages, installed or local, as spelt or links resolved,
+and in another project when the walk up from it finds one
+(`locate::elsewhere`).  A request on a document of another project, of a
+method that reads the project and names its document by
+`textDocument.uri` (a hover, a definition, references, a rename,
+`prepareCallHierarchy`), fails with `<document> lies in the dbt project
+at <project>, and this session serves only the one at <root>`, alone and
+in `plus`; in `merge` in front of dbt lsp, dbt lsp's answer stands, and
+when it gives none that reason comes first.  Inlay hints there are `[]`,
+and a method set to `dbt` goes to dbt lsp.  The rest is answered as
+before: the methods of the document's own text, a document in no
+project, every request while the root's `dbt_project.yml` does not read,
+and a project nested under the root, which is the root's: one session
+serves one project (plan 049).
 
 On the folder's route and a document's, when the server command's first
 word is `dbt` (the default `dbt lsp` included), the dbt is the project's
@@ -1872,7 +1888,8 @@ checked against dbt; the profile and the target in doctor, which need
   between restarts only the merged ones get the proxy's part or empty
   (plan 037).  After the give-up, or with one that cannot start, the
   session is alone, and a method set to `dbt` gets its nothing, null or
-  `[]`, which does not say why (plan 049's).
+  `[]`, which does not say why (no plan gives a reason: the modes go
+  with plan 075).
 - Once the server has listed the graph, an unsaved edit of a `ref` in a node
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the

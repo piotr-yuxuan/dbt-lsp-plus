@@ -122,6 +122,55 @@ fn a_document_s_project_is_the_nearest_one_above_that_is_no_package() {
     }
 }
 
+#[test]
+fn a_document_lies_elsewhere_only_in_another_project_than_the_session_s() {
+    let dir = scratch("locate-elsewhere");
+    let root = dir.join("root");
+    write(
+        &dir,
+        &[
+            ("root/dbt_project.yml", "name: root\n"),
+            ("root/packages.yml", "packages:\n  - local: ../shared\n"),
+            ("root/models/m.sql", "select 1\n"),
+            ("root/nested/dbt_project.yml", "name: nested\n"),
+            ("root/nested/models/n.sql", "select 1\n"),
+            ("shared/dbt_project.yml", "name: shared\n"),
+            ("shared/models/s.sql", "select 1\n"),
+            ("vendor/p/dbt_project.yml", "name: p\n"),
+            ("vendor/p/models/v.sql", "select 1\n"),
+            ("other/dbt_project.yml", "name: other\n"),
+            ("other/models/o.sql", "select 1\n"),
+            ("other/dbt_packages/q/dbt_project.yml", "name: q\n"),
+            ("other/dbt_packages/q/models/q.sql", "select 1\n"),
+            ("nowhere/x.sql", "select 1\n"),
+        ],
+    );
+    std::os::unix::fs::symlink("shared", dir.join("alias")).unwrap();
+    let (default, vendor) = (&["dbt", "lsp"][..], &["dbt", "lsp", "--packages-install-path", "../vendor"][..]);
+    let cases: [(&str, PathBuf, &[&str], Option<PathBuf>); 7] = [
+        ("under the root", root.join("models/m.sql"), default, None),
+        ("in a project nested under the root", root.join("nested/models/n.sql"), default, None),
+        ("in a local package of the root", dir.join("shared/models/s.sql"), default, None),
+        ("in that package through a link", dir.join("alias/models/s.sql"), default, None),
+        ("under the server's install path", dir.join("vendor/p/models/v.sql"), vendor, None),
+        ("in another project", dir.join("other/models/o.sql"), default, Some(dir.join("other"))),
+        (
+            "in a package of another project",
+            dir.join("other/dbt_packages/q/models/q.sql"),
+            default,
+            Some(dir.join("other")),
+        ),
+    ];
+    for (name, path, command, expected) in cases {
+        assert_eq!(locate::elsewhere(&path, &root, &words(command)), expected, "{name}");
+    }
+    assert_eq!(locate::elsewhere(&dir.join("nowhere/x.sql"), &root, &words(default)), None, "in no project");
+    // The root's own reason stands while its file does not read.
+    fs::write(root.join("dbt_project.yml"), "name: [\n").unwrap();
+    let path = dir.join("other/models/o.sql");
+    assert_eq!(locate::elsewhere(&path, &root, &words(default)), None, "beside a root that does not read");
+}
+
 /// What a stub dbt does when asked `lsp --help`.
 const HAS_LSP: &str = "exit 0";
 const NO_LSP: &str = "echo \"error: unrecognized subcommand 'lsp'\" >&2; exit 2";

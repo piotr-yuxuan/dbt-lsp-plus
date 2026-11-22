@@ -32,7 +32,7 @@ pub enum Answer {
 }
 
 /// Why a provider could not answer.  The proxy's: `Unreadable`,
-/// `Unindexed`, `Refused`; dbt lsp's: the others.
+/// `Unindexed`, `Refused`, `Elsewhere`; dbt lsp's: the others.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reason {
     /// The root's `dbt_project.yml` does not read as a project.
@@ -41,6 +41,9 @@ pub enum Reason {
     Unindexed(String),
     /// A rename refused, as `sources` and `document` write it.
     Refused(String),
+    /// The request's document lies in the dbt project at PROJECT, not in
+    /// the one this session serves, at SERVED.
+    Elsewhere { document: PathBuf, project: PathBuf, served: PathBuf },
     /// No dbt lsp runs now: none was started, or a restart is awaited or
     /// under way.
     NotRunning,
@@ -65,6 +68,13 @@ impl fmt::Display for Reason {
             ),
             Reason::Unindexed(why) => write!(f, "dbt parse has not finished: {why}"),
             Reason::Refused(why) => f.write_str(why),
+            Reason::Elsewhere { document, project, served } => write!(
+                f,
+                "{} lies in the dbt project at {}, and this session serves only the one at {}",
+                document.display(),
+                project.display(),
+                served.display()
+            ),
             Reason::NotRunning => f.write_str("dbt lsp is not running"),
             Reason::Lost(why) => write!(f, "dbt lsp is lost for good: {why}"),
             Reason::Late { waited, compiling } => {
@@ -113,6 +123,14 @@ mod tests {
             ),
             (Reason::Unindexed("it is running".into()), "dbt parse has not finished: it is running"),
             (Reason::Refused("another CTE is named final".into()), "another CTE is named final"),
+            (
+                Reason::Elsewhere {
+                    document: PathBuf::from("/r/b/models/m.sql"),
+                    project: PathBuf::from("/r/b"),
+                    served: PathBuf::from("/r/a"),
+                },
+                "/r/b/models/m.sql lies in the dbt project at /r/b, and this session serves only the one at /r/a",
+            ),
             (Reason::NotRunning, "dbt lsp is not running"),
             (
                 Reason::Lost("dbt lsp exited (exit status: 3)".into()),

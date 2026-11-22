@@ -181,6 +181,43 @@ fn on_a_project_from_a_document_the_proxy_answers_alone() {
     assert!(session.finish().success());
 }
 
+#[test]
+fn a_document_of_another_project_is_told_where_it_lies() {
+    let (mut session, project, ..) = from_a_document("routes-elsewhere");
+    let repo = project.parent().unwrap().to_owned();
+    let other = repo.join("other");
+    let m = other.join("models/m.sql");
+    fs::create_dir_all(m.parent().unwrap()).unwrap();
+    fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
+    fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
+    session.open(&m, None);
+    let on_ref = json!({"textDocument": {"uri": uri(&m)}, "position": {"line": 0, "character": 24}});
+    let message = format!(
+        "{} lies in the dbt project at {}, and this session serves only the one at {}",
+        m.display(),
+        other.display(),
+        project.display()
+    );
+    let elsewhere = json!({"code": -32803, "message": message});
+    for method in ["textDocument/hover", "textDocument/definition"] {
+        let answer = session.request(method, on_ref.clone());
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &elsewhere), "{method}: {answer}");
+    }
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}});
+    let hints = session.request("textDocument/inlayHint", json!({"textDocument": {"uri": uri(&m)}, "range": range}));
+    assert_eq!((hints.get("error"), &hints["result"]), (None, &json!([])), "{hints}");
+    // The methods of the document's own text, a document in no project, and the project's own, as before.
+    for path in [&m, &repo.join("ci.yml")] {
+        let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(path)}}));
+        assert!(outline.get("error").is_none() && outline["result"].is_array(), "{outline}");
+    }
+    let orders = project.join("models/marts/orders.sql");
+    let on_orders = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", on_orders);
+    assert!(hover.get("error").is_none() && hover["result"]["contents"].is_object(), "{hover}");
+    assert!(session.finish().success());
+}
+
 /// A session NAME without `--project-dir` in front of the default `dbt
 /// lsp`, run outside the project, the client's folder a copy of the
 /// fixture whose `.venv/bin/dbt` is the fake playing SCRIPT_VALUE.  Returns

@@ -117,6 +117,12 @@ lsp`'s.
 With a `dbt lsp` that cannot start, its parse runs the same dbt and
 fails, and `nodeInfo` and a hover on a node give its failure.
 
+Once a session has a project, a hover, a definition, references, a
+rename or a call hierarchy on a file of another dbt project fails with
+`<file> lies in the dbt project at <other>, and this session serves only
+the one at <root>`; in `merge` in front of `dbt lsp`, only when `dbt
+lsp` gives no answer.
+
 With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
 see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).
 [The design](../explanation/design.md) says how each answer is made.
@@ -235,7 +241,8 @@ In Neovim that is `init_options`, not `settings`: the proxy reads no
 `workspace/didChangeConfiguration`, and a change applies when the client
 starts again.  A refused key is ignored and shown once in a warning.
 `dbt lsp` gets `initializationOptions` without `dbtLspPlus`.  With no
-`dbt lsp`, a method set to `dbt` gets nothing, and a warning says so.
+`dbt lsp`, a method set to `dbt` gets its nothing, null or `[]`, which
+does not say why, and a warning says so once.
 
 ### The shadow
 

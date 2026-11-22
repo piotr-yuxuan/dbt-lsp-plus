@@ -3181,6 +3181,36 @@ fn in_merge_a_project_that_no_longer_reads_leaves_a_claimed_definition_to_dbt_ls
 }
 
 #[test]
+fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why() {
+    let project = navigable("elsewhere-merge");
+    let other = project.with_file_name("other");
+    let m = other.join("models/m.sql");
+    std::fs::create_dir_all(m.parent().unwrap()).unwrap();
+    std::fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
+    std::fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
+    let script = json!({"refuse_on": "textDocument/hover"});
+    let (mut session, _) = Session::fake_with("elsewhere-merge", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    session.open(&m, None);
+    let on_ref = position_in(&m, "ref('orders')", 6);
+    // dbt lsp gives no answer: the proxy's reason first, then dbt lsp's.
+    let refused = session.request("textDocument/hover", on_ref.clone());
+    let message = format!(
+        "{} lies in the dbt project at {}, and this session serves only the one at {}; \
+         dbt lsp failed: refused by the script",
+        m.display(),
+        other.display(),
+        project.display()
+    );
+    let why = json!({"code": -32803, "message": message});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
+    // dbt lsp's answer stands.
+    let definition = session.request("textDocument/definition", on_ref);
+    assert_eq!((definition.get("error"), &definition["result"]["echo"]), (None, &json!("textDocument/definition")));
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_definition_in_yaml_leads_where_dbt_looks() {
     let project = navigable("definition-yaml");
     // As dbt lsp 2.0.9 answers at every position of a properties file.

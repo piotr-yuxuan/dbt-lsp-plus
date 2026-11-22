@@ -79,6 +79,9 @@ pub struct Capability {
     /// lsp is asked too, and its locations that match none of the proxy's
     /// follow them.  Empty for a method the proxy answers whole.
     pub kinds: &'static [(&'static str, &'static [&'static str])],
+    /// Its answer reads the project, its scan or its index, beyond the
+    /// document's text.
+    pub reads_project: bool,
 }
 
 /// What a row of `CAPABILITIES` does not say: an LSP method that both
@@ -94,6 +97,7 @@ const DEFAULT: Capability = Capability {
     list: false,
     wants_index: false,
     kinds: &[],
+    reads_project: false,
 };
 
 /// Every method and command that the proxy answers or takes part in, a
@@ -105,6 +109,7 @@ pub static CAPABILITIES: [Capability; 18] = [
         name: "textDocument/prepareCallHierarchy",
         key: Some("callHierarchyProvider"),
         added: true,
+        reads_project: true,
         ..DEFAULT
     },
     Capability { name: "callHierarchy/incomingCalls", leader: Some("textDocument/prepareCallHierarchy"), ..DEFAULT },
@@ -117,12 +122,19 @@ pub static CAPABILITIES: [Capability; 18] = [
         ..DEFAULT
     },
     Capability { name: "textDocument/selectionRange", key: Some("selectionRangeProvider"), added: true, ..DEFAULT },
-    Capability { name: "textDocument/hover", key: Some("hoverProvider"), combine: Combine::Sections, ..DEFAULT },
+    Capability {
+        name: "textDocument/hover",
+        key: Some("hoverProvider"),
+        combine: Combine::Sections,
+        reads_project: true,
+        ..DEFAULT
+    },
     Capability {
         name: "textDocument/inlayHint",
         key: Some("inlayHintProvider"),
         combine: Combine::Append,
         list: true,
+        reads_project: true,
         ..DEFAULT
     },
     Capability {
@@ -139,6 +151,7 @@ pub static CAPABILITIES: [Capability; 18] = [
             ("test", &["yaml"]),
             ("function", &["sql", "yaml"]),
         ],
+        reads_project: true,
         ..DEFAULT
     },
     Capability {
@@ -153,12 +166,14 @@ pub static CAPABILITIES: [Capability; 18] = [
             ("macro", &["sql", "yaml"]),
             ("function", &["sql", "yaml"]),
         ],
+        reads_project: true,
         ..DEFAULT
     },
     Capability {
         name: "textDocument/rename",
         key: Some("renameProvider"),
         kinds: &[("source", &["sql", "yaml", "python"]), ("cte", &["sql"])],
+        reads_project: true,
         ..DEFAULT
     },
     Capability { name: "textDocument/publishDiagnostics", combine: Combine::PerFile, ..DEFAULT },

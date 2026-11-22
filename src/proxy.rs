@@ -2015,18 +2015,15 @@ impl<W: Write> Proxy<W> {
         if listing.is_some_and(|(own, ..)| id.as_str() == Some(own)) {
             return self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id");
         }
+        if let Some(why) = self.outside(method, params) {
+            return self.on_elsewhere(method, id, body, why);
+        }
         let (pending, fresh) = self.remember(method, id, params);
         match (self.route(method, params), self.backend.running().is_some(), method) {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
             (Route::Answer(answer), ..) => self.send_client(&answer.frame(id, method)),
             (Route::Command(command), ..) => self.on_command(command, id, params, pending),
-            (Route::Forward, true, _) => {
-                // dbt lsp adds to the proxy's part, or replaces its nothing, but never holds it up.
-                let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
-                self.deadlines.extend(late.map(|late| (key(id), late)));
-                self.forwarded.insert(key(id), (id.clone(), pending));
-                self.send_server(body);
-            }
+            (Route::Forward, true, _) => self.forward(id, method, pending, body),
             (Route::Forward, false, "initialize") => {
                 self.initialize = None;
                 self.initialize_alone(id);
@@ -2050,6 +2047,48 @@ impl<W: Write> Proxy<W> {
         if fresh {
             self.want_index();
         }
+    }
+
+    /// Forwards the client's request METHOD of ID, its BODY as it came, and
+    /// keeps PENDING for dbt lsp's answer, which adds to the proxy's part,
+    /// or replaces its nothing, but never holds it up.
+    fn forward(&mut self, id: &Value, method: &str, pending: Pending, body: &[u8]) {
+        let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
+        self.deadlines.extend(late.map(|late| (key(id), late)));
+        self.forwarded.insert(key(id), (id.clone(), pending));
+        self.send_server(body);
+    }
+
+    /// Why the request METHOD at PARAMS is not the session's project's: its
+    /// document, named by `textDocument.uri`, lies in another project
+    /// (`locate::elsewhere`), for a method that reads the project; none
+    /// before a project, in `dbt`, where the request goes to dbt lsp as it
+    /// came, and for any other request.
+    fn outside(&self, method: &str, params: &Value) -> Option<Reason> {
+        let root = self.root.as_ref()?;
+        let reads = capability::of(method).is_some_and(|capability| capability.reads_project);
+        if !reads || self.table.mode(method) == Mode::Dbt {
+            return None;
+        }
+        let document = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
+        let project = locate::elsewhere(&document, root, self.parsing.dbt.command())?;
+        Some(Reason::Elsewhere { document, project, served: root.clone() })
+    }
+
+    /// Answers the request METHOD of ID, its BODY as it came, on a document
+    /// of another project, for WHY, computing nothing on it: in `merge` in
+    /// front of dbt lsp, a method the proxy does not own is forwarded, whose
+    /// answer stands, and when it gives none, WHY comes first; else WHY at
+    /// once.  Inlay hints, a decoration, get none of the proxy's.
+    fn on_elsewhere(&mut self, method: &str, id: &Value, body: &[u8], why: Reason) {
+        let hints = method == "textDocument/inlayHint";
+        let merged = self.table.mode(method) == Mode::Merge && !self.owned.contains(method);
+        if merged && self.backend.running().is_some() {
+            let part = if hints { Part::Empty } else { Part::Unanswered(vec![why]) };
+            return self.forward(id, method, Pending { name: method.to_owned(), kept: Kept::Part(part) }, body);
+        }
+        let answer = if hints { Answer::Empty } else { Answer::Unanswered(vec![why]) };
+        self.send_client(&answer.frame(id, method));
     }
 
     /// A message of the server.  A response is the proxy's own only when its
@@ -2861,6 +2900,10 @@ mod tests {
             (
                 "`no dbt project at <root>: its dbt_project.yml is missing, is not YAML, or names no project`",
                 r#""no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project""#,
+            ),
+            (
+                "lies in the dbt project at <other>, and this session serves only the one at <root>",
+                r#""{} lies in the dbt project at {}, and this session serves only the one at {}""#,
             ),
         ];
         for (words, site) in quoted {
