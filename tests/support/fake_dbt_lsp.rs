@@ -9,10 +9,13 @@
 //! - it compiles, which it announces with `dbt/lspCompileStart` then
 //!   `dbt/lspCompileComplete`, after the first `didOpen`, after each
 //!   `didSave`, after each `workspace/didChangeWatchedFiles` with a change
-//!   under its root (its `--project-dir`, else `initialize`'s `rootUri`)
-//!   outside `target/` and `logs/`, but for one within 1 s of a `didSave`
-//!   whose every change names the file that `didSave` named, and for each
-//!   `dbt.listNodes`, whose answer comes between the two notifications;
+//!   (type 2) of a `.sql` file under `models/` of its root (its
+//!   `--project-dir`, else `initialize`'s `rootUri`), as 2.0.9 compiled on
+//!   a changed model, other types and files not observed, but for one
+//!   within 1 s of a `didSave` whose every change names the file that
+//!   `didSave` named, a window of the fake's own that no live test checks,
+//!   and for each `dbt.listNodes`, whose answer comes between the two
+//!   notifications;
 //!   their params carry the keys of 2.0.9's, `compile_type` `incremental`,
 //!   the completion's `errors` `[]` and `models_count` 6 by default;
 //! - after each such compilation, its background one, which 2.0.9 sends
@@ -21,7 +24,9 @@
 //!   `dbt/lspBackgroundCompileComplete`, `compile_type` `full`, the
 //!   completion's `errors` and `models_count` the foreground's; where
 //!   `models_count` is null, as when 2.0.9 compiled nothing, the
-//!   background completion alone, `incremental`;
+//!   background completion alone, `incremental`, and a listing answered
+//!   `{"error": "Compilation failed", "error_kind": "compilation_failed",
+//!   ...}`;
 //! - a `dbt.listNodes` cancels one still pending, which gets
 //!   `{"error": "Operation cancelled", ...}`; with no scripted answer, a
 //!   listing finds no node, `{"error": "No nodes found", ...}`;
@@ -162,12 +167,15 @@ fn compile_complete(script: &Value) {
     send(json!({"method": "dbt/lspBackgroundCompileComplete", "params": params}));
 }
 
-/// What 2.0.9 answers to METHOD with PARAMS, a listing when LISTING, when
-/// the script says nothing of it.
-fn answered_as_2_0_9(method: &str, listing: bool, params: Value) -> Value {
+/// What 2.0.9 answers to METHOD with PARAMS, a listing when LISTING, in a
+/// project that compiles nothing when FAILED, when the script says nothing
+/// of it.
+fn answered_as_2_0_9(method: &str, listing: bool, failed: bool, params: Value) -> Value {
     let model = params.pointer("/textDocument/uri").and_then(Value::as_str).is_some_and(|uri| uri.ends_with(".sql"));
     match (method, listing) {
         ("shutdown", _) => Value::Null,
+        (_, true) if failed => json!({"error": "Compilation failed", "error_kind": "compilation_failed",
+                                      "grain": "unknown", "nodes": [], "root_project": null}),
         (_, true) => json!({"error": "No nodes found", "grain": "unknown", "nodes": []}),
         // Inlay hints: none on a model, null on any other file.
         ("textDocument/inlayHint", _) if model => json!([]),
@@ -264,7 +272,8 @@ impl Fake {
         let once = self.script.get_mut("answers_once").and_then(Value::as_object_mut).and_then(|a| a.remove(key));
         let listing = key.starts_with(LISTING);
         let answer = once.or_else(|| self.script["answers"].get(key).cloned());
-        let answer = answer.unwrap_or_else(|| answered_as_2_0_9(method, listing, params));
+        let failed = self.script["compile_complete"].get("models_count").is_some_and(Value::is_null);
+        let answer = answer.unwrap_or_else(|| answered_as_2_0_9(method, listing, failed, params));
         let compiling = listing && self.script["hold_compile"] != json!(true);
         if compiling {
             compile_start();
@@ -289,16 +298,16 @@ impl Fake {
                 let changes = params["changes"].as_array().map_or(&[][..], Vec::as_slice);
                 let saved = self.saved.as_ref().filter(|(_, at)| now.duration_since(*at) < SAVE_WINDOW);
                 let covered = saved.is_some_and(|(uri, _)| changes.iter().all(|change| change["uri"] == *uri));
-                // Under the root, outside what 2.0.9 writes at each compilation.
-                let source = |change: &Value| {
+                // A model changed, which 2.0.9 was seen to compile on.
+                let model = |change: &Value| {
                     let path = change["uri"].as_str().and_then(|uri| url::Url::parse(uri).ok()?.to_file_path().ok());
-                    path.is_some_and(|path| {
-                        let relative = self.root.as_deref().and_then(|root| path.strip_prefix(root).ok());
-                        relative
-                            .is_some_and(|relative| !relative.starts_with("target") && !relative.starts_with("logs"))
-                    })
+                    let sql =
+                        path.as_ref().is_some_and(|path| path.extension().is_some_and(|extension| extension == "sql"));
+                    let root = self.root.as_deref();
+                    let under = path.is_some_and(|path| root.is_some_and(|root| path.starts_with(root.join("models"))));
+                    change["type"] == 2 && sql && under
                 };
-                !covered && changes.iter().any(source)
+                !covered && changes.iter().any(model)
             }
             _ => false,
         }

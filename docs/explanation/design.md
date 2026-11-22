@@ -920,13 +920,24 @@ listings, `*` and on its answer `source:*`, then the same after a
 So a compilation that compiled nothing reports `models_count` null and
 an entry of severity `Error` (S1, S2); `models_count` null with no error
 is a first compilation cut short, which the next one follows (S4); an
-error in a model leaves it a count.  The fake (`tests/support/fake_dbt_lsp.rs`) compiles on the same
-triggers, its frames carry O4's keys, and its background pair comes at
-once after each foreground compilation, where 2.0.9 sends it about 1.1 s
-later and joins several, so that no test waits; where its completion's
-`models_count` is null, the background completion comes alone, as in S1
-and S2.  The live test checks O3's and O13's shape in `watcher`, O4's
-keys and O8's percentage in `recorded_observations`.
+error in a model leaves it a count.
+
+The fake (`tests/support/fake_dbt_lsp.rs`) compiles on the triggers
+seen: the first `didOpen`, each `didSave`, each listing, and a watched
+change (type 2) of a `.sql` file under `models/`, as 2.0.9 compiled on
+a changed model; it compiles on no other type of change nor any other
+file, which no probe tried.  Its window of 1 s, within which a watched
+event of the file a `didSave` named compiles nothing more, is its own,
+chosen between O3's two cases (back to back, one compilation; 6 s
+apart, two), and no live test checks it.  Its frames carry O4's keys,
+and its background pair comes at once after each foreground
+compilation, where 2.0.9 sends it about 1.1 s later and joins several,
+so that no test waits.  Where its completion's `models_count` is null,
+the background completion comes alone and a listing is answered
+`{"error": "Compilation failed", "error_kind": "compilation_failed",
+...}`, as in S1 and S2; it does not model S4.  The live test checks
+O3's and O13's shape in `watcher`, O4's keys and O8's percentage in
+`recorded_observations`.
 
 ## Sources
 
