@@ -1265,10 +1265,12 @@ rename of a CTE, which the server answers with null:
   (`model`, `table`, `semantic model`); the kinds are those agreed with
   dbt-mode.  A node shows its resource type's kind wherever the proxy
   lists it, the one its entry has here (`node::TYPES`): in workspace
-  symbols and the call hierarchy too, so a unit test is an Event and an
-  exposure an Object there as here.  A source table is an Interface; a
-  source, the group of its tables, which is no node, a Module.  An entry
-  runs from its first key to its last content: the
+  symbols and the call hierarchy too.  So a unit test is an Event and an
+  exposure an Object in the call hierarchy as here, where only dbt lsp's
+  listing brings them; workspace symbols never list either.  A source
+  table is an Interface; a source, the group of its tables, which is no
+  node, a Module.  An entry runs from its first key to its last content:
+  the
   blank lines and the comment lines less deep than its first key that end
   it belong to what follows, while a key commented out and a block
   scalar's deeper lines stay in; in flow style it ends at its brace.  An
