@@ -460,10 +460,11 @@ pub fn package_config(dir: &Path) -> Option<(String, Tree)> {
 }
 
 /// A file of a project as a scan finds it: its path, its metadata, read
-/// before its content, its package's index, and the layout of the directory
-/// it was found in, none for a package's `dbt_project.yml`.
+/// before its content, its package's position among the inventory's
+/// packages, and the layout of the directory it was found in, none for a
+/// package's `dbt_project.yml`.
 #[derive(Debug)]
-pub struct Found {
+pub struct File {
     pub path: PathBuf,
     pub metadata: Option<fs::Metadata>,
     pub package: usize,
@@ -473,9 +474,9 @@ pub struct Found {
 /// What a scan finds of a project: its packages, its own first, by name and
 /// directory, and their files in the order of the scan.
 #[derive(Debug)]
-pub struct Listing {
+pub struct Inventory {
     pub packages: Vec<(String, PathBuf)>,
-    pub found: Vec<Found>,
+    pub files: Vec<File>,
 }
 
 /// What a scan finds of the project at ROOT: each package's resource paths,
@@ -483,7 +484,7 @@ pub struct Listing {
 /// calls too.  Its packages are those installed, then the local packages
 /// that its packages files name and that are not.  None when ROOT has no
 /// named `dbt_project.yml`.
-pub fn find(root: &Path) -> Option<Listing> {
+pub fn find(root: &Path) -> Option<Inventory> {
     let (root_package, root_config) = package_config(root)?;
     let install = root_config.get("packages-install-path").and_then(Tree::as_str).unwrap_or("dbt_packages");
     let mut installed: Vec<PathBuf> =
@@ -508,7 +509,7 @@ pub fn find(root: &Path) -> Option<Listing> {
                 .map_or(Vec::new(), |paths| paths.items().iter().filter_map(Tree::as_str).collect());
             let dirs = if configured.is_empty() { vec![layout.default] } else { configured };
             let listed = dirs.iter().flat_map(|sub| files(&dir.join(sub)));
-            found.extend(listed.map(|(path, metadata)| Found {
+            found.extend(listed.map(|(path, metadata)| File {
                 path,
                 metadata: Some(metadata),
                 package,
@@ -516,17 +517,17 @@ pub fn find(root: &Path) -> Option<Listing> {
             }));
         }
         let path = dir.join("dbt_project.yml");
-        found.push(Found { metadata: fs::metadata(&path).ok(), path, package, layout: None });
+        found.push(File { metadata: fs::metadata(&path).ok(), path, package, layout: None });
     }
-    Some(Listing { packages: packages.into_iter().map(|(name, dir, _)| (name, dir)).collect(), found })
+    Some(Inventory { packages: packages.into_iter().map(|(name, dir, _)| (name, dir)).collect(), files: found })
 }
 
 /// How a scan reads a file it found: its text and what the text gives.
-pub type Read<'a> = dyn FnMut(&Found) -> Arc<Scanned> + 'a;
+pub type Read<'a> = dyn FnMut(&File) -> Arc<Scanned> + 'a;
 
-/// The project that LISTING finds, each file as READ gives it.
-pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
-    let packages = &listing.packages;
+/// The project that INVENTORY finds, each file as READ gives it.
+pub fn assemble(inventory: &Inventory, read: &mut Read) -> Project {
+    let packages = &inventory.packages;
     let mut project = Project {
         root_package: packages.first().map(|(name, _)| name.clone()).unwrap_or_default(),
         packages: HashMap::new(),
@@ -534,7 +535,7 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
         sources: Vec::new(),
         files: HashMap::new(),
     };
-    for file in &listing.found {
+    for file in &inventory.files {
         let scanned = read(file);
         let name = &packages[file.package].0;
         let yaml = file.path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
@@ -574,7 +575,7 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
     // The versions of each package, once all its properties files are read; a model that two files
     // declare, which dbt rejects, by the first.
     let mut declared: HashMap<&str, Vec<&Versioned>> = HashMap::new();
-    for file in &listing.found {
+    for file in &inventory.files {
         let versions = project.files.get(&file.path).map_or(&[][..], |scanned| scanned.versions.as_slice());
         let known = declared.entry(packages[file.package].0.as_str()).or_default();
         for versioned in versions {
@@ -597,11 +598,10 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
 /// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
 /// editor has open, which wins over the file on disk.
 pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
-    let listing = find(root)?;
-    let mut read = |file: &Found| {
-        Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default())
-    };
-    Some(assemble(&listing, &mut read))
+    let inventory = find(root)?;
+    let mut read =
+        |file: &File| Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default());
+    Some(assemble(&inventory, &mut read))
 }
 
 /// A project of FILES, each a path under it and its text, in a fresh
