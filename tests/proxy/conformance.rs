@@ -364,7 +364,7 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
 /// a definition at a call leads to X if and only if the call is among X's
 /// references.
 fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<String> {
-    let leads_back = |found: &navigation::Found| {
+    let leads_back = |found: &navigation::Target| {
         let file = project.files.get(&found.path);
         let back = file.and_then(|file| navigation::reference_at(&found.path, file, found.range.start));
         back.is_some_and(|target| navigation::resolve(lookup, &found.path, &target).iter().any(|to| to.id == found.id))

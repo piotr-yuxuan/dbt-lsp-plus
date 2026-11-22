@@ -1299,8 +1299,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The locations of FOUND in PROJECT, as the client spelt their URIs.
-    fn locations(&self, project: &Project, found: &[navigation::Found]) -> Vec<Value> {
-        let location = |found: &navigation::Found| {
+    fn locations(&self, project: &Project, found: &[navigation::Target]) -> Vec<Value> {
+        let location = |found: &navigation::Target| {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
             let starts = LineStarts::new(text.get(..found.range.end).unwrap_or(text));
@@ -3312,6 +3312,9 @@ mod tests {
         let text = "select {{ function('f') }}(1) as v";
         let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
         proxy.documents.insert(path.clone(), text.to_owned());
+        let position = json!({"textDocument": {"uri": features::uri(&path)},
+                              "position": {"line": 0, "character": text.find("'f'").unwrap() + 1}});
+        assert_eq!(proxy.node_at(None, &position, false), None, "a function's argument names no node before any parse");
         let node = json!({"unique_id": "model.shop.uses_f", "name": "uses_f", "resource_type": "model",
                           "package_name": "shop", "original_file_path": "models/marts/uses_f.sql", "config": {}});
         let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_f": node}});

@@ -152,7 +152,10 @@ impl Graph {
             let path = package_dir.map_or_else(PathBuf::new, |dir| dir.join(&node.original_file_path));
             let resource_type = node.resource_type.clone();
             // A model's version, which the listing names as its model, is shown as its id ends: `orders.v2`.
-            let own = node.id.strip_prefix(&format!("model.{}.", node.package)).filter(|_| resource_type == "model");
+            let own = node
+                .id
+                .strip_prefix(&crate::node::id(&crate::node::MODEL, &node.package, ""))
+                .filter(|_| resource_type == "model");
             let version = own.filter(|shown| shown.starts_with(&format!("{}.v", node.name)));
             let item = Item {
                 id: node.id.clone(),
