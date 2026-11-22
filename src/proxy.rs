@@ -1120,7 +1120,7 @@ impl<W: Write> Proxy<W> {
     /// The answer to the call hierarchy's METHOD, on the graph of the files
     /// with the server's nodes once listed, or, alone, the last parse's.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Answer> {
-        let Some(project) = self.project() else { return Some(Answer::Empty) };
+        let Some(project) = self.project() else { return Some(self.unreadable()) };
         let graph = self.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
@@ -1234,8 +1234,8 @@ impl<W: Write> Proxy<W> {
     /// 2.0.9's lookup: its location, several, or none.
     fn on_definition(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
-        let target = navigation::target_at(&path, &text, offset);
-        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Answer::Empty) };
+        let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
+        let Some(project) = self.project() else { return Some(self.unreadable()) };
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
         Some(match &locations[..] {
@@ -1249,8 +1249,8 @@ impl<W: Write> Proxy<W> {
     /// position, with their declaration when the client asks.
     fn on_references(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
-        let target = navigation::target_at(&path, &text, offset);
-        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Answer::Empty) };
+        let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
+        let Some(project) = self.project() else { return Some(self.unreadable()) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
         if let navigation::Target::Source(source) = &target {
             let uri_of = |path: &Path| self.uri_of(path);
@@ -1259,6 +1259,12 @@ impl<W: Write> Proxy<W> {
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let found = navigation::references(&lookup, &path, &target, declaration);
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
+    }
+
+    /// Why the proxy cannot answer from the project: the root's
+    /// `dbt_project.yml` does not read, which the scan needs.
+    fn unreadable(&self) -> Answer {
+        Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())])
     }
 
     /// The URI of the file at PATH, as the client spelt it if it opened it.
@@ -1677,9 +1683,10 @@ impl<W: Write> Proxy<W> {
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
             "workspace/symbol" => params.get("query").and_then(Value::as_str).map(|query| {
-                self.project().map_or(Answer::Empty, |project| {
-                    Answer::Found(features::workspace_symbols(&project, query, self.encoding))
-                })
+                self.project().map_or_else(
+                    || self.unreadable(),
+                    |project| Answer::Found(features::workspace_symbols(&project, query, self.encoding)),
+                )
             }),
             config::NODE_INFO => self.node_info(params),
             "textDocument/references" => self.on_references(params),

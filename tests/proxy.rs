@@ -3084,6 +3084,61 @@ fn location(project: &Path, file: &str, line: u64, start: u64, end: u64) -> Valu
 }
 
 #[test]
+fn a_project_that_no_longer_reads_says_so_where_no_symbol_is_empty() {
+    let project = navigable("unreadable");
+    let (mut session, _) =
+        Session::fake_with("unreadable", json!({"no_lsp": true}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let configuration = project.join("dbt_project.yml");
+    let written = std::fs::read_to_string(&configuration).unwrap();
+    std::fs::write(&configuration, "name: [").unwrap();
+    let on_ref = position_in(&orders, "ref('stg_orders')", 6);
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project",
+        project.display()
+    );
+    let unreadable = json!({"code": -32803, "message": message});
+    let at_4_28 = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let asked = [
+        ("textDocument/definition", on_ref.clone()),
+        ("textDocument/references", without_declaration(on_ref.clone())),
+        ("workspace/symbol", json!({"query": "orders"})),
+        ("textDocument/prepareCallHierarchy", at_4_28),
+    ];
+    for (method, params) in asked {
+        let answer = session.request(method, params);
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &unreadable), "{method}: {answer}");
+    }
+    // Where no target is, no symbol either: empty, as before.
+    let nowhere = position_in(&orders, "select", 1);
+    let definition = session.request("textDocument/definition", nowhere.clone());
+    assert_eq!((definition.get("error"), &definition["result"]), (None, &Value::Null), "{definition}");
+    let references = session.request("textDocument/references", without_declaration(nowhere));
+    assert_eq!((references.get("error"), &references["result"]), (None, &json!([])), "{references}");
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&orders)}}));
+    assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    std::fs::write(&configuration, &written).unwrap();
+    let found = session.request("textDocument/definition", on_ref);
+    assert_eq!(found["result"], location(&project, "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
+    assert!(session.finish().success());
+    // In front of dbt lsp, the definition goes to it, whose answer stands: its bytes, odd spacing included.
+    let in_front = navigable("unreadable-merge");
+    let answer = r#"{"result": {"uri": "file:///elsewhere.sql", "range": null},  "id": $ID, "jsonrpc": "2.0"}"#;
+    let script = json!({"raw_answers": {"textDocument/definition": answer}});
+    let (mut session, _) =
+        Session::fake_with("unreadable-merge", script, &[Path::new("--project-dir"), &in_front], None);
+    session.initialize(&in_front);
+    std::fs::write(in_front.join("dbt_project.yml"), "name: [").unwrap();
+    let orders = in_front.join("models/marts/orders.sql");
+    let passed = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
+    let expected = answer.replace("$ID", &passed["id"].to_string());
+    assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "dbt lsp's answer: {passed}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_definition_in_yaml_leads_where_dbt_looks() {
     let project = navigable("definition-yaml");
     // As dbt lsp 2.0.9 answers at every position of a properties file.
