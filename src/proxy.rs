@@ -169,14 +169,34 @@ struct Server {
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
-#[derive(Clone, PartialEq)]
-enum Pending {
-    Request,
-    /// A `dbt.listNodes`: the proxy lists only when none is pending, since a
-    /// second listing cancels the first.
-    Listing,
-    /// Answered with null if the server dies first, as LSP asks of `shutdown`.
-    Shutdown,
+#[derive(PartialEq)]
+struct Pending {
+    /// The method, or for `workspace/executeCommand` the command.
+    name: String,
+    kept: Kept,
+}
+
+/// What the proxy keeps of a forwarded request.
+#[derive(PartialEq)]
+enum Kept {
+    /// Nothing of the proxy's: in `dbt`, a listing, `shutdown`, any other.
+    Plain,
+    /// A merged request: the proxy's part.
+    Part(Part),
+    /// Answered with the proxy's part alone once the server was late: its
+    /// answer, when it comes, is dropped.
+    Answered,
+    /// A definition or references that the shadow follows: its parameters,
+    /// and the count of the client's changes when it came.
+    Shadow(Value, u64),
+}
+
+/// The proxy's part of a merged request.
+#[derive(PartialEq)]
+enum Part {
+    /// Nothing to add: its nothing, null or `[]`, is its answer when the
+    /// server's is an error, late, or none.
+    Nothing,
     /// A hover whose answer gets this text first, and whether its line
     /// breaks are hard in markdown: true for a node's summary and facts,
     /// lines of plain text and code spans; false for a docs block's text or
@@ -184,63 +204,57 @@ enum Pending {
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
-    /// A merged request to which the proxy adds nothing: this nothing, null
-    /// or `[]`, is its answer when the server's is an error, late, or none.
-    Nothing(Value),
     /// A hover whose position names a node while no index exists: in front
     /// of the server, a nothing, null; answered by the proxy, why it has
     /// no index yet.
     Unindexed,
-    /// Answered with the proxy's part alone once the server was late: its
-    /// answer, when it comes, is dropped.
-    Answered,
-    /// A definition or references that the shadow follows: its method and
-    /// parameters, and the count of the client's changes when it came.
-    Shadow {
-        method: String,
-        params: Value,
-        changes: u64,
-    },
 }
 
 impl Pending {
-    /// The server's answer, MESSAGE, as this kind of request makes it, for a
+    /// The server's answer, MESSAGE, as this kind of part makes it, for a
     /// client that reads markdown when MARKDOWN; none to pass it unchanged.
     /// An error to a request with a part of the proxy's gives that part.
     fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
         if message.get("error").is_some() {
             return self.part(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
         }
-        match self {
-            Pending::Hover(text, hard) => features::merge_hover(message, text, *hard, markdown),
-            Pending::Hints(hints) => features::merge_hints(message, hints),
+        match &self.kept {
+            Kept::Part(Part::Hover(text, hard)) => features::merge_hover(message, text, *hard, markdown),
+            Kept::Part(Part::Hints(hints)) => features::merge_hints(message, hints),
             _ => None,
         }
     }
 
-    /// The proxy's part alone, as the answer when the server gives none: a
-    /// hover's text, the hints, a merged request's nothing; none for a
-    /// request that is not merged.
+    /// The proxy's part by itself, as the answer when the server gives
+    /// none: a hover's text, the hints, a merged request's nothing; none
+    /// for a request that is not merged.
     fn part(&self, markdown: bool) -> Option<Value> {
-        let nothing = match self {
-            Pending::Hover(..) => json!({"result": null}),
-            Pending::Hints(_) => json!({"result": []}),
-            Pending::Nothing(nothing) => return Some(nothing.clone()),
-            Pending::Unindexed => return Some(Value::Null),
-            _ => return None,
-        };
-        self.merged(&nothing, markdown).map(|merged| merged["result"].clone())
+        let Kept::Part(part) = &self.kept else { return None };
+        match part {
+            Part::Nothing => Some(capability::empty(&self.name)),
+            Part::Unindexed => Some(Value::Null),
+            Part::Hover(text, hard) => {
+                let alone = features::merge_hover(&json!({"result": null}), text, *hard, markdown);
+                alone.map(|alone| alone["result"].clone())
+            }
+            Part::Hints(hints) => Some(Value::Array(hints.clone())),
+        }
     }
 
-    /// How long the server has to answer this kind of request before the
-    /// client gets the proxy's answer alone: a part is worth showing at
-    /// once, a nothing only once the server is clearly late.
+    /// How long the server has to answer this request before the client
+    /// gets the proxy's answer alone, as its capability waits: a part is
+    /// worth showing at once, a nothing only once the server is clearly
+    /// late.
     fn deadline(&self) -> Option<Duration> {
-        match self {
-            Pending::Hover(..) | Pending::Hints(_) => Some(capability::MERGE_DEADLINE),
-            Pending::Nothing(_) | Pending::Unindexed => Some(capability::NOTHING_DEADLINE),
-            _ => None,
-        }
+        let Kept::Part(part) = &self.kept else { return None };
+        capability::of(&self.name)?.deadline(!matches!(part, Part::Nothing | Part::Unindexed))
+    }
+
+    /// Whether it is a listing, the server's `dbt.listNodes` or the
+    /// proxy's command that it does: the proxy lists only when none is
+    /// pending, since a second listing cancels the first.
+    fn listing(&self) -> bool {
+        self.name == "dbt.listNodes" || self.name == commands::NODES
     }
 }
 
@@ -1451,7 +1465,7 @@ impl<W: Write> Proxy<W> {
                 self.on_document(method, params).map(Ok)
             }
             // Asked for first, as nodeInfo does, so that the reason is that of the parse it may start.
-            "textDocument/hover" if *pending == Pending::Unindexed => {
+            "textDocument/hover" if pending.kept == Kept::Part(Part::Unindexed) => {
                 self.want_index();
                 Some(Err(self.unindexed()))
             }
@@ -1471,7 +1485,7 @@ impl<W: Write> Proxy<W> {
     }
 
     fn client_listing(&self) -> bool {
-        self.forwarded.values().any(|(_, pending)| *pending == Pending::Listing)
+        self.forwarded.values().any(|(_, pending)| pending.listing())
     }
 
     /// Asks the server for the graph, unless a listing is under way, the
@@ -1644,7 +1658,7 @@ impl<W: Write> Proxy<W> {
     /// summary and facts of the node named there, else a doc's or a generic
     /// test's block; else nothing, null, which a node named before any index
     /// turns into why the proxy has none.
-    fn hover_part(&self, params: &Value) -> Pending {
+    fn hover_part(&self, params: &Value) -> Part {
         let index = self.parsing.index.as_ref();
         // Line 1, column 1 of a file stands for the node it defines.
         let start = params["position"] == json!({"line": 0, "character": 0});
@@ -1662,9 +1676,8 @@ impl<W: Write> Proxy<W> {
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
             navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
         };
-        let nothing =
-            if named.is_some() && index.is_none() { Pending::Unindexed } else { Pending::Nothing(Value::Null) };
-        summary.or_else(block).map_or(nothing, |(text, hard)| Pending::Hover(text, hard))
+        let nothing = if named.is_some() && index.is_none() { Part::Unindexed } else { Part::Nothing };
+        summary.or_else(block).map_or(nothing, |(text, hard)| Part::Hover(text, hard))
     }
 
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
@@ -1675,24 +1688,23 @@ impl<W: Write> Proxy<W> {
     /// hover keeps the index fresh, an inlay hint only makes one, and in
     /// `dbt` neither; a shadowed request wants what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
+        let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
+        let name = command.unwrap_or(method).to_owned();
         // Outside `dbt`, hints, a definition or references with no part of the proxy's.
-        let nothing = Pending::Nothing(capability::empty(method));
-        let pending = match (method, params["command"].as_str()) {
-            ("initialize", _) => {
+        let nothing = Kept::Part(Part::Nothing);
+        let (kept, fresh) = match method {
+            "initialize" => {
                 self.on_initialize(params);
                 self.initialized = true;
                 self.initialize = Some(id.clone());
-                Pending::Request
+                (Kept::Plain, false)
             }
-            ("shutdown", _) => {
+            "shutdown" => {
                 self.shutdown = true;
-                Pending::Shutdown
+                (Kept::Plain, false)
             }
-            (_, Some("dbt.listNodes" | commands::NODES)) => Pending::Listing,
-            ("textDocument/hover", _) if self.table.mode(method) != Mode::Dbt => {
-                return (self.hover_part(params), true);
-            }
-            ("textDocument/inlayHint", _) if self.table.mode(method) != Mode::Dbt => {
+            "textDocument/hover" if self.table.mode(method) != Mode::Dbt => (Kept::Part(self.hover_part(params)), true),
+            "textDocument/inlayHint" if self.table.mode(method) != Mode::Dbt => {
                 // A panic leaves the server's answer as it is.
                 let hints = panic::catch_unwind(AssertUnwindSafe(|| {
                     let index = self.parsing.index.as_ref()?;
@@ -1704,23 +1716,19 @@ impl<W: Write> Proxy<W> {
                     Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
-                return (hints.map_or(nothing, Pending::Hints), self.parsing.index.is_none());
+                (hints.map_or(nothing, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
             }
             // Followed in `dbt` only: one the proxy answers is no one's to compare, and `merge` forwards only
             // where the proxy has no target.
-            ("textDocument/definition" | "textDocument/references", _) => {
+            "textDocument/definition" | "textDocument/references" => {
                 let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
-                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Pending::Shadow {
-                    method: method.to_owned(),
-                    params: params.clone(),
-                    changes,
-                });
+                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Kept::Shadow(params.clone(), changes));
                 let fresh = shadowed.is_some();
-                return (shadowed.unwrap_or(if dbt { Pending::Request } else { nothing }), fresh);
+                (shadowed.unwrap_or(if dbt { Kept::Plain } else { nothing }), fresh)
             }
-            _ => Pending::Request,
+            _ => (Kept::Plain, false),
         };
-        (pending, false)
+        (Pending { name, kept }, fresh)
     }
 
     /// A request of the client: routed by `route`; without a server,
@@ -1814,7 +1822,7 @@ impl<W: Write> Proxy<W> {
         let pending = self.forwarded.remove(&key(id));
         self.deadlines.remove(&key(id));
         // The client had the proxy's part alone: the late answer is no one's.
-        if let Some((_, Pending::Answered)) = pending {
+        if pending.as_ref().is_some_and(|(_, pending)| pending.kept == Kept::Answered) {
             return;
         }
         if let (None, Some(own)) = (&pending, id.as_str())
@@ -1822,7 +1830,7 @@ impl<W: Write> Proxy<W> {
         {
             return self.on_own_response(own, message);
         }
-        if let Some((_, Pending::Listing)) = pending {
+        if pending.as_ref().is_some_and(|(_, pending)| pending.listing()) {
             self.resume();
         }
         if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown)) {
@@ -1849,8 +1857,8 @@ impl<W: Write> Proxy<W> {
             return self.watch_runs();
         }
         self.send_client_body(body);
-        if let Some((_, Pending::Shadow { method, params, changes })) = pending {
-            self.compare(&method, &params, changes, message);
+        if let Some((_, Pending { name, kept: Kept::Shadow(params, changes) })) = pending {
+            self.compare(&name, &params, changes, message);
         }
     }
 
@@ -2083,11 +2091,10 @@ impl<W: Write> Proxy<W> {
         }
         self.deadlines.clear();
         for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
-            let part = pending.part(self.markdown);
-            match (pending, part) {
-                (Pending::Shutdown, _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
-                (Pending::Answered, _) => {}
-                (_, Some(part)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
+            match (pending.name.as_str(), &pending.kept, pending.part(self.markdown)) {
+                ("shutdown", ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+                (_, Kept::Answered, _) => {}
+                (.., Some(part)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
                 _ => self.reply_error(&id, REQUEST_FAILED, &why),
             }
         }
@@ -2191,7 +2198,8 @@ impl<W: Write> Proxy<W> {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
-            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).part(self.markdown));
+            let (id, part) = (id.clone(), pending.part(self.markdown));
+            pending.kept = Kept::Answered;
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();

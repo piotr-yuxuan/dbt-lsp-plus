@@ -119,8 +119,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     cache changes only once the project is built;
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
     from the hierarchy's answer;
-  - `Pending::merged`: what each kind of forwarded request does to the
-    server's answer, so that `on_server` stays a dispatch;
+  - `Pending::merged`: what each kind of part does to the server's
+    answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
     hints, apart from the outcome of the parse that changes them;
   - `runs::locator`: where a failed node is written, apart from how it

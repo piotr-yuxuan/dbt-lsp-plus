@@ -12,12 +12,12 @@ use std::time::Duration;
 /// A request to which the proxy adds a part is answered with it alone if the
 /// server has not answered within this long: three times what dbt lsp 2.0.9
 /// took on the fixture during a compilation.
-pub const MERGE_DEADLINE: Duration = Duration::from_millis(300);
+const MERGE_DEADLINE: Duration = Duration::from_millis(300);
 /// A merged request to which the proxy has nothing to add is answered with
 /// that nothing if the server has not answered within this long: above the
 /// slowest answer of dbt lsp 2.0.9 seen, 1.9 s for the first hover on 2,000
 /// models during its compilation.
-pub const NOTHING_DEADLINE: Duration = Duration::from_secs(2);
+const NOTHING_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Who can answer a method or a command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +184,15 @@ impl Capability {
     pub fn is_command(&self) -> bool {
         !self.name.contains('/')
     }
+
+    /// How long a merged request waits for dbt lsp before the client gets
+    /// the proxy's answer alone: `MERGE_DEADLINE` when the proxy has a
+    /// PART, `NOTHING_DEADLINE` when it has nothing; none for a rule that
+    /// waits for no one.
+    pub fn deadline(&self, part: bool) -> Option<Duration> {
+        let waits = matches!(self.combine, Combine::Union | Combine::Sections | Combine::Append);
+        waits.then_some(if part { MERGE_DEADLINE } else { NOTHING_DEADLINE })
+    }
 }
 
 /// The capability named NAME, if the proxy has one.
@@ -216,5 +225,19 @@ mod tests {
         assert!(of("textDocument/completion").is_none(), "dbt lsp's alone");
         assert!(!with_mode().any(|name| name == NODE_INFO || name == "callHierarchy/incomingCalls"));
         assert_eq!(with_mode().count(), 12);
+    }
+
+    #[test]
+    fn a_merge_that_waits_for_dbt_lsp_has_both_deadlines() {
+        let waiting =
+            ["textDocument/hover", "textDocument/inlayHint", "textDocument/definition", "textDocument/references"];
+        for capability in &CAPABILITIES {
+            let deadlines = [true, false].map(|part| capability.deadline(part));
+            let expected = match waiting.contains(&capability.name) {
+                true => [Some(Duration::from_millis(300)), Some(Duration::from_secs(2))],
+                false => [None, None],
+            };
+            assert_eq!(deadlines, expected, "{}", capability.name);
+        }
     }
 }
