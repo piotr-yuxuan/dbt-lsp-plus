@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The Name at a position, from the document's scan, and where it leads:
 //! dbt's one lookup, as dbt 2.0.9 does it, for the definitions and
-//! references that dbt lsp 2.0.9 does not give.  Pure.
+//! references that dbt lsp 2.0.9 does not give, and the node of the last
+//! parse that a Name describes, for hover, nodeInfo and inlay hints.  Pure.
 
 use crate::config::ParseIndex;
 use crate::node::{self, TYPES, Type};
@@ -124,11 +125,11 @@ pub fn reference_at(path: &Path, scanned: &Scanned, offset: usize) -> Option<Nam
 /// dbt 2.0.9's lookup over a project, made once for a request or a graph:
 /// the lookup flag read once, the resources by id, and the last parse's
 /// index, if any.
-pub struct Lookup<'a> {
+pub struct Lookup<'a, 'i> {
     project: &'a Project,
     /// What the last parse knows that the scan does not: versions, Python
     /// models, snapshots defined in YAML, and which nodes are disabled.
-    index: Option<&'a ParseIndex>,
+    index: Option<&'i ParseIndex>,
     /// The resources of each id, in order, so that a package's macros read
     /// as a range; two files may give one id, one of them disabled.
     by_id: BTreeMap<&'a str, Vec<&'a Entity>>,
@@ -141,9 +142,9 @@ pub struct Lookup<'a> {
     root_first: bool,
 }
 
-impl<'a> Lookup<'a> {
+impl<'a, 'i> Lookup<'a, 'i> {
     /// The lookup of PROJECT, with INDEX, the last parse's, if any.
-    pub fn new(project: &'a Project, index: Option<&'a ParseIndex>) -> Lookup<'a> {
+    pub fn new(project: &'a Project, index: Option<&'i ParseIndex>) -> Lookup<'a, 'i> {
         let root = project.root_package.as_str();
         let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));
         let root_first = config.and_then(yaml::parse).is_some_and(|config| {
@@ -277,6 +278,16 @@ impl<'a> Lookup<'a> {
         let range = scanned.map_or(0..0, |entity| entity.name_range.clone());
         Some(Target { id: id.to_owned(), path, range })
     }
+
+    /// The node of the last parse that NAME, named in the file at PATH,
+    /// describes: the index's node of the first place `resolve` leads it
+    /// to, where its definition goes.  None without an index, where NAME
+    /// leads nowhere, or to what the index lacks.
+    pub fn node(&self, path: &Path, name: &Name) -> Option<&'i Value> {
+        let index = self.index?;
+        let target = resolve(self, path, name).into_iter().next()?;
+        index.node(&target.id)
+    }
 }
 
 /// What NAME, named in the file at PATH, leads to by LOOKUP, dbt 2.0.9's:
@@ -356,7 +367,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
 /// too: its file's start or its block, and the `name:` of each properties
 /// entry declaring it in its own package.  Each leads to its id, in the
 /// order of their paths.
-pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration: bool) -> Vec<Target> {
+pub fn references<'a>(lookup: &Lookup<'a, '_>, path: &Path, name: &Name, declaration: bool) -> Vec<Target> {
     let declared = resolve(lookup, path, name);
     let ids: HashSet<&str> = declared.iter().map(|found| found.id.as_str()).collect();
     let wanted = match name.kind {
@@ -1277,6 +1288,85 @@ models:
             leads(&root, yml, named(Kind::Entry { label: "seed" }, None, "raw")),
             lead("seed.shop.raw", "seeds/raw.csv", "")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_name_s_node_is_the_last_parse_s_node_where_its_definition_leads() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/orders.sql", "select 1"),
+            ("models/customers.sql", "select 2"),
+            ("models/off.sql", "select 3"),
+            ("models/dim_v1.sql", "select 4"),
+            ("models/dim_v2.sql", "select 5"),
+            ("models/_sources.yml", "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: payments\n"),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/models/orders.sql", "select 6"),
+            ("dbt_packages/pkg/models/customers.sql", "select 7"),
+        ];
+        let root = scratch_project("navigation-node", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        // Each node with every field a lookup reads; no file of `gone` or `fresh` exists.
+        let model = |id: &str, file: &str| {
+            let parts: Vec<&str> = id.split('.').collect();
+            json!({"unique_id": id, "name": parts[2], "resource_type": "model", "package_name": parts[1],
+                   "original_file_path": file})
+        };
+        let version = |number: u64| {
+            let mut node = model(&format!("model.shop.dim.v{number}"), &format!("models/dim_v{number}.sql"));
+            node["version"] = json!(number);
+            node["latest_version"] = json!(2);
+            node
+        };
+        let payments = json!({"unique_id": "source.shop.raw.payments", "name": "payments", "source_name": "raw",
+                              "resource_type": "source", "package_name": "shop",
+                              "original_file_path": "models/_sources.yml"});
+        // The manifest of a parse that found the model EXTRA beside the others.
+        let manifest = |extra: &str| {
+            let mut nodes = json!({
+                "model.shop.orders": model("model.shop.orders", "models/orders.sql"),
+                "model.pkg.orders": model("model.pkg.orders", "models/orders.sql"),
+                "model.shop.dim.v1": version(1),
+                "model.shop.dim.v2": version(2),
+                "model.pkg.customers": model("model.pkg.customers", "models/customers.sql"),
+            });
+            let id = format!("model.shop.{extra}");
+            nodes[&id] = model(&id, &format!("models/{extra}.sql"));
+            json!({"metadata": {"project_name": "shop"}, "nodes": nodes,
+                   "sources": {"source.shop.raw.payments": payments},
+                   "disabled": {"model.shop.customers": [model("model.shop.customers", "models/customers.sql")],
+                                "model.shop.off": [model("model.shop.off", "models/off.sql")]}})
+        };
+        let mut index = ParseIndex::of(&manifest("gone"));
+        index.overlay(ParseIndex::of(&manifest("fresh")));
+        let called = |text: &str| {
+            let calls = scan::calls(text).into_iter();
+            calls.map(|call| call.name).find(|name| matches!(name.kind, Kind::Ref | Kind::Table { .. })).unwrap()
+        };
+        let id = |lookup: &Lookup, file: &str, text: &str| {
+            let node = lookup.node(&root.join(file), &called(text));
+            node.map(|node| node["unique_id"].as_str().unwrap().to_owned())
+        };
+        let lookup = Lookup::new(&project, Some(&index));
+        let uses = "models/uses.sql";
+        for (text, expected) in [
+            ("{{ ref('dim', v=1) }}", Some("model.shop.dim.v1")),
+            ("{{ ref('dim') }}", Some("model.shop.dim.v2")),
+            ("{{ ref('dim', v=var('x')) }}", None),
+            ("{{ ref('orders') }}", Some("model.shop.orders")),
+            ("{{ ref('customers') }}", Some("model.pkg.customers")),
+            ("{{ ref('off') }}", None),
+            ("{{ ref('gone') }}", None),
+            ("{{ ref('fresh') }}", Some("model.shop.fresh")),
+            ("{{ source('raw', 'payments') }}", Some("source.shop.raw.payments")),
+        ] {
+            assert_eq!(id(&lookup, uses, text).as_deref(), expected, "{text}");
+        }
+        assert!(index.node("model.shop.gone").is_some(), "the index keeps what the last manifest lacks");
+        let theirs = "dbt_packages/pkg/models/uses.sql";
+        assert_eq!(id(&lookup, theirs, "{{ ref('orders') }}").as_deref(), Some("model.pkg.orders"));
+        assert_eq!(id(&Lookup::new(&project, None), uses, "{{ ref('orders') }}"), None, "no index");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
