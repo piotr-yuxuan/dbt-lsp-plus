@@ -1877,6 +1877,14 @@ checked against dbt; the profile and the target in doctor, which need
   function, while the scan still draws the edge to the function.
 - A file that the project reaches through a link, opened by its real path
   outside the project, is not matched to its resource.
+- A package of the root installed outside it through a `.env` in the
+  root that sets `DBT_PACKAGES_INSTALL_PATH`, or through `env_var` in its
+  `packages-install-path`, is taken for another project: a hover, a
+  definition, references or the call hierarchy on its files fails with
+  `<file> lies in the dbt project at <package>, ...`.
+  `locate::elsewhere` reads the install path from the flag, the variable
+  in the server command or the proxy's environment, and the key as
+  written (plan 056).
 - A client that reuses the id of a listing the proxy abandoned after two
   minutes gets the server's late answer to that listing.  Only a client
   whose ids start with `dbt-lsp-plus/` can.
