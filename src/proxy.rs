@@ -2320,8 +2320,9 @@ impl<W: Write> Proxy<W> {
         self.send_client(&publish(&uri, diagnostics));
     }
 
-    /// The server is gone: answer what it left unanswered, once each, and
-    /// carry on alone, on the scanned graph.  Before the client's
+    /// The server is gone: answer what it left unanswered, once each, then
+    /// the client's `initialize`, alone, if it is pending; else restart it
+    /// or lose it for good (`lost_server`).  Before the client's
     /// `initialize`, only remember why, for its answer.
     fn on_server_closed(&mut self) {
         let server = match std::mem::take(&mut self.backend.life) {
@@ -2473,7 +2474,8 @@ impl<W: Write> Proxy<W> {
         if self.backend.running().and_then(|running| running.compiling.due()).is_some_and(|due| due <= now) {
             self.tell_stalled();
         }
-        // A running process's deadlines are spent above: what is due now is a restart's, or a restarted one's.
+        // A restart's due, or a restarted process's deadline: a running process's deadlines are spent above,
+        // and its life is put back as it was.
         if self.backend.due().is_some_and(|due| due <= now) {
             match std::mem::take(&mut self.backend.life) {
                 Life::Waiting(_) => self.start_restart(),
