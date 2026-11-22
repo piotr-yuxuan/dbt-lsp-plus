@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 /// whole source, which is no node of dbt's, and the range of that name in
 /// its file.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Found {
+pub struct Target {
     pub id: String,
     pub path: PathBuf,
     pub range: Range<usize>,
@@ -180,7 +180,7 @@ impl<'a> Lookup<'a> {
     /// (dbt1005), and a dispatch's every implementation (`*__name`).  A
     /// `ref` leads to its file's start, as dbt lsp answers, a macro to its
     /// whole block, as dbt lsp answers too.
-    pub fn call(&self, own: &str, name: &Name) -> Vec<Found> {
+    pub fn call(&self, own: &str, name: &Name) -> Vec<Target> {
         let root = self.project.root_package.as_str();
         let (first, second) = if self.root_first { (root, own) } else { (own, root) };
         let steps = match (&name.kind, &name.package) {
@@ -189,7 +189,7 @@ impl<'a> Lookup<'a> {
             _ => vec![Some(first), Some(second), None],
         };
         let get = |id: String| self.by_id.get(id.as_str()).map_or(&[][..], Vec::as_slice);
-        let found = |entity: &Entity| Found {
+        let found = |entity: &Entity| Target {
             id: entity.id.clone(),
             path: entity.path.clone(),
             range: if entity.resource_type == "macro" { entity.range.clone() } else { entity.name_range.clone() },
@@ -197,7 +197,7 @@ impl<'a> Lookup<'a> {
         // The models, seeds and snapshots that the last parse knows, at their file's start: the one of
         // VERSION, if given, which a model without versions has not; else the latest version, or the one
         // model without versions.
-        let parsed = |package: &str, name: &str, version: Option<&str>| -> Vec<Found> {
+        let parsed = |package: &str, name: &str, version: Option<&str>| -> Vec<Target> {
             let Some(index) = self.index else { return Vec::new() };
             let text = |value: &Value| match value {
                 Value::String(text) => Some(text.clone()),
@@ -210,7 +210,7 @@ impl<'a> Lookup<'a> {
             };
             index.resources(package, name).into_iter().filter(named).filter_map(|node| self.parsed_at(node)).collect()
         };
-        let in_package = |package: &str| -> Vec<Found> {
+        let in_package = |package: &str| -> Vec<Target> {
             let Name { kind, name: called, version, .. } = name;
             match kind {
                 Kind::Ref => {
@@ -254,7 +254,7 @@ impl<'a> Lookup<'a> {
                 _ => Vec::new(),
             }
         };
-        let disabled = |found: &Found| self.index.is_some_and(|index| index.disabled(&found.id));
+        let disabled = |found: &Target| self.index.is_some_and(|index| index.disabled(&found.id));
         let in_step = |step: &Option<&str>| {
             let mut found = match step {
                 Some(package) => in_package(package),
@@ -270,12 +270,12 @@ impl<'a> Lookup<'a> {
     /// Where the node of the last parse NODE leads: its name where the scan
     /// holds its id in its file, as a snapshot declared in a properties
     /// file, else its file's start, as dbt lsp answers a `ref`.
-    fn parsed_at(&self, node: &Value) -> Option<Found> {
+    fn parsed_at(&self, node: &Value) -> Option<Target> {
         let (id, file) = (node["unique_id"].as_str()?, node["original_file_path"].as_str()?);
         let path = self.project.packages.get(node["package_name"].as_str()?)?.join(file);
         let scanned = self.by_id.get(id).into_iter().flatten().find(|entity| entity.path == path);
         let range = scanned.map_or(0..0, |entity| entity.name_range.clone());
-        Some(Found { id: id.to_owned(), path, range })
+        Some(Target { id: id.to_owned(), path, range })
     }
 }
 
@@ -286,7 +286,7 @@ impl<'a> Lookup<'a> {
 /// or snapshot what the last parse knows that the scan does not, each
 /// version of a versioned model, as dbt patches them all from the entry;
 /// any other, a call, as `Lookup::call` resolves it.
-pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
+pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
     let project = lookup.project;
     let (root, own) = (project.root_package.as_str(), lookup.package_of(path));
     let (first, second) = if lookup.root_first { (root, own) } else { (own, root) };
@@ -307,7 +307,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
                 None => (node::group_id(&declared.package, source), declared.source_range.clone()),
                 Some(table) => (node::table_id(&declared.package, source, table), declared.table_range.clone()),
             };
-            (declared.package.as_str(), Found { id, path: declared.path.clone(), range })
+            (declared.package.as_str(), Target { id, path: declared.path.clone(), range })
         });
         return first_step(found.collect(), &packages(CALLS), true);
     }
@@ -328,7 +328,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
         .collect();
     let every = matching.iter().any(|entity| entity.version.is_some());
     let found = matching.into_iter().map(|entity| {
-        let found = Found { id: entity.id.clone(), path: entity.path.clone(), range: entity.name_range.clone() };
+        let found = Target { id: entity.id.clone(), path: entity.path.clone(), range: entity.name_range.clone() };
         (entity.package.as_str(), found)
     });
     // Once a parse knows the resource of an entry or of a unit test's model, its nodes decide, each version
@@ -341,7 +341,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
     let resource = resource_type.is_some_and(|kind| Type::named(kind).refable) && name.package.is_none();
     let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, &name.name));
     let typed = nodes.into_iter().filter(|node| node["resource_type"].as_str() == resource_type);
-    let mut parsed: Vec<Found> = typed.filter_map(|node| lookup.parsed_at(node)).collect();
+    let mut parsed: Vec<Target> = typed.filter_map(|node| lookup.parsed_at(node)).collect();
     if parsed.is_empty() {
         return first_step(found.collect(), &steps, every);
     }
@@ -356,7 +356,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
 /// too: its file's start or its block, and the `name:` of each properties
 /// entry declaring it in its own package.  Each leads to its id, in the
 /// order of their paths.
-pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration: bool) -> Vec<Found> {
+pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration: bool) -> Vec<Target> {
     let declared = resolve(lookup, path, name);
     let ids: HashSet<&str> = declared.iter().map(|found| found.id.as_str()).collect();
     let wanted = match name.kind {
@@ -364,9 +364,9 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration
         _ => &name.name,
     };
     // What a use at RANGE of FILE leads to, if it is NAME's.
-    let leading = |file: &Path, range: Range<usize>, led: Vec<Found>| {
+    let leading = |file: &Path, range: Range<usize>, led: Vec<Target>| {
         let id = led.into_iter().find(|found| ids.contains(found.id.as_str()))?.id;
-        Some(Found { id, path: file.to_owned(), range })
+        Some(Target { id, path: file.to_owned(), range })
     };
     // Calls alike from one package lead alike: each is looked up once.
     let resolved: RefCell<HashMap<(&str, &Name), Option<String>>> = RefCell::default();
@@ -375,7 +375,7 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration
             || lookup.call(own, called).into_iter().find(|found| ids.contains(found.id.as_str())).map(|found| found.id);
         resolved.borrow_mut().entry((own, called)).or_insert_with(found).clone()
     };
-    let calls = |file: &Path, scanned: &'a project::Scanned| -> Vec<Found> {
+    let calls = |file: &Path, scanned: &'a project::Scanned| -> Vec<Target> {
         let called = |call: &&scan::Call| match &call.name {
             Name { kind: Kind::Ref | Kind::Macro | Kind::Function, name: called, .. } => called == wanted,
             _ => false,
@@ -389,13 +389,13 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration
             .calls
             .iter()
             .filter(called)
-            .filter_map(|call| Some(Found { id: lead(own, &call.name)?, path: file.to_owned(), range: at(call) }))
+            .filter_map(|call| Some(Target { id: lead(own, &call.name)?, path: file.to_owned(), range: at(call) }))
             .collect()
     };
     // A unit test's `model:`, a generic test, the macro `test_<name>`, and with DECLARATION an entry's
     // `name:`, those of the name only, looked up as their definitions.
     let test_name = wanted.strip_prefix("test_");
-    let named = |file: &Path, scanned: &project::Scanned| -> Vec<Found> {
+    let named = |file: &Path, scanned: &project::Scanned| -> Vec<Target> {
         let models = scanned.models.iter().filter(|(model, _)| model == wanted);
         let models = models.map(|(model, range)| (Kind::UnitTestModel, None, model, range));
         let tests = scanned.tests.iter().filter(|test| test_name == Some(test.name.as_str()));
@@ -408,7 +408,7 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration
         models.chain(tests).chain(entries).filter_map(found).collect()
     };
     let files = lookup.project.files.iter().map(|(file, scanned)| (file, &**scanned));
-    let mut found: Vec<Found> =
+    let mut found: Vec<Target> =
         files.flat_map(|(file, scanned)| [calls(file, scanned), named(file, scanned)].concat()).collect();
     found.extend(declared.into_iter().filter(|_| declaration));
     found.sort_by(|one, other| (&one.path, one.range.start).cmp(&(&other.path, other.range.start)));
@@ -420,7 +420,7 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, name: &Name, declaration
 /// block it leads to in PROJECT: a docs block's text between its tags, as
 /// written, if any; a test's opening tag and its package, in a code block
 /// and code spans when MARKDOWN.
-pub fn hover(project: &Project, name: &Name, found: &Found, markdown: bool) -> Option<String> {
+pub fn hover(project: &Project, name: &Name, found: &Target, markdown: bool) -> Option<String> {
     if !matches!(name.kind, Kind::Doc | Kind::Test) {
         return None;
     }
@@ -441,13 +441,13 @@ pub fn hover(project: &Project, name: &Name, found: &Found, markdown: bool) -> O
 /// Of CANDIDATES, each with its package, those of the first of STEPS (a
 /// package, or any) that has some: the first, or every one, deduplicated,
 /// when ALL.
-fn first_step(mut candidates: Vec<(&str, Found)>, steps: &[Option<&str>], all: bool) -> Vec<Found> {
+fn first_step(mut candidates: Vec<(&str, Target)>, steps: &[Option<&str>], all: bool) -> Vec<Target> {
     candidates.sort_by(|(_, a), (_, b)| (&a.path, a.range.start).cmp(&(&b.path, b.range.start)));
     candidates.dedup_by(|(_, a), (_, b)| a.path == b.path && a.range == b.range);
     let holds = |step: &Option<&str>, package: &str| step.is_none_or(|step| step == package);
     let step = steps.iter().find(|step| candidates.iter().any(|(package, _)| holds(step, package)));
     let found = candidates.into_iter().filter(|(package, _)| step.is_some_and(|step| holds(step, package)));
-    let mut found: Vec<Found> = found.map(|(_, found)| found).collect();
+    let mut found: Vec<Target> = found.map(|(_, found)| found).collect();
     if !all {
         found.truncate(1);
     }
@@ -664,8 +664,8 @@ models:
     fn leads(root: &Path, rel: &str, target: Option<Name>) -> Vec<(String, String, String)> {
         let project = project::scan(root, &HashMap::new()).unwrap();
         let found = resolve(&Lookup::new(&project, None), &root.join(rel), &target.unwrap());
-        let text = |found: &Found| project.text(&found.path).unwrap()[found.range.clone()].to_owned();
-        let relative = |found: &Found| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let text = |found: &Target| project.text(&found.path).unwrap()[found.range.clone()].to_owned();
+        let relative = |found: &Target| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
         found.iter().map(|found| (found.id.clone(), relative(found), text(found))).collect()
     }
 
@@ -907,7 +907,7 @@ models:
         let leads = |lookup: &Lookup, rel: &str, name: &str, version: Option<&str>| -> Vec<(String, String)> {
             let target =
                 Name { kind: Kind::Ref, package: None, name: name.into(), version: version.map(str::to_owned) };
-            let relative = |found: &Found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
+            let relative = |found: &Target| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
             lookup
                 .call(lookup.package_of(&root.join(rel)), &target)
                 .iter()
@@ -1061,7 +1061,7 @@ models:
                 reference_at(&use_.path, file, use_.range.start).map(|target| resolve(&lookup, &use_.path, &target));
             assert!(back.unwrap_or_default().iter().any(|found| found.id == use_.id), "{use_:?} leads elsewhere");
         }
-        let relative = |found: &Found| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let relative = |found: &Target| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
         found
             .iter()
             .map(|found| (relative(found), project.text(&found.path).unwrap()[found.range.clone()].to_owned()))

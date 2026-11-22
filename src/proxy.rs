@@ -1299,8 +1299,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The locations of FOUND in PROJECT, as the client spelt their URIs.
-    fn locations(&self, project: &Project, found: &[navigation::Found]) -> Vec<Value> {
-        let location = |found: &navigation::Found| {
+    fn locations(&self, project: &Project, found: &[navigation::Target]) -> Vec<Value> {
+        let location = |found: &navigation::Target| {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
             let starts = LineStarts::new(text.get(..found.range.end).unwrap_or(text));
