@@ -60,6 +60,7 @@ src/packages.rs               whether dbt would install packages before it parse
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
+src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale
 src/proxy.rs                  the event loop; the Backend, dbt lsp's process: its life, its listings
 src/cli.rs                    the subcommands doctor and select, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
@@ -129,8 +130,13 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     properties file of its package is read;
   - `Cache::build`: the reads of a refresh, through `&self`, so that the
     cache changes only once the project is built;
-  - `Proxy::graph`: the graph kept while what it is made of stays, apart
-    from the hierarchy's answer;
+  - `Workspace::graph`: the graph kept while what it is made of stays,
+    apart from the hierarchy's answer; `Workspace::project`,
+    `Workspace::parse`, `Workspace::parsed` and `Workspace::stop`: the
+    project as its files and the open texts say, a parse's start when the
+    index is stale and its end, and a parse's stop, each the core's,
+    public for the front ends, though the LSP front end alone calls each
+    yet (the CLI's `node` in plan 051, MCP in plan 052);
   - `Pending::merged` and `Pending::found`: what each kind of part does
     to the server's answer, and what a part found is alone, so that
     `on_server` and `unserved` stay dispatches;
@@ -188,7 +194,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     `Proxy::start_restart` are, where `Proxy::stop_server` is an end;
   - `run::Output::error_line`: the list commands' reader of dbt's first
     error, a text log's `[error]` line, kept apart from `error_event` so
-    that plan 048 changed no answer; plan 050 merges the two;
+    that plan 048 changed no answer; plan 071, which reads dbt's output
+    apart from its log, merges the two;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart

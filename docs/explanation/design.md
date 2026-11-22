@@ -560,7 +560,8 @@ alike unless said:
   and status 1; a project directory that cannot be canonicalised does
   the same, which the cut's mount stops before dbt runs.  A list answers
   the first as how dbt ended, and a compile the second as a launcher's
-  line with how dbt ended, until one rule reads both kinds (plan 050).
+  line with how dbt ended, until one rule reads both kinds (plan 071, once
+  dbt's output is read apart from its log).
 
 ## Root
 
@@ -809,9 +810,14 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
     strings, so a CTE that Jinja generates is not one but those after it
     are;
   - names may hold any letter.
-- The scan is kept between requests, on the event loop, which alone owns
-  it (`src/cache.rs`).  A request that needs the project walks the
-  resource paths again and reads each file's metadata before its content:
+- The scan is kept between requests by the Workspace
+  (`src/workspace.rs`), the core's state of the session's project beside
+  the last parse's index, the parse under way and the call hierarchy's
+  graph, which speaks no protocol: the LSP front end keeps the open
+  documents, the URIs and the positions, and hands it the open texts.  It
+  lives on the event loop, which alone owns it (`src/cache.rs`).  A
+  request that needs the project walks the resource paths again and
+  reads each file's metadata before its content:
   its modification and change times, size, inode and device.  A file whose
   metadata stays keeps its text and what that text alone gives (blocks,
   calls, source tables); any other is read again, and a file gone is

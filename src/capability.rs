@@ -70,7 +70,7 @@ pub struct Capability {
     /// The proxy's answer asks for the parse's index, in both modes: a
     /// stale index is parsed again, as for a hover.
     pub wants_index: bool,
-    /// Its answer reads the call hierarchy's graph (`Proxy::graph`),
+    /// Its answer reads the call hierarchy's graph (`Workspace::graph`),
     /// which, alone, is the last parse's: alone, it asks for the parse's
     /// index too, as `wants_index` does in both modes.
     pub reads_graph: bool,

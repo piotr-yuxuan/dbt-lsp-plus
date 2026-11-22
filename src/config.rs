@@ -432,7 +432,7 @@ pub struct Outcome {
     pub problems: Option<Vec<parse_log::Problem>>,
 }
 
-type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
+pub type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 
 /// Runs RUN, a `dbt parse`, as `run::start` runs it, and hands REPORT the
 /// outcome: a failure words dbt's first error event, else the first line
