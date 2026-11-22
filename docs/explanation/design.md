@@ -238,17 +238,20 @@ that announces them, and the rows where the proxy has no answer
 (completion, code lenses and actions, prepareRename, formatting,
 signature help, semantic tokens) are dbt lsp's.
 
-The backend is fixed for the session: none with `--backend never` or a dbt
-without `lsp`, else the server, which stays the backend through a failed
-start, a crash and its restarts: the capabilities, the flag and the
-table stay as `initialize` fixed them while dbt lsp is lost, but the
-merged requests get the proxy's answer and the parse follows whether a
-dbt lsp runs now (see "How the proxy runs it").  With no backend, `merge`
-is the proxy alone (see "Standalone mode"), and a method in `dbt` is not
-announced, its
-rows left out of the flag, one warning naming it after `initialize`, and
-null or `[]` to a request that comes anyway (plan 020, at dbt-mode's
-request: it reads announcements as the truth).
+What `initialize` fixed stays for the session: the capabilities
+announced, the flag and the table.  Who answers now follows the
+Backend's life (see "State"): the session is alone when no dbt lsp
+answers now nor will in the session, with `--backend never` or a dbt
+without `lsp`, and from the moment a dbt lsp cannot start, exits before
+it answers `initialize`, or is lost after a fourth crash (see
+"Restart"; plan 043).  Alone, `merge` is the proxy alone (see
+"Standalone mode"), and a method in `dbt` gets null or `[]`; a session
+alone when `initialize` is answered does not announce such a method,
+leaves its rows out of the flag, and warns once, naming it, after
+`initialize` (plan 020, at dbt-mode's request: it reads announcements as
+the truth).  While a restart is awaited or under way, the session stays
+in front: the merged requests get the proxy's answer and the parse
+follows whether a dbt lsp runs now (see "How the proxy runs it").
 A method's mode is the user's for it, else the user's default, which
 reaches only these methods, else the shipped one: the command line's
 `--mode` and `--default-mode`, then `initializationOptions.dbtLspPlus`'s
@@ -503,7 +506,7 @@ that applies:
   before any document comes (Claude Code opens the first one right after
   `initialized`), so such a session is alone for its life: its answer is
   the alone one, without the alone message, and `dbt lsp` never starts
-  (plan 043 may start it).  At that document, before it is tracked: the
+  (plan 049 may start it).  At that document, before it is tracked: the
   root, the dbt, the cut's probe, the first scan, the watcher of runs,
   the watcher of files when the client lets the proxy register it, and the
   line; then the parse, as alone.
@@ -746,16 +749,26 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
   found resources; an empty `source:*` does not.  After a crash, the scan
-  gives the whole graph again, until a restarted server lists it.
+  gives the whole graph again, until a restarted server lists it; once
+  dbt lsp is lost for good, the last parse's, as alone.
 - A source that `overrides` a package's source is that package's source:
   dbt-core patches it, so the proxy places its tables in the package
   (dbt 2 does not: see "Known limitations").
 - Text read from disk loses its byte order mark, as an editor's document
   does, so that positions on its first line match.
-- For a restart: the client's `initialize` parameters; each open
-  document's URI, language and last version, as the client sent them; the
-  registrations the client holds; the progress tokens the server began and
-  has not ended.
+- The Backend, the dbt lsp process behind the session (`src/proxy.rs`),
+  is one value whose life is one of five: not started, with why (the
+  backend is never, a dbt without `lsp`, a project found from a file, no
+  project yet); running; waiting for a restart; starting again, until the
+  new process answers its `initialize`; lost, with why.  Beside its life
+  it keeps what it told the client, across lives: the registrations the
+  client holds, the progress tokens it began and has not ended, the
+  commands it listed, the failures of compilations said and whether a
+  stall was.  A running process owns the proxy's listings and its
+  compilation's deadline, which end with it.  It is killed and reaped in
+  one place (`Server::reap`).  A restart is sent again the client's
+  `initialize` parameters and each open document's URI, language and last
+  version, as the client sent them.
 
 ### What `dbt.listNodes` does, observed on 2.0.9
 
@@ -1343,8 +1356,7 @@ So the proxy runs the user's own `dbt parse`.
   the last index meanwhile.  A parse starts only when the server has
   compiled since the change, so that dbt has resolved the packages
   itself, or when no server runs (after a crash, while the restart's
-  process starts, after a fourth crash, when it could not start: plan
-  037), and such a request
+  process starts: plan 037), and such a request
   made before that compilation starts it once it comes,
   when every package is local or `package-lock.yml` is no older than the
   file naming the packages (an empty or comment-only file names none), with
@@ -1358,7 +1370,8 @@ So the proxy runs the user's own `dbt parse`.
   that compiled and then crashed, with no change since, has resolved the
   packages as it does when it runs.  With a dbt lsp that could not start,
   the parse's dbt is the same command, which fails too: `nodeInfo` then
-  gives the parse's failure.  Alone, eagerly: at the first `didOpen`, at each change
+  gives the parse's failure.  Alone, a dbt lsp that could not start or is
+  lost for good included, eagerly: at the first `didOpen`, at each change
   of the client's that may change the graph, and at a request that finds
   the index stale, with no compilation to wait for; one at a time, and the
   next at the end of one when a change came during it.
@@ -1500,7 +1513,11 @@ When `dbt lsp` ends while the session is established (the client's
 `initialize` answered, no `shutdown`), the proxy starts it again with the
 same command, at most three times in a sliding window of ten minutes, the
 n-th restart of the window waiting n seconds first; one pure function
-decides (`restart_delay`).  Past that, the proxy stays alone and says so.
+decides (`restart_delay`).  Past that, the Backend is lost for good: the
+proxy says so, dbt lsp's last diagnostics go (none will publish them
+again, and the parse's would double them), a stale index is parsed with
+no request, and the session answers as alone but for what `initialize`
+fixed (see "Modes").
 
 - The new process is held apart until it answers its `initialize`, so
   that every check of a running server stays right: meanwhile the client's
@@ -1548,11 +1565,18 @@ client's folder names it (see "Root").  Status
 status 2 offline included, spawns the server as before.  A command with no
 `lsp` word is not probed.
 
+The session is alone too when dbt lsp could not start or exited before it
+answered `initialize`, and once it is lost for good after a fourth crash
+(see "Restart"): no dbt lsp answers then, nor will in the session.
+
 Alone, the proxy:
 
 - answers `initialize` itself, with its capabilities without a server and
   `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`; it logs
-  once that the dbt has no `lsp`, and warns nothing;
+  once that the dbt has no `lsp`, and warns nothing; when dbt lsp could not
+  start or exited first, it warns once instead, `WHY: dbt-lsp-plus answers
+  alone.`; lost for good, the client keeps what dbt lsp's `initialize`
+  announced;
 - answers a hover with the summary or the YAML block it would put first,
   alone, null elsewhere, and, on a node before any index, error -32803
   with nodeInfo's reason (see "What the client gets"); inlay hints with
@@ -1593,7 +1617,9 @@ Alone, the proxy:
 - registers, after `initialized` and for a client that allows dynamic
   registration of watched files, the watcher of `**/*` that dbt lsp would
   (`dbt-lsp-plus-file-watcher`), so that an edit outside the editor
-  parses again; dbt's own output is filtered as with a server.
+  parses again; dbt's own output is filtered as with a server.  A dbt lsp
+  lost for good leaves the client its own registration of it, so none is
+  added.
 
 It runs no server, so nothing restarts, and no `dbt/*` notification or
 progress comes.  References at a position it does not claim, in `merge`,
@@ -1658,9 +1684,9 @@ checked against dbt; the profile and the target in doctor, which need
 | A `.venv/bin/dbt` that cannot run or is not a dbt 2 | Skipped and named in the line; the next place, else `PATH` (see "Root") |
 | A repository whose `.venv/bin/dbt` is not to be trusted | Run, outside the cut, as soon as a file of its project opens, on the folder's route and a document's: its probe, then the parse or `dbt lsp`.  A server command with a path to dbt, or `--project-dir`, runs what it names |
 | The user's dbt has no `lsp` | Standalone mode, with no warning (see "Standalone mode") |
-| `dbt lsp` cannot start | The proxy answers `initialize` itself with its own capabilities and incremental sync, warns once with `window/showMessage`, answers `shutdown`, answers null to a definition it finds no target for whatever its mode, answers a merged request with its part or nothing (null, or `[]` for references and hints), tries the parse with the same dbt, whose failure `nodeInfo` gives, and fails every other request with -32803 |
-| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but the merged ones, which get the proxy's part or nothing, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph, and parses (see "How the proxy runs it") |
-| `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
+| `dbt lsp` cannot start | The session is alone (see "Standalone mode"): the proxy answers `initialize` itself, alone in full, with `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`, warns once with `window/showMessage`, `WHY: dbt-lsp-plus answers alone.`, registers its watcher for a client that lets it, answers `shutdown`, null to a definition it finds no target for whatever its mode, a merged request as alone and a method in `dbt` with null or `[]`, tries the parse with the same dbt, whose failure `nodeInfo` and a hover on a node give, and fails every other request with -32803 |
+| `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but the merged ones, which get the proxy's part or nothing, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, answers alone.  While a restart is awaited or under way, the proxy answers the merged requests on the scanned graph, and parses (see "How the proxy runs it"); after a fourth crash, the session is alone: its graph the last parse's, the parse's problems published, dbt lsp's last diagnostics gone (see "Restart") |
+| `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, alone in full, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null, an entry of severity `Error` in its `errors`) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line; never a warning, nothing after `shutdown`.  A completion with `models_count` null and no error, a first compilation cut short (S4), is forwarded and says nothing (see "What a compilation does, observed on 2.0.9") |
 | A compilation of `dbt lsp`'s has no end 60 s after its start, foreground or background | Once a session, a `window/showMessage` of type 2, `dbt lsp has been compiling for 60 s with no end yet (its log: ROOT/logs/dbt-lsp.log)`; nothing after `shutdown`.  A lost server's compilation has no deadline left.  One deadline, from the last start, which any completion ends: a foreground compilation that starts while a background one runs, and hangs once that one ends, is not said |
@@ -1721,10 +1747,13 @@ checked against dbt; the profile and the target in doctor, which need
   recorded until dbt lsp answers it or exits, a hung dbt lsp keeping one
   record per such request.
 - While no server runs (between restarts, after the give-up, or with
-  one that cannot start), a request that is not merged (completion,
-  rename, code actions and the like) fails with -32803, as every request
-  that would go to the server; only the merged ones get the proxy's
-  answer (plan 037).
+  one that cannot start), a request that the proxy does not answer
+  (completion, a rename where it claims nothing, code actions and the
+  like) fails with -32803, as every request that would go to the server;
+  between restarts only the merged ones get the proxy's answer (plan
+  037).  After the give-up, or with one that cannot start, the session is
+  alone, and a method set to `dbt` gets its nothing, null or `[]`, which
+  does not say why.
 - Once the server has listed the graph, an unsaved edit of a `ref` in a node
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the
@@ -2041,19 +2070,22 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     `dbt` with no backend, `initializationOptions` read, refused and left
     out of the server's `initialize`, a later setting forwarded and said
     once to be no mode, diagnostics in `dbt` and in `plus`, a bad option
-    and `--backend never`; a server that cannot start keeping today's
-    capabilities;
+    and `--backend never`; a server that cannot start leaving the proxy
+    alone in full;
   - the restart: the client's `initialize`, `initialized` and the open
     documents as they stand, edits, opens and closes during the delay
     included, then a request reaching the new server, four documents
     replayed in the order of their paths; one answer to `initialize` and
     one registration reaching the client, a begun progress ended, one the
     server ended not ended again; three crashes after 1, 2 then 3 s,
-    measured, then alone, with one message; a replayed `initialize` that
+    measured, then alone, with one message, dbt lsp's last diagnostics
+    gone, a method in `dbt` its nothing, the parse's graph and a save's
+    parse with no request; a replayed `initialize` that
     hangs, given ten seconds; one refused, whose leftover process writes
     a frame that the client never gets, then ends its output after the
     next server answered; one refused after it began a progress, which is
-    ended; one that cannot start; one that dies before it answers; none
+    ended; one that cannot start, whose graph turns the parse's at the
+    give-up with no process lost; one that dies before it answers; none
     after `shutdown`, nor any message or progress, nor before the client's
     `initialize` is answered; `exit` killing a server still starting; a
     crash that leaves the new server's listing all three retries.  The

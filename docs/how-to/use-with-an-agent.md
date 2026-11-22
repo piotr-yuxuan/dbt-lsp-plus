@@ -124,7 +124,11 @@ session is alone; `"alone":null` with `"lsp":true` means it is in
 front of dbt lsp, and with `"lsp":null` its `why` says why no dbt lsp
 starts.
 doctor on a file takes the file's route unless the arguments after `--`
-name `--project-dir`.
+name `--project-dir`.  A session in front of dbt lsp turns alone when
+`dbt lsp` cannot start, exits before it answers `initialize`, or is lost
+for good after a fourth crash in ten minutes, which the proxy says by a
+`window/showMessage` ending `dbt-lsp-plus answers alone.`; Claude Code
+does not show it.
 
 | Operation | LSP method | Alone | In front of dbt lsp |
 |-----------|------------|-------|---------------------|
