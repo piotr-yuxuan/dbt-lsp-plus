@@ -2097,7 +2097,9 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   its filter of dbt's output gave twelve.  It checks O4's keys and O8's
   percentage, and that its session says no compilation compiled nothing
   or had no end; a test of its own, on a profile that names a missing
-  `env_var` (S1), that such a compilation is said once.
+  `env_var` (S1), that such a compilation is said once, and that a
+  listing then answers `Compilation failed` with its `error_kind`, as
+  the fake does.
   It checks the facts of a hover at a model's start, from its properties
   file, and a workspace symbol's id as its container.
   It ends by killing the server, which the proxy restarts: diagnostics

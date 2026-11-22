@@ -155,7 +155,8 @@ fn the_shadow_in_front_of_the_real_dbt_lsp() {
 
 /// A compilation that compiled nothing, as dbt lsp 2.0.9's is when the
 /// profile names a missing `env_var`: said once, with dbt's error and dbt
-/// lsp's log, and not again after a save and its compilation.
+/// lsp's log, and not again after a save and its compilation; a listing
+/// meanwhile answered `Compilation failed`.
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
 fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
@@ -189,6 +190,10 @@ fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
     let quoted = text.starts_with("dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error");
     assert!(quoted && text.contains("DBT_LSP_PLUS_TEST_MISSING") && text.contains("logs/dbt-lsp.log"), "{text}");
     assert_eq!(shown["params"]["type"], 1, "{shown}");
+    // A listing of the client's, which the fake answers alike in a project that compiles nothing.
+    let listed = session.request("workspace/executeCommand", json!({"command": "dbt.listNodes", "arguments": ["*"]}));
+    let failed = (&listed["result"]["error"], &listed["result"]["error_kind"]);
+    assert_eq!(failed, (&json!("Compilation failed"), &json!("compilation_failed")), "{listed}");
     // A foreground completion, then its background one, which says the same failure: 2.0.9 sends
     // the two at once where nothing compiled, so every foreground one has its background one.
     let completed = |session: &Session| {
