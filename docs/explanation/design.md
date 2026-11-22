@@ -904,10 +904,23 @@ listings, `*` and on its answer `source:*`, then the same after a
   foreground compilations (dbt lsp's own, 93 and 94 ms, the listings'
   13 to 22 ms) and one background pair after them, about 1.1 s after the
   last; the same after a `didSave` and its watched event.
+- S4, found by plan 035's review on the generated 1,000 models,
+  reproduced three times: a `didOpen`, at once `dbt.listNodes ["*"]`,
+  then 0.3 s later a `didChange`, a `didSave` and its watched event.  The
+  listing is answered `Operation cancelled` at 0.365 s; the first
+  compilation completes then, `incremental`, after 344 ms, with
+  `models_count` null and `errors` `[]`, followed by a background
+  completion alone, the same; a new start comes at once, its completion
+  1 s later with `models_count` 1,050, then a full background pair.  A
+  second `dbt.listNodes` 0.3 s into the first compilation does the same.
+  A later compilation cut short by a save, a background one cut short,
+  and a cancelled listing past the first compilation all kept
+  `models_count` set.
 
-So `models_count` null is what a compilation that compiled nothing
-reports, and only a failure reports it; an error in a model leaves it a
-count.  The fake (`tests/support/fake_dbt_lsp.rs`) compiles on the same
+So a compilation that compiled nothing reports `models_count` null and
+an entry of severity `Error` (S1, S2); `models_count` null with no error
+is a first compilation cut short, which the next one follows (S4); an
+error in a model leaves it a count.  The fake (`tests/support/fake_dbt_lsp.rs`) compiles on the same
 triggers, its frames carry O4's keys, and its background pair comes at
 once after each foreground compilation, where 2.0.9 sends it about 1.1 s
 later and joins several, so that no test waits; where its completion's
@@ -1630,7 +1643,7 @@ checked against dbt; the profile and the target in doctor, which need
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but the merged ones, which get the proxy's part or nothing, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph, and parses (see "How the proxy runs it") |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
-| A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line, or without `: ERROR` when it reports none; never a warning, nothing after `shutdown` (see "What a compilation does, observed on 2.0.9") |
+| A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null, an entry of severity `Error` in its `errors`) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line; never a warning, nothing after `shutdown`.  A completion with `models_count` null and no error, a first compilation cut short (S4), is forwarded and says nothing (see "What a compilation does, observed on 2.0.9") |
 | A compilation of `dbt lsp`'s has no end 60 s after its start, foreground or background | Once a session, a `window/showMessage` of type 2, `dbt lsp has been compiling for 60 s with no end yet (its log: ROOT/logs/dbt-lsp.log)`; nothing after `shutdown`.  A lost server's compilation has no deadline left.  One deadline, from the last start, which any completion ends: a foreground compilation that starts while a background one runs, and hangs once that one ends, is not said |
 | A YAML file is not valid | Its sources are left out |
 | A body is not JSON | Forwarded unchanged |

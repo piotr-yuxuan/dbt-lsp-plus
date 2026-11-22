@@ -139,7 +139,9 @@ seconds, 10 by default.
   that is not installed; the warehouse's connection or authentication.
   Fix it and save a file: `dbt lsp` compiles again.  An error in one
   model is no such case: the other models compile, and the diagnostic on
-  that model says it.
+  that model says it; nor is a first compilation that a save cuts short,
+  which reports no count and no error, says nothing, and is followed by
+  the next.
 - **"dbt lsp has been compiling for 60 s with no end yet".**  `dbt lsp`
   started a compilation and has not finished it; a merged request gets
   the proxy's answer alone at its deadline (see "Who answers a request").

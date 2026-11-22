@@ -487,17 +487,18 @@ fn changes_graph(
 
 /// What a compilation that compiled nothing reports, from the PARAMS of
 /// its completion, `dbt/lspCompileComplete` or its background one: none
-/// unless `models_count` is there and null, as dbt lsp 2.0.9 reports when
-/// it compiled nothing; else the first error's message on one line, and
-/// its key, that text before the first of dbt's places, ` (in ` or
-/// ` --> `; with no error, two empty strings.  A warning is never quoted.
+/// unless `models_count` is there and null and `errors` holds an error, as
+/// dbt lsp 2.0.9 reports when it compiled nothing (with no error, a first
+/// compilation that a save or a second listing cut short); else that first
+/// error's message on one line, and its key, that text before the first of
+/// dbt's places, ` (in ` or ` --> `.  A warning is never quoted.
 fn compile_failure(params: &Value) -> Option<(String, String)> {
     if !params.get("models_count").is_some_and(Value::is_null) {
         return None;
     }
     let errors = params["errors"].as_array().map_or(&[][..], Vec::as_slice);
-    let first = errors.iter().find(|entry| entry["severity"] == "Error");
-    let message = first.and_then(|entry| entry["message"].as_str()).unwrap_or_default();
+    let message =
+        errors.iter().filter(|entry| entry["severity"] == "Error").find_map(|entry| entry["message"].as_str())?;
     let text = message.split_whitespace().collect::<Vec<_>>().join(" ");
     let place = [" (in ", " --> "].iter().filter_map(|place| text.find(place)).min().unwrap_or(text.len());
     let key = text[..place].to_owned();
@@ -1883,8 +1884,7 @@ impl<W: Write> Proxy<W> {
         if self.shutdown || !self.compiling.said.insert(key) {
             return;
         }
-        let quoted = if text.is_empty() { text } else { format!(": {text}") };
-        let text = format!("dbt lsp compiled nothing{quoted} (its log: {})", self.server_log().display());
+        let text = format!("dbt lsp compiled nothing: {text} (its log: {})", self.server_log().display());
         self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
                                  "params": {"type": 1, "message": text}}));
     }
@@ -2689,9 +2689,15 @@ mod tests {
             ("no count", json!({"errors": [e]}), None),
             ("a warning, then an error", json!({"models_count": null, "errors": [w, e]}), said(e_text, e_key)),
             ("an error placed by -->", json!({"models_count": null, "errors": [f]}), said(f_text, f_key)),
-            ("a warning alone", json!({"models_count": null, "errors": [w]}), said("", "")),
-            ("no error", json!({"models_count": null, "errors": []}), said("", "")),
-            ("errors that are no list", json!({"models_count": null, "errors": 2}), said("", "")),
+            ("a warning alone", json!({"models_count": null, "errors": [w]}), None),
+            ("no error", json!({"models_count": null, "errors": []}), None),
+            ("errors that are no list", json!({"models_count": null, "errors": 2}), None),
+            // As dbt lsp 2.0.9 ends a first compilation that a save or a second listing cut short.
+            (
+                "cut short",
+                json!({"compile_type": "incremental", "duration_ms": 344, "errors": [], "models_count": null}),
+                None,
+            ),
         ];
         for (name, params, expected) in cases {
             assert_eq!(compile_failure(&params), expected, "{name}");
@@ -2720,7 +2726,6 @@ mod tests {
         let said = |text: &str| json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}});
         let e_said = "dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found (in :1:1) (its log: /p/logs/dbt-lsp.log)";
         let f_said = "dbt lsp compiled nothing: [DependencyNotFound (dbt1048)]: Ref 'no_such_model' not found --> models/x.sql:3:10 (its log: /p/logs/dbt-lsp.log)";
-        let nothing_said = "dbt lsp compiled nothing (its log: /p/logs/dbt-lsp.log)";
         let frames = written(&proxy.client);
         let messages: Vec<(usize, &Value)> = frames
             .iter()
@@ -2730,7 +2735,7 @@ mod tests {
             })
             .collect();
         // Each after the completion that brought it.
-        assert_eq!(messages, [(2, &said(e_said)), (6, &said(f_said)), (8, &said(nothing_said))]);
+        assert_eq!(messages, [(2, &said(e_said)), (6, &said(f_said))]);
         let forwarded: Vec<&Vec<u8>> = frames
             .iter()
             .filter(|frame| frame.value.as_ref().is_some_and(|m| m["method"] != "window/showMessage"))
