@@ -2716,7 +2716,7 @@ mod tests {
 
     #[test]
     fn a_failure_is_said_once_per_first_error() {
-        let [e, e2, f, w, _] = reported();
+        let [e, e2, f, w, h] = reported();
         let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
         let completion = |method: &str, count: Value, errors: &[&Value]| {
             frame_of(&json!({"method": method, "params": {"models_count": count, "errors": errors}}))
@@ -2731,8 +2731,13 @@ mod tests {
             completion(foreground, Value::Null, &[&w]),
             completion(foreground, Value::Null, &[&w]),
         ];
-        let bodies: Vec<Vec<u8>> = fed.iter().map(|frame| frame.body.clone()).collect();
+        let mut bodies: Vec<Vec<u8>> = fed.iter().map(|frame| frame.body.clone()).collect();
         fed.into_iter().for_each(|frame| proxy.on_server(frame));
+        // After `shutdown`, a new first error is forwarded and not said.
+        proxy.shutdown = true;
+        let after = completion(foreground, Value::Null, &[&h]);
+        bodies.push(after.body.clone());
+        proxy.on_server(after);
         let said = |text: &str| json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}});
         let e_said = "dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found (in :1:1) (its log: /p/logs/dbt-lsp.log)";
         let f_said = "dbt lsp compiled nothing: [DependencyNotFound (dbt1048)]: Ref 'no_such_model' not found --> models/x.sql:3:10 (its log: /p/logs/dbt-lsp.log)";
