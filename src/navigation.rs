@@ -99,7 +99,10 @@ pub fn reference_at(path: &Path, scanned: &Scanned, offset: usize) -> Option<Nam
     let reference = reference.map(|call| call.name.clone());
     let doc = || scanned.docs.iter().find(|call| call.arguments.iter().any(inside)).map(|call| call.name.clone());
     let entry = || {
-        let found = scanned.entries.iter().find(|entry| inside(&entry.name_range))?;
+        // An entry of its label, when that is one of `LOOKUP`'s.
+        let navigable = |label: &'static str| LOOKUP.iter().any(|(kind, ..)| *kind == Kind::Entry { label });
+        let found =
+            scanned.entries.iter().filter(|entry| navigable(entry.label)).find(|entry| inside(&entry.name_range))?;
         Some(Name::new(Kind::Entry { label: found.label }, None, &found.name))
     };
     let test = || {
