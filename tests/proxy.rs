@@ -3147,6 +3147,41 @@ fn a_project_that_no_longer_reads_says_so_where_no_symbol_is_empty() {
 }
 
 #[test]
+fn a_hover_and_node_information_on_a_project_that_no_longer_reads_say_so() {
+    let project = navigable("unreadable-hover");
+    let script = json!({"no_lsp": true, "manifest": manifest()});
+    let (mut session, _) =
+        Session::fake_with("unreadable-hover", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let by_id =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), by_id, |result| result["unique_id"] == "model.shop.orders");
+    let configuration = project.join("dbt_project.yml");
+    let written = std::fs::read_to_string(&configuration).unwrap();
+    std::fs::write(&configuration, "name: [").unwrap();
+    let on_ref = position_in(&orders, "ref('stg_orders')", 6);
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project",
+        project.display()
+    );
+    let unreadable = json!({"code": -32803, "message": message});
+    let hover = session.request("textDocument/hover", on_ref.clone());
+    assert_eq!((hover.get("result"), &hover["error"]), (None, &unreadable), "{hover}");
+    let info = node_info(&mut session, json!({"uri": on_ref["textDocument"]["uri"], "position": on_ref["position"]}));
+    assert_eq!((info.get("result"), &info["error"]), (None, &unreadable), "{info}");
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 20, "character": 0}});
+    let hints =
+        session.request("textDocument/inlayHint", json!({"textDocument": {"uri": uri(&orders)}, "range": range}));
+    assert_eq!((hints.get("error"), &hints["result"]), (None, &json!([])), "{hints}");
+    std::fs::write(&configuration, &written).unwrap();
+    let hover = session.request("textDocument/hover", on_ref);
+    assert!(hover.get("error").is_none() && hover["result"]["contents"].is_object(), "{hover}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn in_merge_a_project_that_no_longer_reads_leaves_a_claimed_definition_to_dbt_lsp_then_says_why() {
     // In front of dbt lsp, the definition goes to it, whose answer stands: its bytes, odd spacing included.
     let in_front = navigable("unreadable-merge");
