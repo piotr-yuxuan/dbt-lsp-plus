@@ -2425,9 +2425,10 @@ impl<W: Write> Proxy<W> {
         self.deadlines.clear();
         let left = std::mem::take(&mut self.forwarded);
         self.backend.nodes_generation += 1;
-        match self.initialize.take() {
-            Some(id) => self.initialize_alone(&id),
-            None => self.lost_server(&why),
+        if let Some(id) = self.initialize.take() {
+            self.initialize_alone(&id);
+        } else {
+            self.lost_server(&why);
         }
         for (_, (id, pending)) in left {
             match (pending.name.as_str(), &pending.kept) {
@@ -2554,9 +2555,10 @@ impl<W: Write> Proxy<W> {
             let Some(waited) = pending.deadline() else { continue };
             let why = Reason::Late { waited, compiling };
             let answer = pending.unserved(self.markdown, why, &self.parsing);
-            let got = match answer {
-                Answer::Unanswered(_) => "dbt-lsp-plus answered with the reason",
-                _ => "dbt-lsp-plus answered alone",
+            let got = if let Answer::Unanswered(_) = answer {
+                "dbt-lsp-plus answered with the reason"
+            } else {
+                "dbt-lsp-plus answered alone"
             };
             let answer = answer.frame(id, &pending.name);
             pending.kept = Kept::Answered;
