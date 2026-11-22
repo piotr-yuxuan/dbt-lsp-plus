@@ -1357,10 +1357,11 @@ impl<W: Write> Proxy<W> {
     /// one node its document defines, but never in a YAML file: there the
     /// manifest places the generic tests a file declares beside its node, a
     /// YAML snapshot's included, so neither the scan nor `of_file` can name
-    /// one node.  None when it names nothing; `Some(None)` when it names a
-    /// node that the lookup does not find, as over a project that does not
-    /// read, or that, without an index, the scan tells is named but cannot
-    /// give.
+    /// one node.  None when it names nothing, as an entry's `name:` over a
+    /// project that does not read; `Some(None)` when it names a node that
+    /// the lookup does not find, as a `ref` or a `source` over a project
+    /// that does not read once there is an index, or that, without an index,
+    /// the scan tells is named but cannot give, as any `ref` or `source`.
     fn node_at<'a>(
         &self,
         index: Option<&'a config::ParseIndex>,
@@ -1376,8 +1377,10 @@ impl<W: Write> Proxy<W> {
         };
         if let Some(call) = scanned.calls.iter().find(inside) {
             let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
+            // Without an index there is no node to find: the project is not read for none.
             return named.then(|| {
-                self.project().and_then(|project| navigation::Lookup::new(&project, index).node(&path, &call.name))
+                let project = index.and_then(|_| self.project())?;
+                navigation::Lookup::new(&project, index).node(&path, &call.name)
             });
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
