@@ -4,7 +4,7 @@
 //! function here is pure.
 
 use crate::scan::{self, Symbol};
-use crate::text::{Encoding, LineIndex};
+use crate::text::{Encoding, LineStarts};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::ops::Range;
@@ -17,10 +17,10 @@ use std::sync::LazyLock;
 /// before.  The longest of the ranges that start on one line comes first,
 /// since some clients keep only the first.
 pub fn folding_ranges(text: &str, sql: bool) -> Value {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let fold = |start: usize, closer: usize, kind: &'static str| {
-        let (first, mut last) = (index.line(start), index.line(closer));
-        if text[index.line_start(last)..closer].trim().is_empty() {
+        let (first, mut last) = (starts.line(start), starts.line(closer));
+        if text[starts.line_start(last)..closer].trim().is_empty() {
             last = last.saturating_sub(1);
         }
         (last > first).then_some((first, last, kind))
@@ -58,9 +58,9 @@ pub fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> 
 /// The highlights at OFFSET of TEXT: on a CTE of SQL, its definition (write)
 /// and its uses (read); on a tag of a Jinja block, every tag of that block.
 pub fn highlights(text: &str, sql: bool, offset: usize, encoding: Encoding) -> Value {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let highlight =
-        |range: &Range<usize>, kind: u8| json!({"range": index.range(range.start, range.end, encoding), "kind": kind});
+        |range: &Range<usize>, kind: u8| json!({"range": starts.range(range.start, range.end, encoding), "kind": kind});
     if let Some((cte, uses)) = cte_at(text, offset).filter(|_| sql) {
         let definition = std::iter::once(highlight(&cte.name_range, 3));
         return Value::Array(definition.chain(uses.iter().map(|range| highlight(range, 2))).collect());
@@ -76,7 +76,7 @@ static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\p{L}\p{N}_$]+").u
 /// word, the Jinja tag, a CTE's or block's content, the CTE or block, and
 /// the whole text, each range containing the one before.
 pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize], encoding: Encoding) -> Value {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let mut candidates = scan::tags(text);
     for symbol in scan::outline(text, sql, false) {
         candidates.extend([symbol.inner, symbol.range]);
@@ -99,7 +99,7 @@ pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize], encoding: Enco
             }
         }
         nested.iter().rev().fold(None, |parent: Option<Value>, range| {
-            let mut selection = json!({"range": index.range(range.start, range.end, encoding)});
+            let mut selection = json!({"range": starts.range(range.start, range.end, encoding)});
             if let Some(parent) = parent {
                 selection["parent"] = parent;
             }
@@ -136,9 +136,9 @@ pub fn rename_cte(
     if scan::ctes(text).iter().any(|other| other.name_range != cte.name_range && other.name.eq_ignore_ascii_case(new)) {
         return Some(Err(format!("another CTE is named {new}")));
     }
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let edits = std::iter::once(&cte.name_range).chain(&uses);
-    let edits = edits.map(|range| json!({"range": index.range(range.start, range.end, encoding), "newText": new}));
+    let edits = edits.map(|range| json!({"range": starts.range(range.start, range.end, encoding), "newText": new}));
     Some(Ok(json!({"changes": {uri: edits.collect::<Vec<_>>()}})))
 }
 
@@ -223,9 +223,9 @@ mod tests {
         let texts: Vec<String> = ranges
             .iter()
             .map(|r| {
-                let index = LineIndex::new(ORDERS);
-                let start = index.offset_of(&r["start"], Encoding::Utf16).unwrap();
-                let end = index.offset_of(&r["end"], Encoding::Utf16).unwrap();
+                let starts = LineStarts::new(ORDERS);
+                let start = starts.offset_of(&r["start"], Encoding::Utf16).unwrap();
+                let end = starts.offset_of(&r["end"], Encoding::Utf16).unwrap();
                 ORDERS[start..end].to_owned()
             })
             .collect();
@@ -365,9 +365,9 @@ mod tests {
         let mut selection = &found[0];
         while selection.is_object() {
             let (start, end) = (&selection["range"]["start"], &selection["range"]["end"]);
-            let index = LineIndex::new(text);
+            let starts = LineStarts::new(text);
             lengths.push(
-                index.offset_of(end, Encoding::Utf16).unwrap() - index.offset_of(start, Encoding::Utf16).unwrap(),
+                starts.offset_of(end, Encoding::Utf16).unwrap() - starts.offset_of(start, Encoding::Utf16).unwrap(),
             );
             selection = &selection["parent"];
         }

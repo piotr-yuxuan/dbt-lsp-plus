@@ -3,7 +3,7 @@
 //! writes them.  Offsets are bytes into the file's text.  Pure.
 
 use crate::project;
-use crate::text::{Encoding, LineIndex};
+use crate::text::{Encoding, LineStarts};
 use crate::yaml::{self, Tree};
 use std::ops::Range;
 
@@ -80,7 +80,7 @@ pub fn entries(text: &str) -> Vec<Entry> {
 /// The named entries of the properties file TEXT, whose tree is ROOT, as
 /// `entries` gives them: those of the top level only, unless NESTED.
 pub fn entries_in(text: &str, root: &Tree, nested: bool) -> Vec<Entry> {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     // Popped from the end: what comes first in the text pops first.
     let mut pending = held(root, "");
     pending.reverse();
@@ -94,15 +94,15 @@ pub fn entries_in(text: &str, root: &Tree, nested: bool) -> Vec<Entry> {
         });
         // A `name:` still being typed is empty, and placed at the next token;
         // a block scalar's name holds a line break, as written or as read.
-        let named = item.get("name").and_then(|name| project::written(text, &index, name));
+        let named = item.get("name").and_then(|name| project::written(text, &starts, name));
         let usable = |(name, range): &(String, Range<usize>)| {
             !name.trim().is_empty() && !name.contains(['\n', '\r']) && !text[range.clone()].contains(['\n', '\r'])
         };
         let (Some((line, column)), Some((name, name_range))) = (first, named.filter(usable)) else {
             continue;
         };
-        let start = index.offset(line as u64, column as u64, Encoding::Utf32);
-        let end = index.offset(end.0 as u64, end.1 as u64, Encoding::Utf32);
+        let start = starts.offset(line as u64, column as u64, Encoding::Utf32);
+        let end = starts.offset(end.0 as u64, end.1 as u64, Encoding::Utf32);
         let range = if text[end..].starts_with('}') {
             start..end + 1
         } else {
@@ -147,7 +147,7 @@ pub fn tests(text: &str) -> Vec<Test> {
 /// `tests` gives them.
 pub fn tests_in(text: &str, root: &Tree) -> Vec<Test> {
     let Tree::Map { entries: top, .. } = root else { return Vec::new() };
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let mut pending: Vec<&Tree> = top.iter().map(|(_, value)| value).collect();
     let mut found = Vec::new();
     while let Some(tree) = pending.pop() {
@@ -164,7 +164,7 @@ pub fn tests_in(text: &str, root: &Tree) -> Vec<Test> {
                             Tree::Map { .. } => item.get("test_name"),
                             _ => Some(item),
                         });
-                        let written = named.filter_map(|name| project::written(text, &index, name));
+                        let written = named.filter_map(|name| project::written(text, &starts, name));
                         found.extend(written.map(|(written, range)| {
                             let (package, name) = match written.split_once('.') {
                                 Some((package, name)) => (Some(package.to_owned()), name.to_owned()),

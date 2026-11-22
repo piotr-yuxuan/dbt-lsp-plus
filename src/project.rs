@@ -6,7 +6,7 @@ use crate::packages;
 use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
-use crate::text::{self, Encoding, LineIndex};
+use crate::text::{self, Encoding, LineStarts};
 use crate::yaml::{self, Tree};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -103,9 +103,9 @@ impl Scanned {
         let resource =
             |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
         let entries: Vec<Entry> = properties::entries_in(&text, &root, false).into_iter().filter(resource).collect();
-        let index = LineIndex::new(&text);
+        let starts = LineStarts::new(&text);
         let relation = |item: &Tree| {
-            Some((written(&text, &index, item.get("name")?)?.1, written(&text, &index, item.get("relation")?)?.1))
+            Some((written(&text, &starts, item.get("name")?)?.1, written(&text, &starts, item.get("relation")?)?.1))
         };
         let relations: Vec<_> =
             root.get("snapshots").map_or(&[][..], Tree::items).iter().filter_map(relation).collect();
@@ -347,17 +347,17 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
 /// The models of the unit tests of the properties file TEXT, whose tree is
 /// ROOT: each `model:` as written.
 pub fn unit_test_models(text: &str, root: &Tree) -> Vec<(String, Range<usize>)> {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let models = root.get("unit_tests").map_or(&[][..], Tree::items).iter().filter_map(|unit| unit.get("model"));
-    models.filter_map(|model| written(text, &index, model)).collect()
+    models.filter_map(|model| written(text, &starts, model)).collect()
 }
 
 /// The value of the scalar TREE of TEXT and its range as written: inside
 /// its quotes, escapes included, else as long as its value, else to the end
 /// of its line.
-pub fn written(text: &str, index: &LineIndex, tree: &Tree) -> Option<(String, Range<usize>)> {
+pub fn written(text: &str, starts: &LineStarts, tree: &Tree) -> Option<(String, Range<usize>)> {
     let Tree::Scalar { value, line, column, .. } = tree else { return None };
-    let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
+    let at = starts.offset(*line as u64, *column as u64, Encoding::Utf32);
     let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
     let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
     let range = match quoted {
@@ -370,13 +370,13 @@ pub fn written(text: &str, index: &LineIndex, tree: &Tree) -> Option<(String, Ra
 
 /// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
 /// range, and where a line goes after it.
-fn placed(text: &str, index: &LineIndex, key: &Tree, value: &Tree) -> Option<(String, Range<usize>, Insertion)> {
+fn placed(text: &str, starts: &LineStarts, key: &Tree, value: &Tree) -> Option<(String, Range<usize>, Insertion)> {
     let Tree::Scalar { line: key_line, column: key_column, .. } = key else { return None };
-    let (value, range) = written(text, index, value)?;
+    let (value, range) = written(text, starts, value)?;
     let line_end = text[range.end..].find(['\n', '\r']).map_or(text.len(), |end| range.end + end);
-    let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
+    let key_line_start = starts.offset(*key_line as u64, 0, Encoding::Utf32);
     let before_key =
-        text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
+        text[key_line_start..starts.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
     // A document in flow style, such as JSON, spans lines that look like blocks.
     let flow_document = text.trim_start().starts_with(['{', '[']);
     let block = !flow_document && before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
@@ -394,17 +394,17 @@ pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable>
 /// The tables of the `sources:` of the properties file TEXT of PACKAGE,
 /// whose tree is ROOT, as `source_tables` gives them.
 pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Tree) -> Vec<SourceTable> {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     // An anchor anywhere in the file may hold a name, a schema or an identifier.
     let anchored = root.shares();
     let mut found = Vec::new();
     for source in root.get("sources").map_or(&[][..], Tree::items) {
         let own = source.entry("name").filter(|_| source.get("overrides").is_none());
         let Some((key, value)) = own else { continue };
-        let Some((source_name, source_range, source_insertion)) = placed(text, &index, key, value) else { continue };
+        let Some((source_name, source_range, source_insertion)) = placed(text, &starts, key, value) else { continue };
         for table in source.get("tables").map_or(&[][..], Tree::items) {
             let Some((key, value)) = table.entry("name") else { continue };
-            let Some((table_name, table_range, table_insertion)) = placed(text, &index, key, value) else { continue };
+            let Some((table_name, table_range, table_insertion)) = placed(text, &starts, key, value) else { continue };
             found.push(SourceTable {
                 package: package.to_owned(),
                 path: path.to_owned(),
@@ -1007,8 +1007,8 @@ mod tests {
         let written: Vec<&str> = tables.iter().map(|t| &text[t.table_range.clone()]).collect();
         assert_eq!(written, ["a\\tb\\\"é", "it''s"]);
         assert_eq!(Entity::from(&tables[0]).id, "source.shop.raw.a\tb\"é");
-        let index = LineIndex::new(text);
-        let end = index.position(tables[0].table_range.end, Encoding::Utf16);
+        let starts = LineStarts::new(text);
+        let end = starts.position(tables[0].table_range.end, Encoding::Utf16);
         assert_eq!(end, serde_json::json!({"line": 3, "character": 22}));
     }
 

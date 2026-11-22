@@ -6,7 +6,7 @@
 
 use crate::project::{self, Insertion, Project, SourceTable};
 use crate::scan::{self, Call};
-use crate::text::{Encoding, LineIndex};
+use crate::text::{Encoding, LineStarts};
 use crate::yaml;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -94,7 +94,7 @@ fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
     };
     let parent = parents.iter().try_fold(config.get("sources")?, |node, name| node.get(name))?;
     let (key, _) = parent.entry(key)?;
-    let (_, range) = project::written(text, &LineIndex::new(text), key)?;
+    let (_, range) = project::written(text, &LineStarts::new(text), key)?;
     Some(Occurrence { path, range, declaration: false })
 }
 
@@ -120,7 +120,7 @@ pub fn occurrences(project: &Project, target: &Target) -> Vec<Occurrence> {
 
 /// The LSP range of RANGE in TEXT.
 fn lsp_range(text: &str, range: &Range<usize>, encoding: Encoding) -> Value {
-    LineIndex::new(text).range(range.start, range.end, encoding)
+    LineStarts::new(text).range(range.start, range.end, encoding)
 }
 
 /// The references of TARGET, as `Location`s; its declarations too when

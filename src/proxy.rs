@@ -9,7 +9,7 @@ use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
 use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
-use crate::text::{self, Encoding, LineIndex};
+use crate::text::{self, Encoding, LineStarts};
 use crate::{
     cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, shadow, sources,
 };
@@ -957,7 +957,7 @@ impl<W: Write> Proxy<W> {
             return Some(Value::Null);
         };
         let text = project.text(&path).unwrap_or_default();
-        let offset = LineIndex::new(text).offset_of(params.get("position")?, self.encoding)?;
+        let offset = LineStarts::new(text).offset_of(params.get("position")?, self.encoding)?;
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
     }
 
@@ -965,7 +965,7 @@ impl<W: Write> Proxy<W> {
     /// of the request's position in it.
     fn document_at(&self, params: &Value) -> Option<(PathBuf, String, usize)> {
         let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
-        let offset = LineIndex::new(&text).offset_of(params.get("position")?, self.encoding)?;
+        let offset = LineStarts::new(&text).offset_of(params.get("position")?, self.encoding)?;
         Some((path, text, offset))
     }
 
@@ -1091,8 +1091,8 @@ impl<W: Write> Proxy<W> {
         let location = |found: &navigation::Found| {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
-            let index = LineIndex::new(text.get(..found.range.end).unwrap_or(text));
-            let range = index.range(found.range.start, found.range.end, self.encoding);
+            let starts = LineStarts::new(text.get(..found.range.end).unwrap_or(text));
+            let range = starts.range(found.range.start, found.range.end, self.encoding);
             json!({"uri": self.uri_of(&found.path), "range": range})
         };
         found.iter().map(location).collect()
@@ -1133,8 +1133,8 @@ impl<W: Write> Proxy<W> {
         if method == "textDocument/foldingRange" {
             return Some(document::folding_ranges(&text, sql));
         }
-        let index = LineIndex::new(&text);
-        let positions = params.get("positions")?.as_array()?.iter().map(|p| index.offset_of(p, self.encoding));
+        let starts = LineStarts::new(&text);
+        let positions = params.get("positions")?.as_array()?.iter().map(|p| starts.offset_of(p, self.encoding));
         Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
     }
 
@@ -1754,7 +1754,7 @@ impl<W: Write> Proxy<W> {
                 let hints = panic::catch_unwind(AssertUnwindSafe(|| {
                     let index = self.parsing.index.as_ref()?;
                     let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
-                    let lines = LineIndex::new(&text);
+                    let lines = LineStarts::new(&text);
                     let start = lines.offset_of(params.pointer("/range/start")?, self.encoding)?;
                     let end = lines.offset_of(params.pointer("/range/end")?, self.encoding)?;
                     let calls = sources::file_calls(&path, &text);
@@ -2097,7 +2097,7 @@ impl<W: Write> Proxy<W> {
         // The failures, placed in the text as it stands.
         let failures = self.diagnostics.failures.get(path).map_or(&[][..], Vec::as_slice);
         let text = self.documents.get(path).cloned().or_else(|| text::read(path)).unwrap_or_default();
-        let lines = LineIndex::new(&text);
+        let lines = LineStarts::new(&text);
         let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
             let range = runs::locate(&text, &entries, &tests, &failure.place);
