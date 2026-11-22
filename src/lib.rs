@@ -2,6 +2,7 @@
 //! dbt-lsp-plus: a proxy in front of `dbt lsp` that adds what it lacks.
 
 pub mod cache;
+pub mod capability;
 pub mod cli;
 pub mod commands;
 pub mod config;

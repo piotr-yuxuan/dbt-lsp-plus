@@ -4,6 +4,7 @@
 //! command line and `initializationOptions.dbtLspPlus`, parsed here at the
 //! boundary; the table of a session, fixed once `initialize` is answered.
 
+use crate::capability::{self, CAPABILITIES};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -30,49 +31,6 @@ impl Mode {
     }
 }
 
-/// The methods that take a mode: those the proxy answers, by their LSP
-/// names.  Any other stays `dbt`.
-pub const METHODS: [&str; 12] = [
-    "textDocument/documentSymbol",
-    "workspace/symbol",
-    "textDocument/prepareCallHierarchy",
-    "textDocument/foldingRange",
-    "textDocument/documentHighlight",
-    "textDocument/selectionRange",
-    "textDocument/hover",
-    "textDocument/inlayHint",
-    "textDocument/definition",
-    "textDocument/references",
-    "textDocument/rename",
-    "textDocument/publishDiagnostics",
-];
-
-/// The methods that take another's mode, as their items come from it.
-const FOLLOWERS: [(&str, &str); 2] = [
-    ("callHierarchy/incomingCalls", "textDocument/prepareCallHierarchy"),
-    ("callHierarchy/outgoingCalls", "textDocument/prepareCallHierarchy"),
-];
-
-/// The methods whose shipped default is `plus` when the first server does
-/// not announce their capability, else `dbt`: those the proxy adds.  Every
-/// other method of `METHODS` ships `merge`, today's merges.
-const ADDED: [&str; 6] = [
-    "textDocument/documentSymbol",
-    "workspace/symbol",
-    "textDocument/prepareCallHierarchy",
-    "textDocument/foldingRange",
-    "textDocument/documentHighlight",
-    "textDocument/selectionRange",
-];
-
-/// The methods whose empty answer is `[]` rather than null.
-const LISTS: [&str; 3] = ["textDocument/references", "textDocument/inlayHint", "workspace/symbol"];
-
-/// What METHOD answers when it has nothing: `[]` for a list, else null.
-pub fn empty(method: &str) -> Value {
-    if LISTS.contains(&method) { json!([]) } else { Value::Null }
-}
-
 /// A method of LSP: a namespace of the protocol's and a name.
 static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -81,9 +39,10 @@ static LSP_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// The user's settings: a mode per method of `METHODS`, a default for them
-/// all, whether the shadow compares the proxy's definitions and
-/// references with dbt lsp's, and whether a mode was named `ours`.
+/// The user's settings: a mode per method that takes one
+/// (`capability::with_mode`), a default for them all, whether the shadow
+/// compares the proxy's definitions and references with dbt lsp's, and
+/// whether a mode was named `ours`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub modes: BTreeMap<String, Mode>,
@@ -98,10 +57,10 @@ impl Settings {
     /// accepted.  A mode named `ours` is noted.
     pub fn set(&mut self, method: &str, mode: &str) -> Result<(), String> {
         let named = Mode::parse(mode).ok_or_else(|| format!("{mode} is no mode: plus, dbt or merge"))?;
-        if let Some((_, leader)) = FOLLOWERS.iter().find(|(follower, _)| *follower == method) {
+        if let Some(leader) = capability::of(method).and_then(|capability| capability.leader) {
             return Err(format!("{method} takes the mode of {leader}"));
         }
-        match (METHODS.contains(&method), LSP_METHOD.is_match(method), named) {
+        match (capability::with_mode().any(|taken| taken == method), LSP_METHOD.is_match(method), named) {
             (true, ..) => {
                 self.modes.insert(method.to_owned(), named);
                 self.ours |= mode == "ours";
@@ -236,7 +195,7 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
     Ok(Arguments::Run { settings, launch, command })
 }
 
-/// The mode of each method of `METHODS` in a session, fixed when its
+/// The mode of each method that takes one in a session, fixed when its
 /// `initialize` is answered, and whether it has no backend.
 #[derive(Clone, Debug, Default)]
 pub struct Table {
@@ -250,7 +209,8 @@ impl Table {
     /// backend: the user's mode for a method, else the user's default, else
     /// the shipped one, today's behaviour.
     pub fn new(settings: &Settings, announced: &dyn Fn(&str) -> bool, none: bool) -> Table {
-        let shipped = |method: &str| match (ADDED.contains(&method), announced(method)) {
+        let added = |method: &str| capability::of(method).is_some_and(|capability| capability.added);
+        let shipped = |method: &str| match (added(method), announced(method)) {
             (true, false) => Mode::Plus,
             (true, true) => Mode::Dbt,
             (false, _) => Mode::Merge,
@@ -259,7 +219,7 @@ impl Table {
             let set = settings.modes.get(method).copied().or(settings.default);
             (method, set.unwrap_or_else(|| shipped(method)))
         };
-        Table { modes: METHODS.into_iter().map(mode).collect(), none }
+        Table { modes: capability::with_mode().map(mode).collect(), none }
     }
 
     /// The mode of METHOD: a follower's leader's, `dbt` for a method that
@@ -270,7 +230,7 @@ impl Table {
 
     /// The method whose mode METHOD takes: its own, or its leader's.
     fn leader<'m>(&self, method: &'m str) -> &'m str {
-        FOLLOWERS.iter().find(|(follower, _)| *follower == method).map_or(method, |(_, leader)| leader)
+        capability::of(method).and_then(|capability| capability.leader).unwrap_or(method)
     }
 
     /// Whether the proxy answers METHOD at a position it claims, by a row of
@@ -286,25 +246,25 @@ impl Table {
     pub fn nothing(&self, method: &str) -> Option<Value> {
         let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
         let empty = known && (mode == Mode::Plus || (self.none && mode == Mode::Dbt));
-        empty.then(|| self::empty(method))
+        empty.then(|| capability::empty(method))
     }
 
-    /// `experimental.dbtLspPlus`, version 2, from ROWS (request, kind,
-    /// places): each row the table lists, its places in order.
-    pub fn flag(&self, rows: &[(&str, &str, &[&str])]) -> Value {
+    /// `experimental.dbtLspPlus`, version 2: the kinds and places of each
+    /// capability the table lists, by its request's name.
+    pub fn flag(&self) -> Value {
         let mut answered = json!({"version": 2});
-        for (request, kind, places) in rows {
-            if self.lists(&format!("textDocument/{request}")) {
-                let listed = answered[*request][*kind].as_array().cloned().unwrap_or_default();
-                answered[*request][*kind] = json!([listed, places.iter().map(|place| json!(place)).collect()].concat());
-            }
+        let listed =
+            CAPABILITIES.iter().filter(|capability| !capability.kinds.is_empty() && self.lists(capability.name));
+        for capability in listed {
+            let kinds = capability.kinds.iter().map(|(kind, places)| ((*kind).to_owned(), json!(places)));
+            answered[capability.name.trim_start_matches("textDocument/")] = Value::Object(kinds.collect());
         }
         answered
     }
 
     /// The methods set to `dbt` that no backend can answer.
     pub fn unanswered(&self) -> Vec<&'static str> {
-        let unanswered = METHODS.into_iter().filter(|method| self.none && self.mode(method) == Mode::Dbt);
+        let unanswered = capability::with_mode().filter(|method| self.none && self.mode(method) == Mode::Dbt);
         unanswered.collect()
     }
 }
@@ -478,23 +438,41 @@ mod tests {
         assert_eq!((kept.shadow, refused), (false, vec!["dbtLspPlus.shadow is no boolean".to_owned()]));
     }
 
+    /// The flag in full: every kind at each of its places.
+    fn every() -> Value {
+        json!({"version": 2,
+            "definition": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"], "macro": ["sql", "yaml"],
+                           "doc": ["yaml"], "entry": ["yaml"], "test": ["yaml"], "function": ["sql", "yaml"]},
+            "references": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"],
+                           "macro": ["sql", "yaml"], "function": ["sql", "yaml"]},
+            "rename": {"source": ["sql", "yaml", "python"], "cte": ["sql"]}})
+    }
+
+    #[test]
+    fn the_flag_lists_every_row_in_plus_and_merge_with_a_backend_or_none() {
+        let every = every();
+        let mut plus = Settings::default();
+        plus.set_default("plus").unwrap();
+        for (settings, none) in [(Settings::default(), false), (Settings::default(), true), (plus, false)] {
+            assert_eq!(Table::new(&settings, &|_| false, none).flag(), every, "{settings:?} {none}");
+        }
+        let mut dbt = Settings::default();
+        dbt.set("textDocument/definition", "dbt").unwrap();
+        dbt.set("textDocument/references", "dbt").unwrap();
+        let rename = json!({"version": 2, "rename": every["rename"]});
+        assert_eq!(Table::new(&dbt, &|_| false, false).flag(), rename);
+    }
+
     #[test]
     fn the_flag_and_empty_answers_follow_the_modes() {
-        let rows: [(&str, &str, &[&str]); 4] = [
-            ("definition", "source", &["sql", "yaml"]),
-            ("definition", "ref", &["sql"]),
-            ("definition", "ref", &["python"]),
-            ("references", "source", &["sql"]),
-        ];
-        let every = json!({"version": 2, "definition": {"source": ["sql", "yaml"], "ref": ["sql", "python"]},
-                           "references": {"source": ["sql"]}});
+        let every = every();
         for none in [false, true] {
-            assert_eq!(Table::new(&Settings::default(), &|_| false, none).flag(&rows), every, "merge, none {none}");
+            assert_eq!(Table::new(&Settings::default(), &|_| false, none).flag(), every, "merge, none {none}");
         }
         let user = settings(&[("textDocument/definition", "plus"), ("textDocument/references", "dbt")], None);
         let table = Table::new(&user, &|_| false, false);
-        let definition = json!({"version": 2, "definition": every["definition"]});
-        assert_eq!(table.flag(&rows), definition, "plus lists, dbt does not");
+        let definition = json!({"version": 2, "definition": every["definition"], "rename": every["rename"]});
+        assert_eq!(table.flag(), definition, "plus lists, dbt does not");
         assert_eq!(table.nothing("textDocument/definition"), Some(Value::Null));
         assert_eq!(table.nothing("textDocument/references"), None, "dbt with a backend is forwarded");
         let none = Table::new(&user, &|_| false, true);
