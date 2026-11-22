@@ -174,7 +174,7 @@ pub fn without_section(params: &Value) -> Value {
 /// Whether the server runs behind the proxy: `auto`, when the dbt has
 /// `lsp`, or `never`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Backend {
+pub enum Launch {
     #[default]
     Auto,
     Never,
@@ -185,21 +185,21 @@ pub enum Backend {
 pub enum Arguments {
     Help,
     Version,
-    Run { settings: Settings, backend: Backend, command: Vec<String> },
+    Run { settings: Settings, launch: Launch, command: Vec<String> },
 }
 
 /// The options that print and exit: true for the usage, false for the version.
 const ASKED: [(&str, bool); 4] = [("-h", true), ("--help", true), ("-V", false), ("--version", false)];
 
-/// The backends that `--backend` names.
-const BACKENDS: [(&str, Backend); 2] = [("auto", Backend::Auto), ("never", Backend::Never)];
+/// The launches that `--backend` names.
+const LAUNCHES: [(&str, Launch); 2] = [("auto", Launch::Auto), ("never", Launch::Never)];
 
 /// The proxy's command line, WORDS, after its name: its options, read from
 /// the first word for as long as one starts with `-` and is not `--`, each
 /// value the next word or after the first `=`, `--shadow` with none; then
 /// the server command, `dbt lsp` when none.  Or why it cannot be read.
 pub fn arguments(words: &[String]) -> Result<Arguments, String> {
-    let (mut settings, mut backend) = (Settings::default(), Backend::Auto);
+    let (mut settings, mut launch) = (Settings::default(), Launch::Auto);
     let mut rest = words.iter().peekable();
     while let Some(word) = rest.next_if(|word| word.starts_with('-') && *word != "--") {
         let (option, attached) = word.split_once('=').map_or((word.as_str(), None), |(o, v)| (o, Some(v.to_owned())));
@@ -223,8 +223,8 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
             }),
             "--default-mode" => value().and_then(|value| settings.set_default(&value)),
             "--backend" => value().and_then(|value| {
-                let named = BACKENDS.iter().find(|(name, _)| *name == value).map(|(_, named)| *named);
-                named.map(|named| backend = named).ok_or(format!("{value} is no backend: auto or never"))
+                let named = LAUNCHES.iter().find(|(name, _)| *name == value).map(|(_, named)| *named);
+                named.map(|named| launch = named).ok_or(format!("{value} is no backend: auto or never"))
             }),
             other => Err(format!("{other} is no option of dbt-lsp-plus")),
         };
@@ -233,7 +233,7 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
     let command: Vec<String> = rest.skip_while(|word| *word == "--").cloned().collect();
     let command =
         Some(command).filter(|command| !command.is_empty()).unwrap_or_else(|| vec!["dbt".into(), "lsp".into()]);
-    Ok(Arguments::Run { settings, backend, command })
+    Ok(Arguments::Run { settings, launch, command })
 }
 
 /// The mode of each method of `METHODS` in a session, fixed when its
@@ -437,13 +437,13 @@ mod tests {
     #[test]
     fn the_command_line_reads_options_then_the_server_command() {
         let run = |words: &[&str]| match arguments(&super::tests::words(words)) {
-            Ok(Arguments::Run { settings, backend, command }) => (settings, backend, command),
+            Ok(Arguments::Run { settings, launch, command }) => (settings, launch, command),
             other => panic!("{other:?}"),
         };
-        let (settings, backend, command) =
+        let (settings, launch, command) =
             run(&["--mode", "textDocument/hover=dbt", "--backend=never", "dbt", "lsp", "--project-dir", "p"]);
         assert_eq!(settings.modes["textDocument/hover"], Mode::Dbt);
-        assert_eq!(backend, Backend::Never);
+        assert_eq!(launch, Launch::Never);
         assert_eq!(command, words(&["dbt", "lsp", "--project-dir", "p"]));
         assert_eq!(run(&["--default-mode=plus"]).0.default, Some(Mode::Plus));
         assert_eq!(run(&[]).2, words(&["dbt", "lsp"]), "dbt lsp by default");

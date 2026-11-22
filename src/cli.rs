@@ -4,7 +4,7 @@
 //! project and its dbt are found as the server finds them.
 
 use crate::locate::{self, Probe, Route};
-use crate::modes::{self, Arguments, Backend};
+use crate::modes::{self, Arguments, Launch};
 use crate::{commands, config, packages, proxy};
 use serde_json::{Value, json};
 use std::io::Write;
@@ -61,10 +61,10 @@ pub fn named(words: &[String]) -> Option<Subcommand> {
 enum Asked {
     Help,
     /// Its OPERAND, doctor's PATH or select's SELECTOR, and the server's
-    /// backend and command.
+    /// launch and command.
     Run {
         operand: Option<String>,
-        backend: Backend,
+        launch: Launch,
         command: Vec<String>,
     },
 }
@@ -91,7 +91,7 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
         return Err("select needs a SELECTOR".into());
     }
     match modes::arguments(server)? {
-        Arguments::Run { backend, command, .. } => Ok(Asked::Run { operand, backend, command }),
+        Arguments::Run { launch, command, .. } => Ok(Asked::Run { operand, launch, command }),
         _ => Err("-h and -V are not the server's arguments here".into()),
     }
 }
@@ -104,8 +104,8 @@ pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
         Subcommand::Doctor => DOCTOR_USAGE,
         Subcommand::Select => SELECT_USAGE,
     };
-    let (operand, backend, command) = match asked(subcommand, words) {
-        Ok(Asked::Run { operand, backend, command }) => (operand, backend, command),
+    let (operand, launch, command) = match asked(subcommand, words) {
+        Ok(Asked::Run { operand, launch, command }) => (operand, launch, command),
         Ok(Asked::Help) => {
             println!("{usage}");
             return ExitCode::SUCCESS;
@@ -116,7 +116,7 @@ pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
         }
     };
     let (answer, ok) = match (subcommand, operand) {
-        (Subcommand::Doctor, path) => doctor(Path::new(path.as_deref().unwrap_or(".")), backend, &command),
+        (Subcommand::Doctor, path) => doctor(Path::new(path.as_deref().unwrap_or(".")), launch, &command),
         (Subcommand::Select, selector) => {
             let answer = select(&selector.unwrap_or_default(), &command);
             let ok = answer["error"].is_null();
@@ -167,10 +167,10 @@ fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Found, O
     (locate::dbt(project, &anchored, &git), Some(project.to_owned()))
 }
 
-/// What the server would find and do from PATH with BACKEND and the server
+/// What the server would find and do from PATH with LAUNCH and the server
 /// command COMMAND, and whether it would work: its answer, and whether a
 /// project was found whose dbt answers as a dbt 2 does.
-fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
+fn doctor(path: &Path, launch: Launch, command: &[String]) -> (Value, bool) {
     let version = env!("CARGO_PKG_VERSION");
     // `..` resolved as written, as a client's URI has none: the walk up to a
     // project then never passes through a directory the file lies outside.
@@ -196,7 +196,7 @@ fn doctor(path: &Path, backend: Backend, command: &[String]) -> (Value, bool) {
             Probe::Other(why) => Err(why),
         },
     };
-    let alone = locate::alone(backend == Backend::Never, route, || probed == Ok(false));
+    let alone = locate::alone(launch == Launch::Never, route, || probed == Ok(false));
     let cut = config::can_cut();
     // With the server command as given, as select asks it: finding the dbt
     // changes only a bare `dbt`, and the guard reads none of it.
@@ -291,12 +291,12 @@ mod tests {
 
     #[test]
     fn a_subcommand_reads_its_operand_then_the_server_s_arguments_after_dashes() {
-        let run = |operand: Option<&str>, backend: Backend, command: &[&str]| {
-            Ok(Asked::Run { operand: operand.map(str::to_owned), backend, command: words(command) })
+        let run = |operand: Option<&str>, launch: Launch, command: &[&str]| {
+            Ok(Asked::Run { operand: operand.map(str::to_owned), launch, command: words(command) })
         };
         let default = ["dbt", "lsp"];
-        assert_eq!(asked(Subcommand::Doctor, &[]), run(None, Backend::Auto, &default));
-        assert_eq!(asked(Subcommand::Doctor, &words(&["x.sql"])), run(Some("x.sql"), Backend::Auto, &default));
+        assert_eq!(asked(Subcommand::Doctor, &[]), run(None, Launch::Auto, &default));
+        assert_eq!(asked(Subcommand::Doctor, &words(&["x.sql"])), run(Some("x.sql"), Launch::Auto, &default));
         let helped: [(Subcommand, &[&str]); 4] = [
             (Subcommand::Doctor, &["-h"]),
             (Subcommand::Select, &["--help"]),
@@ -309,10 +309,10 @@ mod tests {
         let given = words(&["--", "--backend", "never", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
         assert_eq!(
             asked(Subcommand::Doctor, &given),
-            run(None, Backend::Never, &["uvx", "dbt", "lsp", "--target", "prod"])
+            run(None, Launch::Never, &["uvx", "dbt", "lsp", "--target", "prod"])
         );
         let selected = words(&["+m+", "--", "--shadow", "dbt", "lsp"]);
-        assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), Backend::Auto, &default));
+        assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), Launch::Auto, &default));
         let refused: [(Subcommand, &[&str]); 7] = [
             (Subcommand::Doctor, &["--bogus"]),
             (Subcommand::Doctor, &["x.sql", "-h"]),

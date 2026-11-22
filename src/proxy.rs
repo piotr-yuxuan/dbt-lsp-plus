@@ -2380,10 +2380,10 @@ fn spawn_server(
 /// probe, the server and the cut start now, in the proxy's working
 /// directory; else nothing runs before the client's folder or a document
 /// names the project.
-pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backend) -> ExitCode {
+pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch) -> ExitCode {
     let (events, inbox) = mpsc::channel();
     // With `never`, nothing of the user's dbt runs but its parse.
-    let never = backend == modes::Backend::Never;
+    let never = launch == modes::Launch::Never;
     let given = project_dir(command);
     // Without a project yet, `take_project` decides once one is named.
     let standalone = match given {
