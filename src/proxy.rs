@@ -47,7 +47,8 @@ enum Route {
     /// Itself, with this answer: null before a project, the shadow's
     /// counts, or the method's nothing.
     Answer(Answer),
-    /// By the server.
+    /// By the server: `forward`, which also says what the request gets
+    /// when none runs.
     Forward,
     /// As this command of the proxy's for clients.
     Command(&'static str),
@@ -401,7 +402,7 @@ impl Pending {
     ) -> Option<Value> {
         if let (Some(error), Kept::Part(_)) = (message.get("error"), &self.kept) {
             let failed = Reason::Failed(error["message"].as_str().unwrap_or_default().to_owned());
-            return Some(self.unserved(markdown, failed, parsing).frame(&message["id"], &self.name));
+            return Some(self.unserved(markdown, Some(failed), parsing).frame(&message["id"], &self.name));
         }
         match &self.kept {
             Kept::Part(Part::Hover(text, hard)) => features::merge_hover(message, text, *hard, markdown),
@@ -430,23 +431,24 @@ impl Pending {
         }
     }
 
-    /// What the client gets for this request when dbt lsp gives it no
-    /// answer, for WHY, as it reads markdown when MARKDOWN, as PARSING
-    /// stands: the proxy's part found; its empty; why it could not answer,
-    /// then WHY; for a hover on a node before any index, why the proxy has
-    /// none, then WHY; else WHY.  An index made since the request makes the
-    /// hover's part a nothing.
-    fn unserved(&self, markdown: bool, why: Reason, parsing: &Parsing) -> Answer {
+    /// What the client gets for this request from the proxy's part, as it
+    /// reads markdown when MARKDOWN, as PARSING stands, when dbt lsp gives
+    /// it no answer, for WHY, or answered whole, with none: the proxy's
+    /// part found; its empty; why it could not answer, then WHY; for a
+    /// hover on a node before any index, why the proxy has none, then WHY;
+    /// else WHY, or with none the method's nothing.  An index made since
+    /// the request makes the hover's part a nothing.
+    fn unserved(&self, markdown: bool, why: Option<Reason>, parsing: &Parsing) -> Answer {
         match (&self.kept, self.found(markdown)) {
             (_, Some(found)) => Answer::Found(found),
             (Kept::Part(Part::Empty), None) => Answer::Empty,
             (Kept::Part(Part::Unanswered(reasons)), None) => {
-                Answer::Unanswered(reasons.iter().cloned().chain([why]).collect())
+                Answer::Unanswered(reasons.iter().cloned().chain(why).collect())
             }
             (Kept::Part(Part::Unindexed), None) if parsing.index.is_none() => {
-                Answer::Unanswered(vec![parsing.unindexed(), why])
+                Answer::Unanswered([parsing.unindexed()].into_iter().chain(why).collect())
             }
-            _ => Answer::Unanswered(vec![why]),
+            _ => why.map_or(Answer::Empty, |why| Answer::Unanswered(vec![why])),
         }
     }
 
@@ -1707,24 +1709,33 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Answers a request that the proxy answers itself, which it remembers as
-    /// PENDING.  A refusal fails it with its reason; a panic while answering
-    /// fails that request alone, never the session.
+    /// PENDING, with `plus_answer`'s Answer, after asking for the index where
+    /// that answer reads it, so that a reason is that of the parse it may
+    /// start: as its capability says, and for a hover whose part names a node
+    /// before any index.  A refusal fails it with its reason; a panic while
+    /// answering fails that request alone, never the session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
-        // Alone, the call hierarchy's graph needs the index too.
-        let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
-        if capability::of(method).is_some_and(|capability| capability.wants_index)
-            || (self.backend.alone() && hierarchy)
-        {
+        let alone = self.backend.alone();
+        let reads = capability::of(method).is_some_and(|c| c.wants_index || (alone && c.reads_graph));
+        if reads || pending.kept == Kept::Part(Part::Unindexed) {
             self.want_index();
         }
-        let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
+        let computed = panic::catch_unwind(AssertUnwindSafe(|| self.plus_answer(method, params, pending)));
+        match computed {
+            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
+            Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
+            Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
+        }
+    }
+
+    /// The Answer of the `plus` provider, the proxy itself, to METHOD at
+    /// PARAMS, which it remembers as PENDING, by the method's handler: for a
+    /// hover or inlay hints, the part kept, alone; none for invalid
+    /// parameters.  It sends nothing.
+    fn plus_answer(&self, method: &str, params: &Value, pending: &Pending) -> Option<Answer> {
+        match method {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
-            "workspace/symbol" => params.get("query").and_then(Value::as_str).map(|query| {
-                self.project().map_or_else(
-                    || Answer::Unanswered(vec![self.unreadable()]),
-                    |project| Answer::Found(features::workspace_symbols(&project, query, self.encoding)),
-                )
-            }),
+            "workspace/symbol" => self.symbols(params),
             config::NODE_INFO => self.node_info(params),
             "textDocument/references" => self.on_references(params),
             "textDocument/definition" => self.on_definition(params),
@@ -1732,25 +1743,22 @@ impl<W: Write> Proxy<W> {
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Answer::Found)
             }
-            // Asked for first, as nodeInfo does, so that the reason is that of the parse it may start.
-            "textDocument/hover" if pending.kept == Kept::Part(Part::Unindexed) => {
-                self.want_index();
-                Some(Answer::Unanswered(vec![self.parsing.unindexed()]))
-            }
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that; why
             // the proxy could not answer, as over a project that does not read.
-            "textDocument/hover" | "textDocument/inlayHint" => Some(match &pending.kept {
-                Kept::Part(Part::Unanswered(reasons)) => Answer::Unanswered(reasons.clone()),
-                _ => pending.found(self.markdown).map_or(Answer::Empty, Answer::Found),
-            }),
+            "textDocument/hover" | "textDocument/inlayHint" => {
+                Some(pending.unserved(self.markdown, None, &self.parsing))
+            }
             _ => self.hierarchy(method, params),
-        }));
-        match computed {
-            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
-            Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
-            Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
+    }
+
+    /// The workspace's symbols that match the request's query; why none
+    /// over a project that does not read.
+    fn symbols(&self, params: &Value) -> Option<Answer> {
+        let query = params.get("query")?.as_str()?;
+        let Some(project) = self.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        Some(Answer::Found(features::workspace_symbols(&project, query, self.encoding)))
     }
 
     fn client_listing(&self) -> bool {
@@ -2022,9 +2030,11 @@ impl<W: Write> Proxy<W> {
         (Pending { name, kept }, fresh)
     }
 
-    /// A request of the client: routed by `route`; without a server,
-    /// `initialize` is answered here, and any other forwarded request fails,
-    /// with why when dbt lsp is lost for good.
+    /// A request of the client: refused under the id of the proxy's listing
+    /// in flight; `on_elsewhere`'s on a document of another project; else
+    /// remembered, and handled where `route` sends it: `answer`, its answer
+    /// sent, `on_command`, or `forward`, which asks for the index itself;
+    /// then the index, when it asks for a fresh one.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         // The server would get two requests under one id.
         let listing = self.backend.running().and_then(|running| running.listings.listing.as_ref());
@@ -2035,31 +2045,12 @@ impl<W: Write> Proxy<W> {
             return self.on_elsewhere(method, id, body, why);
         }
         let (pending, fresh) = self.remember(method, id, params);
-        match (self.route(method, params), self.backend.running().is_some(), method) {
-            (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
-            (Route::Answer(answer), ..) => self.send_client(&answer.frame(id, method)),
-            (Route::Command(command), ..) => self.on_command(command, id, params, pending),
-            (Route::Forward, true, _) => self.forward(id, method, pending, body),
-            (Route::Forward, false, "initialize") => {
-                self.initialize = None;
-                self.initialize_alone(id);
-            }
-            // A merged request gets the proxy's answer alone, any other the failure: for good, or for now.  Nothing is
-            // forwarded: the index is asked for first, so that a reason is that of the parse it may start.
-            (Route::Forward, false, _) => {
-                if fresh {
-                    self.want_index();
-                }
-                let why = if let Life::Lost(why) = &self.backend.life {
-                    Reason::Lost(why.clone())
-                } else {
-                    Reason::NotRunning
-                };
-                let answer = pending.unserved(self.markdown, why, &self.parsing);
-                return self.send_client(&answer.frame(id, &pending.name));
-            }
+        match self.route(method, params) {
+            Route::Here(owned) => self.answer(owned, id, params, &pending),
+            Route::Answer(answer) => self.send_client(&answer.frame(id, method)),
+            Route::Command(command) => self.on_command(command, id, params, pending),
+            Route::Forward => return self.forward(id, method, pending, body, fresh),
         }
-        // Once the request is forwarded, so that a listing takes no id of the client's.
         if fresh {
             self.want_index();
         }
@@ -2067,12 +2058,34 @@ impl<W: Write> Proxy<W> {
 
     /// Forwards the client's request METHOD of ID, its BODY as it came, and
     /// keeps PENDING for dbt lsp's answer, which adds to the proxy's part,
-    /// or replaces its nothing, but never holds it up.
-    fn forward(&mut self, id: &Value, method: &str, pending: Pending, body: &[u8]) {
+    /// or replaces its nothing, but never holds it up; then, when FRESH,
+    /// asks for the index, once the request is forwarded, so that a listing
+    /// takes no id of the client's.  With no dbt lsp running, nothing is
+    /// forwarded: `initialize` is answered alone, and any other request gets
+    /// what `Pending::unserved` gives for why none runs, for good or for
+    /// now, the index asked for first when FRESH, so that a reason is that
+    /// of the parse it may start.
+    fn forward(&mut self, id: &Value, method: &str, pending: Pending, body: &[u8], fresh: bool) {
+        if self.backend.running().is_none() {
+            if method == "initialize" {
+                self.initialize = None;
+                return self.initialize_alone(id);
+            }
+            if fresh {
+                self.want_index();
+            }
+            let why =
+                if let Life::Lost(why) = &self.backend.life { Reason::Lost(why.clone()) } else { Reason::NotRunning };
+            let answer = pending.unserved(self.markdown, Some(why), &self.parsing);
+            return self.send_client(&answer.frame(id, &pending.name));
+        }
         let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
         self.deadlines.extend(late.map(|late| (key(id), late)));
         self.forwarded.insert(key(id), (id.clone(), pending));
         self.send_server(body);
+        if fresh {
+            self.want_index();
+        }
     }
 
     /// Why the request METHOD at PARAMS is not the session's project's: its
@@ -2101,7 +2114,7 @@ impl<W: Write> Proxy<W> {
         let merged = self.table.mode(method) == Mode::Merge && !self.owned.contains(method);
         if merged && self.backend.running().is_some() {
             let part = if hints { Part::Empty } else { Part::Unanswered(vec![why]) };
-            return self.forward(id, method, Pending { name: method.to_owned(), kept: Kept::Part(part) }, body);
+            return self.forward(id, method, Pending { name: method.to_owned(), kept: Kept::Part(part) }, body, false);
         }
         let answer = if hints { Answer::Empty } else { Answer::Unanswered(vec![why]) };
         self.send_client(&answer.frame(id, method));
@@ -2510,7 +2523,7 @@ impl<W: Write> Proxy<W> {
                 ("shutdown", _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
                 (_, Kept::Answered) => {}
                 _ => {
-                    let answer = pending.unserved(self.markdown, exited.clone(), &self.parsing);
+                    let answer = pending.unserved(self.markdown, Some(exited.clone()), &self.parsing);
                     self.send_client(&answer.frame(&id, &pending.name))
                 }
             }
@@ -2629,7 +2642,7 @@ impl<W: Write> Proxy<W> {
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
             let why = Reason::Late { waited, compiling };
-            let answer = pending.unserved(self.markdown, why, &self.parsing);
+            let answer = pending.unserved(self.markdown, Some(why), &self.parsing);
             let got = if let Answer::Unanswered(_) = answer {
                 "dbt-lsp-plus answered with the reason"
             } else {
@@ -3553,11 +3566,11 @@ mod tests {
         ];
         let parsing = Parsing::default();
         for (pending, expected) in cases {
-            assert_eq!(pending.unserved(false, Reason::NotRunning, &parsing), expected, "{}", pending.name);
+            assert_eq!(pending.unserved(false, Some(Reason::NotRunning), &parsing), expected, "{}", pending.name);
         }
         // Once an index exists, a hover's part taken before it is a nothing.
         let indexed = Parsing { index: Some(config::ParseIndex::of(&json!({}))), ..Parsing::default() };
-        let late = part("textDocument/hover", Part::Unindexed).unserved(false, Reason::NotRunning, &indexed);
+        let late = part("textDocument/hover", Part::Unindexed).unserved(false, Some(Reason::NotRunning), &indexed);
         assert_eq!(late, Answer::Unanswered(why()));
     }
 

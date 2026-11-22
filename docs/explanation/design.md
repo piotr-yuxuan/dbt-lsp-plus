@@ -1879,9 +1879,12 @@ checked against dbt; the profile and the target in doctor, which need
   outside the project, is not matched to its resource.
 - A package of the root installed outside it through a `.env` in the
   root that sets `DBT_PACKAGES_INSTALL_PATH`, or through `env_var` in its
-  `packages-install-path`, is taken for another project: a hover, a
-  definition, references or the call hierarchy on its files fails with
-  `<file> lies in the dbt project at <package>, ...`.
+  `packages-install-path`, is taken for another project: on its files,
+  `prepareCallHierarchy` fails at once with
+  `<file> lies in the dbt project at <package>, ...`, and so do a hover,
+  a definition and references alone and in `plus`; in `merge` in front
+  of a running dbt lsp, the default, these three go to dbt lsp, whose
+  answer stands, and when it gives none that reason comes first.
   `locate::elsewhere` reads the install path from the flag, the variable
   in the server command or the proxy's environment, and the key as
   written (plan 056).
