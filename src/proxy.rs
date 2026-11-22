@@ -375,6 +375,11 @@ enum Part {
     /// proxy has no index yet, where dbt lsp's answer is null or none, and
     /// before why dbt lsp gave none.
     Unindexed,
+    /// A definition or references at a position the proxy claims and
+    /// cannot answer, for these reasons, as over a project that does not
+    /// read: dbt lsp's answer passes as it came; when it gives none, these
+    /// reasons, then why.
+    Unanswered(Vec<Reason>),
 }
 
 impl Pending {
@@ -411,7 +416,7 @@ impl Pending {
     fn found(&self, markdown: bool) -> Option<Value> {
         let Kept::Part(part) = &self.kept else { return None };
         match part {
-            Part::Nothing | Part::Empty | Part::Unindexed => None,
+            Part::Nothing | Part::Empty | Part::Unindexed | Part::Unanswered(_) => None,
             Part::Hover(text, hard) => {
                 let alone = features::merge_hover(&json!({"result": null}), text, *hard, markdown);
                 alone.map(|alone| alone["result"].clone())
@@ -423,13 +428,17 @@ impl Pending {
 
     /// What the client gets for this request when dbt lsp gives it no
     /// answer, for WHY, as it reads markdown when MARKDOWN, as PARSING
-    /// stands: the proxy's part found; its empty; for a hover on a node
-    /// before any index, why the proxy has none, then WHY; else WHY.  An
-    /// index made since the request makes the hover's part a nothing.
+    /// stands: the proxy's part found; its empty; why it could not answer,
+    /// then WHY; for a hover on a node before any index, why the proxy has
+    /// none, then WHY; else WHY.  An index made since the request makes the
+    /// hover's part a nothing.
     fn unserved(&self, markdown: bool, why: Reason, parsing: &Parsing) -> Answer {
         match (&self.kept, self.found(markdown)) {
             (_, Some(found)) => Answer::Found(found),
             (Kept::Part(Part::Empty), None) => Answer::Empty,
+            (Kept::Part(Part::Unanswered(reasons)), None) => {
+                Answer::Unanswered(reasons.iter().cloned().chain([why]).collect())
+            }
             (Kept::Part(Part::Unindexed), None) if parsing.index.is_none() => {
                 Answer::Unanswered(vec![parsing.unindexed(), why])
             }
@@ -443,7 +452,8 @@ impl Pending {
     /// empty only once the server is clearly late.
     fn deadline(&self) -> Option<Duration> {
         let Kept::Part(part) = &self.kept else { return None };
-        capability::of(&self.name)?.deadline(!matches!(part, Part::Nothing | Part::Empty | Part::Unindexed))
+        let nothing = matches!(part, Part::Nothing | Part::Empty | Part::Unindexed | Part::Unanswered(_));
+        capability::of(&self.name)?.deadline(!nothing)
     }
 
     /// Whether it is a listing, the server's `dbt.listNodes` or the
@@ -1899,9 +1909,9 @@ impl<W: Write> Proxy<W> {
 
     /// What a definition or references at PARAMS gets first when the proxy
     /// unites dbt lsp's answer with its own: where it claims the position,
-    /// its locations, or its empty; nothing where it cannot answer, as with
-    /// a project that does not read, or where it panics; none where it
-    /// claims nothing.
+    /// its locations, its empty, or why it cannot answer, as over a project
+    /// that does not read; nothing where it panics; none where it claims
+    /// nothing.
     fn union_part(&self, method: &str, params: &Value) -> Option<Part> {
         let claimed = self.targeted(method, params)?;
         let found = panic::catch_unwind(AssertUnwindSafe(|| match claimed {
@@ -1911,7 +1921,8 @@ impl<W: Write> Proxy<W> {
         Some(match found.ok().flatten() {
             Some(Answer::Found(found)) if !found.is_null() && found != json!([]) => Part::Locations(found),
             Some(Answer::Found(_) | Answer::Empty) => Part::Empty,
-            _ => Part::Nothing,
+            Some(Answer::Unanswered(reasons)) => Part::Unanswered(reasons),
+            None => Part::Nothing,
         })
     }
 
@@ -3204,6 +3215,10 @@ mod tests {
             (part("textDocument/definition", Part::Locations(location.clone())), Answer::Found(location)),
             (part("textDocument/references", Part::Empty), Answer::Empty),
             (part("textDocument/definition", Part::Nothing), Answer::Unanswered(why())),
+            (
+                part("textDocument/definition", Part::Unanswered(vec![Reason::Unreadable("/p".into())])),
+                Answer::Unanswered(vec![Reason::Unreadable("/p".into()), Reason::NotRunning]),
+            ),
             (part("textDocument/hover", Part::Unindexed), Answer::Unanswered(vec![unindexed, Reason::NotRunning])),
             (pending("textDocument/completion", Kept::Plain), Answer::Unanswered(why())),
         ];

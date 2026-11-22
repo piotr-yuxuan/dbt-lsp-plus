@@ -3136,6 +3136,10 @@ fn a_project_that_no_longer_reads_says_so_where_no_symbol_is_empty() {
     let found = session.request("textDocument/definition", on_ref);
     assert_eq!(found["result"], location(&project, "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
     assert!(session.finish().success());
+}
+
+#[test]
+fn in_merge_a_project_that_no_longer_reads_leaves_a_claimed_definition_to_dbt_lsp_then_says_why() {
     // In front of dbt lsp, the definition goes to it, whose answer stands: its bytes, odd spacing included.
     let in_front = navigable("unreadable-merge");
     let answer = r#"{"result": {"uri": "file:///elsewhere.sql", "range": null},  "id": $ID, "jsonrpc": "2.0"}"#;
@@ -3148,6 +3152,23 @@ fn a_project_that_no_longer_reads_says_so_where_no_symbol_is_empty() {
     let passed = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
     let expected = answer.replace("$ID", &passed["id"].to_string());
     assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "dbt lsp's answer: {passed}");
+    assert!(session.finish().success());
+    // When dbt lsp gives none, the proxy's reason first, then dbt lsp's.
+    let refusing = navigable("unreadable-refused");
+    let script = json!({"refuse_on": "textDocument/definition"});
+    let (mut session, _) =
+        Session::fake_with("unreadable-refused", script, &[Path::new("--project-dir"), &refusing], None);
+    session.initialize(&refusing);
+    std::fs::write(refusing.join("dbt_project.yml"), "name: [").unwrap();
+    let orders = refusing.join("models/marts/orders.sql");
+    let refused = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project; \
+         dbt lsp failed: refused by the script",
+        refusing.display()
+    );
+    let why = json!({"code": -32803, "message": message});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
     assert!(session.finish().success());
 }
 

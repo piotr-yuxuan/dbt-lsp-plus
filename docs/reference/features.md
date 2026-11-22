@@ -110,7 +110,10 @@ before it answers `initialize`, the proxy answers alone, as with dbt-oss,
 and a request only `dbt lsp` answers fails with `dbt lsp is lost for
 good: ...`.  When the root's `dbt_project.yml` no longer reads, a
 definition or references on a target, workspace symbols and the call
-hierarchy fail with `no dbt project at ...`, alone and in `plus`.
+hierarchy fail with `no dbt project at ...`, alone and in `plus`; in
+`merge` in front of `dbt lsp`, a definition or references goes to `dbt
+lsp`, and when it gives no answer, that reason comes first, then `dbt
+lsp`'s.
 With a `dbt lsp` that cannot start, its parse runs the same dbt and
 fails, and `nodeInfo` and a hover on a node give its failure.
 

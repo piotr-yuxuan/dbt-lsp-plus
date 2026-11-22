@@ -261,7 +261,8 @@ By what the agent reads:
   the file, then start the session again.
 - `no dbt project at <root>: its dbt_project.yml is missing, is not
   YAML, or names no project`: the project's file no longer reads, as
-  mid-edit; fix it, and the next request reads it again.
+  mid-edit; fix it, and the next request reads it again.  In front of
+  `dbt lsp`, followed by `; ` and why `dbt lsp` gave no answer either.
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not

@@ -154,7 +154,9 @@ A root whose `dbt_project.yml` no longer reads (removed, broken
 mid-edit, left without its `name`) is `Unreadable` for a definition or
 references on a target, workspace symbols and the call hierarchy, where
 no target stays empty; in `merge` in front of dbt lsp, such a
-definition or references goes to dbt lsp, whose answer stands.  The
+definition or references goes to dbt lsp, whose answer stands, and
+when it gives none the proxy's reason comes first, then dbt lsp's:
+`no dbt project at <root>: ...; dbt lsp failed: <its message>`.  The
 hover and nodeInfo by an entry's position stay empty there (plan 047's
 one lookup).  The late log and a command's failure, a result with
 `error` set, keep their own forms.
@@ -224,7 +226,9 @@ not ended, `dbt lsp failed: <its message>`, `dbt lsp exited (<status>)`
 or `dbt lsp is not running`.  The proxy's empty at a claimed position
 stays the answer, since its kinds are its own: an agent reading `dbt lsp
 did not answer` on `ref('nowhere')` would wait for nothing; the hints'
-empty too, as editors ask for hints at every scroll.  Any other request
+empty too, as editors ask for hints at every scroll.  Over a project
+that no longer reads, the proxy has no empty at a claimed position but
+its reason, which comes before dbt lsp's.  Any other request
 gets dbt lsp's error as it came, or -32803.  A hover on a node before
 any index (see "What the client gets") gets dbt lsp's answer when it is
 not null, else nodeInfo's reason, then, when dbt lsp gave none, `; ` and
@@ -1744,7 +1748,7 @@ checked against dbt; the profile and the target in doctor, which need
 | `dbt lsp` cannot start | The session is alone (see "Standalone mode"): the proxy answers `initialize` itself, alone in full, with `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`, warns once with `window/showMessage`, `WHY: dbt-lsp-plus answers alone.`, registers its watcher for a client that lets it, answers `shutdown`, null to a definition it finds no target for whatever its mode, a merged request as alone and a method in `dbt` with null or `[]`, tries the parse with the same dbt, whose failure `nodeInfo` and a hover on a node give, and fails every other request with -32803 `dbt lsp is lost for good: WHY` |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 `dbt lsp exited (STATUS)`, but the merged ones, which get the proxy's part or empty, else that failure, after nodeInfo's reason for a hover on a node before any index, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, answers alone.  While a restart is awaited or under way, the proxy answers the merged requests on the scanned graph, with its part, its empty, or `dbt lsp is not running`, and parses (see "How the proxy runs it"); after a fourth crash, the session is alone: its graph the last parse's, the parse's problems published, dbt lsp's last diagnostics gone (see "Restart"), a forwarded request failed with `dbt lsp is lost for good: WHY`, while a method set to `dbt` keeps its nothing, and a definition with no target and `shutdown` their null |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, alone in full, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer; a forwarded request then fails with `dbt lsp is lost for good: WHY` |
-| The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`, alone and in `plus`; in `merge` in front of dbt lsp, a definition or references goes to dbt lsp; with no target, a definition is null and references `[]` (see "What a request gets") |
+| The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`, alone and in `plus`; in `merge` in front of dbt lsp, a definition or references goes to dbt lsp, whose answer stands, and when it gives none, that reason comes first, then dbt lsp's; with no target, a definition is null and references `[]` (see "What a request gets") |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null, an entry of severity `Error` in its `errors`) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line; never a warning, nothing after `shutdown`.  A completion with `models_count` null and no error, a first compilation cut short (S4), is forwarded and says nothing (see "What a compilation does, observed on 2.0.9") |
 | A compilation of `dbt lsp`'s has no end 60 s after its start, foreground or background | Once a session, a `window/showMessage` of type 2, `dbt lsp has been compiling for 60 s with no end yet (its log: ROOT/logs/dbt-lsp.log)`; nothing after `shutdown`.  A lost server's compilation has no deadline left.  One deadline, from the last start, which any completion ends: a foreground compilation that starts while a background one runs, and hangs once that one ends, is not said |
