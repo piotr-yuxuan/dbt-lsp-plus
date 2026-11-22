@@ -149,9 +149,9 @@ fn compile_start() {
     send(json!({"method": "dbt/lspCompileStart", "params": compile_params("incremental")}));
 }
 
-/// The foreground compilation's completion, the script's over 2.0.9's,
-/// then the background compilation that follows it.
-fn compile_complete(script: &Value) {
+/// The params of a foreground compilation's completion: the script's laid
+/// over 2.0.9's.
+fn completion_params(script: &Value) -> Value {
     let mut params = compile_params("incremental");
     params["duration_ms"] = json!(1);
     params["errors"] = json!([]);
@@ -159,6 +159,13 @@ fn compile_complete(script: &Value) {
     for (key, value) in script["compile_complete"].as_object().into_iter().flatten() {
         params[key.as_str()] = value.clone();
     }
+    params
+}
+
+/// The foreground compilation's completion, then the background
+/// compilation that follows it.
+fn compile_complete(script: &Value) {
+    let mut params = completion_params(script);
     send(json!({"method": "dbt/lspCompileComplete", "params": params.clone()}));
     if !params["models_count"].is_null() {
         send(json!({"method": "dbt/lspBackgroundCompileStart", "params": compile_params("full")}));
@@ -272,7 +279,7 @@ impl Fake {
         let once = self.script.get_mut("answers_once").and_then(Value::as_object_mut).and_then(|a| a.remove(key));
         let listing = key.starts_with(LISTING);
         let answer = once.or_else(|| self.script["answers"].get(key).cloned());
-        let failed = self.script["compile_complete"].get("models_count").is_some_and(Value::is_null);
+        let failed = completion_params(&self.script)["models_count"].is_null();
         let answer = answer.unwrap_or_else(|| answered_as_2_0_9(method, listing, failed, params));
         let compiling = listing && self.script["hold_compile"] != json!(true);
         if compiling {
