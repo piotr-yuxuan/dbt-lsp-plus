@@ -2010,15 +2010,19 @@ impl<W: Write> Proxy<W> {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            // A merged request gets the proxy's answer alone, any other the failure: for good, or for now.
+            // A merged request gets the proxy's answer alone, any other the failure: for good, or for now.  Nothing is
+            // forwarded: the index is asked for first, so that a reason is that of the parse it may start.
             (Route::Forward, false, _) => {
+                if fresh {
+                    self.want_index();
+                }
                 let why = if let Life::Lost(why) = &self.backend.life {
                     Reason::Lost(why.clone())
                 } else {
                     Reason::NotRunning
                 };
                 let answer = pending.unserved(self.markdown, why, &self.parsing);
-                self.send_client(&answer.frame(id, &pending.name))
+                return self.send_client(&answer.frame(id, &pending.name));
             }
         }
         // Once the request is forwarded, so that a listing takes no id of the client's.
@@ -2396,10 +2400,11 @@ impl<W: Write> Proxy<W> {
         self.send_client(&publish(&uri, diagnostics));
     }
 
-    /// The server is gone: answer what it left unanswered, once each, then
-    /// the client's `initialize`, alone, if it is pending; else restart it
-    /// or lose it for good (`lost_server`).  Before the client's
-    /// `initialize`, only remember why, for its answer.
+    /// The server is gone: answer the client's `initialize`, alone, if it
+    /// is pending; else restart it or lose it for good (`lost_server`);
+    /// then what it left unanswered, once each, so that a reason is that of
+    /// the parse a give-up starts.  Before the client's `initialize`, only
+    /// remember why, for its answer.
     fn on_server_closed(&mut self) {
         let server = match std::mem::take(&mut self.backend.life) {
             Life::Running(Running { server, .. }) | Life::Starting(server, ..) => server,
@@ -2416,7 +2421,13 @@ impl<W: Write> Proxy<W> {
             self.forwarded.remove(&key(id));
         }
         self.deadlines.clear();
-        for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
+        let left = std::mem::take(&mut self.forwarded);
+        self.backend.nodes_generation += 1;
+        match self.initialize.take() {
+            Some(id) => self.initialize_alone(&id),
+            None => self.lost_server(&why),
+        }
+        for (_, (id, pending)) in left {
             match (pending.name.as_str(), &pending.kept) {
                 ("shutdown", _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
                 (_, Kept::Answered) => {}
@@ -2426,11 +2437,6 @@ impl<W: Write> Proxy<W> {
                 }
             }
         }
-        self.backend.nodes_generation += 1;
-        if let Some(id) = self.initialize.take() {
-            return self.initialize_alone(&id);
-        }
-        self.lost_server(&why);
     }
 
     /// The server lost for WHY: during a session, the progress it began is
@@ -3197,6 +3203,43 @@ mod tests {
         let waiting = hover(Life::Waiting(Instant::now() + Duration::from_secs(60)));
         let message = "dbt parse has not finished: dbt parse failed: x; dbt lsp is not running";
         assert_eq!(waiting["error"], json!({"code": -32803, "message": message}), "{waiting}");
+    }
+
+    #[test]
+    fn with_no_dbt_lsp_a_hover_before_any_index_says_why_after_asking_for_one() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let orders = features::uri(&root.join("models/marts/orders.sql"));
+        let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+        let error = |proxy: &Proxy<Vec<u8>>, id: i64| {
+            let frames = written(&proxy.client).into_iter().filter_map(|frame| frame.value);
+            frames
+                .filter(|m| m["id"] == id)
+                .map(|m| m["error"]["message"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // A restart awaited, no index, none asked for yet: the hover asks for one, then says why there is none,
+        // as nodeInfo would now; the parse cannot start here, the server command having no `lsp`.
+        let mut proxy =
+            Proxy::new(Vec::new(), Life::Waiting(Instant::now() + Duration::from_secs(60)), Some(root.clone()));
+        proxy.table = modes::Table::new(&modes::Settings::default(), &|_| false);
+        proxy.on_request("textDocument/hover", &json!(1), &inside_ref, b"");
+        let asked = format!("{}; dbt lsp is not running", proxy.parsing.unindexed());
+        assert!(!asked.contains("waiting for dbt lsp"), "{asked}");
+        assert_eq!(error(&proxy, 1), [asked]);
+        // A give-up, which parses again, then answers the hover that dbt lsp left.
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(root));
+        proxy.initialized = true;
+        let ago = |seconds| Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap();
+        proxy.backend.restarts = vec![ago(30), ago(20), ago(10)];
+        let hover = Pending { name: "textDocument/hover".into(), kept: Kept::Part(Part::Unindexed) };
+        proxy.forwarded.insert(key(&json!(2)), (json!(2), hover));
+        proxy.on_server_closed();
+        let left = error(&proxy, 2);
+        let given_up = format!("{}; dbt lsp exited (", proxy.parsing.unindexed());
+        assert!(
+            !given_up.contains("waiting for dbt lsp") && left.len() == 1 && left[0].starts_with(&given_up),
+            "{left:?}"
+        );
     }
 
     #[test]
