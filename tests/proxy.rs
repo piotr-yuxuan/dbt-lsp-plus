@@ -406,15 +406,27 @@ fn the_client_s_spelling_of_the_root_wins_and_its_paths_match() {
 }
 
 #[test]
-fn a_server_that_cannot_start_keeps_today_s_capabilities() {
+fn a_server_that_cannot_start_leaves_the_proxy_alone_in_full() {
     let project = fixture().to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
     let mut session = Session::start(&command, &[], None);
-    let result = session.initialize(&fixture());
-    // As before modes, `merge` by default: no hover and no hints of the proxy's; every row, as alone.
-    let proxy_s = ["hoverProvider", "inlayHintProvider"].map(|provider| result["capabilities"].get(provider));
-    assert_eq!(proxy_s, [None, None]);
+    let watching = json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
+    let result = session.initialize_as(&fixture(), watching);
+    // As alone from the start: hovers and hints from the parse, saves asked for, every row.
+    let proxy_s = ["hoverProvider", "inlayHintProvider"].map(|provider| &result["capabilities"][provider]);
+    assert_eq!(proxy_s, [&json!(true), &json!(true)]);
+    assert_eq!(result["capabilities"]["textDocumentSync"], json!({"openClose": true, "change": 2, "save": {}}));
     assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered_itself());
+    let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
+    let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
+                         "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
+    assert_eq!(registered["params"]["registrations"], json!([watcher]));
+    // A hover on a node before any index says why, as alone: no parse has finished.
+    let orders = fixture().join("models/marts/orders.sql");
+    let inside_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let hover = session.request("textDocument/hover", inside_ref);
+    let message = hover["error"]["message"].as_str().unwrap_or_default();
+    assert!(hover["error"]["code"] == -32803 && message.starts_with("dbt parse has not finished: "), "{hover}");
     assert!(session.finish().success());
 }
 
@@ -426,7 +438,7 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
     assert_eq!(result["capabilities"]["documentSymbolProvider"], json!(true));
-    assert_eq!(result["capabilities"]["textDocumentSync"], json!({"openClose": true, "change": 2}));
+    assert_eq!(result["capabilities"]["textDocumentSync"], json!({"openClose": true, "change": 2, "save": {}}));
     let warning = session.wait_for(|m| m["method"] == "window/showMessage");
     assert!(warning["params"]["message"].as_str().unwrap().contains("could not start"), "{warning}");
     let path = fixture().join("models/marts/orders.sql");
@@ -621,6 +633,10 @@ fn a_server_that_exits_before_initialize_leaves_the_proxy_alone() {
     let (mut session, log) = Session::fake("exit-before-initialize", json!({"exit_on": "initialize"}));
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
+    // Alone in full, as when dbt lsp cannot start.
+    let proxy_s = ["hoverProvider", "inlayHintProvider"].map(|provider| &result["capabilities"][provider]);
+    assert_eq!(proxy_s, [&json!(true), &json!(true)]);
+    assert_eq!(result["capabilities"]["textDocumentSync"], json!({"openClose": true, "change": 2, "save": {}}));
     let warning = session.wait_for(|m| m["method"] == "window/showMessage");
     assert_eq!(warning["params"]["type"], json!(2));
     assert!(warning["params"]["message"].as_str().unwrap().contains("exited"), "{warning}");
@@ -729,8 +745,20 @@ fn a_crashed_server_restarts_with_the_session_as_the_client_left_it() {
 
 #[test]
 fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_the_proxy_alone() {
-    let (mut session, log) = Session::fake("restarts", json!({"exit_on": "textDocument/hover"}));
-    session.initialize(&fixture());
+    let mut manifest = manifest();
+    manifest["nodes"]["model.shop.orders"]["depends_on"] = json!({"nodes": ["model.shop.stg_orders"]});
+    let log_file = scratch("restarts-parse-log").join("parse.jsonl");
+    let error = "[error] [DependencyNotFound (dbt1048)]: Ref 'nowhere' not found\n  --> models/marts/orders.sql:1:1";
+    let completed = dbt_event("info", "Q039", "Finished 'parse'");
+    std::fs::write(&log_file, dbt_event("error", "1048", error) + &completed).unwrap();
+    let customers = uri(&fixture().join("models/marts/customers.sql"));
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}});
+    let published = json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                           "params": {"uri": customers, "diagnostics": [{"range": range, "message": "of dbt lsp"}]}});
+    let script = json!({"exit_on": "textDocument/hover", "manifest": manifest, "parse_log": log_file,
+                        "raw_on_initialized": [published.to_string()]});
+    let (mut session, log) = Session::fake("restarts", script);
+    session.initialize_options(&fixture(), json!({"dbtLspPlus": {"modes": {"textDocument/references": "dbt"}}}));
     let summary = fixture().join("models/marts/order_summary.sql");
     for delay in 1..=3 {
         session.received.clear();
@@ -755,6 +783,27 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     // One message on giving up: everything sent before this answer is read.
     session.request("workspace/symbol", json!({"query": "summary"}));
     assert_eq!(show_messages(&session), 1);
+    // Lost for good, the session is alone.  Its last diagnostics, which no dbt lsp will publish again, go.
+    let gone = json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                      "params": {"uri": customers, "diagnostics": []}});
+    let given_up = session.received.iter().position(|m| m["method"] == "window/showMessage");
+    let cleared = session.received.iter().position(|m| *m == gone);
+    assert!(cleared > given_up, "{:#?}", session.received);
+    // In `dbt`, its nothing, as alone, where dbt lsp would be asked.
+    let orders = fixture().join("models/marts/orders.sql");
+    let inside_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28},
+                            "context": {"includeDeclaration": false}});
+    let references = session.request("textDocument/references", inside_ref);
+    assert_eq!((references.get("error"), &references["result"]), (None, &json!([])), "{references}");
+    // The graph is the last parse's, as alone: the scan would add stg_customers.
+    let outgoing = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    let parsed = |calls: &Value| details(calls, "to") == ["macro.shop_utils.is_positive", "model.shop.stg_orders"];
+    session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", outgoing), parsed);
+    // A save parses, with no request, and its problems are published.
+    session.received.clear();
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
+    let of_orders = |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&orders);
+    session.wait_for(|m| of_orders(m) && m["params"]["diagnostics"][0]["source"] == "dbt parse");
     assert!(session.finish().success());
 }
 
@@ -832,20 +881,33 @@ fn a_restart_that_cannot_start_counts_as_a_crash() {
     let dir = scratch("restart-cannot-start");
     let (link, script) = (dir.join("dbt"), dir.join("script.json"));
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt-lsp"), &link).unwrap();
-    std::fs::write(&script, json!({"exit_on": "textDocument/hover"}).to_string()).unwrap();
+    let mut manifest = manifest();
+    manifest["nodes"]["model.shop.orders"]["depends_on"] = json!({"nodes": ["model.shop.stg_orders"]});
+    std::fs::write(&script, json!({"exit_on": "textDocument/hover", "manifest": manifest}).to_string()).unwrap();
     let project = fixture().to_string_lossy().into_owned();
     let command = [link.to_string_lossy().into_owned(), "lsp".into(), "--project-dir".into(), project];
     let cache = dir.join("cache");
     let mut session = Session::start(&command, &[("FAKE_DBT_LSP_SCRIPT", &script), ("XDG_CACHE_HOME", &cache)], None);
     session.initialize(&fixture());
+    // The index made, and fresh, before dbt can run no more.
+    parsed_orders(&mut session);
     // The server's executable gone, as after an upgrade.
     std::fs::remove_file(&link).unwrap();
     session.request("textDocument/hover", hover_at_start(&fixture().join("models/marts/order_summary.sql")));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    // While a restart is awaited, the scan's graph.
+    let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    let outgoing = session.request("callHierarchy/outgoingCalls", orders.clone());
+    let scanned = ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"];
+    assert_eq!(details(&outgoing["result"], "to"), scanned);
     let shown = std::cell::Cell::new(0);
     session.wait_for(|m| {
         shown.set(shown.get() + usize::from(m["method"] == "window/showMessage"));
         shown.get() == 4
     });
+    // Lost for good by restarts that could not start, which change no nodes: the graph is the last parse's.
+    let outgoing = session.request("callHierarchy/outgoingCalls", orders);
+    assert_eq!(details(&outgoing["result"], "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
     let messages: Vec<&str> = session.received.iter().filter_map(|m| m["params"]["message"].as_str()).collect();
     assert!(messages[1].starts_with("dbt lsp could not start") && messages[1].ends_with("in 2 s."), "{messages:?}");
     assert!(
