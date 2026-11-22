@@ -1515,9 +1515,10 @@ same command, at most three times in a sliding window of ten minutes, the
 n-th restart of the window waiting n seconds first; one pure function
 decides (`restart_delay`).  Past that, the Backend is lost for good: the
 proxy says so, dbt lsp's last diagnostics go (none will publish them
-again, and the parse's would double them), a stale index is parsed with
-no request, and the session answers as alone but for what `initialize`
-fixed (see "Modes").
+again, and the parse's would double them), the project is parsed again
+with no request, as after a change alone, since a parse made in front
+kept none of its problems, and the session answers as alone but for what
+`initialize` fixed (see "Modes").
 
 - The new process is held apart until it answers its `initialize`, so
   that every check of a running server stays right: meanwhile the client's

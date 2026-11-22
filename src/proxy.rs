@@ -2357,7 +2357,7 @@ impl<W: Write> Proxy<W> {
     /// The server lost for WHY: during a session, the progress it began is
     /// ended, and a restart follows after its delay, else the proxy is alone
     /// from now on; the client is told which.  Lost for good, its last
-    /// diagnostics go and a stale index is parsed.  Before the client's
+    /// diagnostics go and the project is parsed again.  Before the client's
     /// `initialize` or after `shutdown`, lost for good, and nothing said.
     fn lost_server(&mut self, why: &str) {
         self.backend.life = Life::Lost(why.to_owned());
@@ -2383,7 +2383,8 @@ impl<W: Write> Proxy<W> {
             let mut published: Vec<PathBuf> = std::mem::take(&mut self.diagnostics.server).into_keys().collect();
             published.sort();
             published.iter().for_each(|path| self.publish(path));
-            // As after a change alone, with no request.
+            // As after a change alone, with no request: the problems of a parse made in front were never kept.
+            self.parsing.fresh = false;
             return self.want_index();
         };
         self.backend.life = Life::Waiting(now + delay);

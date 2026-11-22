@@ -760,6 +760,8 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
                         "raw_on_initialized": [published.to_string()]});
     let (mut session, log) = Session::fake("restarts", script);
     session.initialize_options(&fixture(), json!({"dbtLspPlus": {"modes": {"textDocument/references": "dbt"}}}));
+    // An index made in front, fresh until the give-up.
+    parsed_orders(&mut session);
     let summary = fixture().join("models/marts/order_summary.sql");
     for delay in 1..=3 {
         session.received.clear();
@@ -781,6 +783,10 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     assert!(shown["params"]["message"].as_str().unwrap().ends_with(": dbt-lsp-plus answers alone."), "{shown}");
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(lives(&log).len(), 4);
+    // The give-up parses, with no request and no change, and publishes the parse's problems.
+    let orders = fixture().join("models/marts/orders.sql");
+    let of_orders = |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&orders);
+    session.wait_for(|m| of_orders(m) && m["params"]["diagnostics"][0]["source"] == "dbt parse");
     // One message on giving up: everything sent before this answer is read.
     session.request("workspace/symbol", json!({"query": "summary"}));
     assert_eq!(show_messages(&session), 1);
@@ -791,7 +797,6 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     let cleared = session.received.iter().position(|m| *m == gone);
     assert!(cleared > given_up, "{:#?}", session.received);
     // In `dbt`, its nothing, as alone, where dbt lsp would be asked.
-    let orders = fixture().join("models/marts/orders.sql");
     let inside_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28},
                             "context": {"includeDeclaration": false}});
     let references = session.request("textDocument/references", inside_ref);
@@ -803,7 +808,6 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     // A save parses, with no request, and its problems are published.
     session.received.clear();
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
-    let of_orders = |m: &Value| m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&orders);
     session.wait_for(|m| of_orders(m) && m["params"]["diagnostics"][0]["source"] == "dbt parse");
     assert!(session.finish().success());
 }
