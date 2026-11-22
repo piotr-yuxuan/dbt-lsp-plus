@@ -49,7 +49,7 @@ src/sources.rs                references and renames of sources
 src/navigation.rs             the Name at a position, from the document's scan, and where it leads: dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/answer.rs                 what a request gets: found, empty, or unanswered with its reasons, as LSP JSON
-src/config.rs                 the user's dbt parse: its command, run, index, summary
+src/config.rs                 the user's Dbt, read once from the server command, and its parse: index, summary
 src/run.rs                    the proxy's children but dbt lsp: one run of dbt, the parse's or a command's, and the one wait for each child
 src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command

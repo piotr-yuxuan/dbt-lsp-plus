@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The resolved configuration of a project's nodes, which dbt lsp 2.0.9 does
-//! not expose, from the user's own `dbt parse`: the command line that
-//! matches the server's, its run in a thread of its own, the index of the
-//! manifest it writes, and the summary of a node.
+//! not expose, from the user's own `dbt parse`: the user's dbt as a project
+//! runs it, read once from the server command, the parse's run and outcome,
+//! the index of the manifest it writes, and the summary of a node.
 
 use crate::graph::ServerNode;
 use crate::node::Type;
@@ -19,7 +19,8 @@ use std::time::Duration;
 /// The command under which dbt-lsp-plus answers a node's information.
 pub const NODE_INFO: &str = "dbt-lsp-plus.nodeInfo";
 
-/// How long a parse may run before it is killed.
+/// How long a run of dbt, the parse or a command's, may run before it is
+/// killed.
 pub const PARSE_DEADLINE: Duration = Duration::from_secs(120);
 
 /// How long a probe of what a command can do, such as `dbt lsp --help`,
@@ -49,36 +50,77 @@ const CUT: [&str; 5] = [
     r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && here=$(pwd -P) && cd -- "$here" && exec "$@""#,
 ];
 
-/// The words of the proxy's `dbt parse`, as `dbt_command` takes them.
+/// The words of the proxy's `dbt parse`, as `Dbt::run` takes them.
 pub const PARSE: [&str; 3] = ["parse", "--log-format", "json"];
 
-/// The dbt command WORDS, as `PARSE`, that matches
-/// SERVER, the command that runs `dbt lsp`: every word before `lsp`, as
-/// `uvx dbt` or `env X=1 dbt`, then WORDS; the flags of KEPT after it, as
-/// `--flag X` or `--flag=X`; the project at ROOT; its output under CACHE,
-/// with neither telemetry nor a check of versions; under the cut when CUT,
-/// which guards ROOT.  None when SERVER has no `lsp` word, as a wrapper of
-/// its own.
-pub fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, words: &[String]) -> Option<Vec<String>> {
-    let at = server.iter().position(|word| word == "lsp")?;
-    let path = |path: &Path| path.to_string_lossy().into_owned();
-    let mut command: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
-    command.extend(cut.then(|| path(root)));
-    command.extend_from_slice(&server[..at]);
-    command.extend_from_slice(words);
-    let mut rest = server[at + 1..].iter();
-    while let Some(word) = rest.next() {
-        let (flag, value) = word.split_once('=').map_or((word.as_str(), None), |(flag, value)| (flag, Some(value)));
-        if KEPT.contains(&flag) {
-            command.push(flag.to_owned());
-            command.extend(value.map(str::to_owned).or_else(|| rest.next().cloned()));
+/// The user's dbt as a project runs it: the server command, read once, and
+/// where dbt runs.
+#[derive(Debug, Default)]
+pub struct Dbt {
+    command: Vec<String>,
+    /// Where dbt runs: the project, when the client's folder or a document
+    /// named it; none, the proxy's working directory.
+    dir: Option<PathBuf>,
+    /// The words before `lsp`, as `uvx dbt` or `env X=1 dbt`; none without
+    /// it, as a wrapper of its own.
+    launcher: Option<Vec<String>>,
+    /// The flags of KEPT after `lsp`, as `--flag X`.
+    kept: Vec<String>,
+}
+
+impl Dbt {
+    /// The dbt of COMMAND, the server command, run in DIR when given: every
+    /// word before `lsp`, and the flags of KEPT after it, as `--flag X` or
+    /// `--flag=X`.
+    pub fn new(command: Vec<String>, dir: Option<PathBuf>) -> Dbt {
+        let at = command.iter().position(|word| word == "lsp");
+        let launcher = at.map(|at| command[..at].to_vec());
+        let mut kept = Vec::new();
+        let mut rest = command[at.map_or(command.len(), |at| at + 1)..].iter();
+        while let Some(word) = rest.next() {
+            let (flag, value) = word.split_once('=').map_or((word.as_str(), None), |(flag, value)| (flag, Some(value)));
+            if KEPT.contains(&flag) {
+                kept.push(flag.to_owned());
+                kept.extend(value.map(str::to_owned).or_else(|| rest.next().cloned()));
+            }
         }
+        Dbt { command, dir, launcher, kept }
     }
-    command.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
-    command.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
-    let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
-    command.extend(quiet.map(str::to_owned));
-    Some(command)
+
+    /// The server command, as read.
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+
+    /// Where dbt runs; none, the proxy's working directory.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Whether its command has `lsp`, from which its runs are made.
+    pub fn runs(&self) -> bool {
+        self.launcher.is_some()
+    }
+
+    /// The run of dbt WORDS, as `PARSE`: the words before `lsp`, then WORDS,
+    /// then the flags of KEPT; the project at ROOT; its output under CACHE,
+    /// its log LOG there, with neither telemetry nor a check of versions;
+    /// under the cut when CUT, which guards ROOT; killed past
+    /// `PARSE_DEADLINE`.  None when the command has no `lsp` word.
+    pub fn run(&self, words: &[String], root: &Path, cache: PathBuf, log: &'static str, cut: bool) -> Option<Run> {
+        let launcher = self.launcher.as_ref()?;
+        let path = |path: &Path| path.to_string_lossy().into_owned();
+        let mut line: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
+        line.extend(cut.then(|| path(root)));
+        line.extend_from_slice(launcher);
+        line.extend_from_slice(words);
+        line.extend_from_slice(&self.kept);
+        line.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
+        line.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
+        let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
+        line.extend(quiet.map(str::to_owned));
+        Some(Run { line, cwd: self.dir.clone(), dir: cache, log, deadline: PARSE_DEADLINE })
+    }
 }
 
 /// SERVER, a server command, with what it names from the directory DIR,
@@ -424,6 +466,12 @@ mod tests {
     /// `start` with the Run's parts as it took them before the Run.
     fn start(line: Vec<String>, cwd: Option<PathBuf>, dir: PathBuf, deadline: Duration, report: ReportFn) -> Running {
         super::start(Run { line, cwd, dir, log: "parse.log", deadline }, report)
+    }
+
+    /// The command line of the Dbt of SERVER's run of WORDS, as it was made
+    /// before the Dbt.
+    fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, words: &[String]) -> Option<Vec<String>> {
+        Dbt::new(server.to_vec(), None).run(words, root, cache.to_owned(), "parse.log", cut).map(|run| run.line)
     }
 
     #[test]

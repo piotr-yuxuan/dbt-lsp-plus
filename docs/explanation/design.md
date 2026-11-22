@@ -1398,8 +1398,10 @@ So the proxy runs the user's own `dbt parse`.
 
 ### How the proxy runs it
 
-- The command: the server command with its `lsp` word replaced by `parse`,
-  every word before it kept (`uvx dbt`), then from after it only
+- The command: made from the project's Dbt (`config::Dbt`), the server
+  command read once, as every run of dbt is: the server command with its
+  `lsp` word replaced by `parse`, every word before it kept (`uvx dbt`),
+  then from after it only
   `--profiles-dir`, `--profile`, `--target`, `--vars` and
   `--packages-install-path`, in either form; always `--project-dir <root>`,
   `--target-path` and `--log-path` under the cache, `--write-json`,
@@ -1763,7 +1765,7 @@ second binary would be one more file to install, put on a harness's
   on its standard error, is doctor's `cut`.
 - **select is `dbt-lsp-plus.nodes` from a shell.**  The same refusal
   without the cut (`commands::route`), the same guard, the same run
-  (`commands::nodes_job`, `config::dbt_command` under the cut,
+  (`commands::nodes_job`, `config::Dbt::run` under the cut,
   `commands::start` with the parse's deadline), in a run directory of
   its own under the user's cache, removed once the answer is read; its
   answer is `listed`'s, as a client gets it.
