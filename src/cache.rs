@@ -7,13 +7,14 @@
 use crate::project::{self, File, Inventory, Project, Scanned};
 use std::collections::HashMap;
 use std::fs::Metadata;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 /// What the cache knows a file by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     /// A file on disk, by its metadata: a same-sized edit, a file replaced
     /// or a link turned to another file changes one of them.
@@ -162,6 +163,25 @@ pub fn fill(root: &Path) -> Vec<(PathBuf, Key, Arc<Scanned>)> {
     files.into_iter().filter_map(read).map(|(scanned, key, path)| (path, key, scanned)).collect()
 }
 
+/// A stamp of the project at ROOT as it lies on disk: each package's name
+/// and directory, and each file that may hold a resource
+/// (`project::resource_file`) by its path and the key of its metadata.
+/// The walk is `project::find`'s, which reads each package's
+/// `dbt_project.yml` and each `packages.yml` and `dependencies.yml` that
+/// names local packages, and no other file; open texts play no part, as
+/// dbt parses the disk.  0 where ROOT holds no project.  It changes when
+/// such a file is written, added, removed or replaced, and when a package
+/// comes or goes, a `local:` one named included.
+pub fn disk(root: &Path) -> u64 {
+    let Some(inventory) = project::find(root) else { return 0 };
+    let mut hasher = DefaultHasher::new();
+    inventory.packages.hash(&mut hasher);
+    for found in inventory.files.iter().filter(|found| project::resource_file(&found.path)) {
+        (&found.path, found.metadata.as_ref().map(Key::of)).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +286,40 @@ mod tests {
         cache.project(&dir, 4, &Open { texts: &texts, edits: &edits }).unwrap();
         assert_eq!(cache.generation, 3, "built again, the file read again");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_disk_stamp_changes_with_the_files_that_may_hold_a_resource() {
+        let dir = scratch_project("cache-stamp", &[("dbt_project.yml", "name: shop\n"), ("models/a.sql", "select 1")]);
+        let write = |path: &str, text: &str| {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        let first = super::disk(&dir);
+        assert_eq!(super::disk(&dir), first, "nothing changed");
+        // Outside the resource paths, hidden, an editor's auto-save and its backup.
+        write("target/x.sql", "select 3");
+        write(".written", "");
+        write("models/#a.sql#", "select 4");
+        write("models/a.sql~", "select 5");
+        assert_eq!(super::disk(&dir), first, "files that hold no resource");
+        write("models/a.sql", "select 22");
+        let rewritten = super::disk(&dir);
+        assert_ne!(rewritten, first, "a file rewritten at another size");
+        write("models/b.sql", "select 2");
+        assert_ne!(super::disk(&dir), rewritten, "a file added");
+        fs::remove_file(dir.join("models/b.sql")).unwrap();
+        assert_eq!(super::disk(&dir), rewritten, "the file added, then removed");
+        write("packages.yml", "packages:\n  - local: vendor/shared\n");
+        write("vendor/shared/dbt_project.yml", "name: shared\n");
+        assert_ne!(super::disk(&dir), rewritten, "a local package named");
+        write("dbt_project.yml", "name: [");
+        assert_eq!(super::disk(&dir), 0, "a project that does not read");
+        let none = scratch_project("cache-stamp-none", &[("models/a.sql", "select 1")]);
+        assert_eq!(super::disk(&none), 0, "no project");
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&none).unwrap();
     }
 
     #[test]

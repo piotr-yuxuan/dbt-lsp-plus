@@ -41,7 +41,7 @@ pub struct Workspace {
     /// The front end's count of its events: the scan looks at the files once an epoch.
     pub epoch: u64,
     pub index: Option<config::ParseIndex>,
-    /// Whether no change was told since the last parse started.
+    /// Whether no change was told, nor found on disk by `notice`, since the last parse started.
     pub fresh: bool,
     /// Why the last parse failed, or none could start, as logged.
     pub failure: Option<String>,
@@ -58,6 +58,8 @@ pub struct Workspace {
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
     cache_dir: Option<PathBuf>,
+    /// The stamp of the files on disk (`cache::disk`) when the last parse started; none before any.
+    stamp: Option<u64>,
 }
 
 impl Workspace {
@@ -132,9 +134,17 @@ impl Workspace {
             return self.failed(Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".into()));
         };
         let report = report?;
-        self.fresh = true;
+        (self.fresh, self.stamp) = (true, Some(cache::disk(&root)));
         self.running = Some(config::start(run, report));
         None
+    }
+
+    /// A look at the files on disk on behalf of a request: one that may hold
+    /// a resource and that changed since the last parse started makes the
+    /// index stale, as a change told does.  Nothing to compare before a parse.
+    pub fn notice(&mut self) {
+        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return };
+        self.fresh = cache::disk(root) == stamp;
     }
 
     /// A parse's end, its INDEX and its FAILURE: its run stopped; its index
@@ -226,6 +236,10 @@ mod tests {
                 workspace.failure.clone(),
             ));
         };
+        // Before any parse, nothing to compare the disk with.
+        let mut before = Workspace { root: Some(root.clone()), fresh: true, ..Workspace::default() };
+        before.notice();
+        look("before any parse", None, &before);
         // A server command with no `lsp`: no parse, and why, once.
         workspace.dbt = config::Dbt::new(vec!["dbt".into()], None);
         look("no lsp", workspace.parse(true, Some(report())), &workspace);
@@ -234,29 +248,44 @@ mod tests {
         workspace.dbt = config::Dbt::new(vec!["true".into(), "lsp".into()], None);
         look("no report", workspace.parse(true, None), &workspace);
         look("started", workspace.parse(true, Some(report())), &workspace);
+        workspace.notice();
+        look("nothing written", None, &workspace);
         look("under way", workspace.parse(true, Some(report())), &workspace);
         let outcome = outcomes.recv_timeout(Duration::from_secs(10)).expect("the parse's outcome");
         look("parsed", workspace.parsed(outcome.index, outcome.failure), &workspace);
         look("fresh", workspace.parse(true, Some(report())), &workspace);
+        let parsed = workspace.index.is_none() && outcomes.try_recv().is_err();
+        // A file written on disk, with no change told: stale, and parsed again, one parse at a time.
+        fs::write(root.join("models/b.sql"), "select 2").unwrap();
+        workspace.notice();
+        look("b written", None, &workspace);
+        look("stale", workspace.parse(true, Some(report())), &workspace);
+        fs::write(root.join("models/c.sql"), "select 3").unwrap();
+        workspace.notice();
+        look("c written", None, &workspace);
+        look("stale under way", workspace.parse(true, Some(report())), &workspace);
         let no_lsp = Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".to_owned());
         let expected = [
+            ("before any parse", None, false, true, None),
             ("no lsp", no_lsp.clone(), false, false, no_lsp.clone()),
             ("no lsp again", None, false, false, no_lsp.clone()),
             ("no report", None, false, false, no_lsp.clone()),
             ("started", None, true, true, no_lsp.clone()),
+            ("nothing written", None, true, true, no_lsp.clone()),
             ("under way", None, true, true, no_lsp.clone()),
             ("parsed", None, false, true, None),
             ("fresh", None, false, true, None),
+            ("b written", None, false, false, None),
+            ("stale", None, true, true, None),
+            ("c written", None, true, false, None),
+            ("stale under way", None, true, false, None),
         ];
         let expected: Vec<_> = expected
             .into_iter()
             .map(|(step, given, running, fresh, failure)| (step.to_owned(), given, running, fresh, failure))
             .collect();
         assert_eq!(seen, expected);
-        assert!(
-            workspace.index.is_none() && outcomes.try_recv().is_err(),
-            "an index with no manifest, or a second outcome"
-        );
+        assert!(parsed, "an index with no manifest, or a second outcome");
         workspace.stop();
         fs::remove_dir_all(root).unwrap();
     }

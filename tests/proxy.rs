@@ -2375,6 +2375,64 @@ fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
 }
 
 #[test]
+fn alone_a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_request() {
+    let project = copy_fixture("standalone-disk-change");
+    let gate = scratch("standalone-disk-change-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest(), "parse_gate": gate});
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("standalone-disk-change-session", script, &flags, None);
+    session.initialize_as(&project, json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    until_logged(&log, "the parse of the first document", |_| parses(&log).len() == 1);
+    // Written while it runs, with no notification, as Claude Code's `Edit` of a file it has not opened.
+    std::fs::write(project.join("models/marts/during.sql"), "select 1").unwrap();
+    std::fs::write(&gate, "").unwrap();
+    // The parse has ended once the client is asked to refresh its hints: its end looks at no file.
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    parses_stay(&log, 1);
+    // The next request that would parse finds the file changed.
+    session.received.clear();
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after the write", |_| parses(&log).len() == 2);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    // An open text is no change on disk.
+    let change = json!({"textDocument": {"uri": uri(&orders), "version": 2}, "contentChanges": [{"text": "select 1"}]});
+    session.notify("textDocument/didChange", change);
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 2);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_front_a_file_changed_on_disk_is_parsed_at_the_next_request_with_no_compilation() {
+    let project = copy_fixture("in-front-disk-change");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) =
+        Session::fake_with("in-front-disk-change-session", json!({"manifest": manifest()}), &flags, None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(parses(&log).len(), 1, "the parse of the first request");
+    session.received.clear();
+    // Written with no notification: dbt lsp hears of no change, and compiles nothing.
+    std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after the write", |_| parses(&log).len() == 2);
+    node_info(&mut session, json!("model.shop.orders"));
+    let compiled = |m: &&Value| m["method"] == "dbt/lspCompileStart" || m["method"] == "dbt/lspCompileComplete";
+    let compilations: Vec<&Value> = session.received.iter().filter(compiled).collect();
+    assert!(compilations.is_empty(), "{compilations:?}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_a_completion_starts_no_parse() {
     let (mut session, log) = Session::fake("standalone-completion", json!({"no_lsp": true, "manifest": manifest()}));
     session.initialize(&fixture());

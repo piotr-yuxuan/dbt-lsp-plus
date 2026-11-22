@@ -844,7 +844,10 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
     calls (see "Known limitations"), and within 0.20 and 0.31 s as the
     first request after the save of a model, of the largest properties
     file or of `dbt_project.yml`.  Each took 0.3 to 1.7 s without the
-    cache.  The proxy then holds 79 and 142 MB.
+    cache.  The proxy then holds 79 and 142 MB.  These figures predate
+    plan 050, which adds to a definition, references and an alone call
+    hierarchy a second walk, for the stamp of the files on disk
+    (`cache::disk`), unmeasured.
 - The graph: once the server has listed the graph, the dependencies of each
   node it listed are its own, since only dbt resolves `ref(var('x'))`; until
   then, and for the nodes it did not list, they come from the scan.  The
@@ -1479,8 +1482,15 @@ So the proxy runs the user's own `dbt parse`.
   `nodeInfo`, a hover, or a definition or references request that the
   proxy answers or the shadow follows, that finds it stale, or an inlay
   hint request that finds no index, starts a parse, and is answered from
-  the last index meanwhile.  A parse starts only when the server has
-  compiled since the change, so that dbt has resolved the packages
+  the last index meanwhile.  Such a request first looks at the files the
+  scan holds, by their metadata: one that may hold a resource (not an
+  editor's auto-save `#x.sql#` or backup `x.sql~`) written, added or
+  removed since the last parse started, or a package come or gone, marks
+  the index stale too, with no change told, as after Claude Code's `Edit`
+  of a file it had not opened, which it opens without saving (the
+  Workspace's own refresh).  In front of dbt lsp, such a change waits for
+  no compilation: the guard on packages still holds each start.  A parse
+  starts only when the server has compiled since the change, so that dbt has resolved the packages
   itself, or when no server runs (after a crash, while the restart's
   process starts: plan 037), and such a request
   made before that compilation starts it once it comes,
@@ -1500,7 +1510,10 @@ So the proxy runs the user's own `dbt parse`.
   lost for good included, eagerly: at the first `didOpen`, at each change
   of the client's that may change the graph, and at a request that finds
   the index stale, with no compilation to wait for; one at a time, and the
-  next at the end of one when a change came during it.
+  next at the end of one when a change came during it.  A change found on
+  disk waits for a request: the end of a parse, a notification and a loss
+  never look, so that a run of dbt that wrote such a file would start no
+  other by itself.
 - The packages (`packages::refused`): a parse is refused, and why logged,
   when dbt would install packages first, which writes `package-lock.yml`,
   rewrites the install path, deleting what it holds, untracked files
@@ -1989,7 +2002,9 @@ checked against dbt; the profile and the target in doctor, which need
 - Each request that needs the project walks it, reads the metadata of
   every file and each package's `dbt_project.yml`, and the root's
   `packages.yml` and `dependencies.yml`: most of the 30 to
-  40 ms at 6,000 models.
+  40 ms at 6,000 models.  A request that would start a parse walks it
+  once more, for the stamp of the files on disk, and an alone hover on a
+  node before any index twice more.
 - The references of a macro that each of 6,000 synthetic models calls,
   6,001 locations and 1.5 MB of JSON, take about 86 ms: the walk above,
   about 25 ms to find and place them, and the rest to encode the answer

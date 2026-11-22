@@ -43,7 +43,7 @@ src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
 src/project.rs                the resources of a project and its packages
-src/cache.rs                  the scan kept between requests, each file by its metadata
+src/cache.rs                  the scan kept between requests, each file by its metadata; the stamp of the files on disk
 src/graph.rs                  the dependency graph: scanned, then the server's or the manifest's
 src/sources.rs                references and renames of sources
 src/navigation.rs             the Name at a position, from the document's scan, and where it leads: dbt's one lookup
@@ -128,15 +128,19 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `project::versions_of`: the decision which versions a model's file
     is, free of the file system, with tests of its own, once every
     properties file of its package is read;
+  - `project::resource_file`: which files the stamp of the disk counts,
+    by the extensions of `LAYOUT` and YAML's, beside `LAYOUT` so that one
+    table says both;
   - `Cache::build`: the reads of a refresh, through `&self`, so that the
     cache changes only once the project is built;
   - `Workspace::graph`: the graph kept while what it is made of stays,
     apart from the hierarchy's answer; `Workspace::project`,
-    `Workspace::parse`, `Workspace::parsed` and `Workspace::stop`: the
-    project as its files and the open texts say, a parse's start when the
-    index is stale and its end, and a parse's stop, each the core's,
-    public for the front ends, though the LSP front end alone calls each
-    yet (the CLI's `node` in plan 051, MCP in plan 052);
+    `Workspace::parse`, `Workspace::parsed`, `Workspace::notice` and
+    `Workspace::stop`: the project as its files and the open texts say, a
+    parse's start when the index is stale and its end, a look at the disk
+    on behalf of a request, and a parse's stop, each the core's, public
+    for the front ends, though the LSP front end alone calls each yet (the
+    CLI's `node` in plan 051, MCP in plan 052);
   - `Pending::merged` and `Pending::found`: what each kind of part does
     to the server's answer, and what a part found is alone, so that
     `on_server` and `unserved` stay dispatches;

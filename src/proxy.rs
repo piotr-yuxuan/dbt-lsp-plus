@@ -1382,6 +1382,13 @@ impl<W: Write> Proxy<W> {
         }
     }
 
+    /// On behalf of a request: the Workspace looks at the files on disk
+    /// first, then `want_index`.
+    fn ask_index(&mut self) {
+        self.workspace.notice();
+        self.want_index();
+    }
+
     /// Whether dbt's packages are guarded as alone: no dbt lsp runs, and
     /// none compiled since the last change, as one that did resolved them,
     /// though it may be gone since.
@@ -1607,7 +1614,7 @@ impl<W: Write> Proxy<W> {
         let alone = self.backend.alone();
         let reads = capability::of(method).is_some_and(|c| c.wants_index || (alone && c.reads_graph));
         if reads || pending.kept == Kept::Part(Part::Unindexed) {
-            self.want_index();
+            self.ask_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| self.plus_answer(method, params, pending)));
         match computed {
@@ -1944,7 +1951,7 @@ impl<W: Write> Proxy<W> {
             Route::Forward => return self.forward(id, method, pending, body, fresh),
         }
         if fresh {
-            self.want_index();
+            self.ask_index();
         }
     }
 
@@ -1964,7 +1971,7 @@ impl<W: Write> Proxy<W> {
                 return self.initialize_alone(id);
             }
             if fresh {
-                self.want_index();
+                self.ask_index();
             }
             let why =
                 if let Life::Lost(why) = &self.backend.life { Reason::Lost(why.clone()) } else { Reason::NotRunning };
@@ -1976,7 +1983,7 @@ impl<W: Write> Proxy<W> {
         self.forwarded.insert(key(id), (id.clone(), pending));
         self.send_server(body);
         if fresh {
-            self.want_index();
+            self.ask_index();
         }
     }
 
