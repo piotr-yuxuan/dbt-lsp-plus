@@ -97,17 +97,18 @@ pub struct Job {
     read: Box<dyn FnOnce(&Output) -> Value + Send>,
 }
 
-/// Why a run failed, if it did: dbt's first error, whatever its exit
-/// status; else, for a failed run, how it ended, after the first line that
-/// is none of its events, as a launcher's own.
-fn first_error(output: &Output) -> Option<String> {
+/// Why a run failed, if it did: dbt's first error as LOGGED reads it from
+/// the run's log, whatever its exit status; else, for a failed run, how it
+/// ended, after the first line that is none of its events, as a launcher's
+/// own.
+fn first_error(output: &Output, logged: fn(&Output) -> Option<String>) -> Option<String> {
     let status = match &output.ending {
         Ending::NotStarted(why) => return Some(why.clone()),
         Ending::Stopped => return Some("dbt was stopped, or ran past its deadline".into()),
         Ending::Exited(status) => status,
     };
     let ended = || output.line().map_or_else(|| format!("dbt {status}"), |line| format!("{line} (dbt {status})"));
-    output.error().or_else(|| (!status.success()).then(ended))
+    logged(output).or_else(|| (!status.success()).then(ended))
 }
 
 /// The compile of the file at PATH, of the project at ROOT that PROJECT
@@ -135,7 +136,7 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
         return Err(refused(format!("{relative} holds a space or a comma, which dbt's selector would split")));
     }
     let words = ["compile", "--select", &format!("path:{relative}"), "--log-format", "json"].map(str::to_owned);
-    let read = move |output: &Output| match first_error(output) {
+    let read = move |output: &Output| match first_error(output, Output::error_event) {
         Some(why) => failure(COMPILE, &why),
         None => compiled(output.manifest.as_ref(), &package, &relative, &cwd),
     };
@@ -163,7 +164,7 @@ pub fn compiled(manifest: Option<&Value>, package: &str, relative: &str, cwd: &P
 /// log event; its answer, `listed`'s.
 pub fn nodes_job(selector: &str) -> Job {
     let words = ["list".into(), format!("--select={selector}"), "--output".into(), "json".into()];
-    let read = |output: &Output| match first_error(output) {
+    let read = |output: &Output| match first_error(output, Output::error_line) {
         Some(why) => failure(NODES, &why),
         None => listed(&output.text),
     };

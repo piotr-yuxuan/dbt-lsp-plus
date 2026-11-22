@@ -51,14 +51,22 @@ pub struct Output {
     pub manifest: Option<Value>,
 }
 
+/// Two readers of dbt's first error, one per kind of log, each kept by the
+/// runs that read it before the Run: dbt writes the other kind too, as
+/// `design.md` says, so one rule for both would change their answers.
 impl Output {
-    /// dbt's first error: the first error event of a JSON log, else the
-    /// first line beginning `[error]`, as a text log writes it.
-    pub fn error(&self) -> Option<String> {
+    /// dbt's first error event, its message without `[error] `, as a JSON
+    /// log writes it: the parse's and a compile's, which run with
+    /// `--log-format json`.
+    pub fn error_event(&self) -> Option<String> {
         let mut problems = parse_log::read(&self.text).problems.into_iter();
-        let event = problems.find(|problem| problem.severity == 1).map(|problem| problem.message);
-        let line = || self.text.lines().map(str::trim).find(|line| line.starts_with("[error]")).map(str::to_owned);
-        event.or_else(line)
+        problems.find(|problem| problem.severity == 1).map(|problem| problem.message)
+    }
+
+    /// dbt's first line beginning `[error]`, as a text log writes it: a
+    /// list's, which runs with dbt's text log.
+    pub fn error_line(&self) -> Option<String> {
+        self.text.lines().map(str::trim).find(|line| line.starts_with("[error]")).map(str::to_owned)
     }
 
     /// The first line that is none of dbt's events, as a launcher's own.
@@ -163,23 +171,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn dbt_s_first_error_is_its_first_error_event_else_its_first_error_line() {
+    fn dbt_s_first_error_is_an_error_event_of_a_json_log_or_an_error_line_of_a_text_one() {
         let output =
             |text: &str| Output { ending: Ending::Stopped, log: PathBuf::new(), text: text.to_owned(), manifest: None };
         let event = |level: &str, code: &str, msg: &str| json!({"info": {"code": code, "level": level, "msg": msg}});
         let version = event("info", "A001", "Running with dbt=2.0.9");
+        let warning = event("warn", "1097", "[warning] [UnusedResourceConfigPath (dbt1097)]: unused");
         let json = format!(
-            "{version}\n{}\n{}\n",
+            "{version}\n{warning}\n{}\n{}\n",
             event("error", "1501", "[error] [JinjaError (dbt1501)]: Failed"),
             event("error", "1048", "[error] [DependencyNotFound (dbt1048)]")
         );
-        assert_eq!(output(&json).error().as_deref(), Some("[JinjaError (dbt1501)]: Failed"), "its first, unprefixed");
+        let read = |text: &str| (output(text).error_event(), output(text).error_line());
+        let first = Some("[JinjaError (dbt1501)]: Failed".to_owned());
+        assert_eq!(read(&json), (first, None), "its first error event, unprefixed, past a warning");
         let text = "noise\n[error] [IoError (dbt1001)]: Cannot open file\n";
-        assert_eq!(output(text).error().as_deref(), Some("[error] [IoError (dbt1001)]: Cannot open file"));
-        let no_event = format!("{version}\n[error] x\n");
-        assert_eq!(output(&no_event).error().as_deref(), Some("[error] x"), "a JSON log with no error event");
-        assert_eq!(output(&format!("{json}[error] x\n")).error(), output(&json).error(), "an error event first");
-        assert_eq!(output(&format!("{version}\nnoise\n")).error(), None);
+        assert_eq!(read(text), (None, Some("[error] [IoError (dbt1001)]: Cannot open file".to_owned())));
+        // Each reader leaves the other kind, which dbt writes too: a bare line under `--log-format json`, events
+        // under `DBT_LOG_FORMAT=json`.
+        let bare = "[error] [IoError (dbt1001)]: Failed to create output directory: /p/target";
+        assert_eq!(output(&format!("{version}\n{bare}\n")).error_event(), None, "a JSON log with no error event");
+        assert_eq!(output(&json).error_line(), None, "a text log of events alone");
+        assert_eq!(read(&format!("{version}\n{warning}\nnoise\n")), (None, None), "a warning alone");
         assert_eq!(output("\nuvx: no network\n").line(), Some("uvx: no network"));
         assert_eq!(output(&json).line(), None, "only dbt's events");
     }

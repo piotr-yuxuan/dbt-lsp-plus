@@ -303,6 +303,34 @@ fn alone_nodes_runs_dbt_list_and_answers_its_lines() {
 }
 
 #[test]
+fn alone_compile_takes_dbt_s_error_from_the_events_of_its_json_log_alone() {
+    // As both builds write it under `--log-format json` with a target path they cannot create: no event.
+    let bare = "[error] [IoError (dbt1001)]: Failed to create output directory: /p/target";
+    let (mut session, _, _) =
+        alone("commands-alone-bare-error", json!({"run_log": format!("{bare}\n"), "run_exit": 1}));
+    if !cut() {
+        return;
+    }
+    let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
+    let ended = format!("{bare} (dbt exit status: 1)");
+    assert_eq!(answer["result"], json!({"file_uri": null, "error": ended}), "a launcher's line, with how dbt ended");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_nodes_takes_dbt_s_error_from_the_lines_of_its_text_log_alone() {
+    // As both builds write it with `DBT_LOG_FORMAT=json` in their environment and no profiles.yml: events alone.
+    let event = dbt_event("error", "dbt1005", "[error] [InvalidConfig (dbt1005)]: No profiles.yml found at /h");
+    let (mut session, _, _) = alone("commands-alone-json-list", json!({"run_log": event, "run_exit": 1}));
+    if !cut() {
+        return;
+    }
+    let answer = execute(&mut session, NODES, json!(["x"]));
+    assert_eq!(answer["result"], json!({"nodes": [], "error": "dbt exit status: 1"}), "how dbt ended");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_show_is_refused_and_runs_nothing() {
     let (mut session, log, result) = alone("commands-alone-show", json!({}));
     assert!(!announced(&result).contains(&SHOW));

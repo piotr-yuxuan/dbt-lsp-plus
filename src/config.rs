@@ -428,12 +428,12 @@ pub struct Outcome {
 type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 
 /// Runs RUN, a `dbt parse`, as `run::start` runs it, and hands REPORT the
-/// outcome: a failure words dbt's first error, else the first line that is
-/// none of its events, as a launcher's own, and names the log; one that
-/// ends with no outcome, as on a panic, fails.
+/// outcome: a failure words dbt's first error event, else the first line
+/// that is none of its events, as a launcher's own, and names the log; one
+/// that ends with no outcome, as on a panic, fails.
 pub fn start(run: Run, report: ReportFn) -> Running {
     let read = |output: &Output| {
-        let first = output.error().or_else(|| output.line().map(str::to_owned));
+        let first = output.error_event().or_else(|| output.line().map(str::to_owned));
         let failure = match &output.ending {
             Ending::Exited(status) if status.success() => None,
             Ending::Exited(status) => Some(first.map_or_else(
