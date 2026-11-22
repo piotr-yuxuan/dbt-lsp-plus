@@ -353,9 +353,14 @@ enum Kept {
 /// The proxy's part of a merged request.
 #[derive(PartialEq)]
 enum Part {
-    /// Nothing to add: its nothing, null or `[]`, is its answer when the
-    /// server's is an error, late, or none.
+    /// Nothing of the proxy's at the position: the request is dbt lsp's,
+    /// whose answer passes as it came, and when it gives none, the client
+    /// gets why.
     Nothing,
+    /// The proxy found nothing, and that is its answer: at a position it
+    /// claims, for hints, or where no dbt lsp was to answer.  Its nothing,
+    /// null or `[]`, is the answer when the server gives none.
+    Empty,
     /// A hover whose answer gets this text first, and whether its line
     /// breaks are hard in markdown: true for a node's summary and facts,
     /// lines of plain text and code spans; false for a docs block's text or
@@ -366,26 +371,36 @@ enum Part {
     /// A definition or references at a position the proxy claims, whose
     /// answer gets the server's other locations after these.
     Locations(Value),
-    /// A hover whose position names a node while no index exists: in front
-    /// of the server, a nothing, null; answered by the proxy, why it has
-    /// no index yet.
+    /// A hover whose position names a node while no index exists: why the
+    /// proxy has no index yet, where dbt lsp's answer is null or none, and
+    /// before why dbt lsp gave none.
     Unindexed,
 }
 
 impl Pending {
     /// The server's answer, MESSAGE, as this kind of part makes it, for a
-    /// client that reads markdown when MARKDOWN, its locations' URIs read as
-    /// paths by PATH_OF; none to pass it unchanged.  An error to a merged
-    /// request gives what `unserved` gives for it.
-    fn merged(&self, message: &Value, markdown: bool, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Value> {
+    /// client that reads markdown when MARKDOWN, as PARSING stands, its
+    /// locations' URIs read as paths by PATH_OF; none to pass it unchanged.
+    /// An error to a merged request gives what `unserved` gives for it, and
+    /// a null to a hover on a node before any index why the proxy has none.
+    fn merged(
+        &self,
+        message: &Value,
+        markdown: bool,
+        parsing: &Parsing,
+        path_of: &dyn Fn(&str) -> Option<PathBuf>,
+    ) -> Option<Value> {
         if let (Some(error), Kept::Part(_)) = (message.get("error"), &self.kept) {
             let failed = Reason::Failed(error["message"].as_str().unwrap_or_default().to_owned());
-            return Some(self.unserved(markdown, failed).frame(&message["id"], &self.name));
+            return Some(self.unserved(markdown, failed, parsing).frame(&message["id"], &self.name));
         }
         match &self.kept {
             Kept::Part(Part::Hover(text, hard)) => features::merge_hover(message, text, *hard, markdown),
             Kept::Part(Part::Hints(hints)) => features::merge_hints(message, hints),
             Kept::Part(Part::Locations(found)) => Some(features::merge_locations(message, found, path_of)),
+            Kept::Part(Part::Unindexed) if message["result"].is_null() && parsing.index.is_none() => {
+                Some(Answer::Unanswered(vec![parsing.unindexed()]).frame(&message["id"], &self.name))
+            }
             _ => None,
         }
     }
@@ -396,7 +411,7 @@ impl Pending {
     fn found(&self, markdown: bool) -> Option<Value> {
         let Kept::Part(part) = &self.kept else { return None };
         match part {
-            Part::Nothing | Part::Unindexed => None,
+            Part::Nothing | Part::Empty | Part::Unindexed => None,
             Part::Hover(text, hard) => {
                 let alone = features::merge_hover(&json!({"result": null}), text, *hard, markdown);
                 alone.map(|alone| alone["result"].clone())
@@ -407,24 +422,28 @@ impl Pending {
     }
 
     /// What the client gets for this request when dbt lsp gives it no
-    /// answer, for WHY, as it reads markdown when MARKDOWN: the proxy's part
-    /// found; its nothing, the method's; else, for a request that is not
-    /// merged, why.
-    fn unserved(&self, markdown: bool, why: Reason) -> Answer {
+    /// answer, for WHY, as it reads markdown when MARKDOWN, as PARSING
+    /// stands: the proxy's part found; its empty; for a hover on a node
+    /// before any index, why the proxy has none, then WHY; else WHY.  An
+    /// index made since the request makes the hover's part a nothing.
+    fn unserved(&self, markdown: bool, why: Reason, parsing: &Parsing) -> Answer {
         match (&self.kept, self.found(markdown)) {
             (_, Some(found)) => Answer::Found(found),
-            (Kept::Part(Part::Nothing | Part::Unindexed), None) => Answer::Empty,
+            (Kept::Part(Part::Empty), None) => Answer::Empty,
+            (Kept::Part(Part::Unindexed), None) if parsing.index.is_none() => {
+                Answer::Unanswered(vec![parsing.unindexed(), why])
+            }
             _ => Answer::Unanswered(vec![why]),
         }
     }
 
     /// How long the server has to answer this request before the client
-    /// gets the proxy's answer alone, as its capability waits: a part is
-    /// worth showing at once, a nothing only once the server is clearly
-    /// late.
+    /// gets the proxy's answer alone, or why there is none, as its
+    /// capability waits: a part is worth showing at once, a nothing or an
+    /// empty only once the server is clearly late.
     fn deadline(&self) -> Option<Duration> {
         let Kept::Part(part) = &self.kept else { return None };
-        capability::of(&self.name)?.deadline(!matches!(part, Part::Nothing | Part::Unindexed))
+        capability::of(&self.name)?.deadline(!matches!(part, Part::Nothing | Part::Empty | Part::Unindexed))
     }
 
     /// Whether it is a listing, the server's `dbt.listNodes` or the
@@ -1873,8 +1892,9 @@ impl<W: Write> Proxy<W> {
 
     /// What a definition or references at PARAMS gets first when the proxy
     /// unites dbt lsp's answer with its own: where it claims the position,
-    /// its locations, or nothing for null or `[]`; none where it claims
-    /// nothing.  A panic gives nothing.
+    /// its locations, or its empty; nothing where it cannot answer, as with
+    /// a project that does not read, or where it panics; none where it
+    /// claims nothing.
     fn union_part(&self, method: &str, params: &Value) -> Option<Part> {
         let claimed = self.targeted(method, params)?;
         let found = panic::catch_unwind(AssertUnwindSafe(|| match claimed {
@@ -1883,6 +1903,7 @@ impl<W: Write> Proxy<W> {
         }));
         Some(match found.ok().flatten() {
             Some(Answer::Found(found)) if !found.is_null() && found != json!([]) => Part::Locations(found),
+            Some(Answer::Found(_) | Answer::Empty) => Part::Empty,
             _ => Part::Nothing,
         })
     }
@@ -1899,8 +1920,8 @@ impl<W: Write> Proxy<W> {
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
         let name = command.unwrap_or(method).to_owned();
-        // Outside `dbt`, hints, a definition or references with no part of the proxy's.
-        let nothing = Kept::Part(Part::Nothing);
+        // Outside `dbt`, hints with none of the proxy's, and a definition or references it does not unite: its empty.
+        let empty = Kept::Part(Part::Empty);
         let (kept, fresh) = match method {
             "initialize" => {
                 self.on_initialize(params);
@@ -1925,7 +1946,7 @@ impl<W: Write> Proxy<W> {
                     Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
-                (hints.map_or(nothing, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
+                (hints.map_or(empty, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
             }
             "textDocument/definition" | "textDocument/references"
                 if self.table.unites(method, self.backend.alone()) =>
@@ -1939,7 +1960,7 @@ impl<W: Write> Proxy<W> {
                 let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
                 let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Kept::Shadow(params.clone(), changes));
                 let fresh = shadowed.is_some();
-                (shadowed.unwrap_or(if dbt { Kept::Plain } else { nothing }), fresh)
+                (shadowed.unwrap_or(if dbt { Kept::Plain } else { empty }), fresh)
             }
             _ => (Kept::Plain, false),
         };
@@ -1972,7 +1993,8 @@ impl<W: Write> Proxy<W> {
             }
             // A merged request gets the proxy's answer alone, any other the failure.
             (Route::Forward, false, _) => {
-                self.send_client(&pending.unserved(self.markdown, Reason::NotRunning).frame(id, &pending.name))
+                let answer = pending.unserved(self.markdown, Reason::NotRunning, &self.parsing);
+                self.send_client(&answer.frame(id, &pending.name))
             }
         }
         // Once the request is forwarded, so that a listing takes no id of the client's.
@@ -2097,7 +2119,9 @@ impl<W: Write> Proxy<W> {
             self.resume();
         }
         let path_of = |uri: &str| self.path_of(uri);
-        if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown, &path_of)) {
+        let merged =
+            pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown, &self.parsing, &path_of));
+        if let Some(merged) = merged {
             return self.send_client(&merged);
         }
         if self.initialize.as_ref() == Some(id) {
@@ -2372,7 +2396,10 @@ impl<W: Write> Proxy<W> {
             match (pending.name.as_str(), &pending.kept) {
                 ("shutdown", _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
                 (_, Kept::Answered) => {}
-                _ => self.send_client(&pending.unserved(self.markdown, exited.clone()).frame(&id, &pending.name)),
+                _ => {
+                    let answer = pending.unserved(self.markdown, exited.clone(), &self.parsing);
+                    self.send_client(&answer.frame(&id, &pending.name))
+                }
             }
         }
         self.backend.nodes_generation += 1;
@@ -2484,15 +2511,16 @@ impl<W: Write> Proxy<W> {
     fn on_time(&mut self) {
         self.expire_listing();
         let now = Instant::now();
-        // A merge past its deadline: the proxy's part or nothing alone, the server's late answer dropped.
+        // A merge past its deadline: the proxy's part or empty alone, else why, the server's late answer dropped.
         let due: Vec<(String, String)> =
             self.deadlines.iter().filter(|(_, (at, _))| *at <= now).map(|(k, (_, m))| (k.clone(), m.clone())).collect();
+        let compiling = self.backend.running().is_some_and(|running| running.compiling.since.is_some());
         for (late, method) in due {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
-            let why = Reason::Late { waited, compiling: false };
-            let answer = pending.unserved(self.markdown, why).frame(id, &pending.name);
+            let why = Reason::Late { waited, compiling };
+            let answer = pending.unserved(self.markdown, why, &self.parsing).frame(id, &pending.name);
             pending.kept = Kept::Answered;
             self.send_client(&answer);
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
@@ -3129,9 +3157,39 @@ mod tests {
             lost["error"],
             json!({"code": -32803, "message": "dbt parse has not finished: dbt parse failed: x"})
         );
-        // In front, a restart awaited: the merge's part alone, null.
+        // In front, a restart awaited: the proxy's reason, then dbt lsp's.
         let waiting = hover(Life::Waiting(Instant::now() + Duration::from_secs(60)));
-        assert_eq!((waiting.get("error"), &waiting["result"]), (None, &Value::Null), "{waiting}");
+        let message = "dbt parse has not finished: dbt parse failed: x; dbt lsp is not running";
+        assert_eq!(waiting["error"], json!({"code": -32803, "message": message}), "{waiting}");
+    }
+
+    #[test]
+    fn a_request_dbt_lsp_left_gets_its_part_its_empty_or_why() {
+        let hint = json!({"position": {"line": 0, "character": 0}, "label": "x"});
+        let location = json!({"uri": "file:///p/models/a.sql", "range": {}});
+        let pending = |name: &str, kept: Kept| Pending { name: name.to_owned(), kept };
+        let part = |name: &str, part: Part| pending(name, Kept::Part(part));
+        let why = || vec![Reason::NotRunning];
+        // No index: why the proxy has none, as nodeInfo says it.
+        let unindexed = Reason::Unindexed("waiting for dbt lsp to compile the project".into());
+        let hover = json!({"contents": {"kind": "plaintext", "value": "a summary"}});
+        let cases = [
+            (part("textDocument/hover", Part::Hover("a summary".into(), true)), Answer::Found(hover)),
+            (part("textDocument/inlayHint", Part::Hints(vec![hint.clone()])), Answer::Found(json!([hint]))),
+            (part("textDocument/definition", Part::Locations(location.clone())), Answer::Found(location)),
+            (part("textDocument/references", Part::Empty), Answer::Empty),
+            (part("textDocument/definition", Part::Nothing), Answer::Unanswered(why())),
+            (part("textDocument/hover", Part::Unindexed), Answer::Unanswered(vec![unindexed, Reason::NotRunning])),
+            (pending("textDocument/completion", Kept::Plain), Answer::Unanswered(why())),
+        ];
+        let parsing = Parsing::default();
+        for (pending, expected) in cases {
+            assert_eq!(pending.unserved(false, Reason::NotRunning, &parsing), expected, "{}", pending.name);
+        }
+        // Once an index exists, a hover's part taken before it is a nothing.
+        let indexed = Parsing { index: Some(config::ParseIndex::of(&json!({}))), ..Parsing::default() };
+        let late = part("textDocument/hover", Part::Unindexed).unserved(false, Reason::NotRunning, &indexed);
+        assert_eq!(late, Answer::Unanswered(why()));
     }
 
     fn args(words: &[&str]) -> Vec<String> {

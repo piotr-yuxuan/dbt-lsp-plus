@@ -2,7 +2,7 @@
 //! The proxy's commands for clients: by dbt lsp's own commands in front of
 //! the fake, and by the fake dbt's CLI without it.
 
-use super::{alive, barrier, dbt_event, listings, logged, scratch, scratch_of, with_options};
+use super::{alive, barrier, dbt_event, listings, logged, scratch, scratch_of, unindexed_then, with_options};
 use crate::support::{Session, copy_fixture, fixture, until_logged, uri};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -396,7 +396,7 @@ fn a_server_lost_after_it_listed_the_commands_leaves_compile_to_the_run_and_show
         json!({"textDocument": {"uri": uri(&orders())},
                                                               "position": {"line": 0, "character": 0}}),
     );
-    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "the proxy's nothing: {hover}");
+    unindexed_then(&hover, "; dbt lsp exited (exit status: 3)");
     let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
     let shown = execute(&mut session, SHOW, json!([{"inline": "select 1", "limit": 2}]));
     assert!(shown["result"]["error"].as_str().unwrap().contains("needs dbt lsp"), "{shown}");
