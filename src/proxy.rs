@@ -2802,6 +2802,18 @@ mod tests {
             ),
             ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
             ("A session finds one project, once", r#"method == "textDocument/didOpen" && self.root.is_none()"#),
+            // The reasons that the proxy gives where no one answers, one arm each of `Reason`'s words.
+            (
+                "`dbt lsp did not answer within 2 s`",
+                r#"write!(f, "dbt lsp did not answer within {} s{compiling}", waited.as_secs_f64())"#,
+            ),
+            ("`: it is compiling the project`", r#"if *compiling { ": it is compiling the project" } else { "" }"#),
+            ("`dbt lsp failed: ...`", r#"Reason::Failed(message) => write!(f, "dbt lsp failed: {message}")"#),
+            ("`dbt lsp is lost for good: ...`", r#"Reason::Lost(why) => write!(f, "dbt lsp is lost for good: {why}")"#),
+            (
+                "`no dbt project at <root>: its dbt_project.yml is missing, is not YAML, or names no project`",
+                r#""no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project""#,
+            ),
         ];
         for (words, site) in quoted {
             assert!(page.contains(words), "the agent page says {words:?}");

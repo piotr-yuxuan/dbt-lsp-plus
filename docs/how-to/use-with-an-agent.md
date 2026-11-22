@@ -128,13 +128,14 @@ name `--project-dir`.  A session in front of dbt lsp turns alone when
 `dbt lsp` cannot start, exits before it answers `initialize`, or is lost
 for good after a fourth crash in ten minutes, which the proxy says by a
 `window/showMessage` ending `dbt-lsp-plus answers alone.`; Claude Code
-does not show it.
+does not show it, but a request that only dbt lsp answers then fails
+with `dbt lsp is lost for good:` and why.
 
 | Operation | LSP method | Alone | In front of dbt lsp |
 |-----------|------------|-------|---------------------|
-| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else null |
-| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else `[]` |
-| hover | `textDocument/hover` | dbt-lsp-plus: a node's summary and facts, a docs block, a test's signature; before the first parse, the error above | dbt lsp's answer within 300 ms, under dbt-lsp-plus's summary and a line `**dbt lsp**` where it has one, else within 2 s; past that, dbt-lsp-plus's summary, else null |
+| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else why, as an error |
+| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else why, as an error |
+| hover | `textDocument/hover` | dbt-lsp-plus: a node's summary and facts, a docs block, a test's signature; before the first parse, the error above | dbt lsp's answer within 300 ms, under dbt-lsp-plus's summary and a line `**dbt lsp**` where it has one, else within 2 s; past that, dbt-lsp-plus's summary, else why, as an error; on a node before the first parse, dbt lsp's answer unless null, else the error above |
 | documentSymbol | `textDocument/documentSymbol` | dbt-lsp-plus | dbt-lsp-plus, since dbt lsp 2.0.9 does not announce it; not observed |
 | workspaceSymbol | `workspace/symbol` | dbt-lsp-plus | dbt-lsp-plus |
 | goToImplementation | `textDocument/implementation` | none: `dbt lsp is not running` | dbt lsp; 2.0.9 answers `No such method textDocument/implementation` |
@@ -233,7 +234,8 @@ By what the agent reads:
   `dbt-lsp-plus doctor` on the file.
 - `dbt parse has not finished: it is running`: ask again.
 - `dbt parse has not finished: waiting for dbt lsp to compile the
-  project`: in `plus`, in front of `dbt lsp`; ask again.
+  project`: in front of `dbt lsp`, whose first compilation is under way;
+  ask again.  Followed by `; ` and why `dbt lsp` gave no answer either.
 - `dbt parse has not finished: dbt parse failed: ...`: dbt's first error;
   its log is the path in parentheses.  `Read-only file system (os error
   30)` there, from a project that has a `.gitignore` without the line
@@ -248,8 +250,18 @@ By what the agent reads:
   dbt off the network, as select cannot.
 - `dbt-lsp-plus runs dbt only cut off the network, which this system
   cannot`, from select: see [From a shell](#from-a-shell).
-- `No hover information available` in front of `dbt lsp`: its first
-  compilation is under way; ask again.
+- `dbt lsp did not answer within 2 s`: ask again.  Followed by `: it is
+  compiling the project`: ask again once it has compiled, in a few
+  seconds on a small project.
+- `dbt lsp failed: ...`: `dbt lsp`'s own error, its message after the
+  colon; dbt-lsp-plus had nothing of its own there.
+- `dbt lsp is lost for good: ...`: `dbt lsp` could not start, exited
+  before it answered `initialize`, or crashed four times in ten minutes;
+  the reason after the colon says which.  Run `dbt-lsp-plus doctor` on
+  the file, then start the session again.
+- `no dbt project at <root>: its dbt_project.yml is missing, is not
+  YAML, or names no project`: the project's file no longer reads, as
+  mid-edit; fix it, and the next request reads it again.
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not
