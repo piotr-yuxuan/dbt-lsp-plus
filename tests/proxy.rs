@@ -455,7 +455,11 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
     let untitled = json!({"textDocument": {"uri": "untitled:Untitled-1"}, "position": {"line": 0, "character": 0}});
     let prepared = session.request("textDocument/prepareCallHierarchy", untitled);
     assert_eq!(prepared.get("result"), Some(&Value::Null), "{prepared}");
-    assert_eq!(show_messages(&session), 1, "the proxy warns once");
+    // A request that only dbt lsp answers says why none will; one assertion with the warning's, as clippy counts.
+    let completion = session.request("textDocument/completion", json!({}));
+    let message = completion["error"]["message"].as_str().unwrap_or_default();
+    let lost = message.starts_with("dbt lsp is lost for good: dbt lsp could not start (");
+    assert_eq!((show_messages(&session), lost), (1, true), "the proxy warns once: {completion}");
     assert!(session.finish().success());
 }
 
@@ -509,6 +513,10 @@ fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
     assert!(!registered, "a watcher, for a client that does not let a server register one");
     assert_eq!(session.received.iter().filter(|m| m["method"] == "window/logMessage").count(), 1);
     assert!(lives(&log).is_empty(), "a server started");
+    // A request that only dbt lsp answers: none was started, none is lost.
+    let completion = session.request("textDocument/completion", json!({}));
+    let not_running = json!({"code": -32803, "message": "dbt lsp is not running"});
+    assert_eq!((completion.get("result"), &completion["error"]), (None, &not_running), "{completion}");
     assert!(session.finish().success());
 }
 
@@ -617,13 +625,13 @@ fn a_crash_fails_each_pending_request_exactly_once() {
     assert!(error["params"]["message"].as_str().unwrap().contains("exit status: 3"), "{error}");
     let symbols = session.request("workspace/symbol", json!({"query": "summary"}));
     assert_eq!(names(&symbols["result"]), ["order_summary"]);
-    // Each answered once: the merged definition and hover with the proxy's nothing, the completion with the failure.
+    // Each answered once, each with the failure: the proxy has nothing at a file outside the project.
     let answered = |id: i64| {
         let found: Vec<&Value> = session.received.iter().filter(|m| m["id"] == json!(id)).collect();
-        (found.len(), found[0]["result"].clone(), found[0]["error"]["code"].clone())
+        (found.len(), found[0].get("result").cloned(), found[0]["error"].clone())
     };
-    let expected = [(1, Value::Null, Value::Null), (1, Value::Null, json!(-32803)), (1, Value::Null, Value::Null)];
-    assert_eq!([1001, 1002, 1003].map(answered), expected);
+    let failed = (1, None, json!({"code": -32803, "message": "dbt lsp exited (exit status: 3)"}));
+    assert_eq!([1001, 1002, 1003].map(answered), [failed.clone(), failed.clone(), failed]);
     let failure = session.received.iter().find(|m| m["id"] == 1002).unwrap();
     assert!(failure["error"]["message"].as_str().unwrap().contains("exited"), "{failure}");
     assert!(session.finish().success());
@@ -683,6 +691,15 @@ fn hover_at_start(path: &Path) -> Value {
     json!({"textDocument": {"uri": uri(path)}, "position": {"line": 0, "character": 0}})
 }
 
+/// Checks that ANSWER, to a hover on a node before any index in front of
+/// dbt lsp, which gave no answer, says why the proxy has no index, then
+/// ENDING, why dbt lsp gave none.
+pub fn unindexed_then(answer: &Value, ending: &str) {
+    let message = answer["error"]["message"].as_str().unwrap_or_default();
+    assert!(answer.get("result").is_none() && answer["error"]["code"] == -32803, "{answer}");
+    assert!(message.starts_with("dbt parse has not finished: ") && message.ends_with(ending), "{answer}");
+}
+
 /// A server that exits on a hover, then one that never answers its initialize.
 fn restart_hangs() -> Value {
     json!({"exit_on": "textDocument/hover", "exit_life": 1, "hang_on": "initialize", "hang_life": 2})
@@ -708,7 +725,7 @@ fn a_crashed_server_restarts_with_the_session_as_the_client_left_it() {
     session.notify("textDocument/didOpen", json!({"textDocument": summary_document}));
     session.open(&customers, None);
     let lost = session.request("textDocument/hover", hover_at_start(&orders));
-    assert_eq!((lost.get("error"), &lost["result"]), (None, &Value::Null), "{lost}");
+    unindexed_then(&lost, "; dbt lsp exited (exit status: 3)");
     let shown = session.wait_for(|m| m["method"] == "window/showMessage");
     let message = shown["params"]["message"].as_str().unwrap();
     assert!(message.starts_with("dbt lsp exited") && message.ends_with("restarting it in 1 s."), "{shown}");
@@ -718,7 +735,7 @@ fn a_crashed_server_restarts_with_the_session_as_the_client_left_it() {
     session.open(&stg_customers, None);
     session.notify("textDocument/didClose", json!({"textDocument": {"uri": uri(&stg_customers)}}));
     let meanwhile = session.request("textDocument/hover", hover_at_start(&summary));
-    assert_eq!((meanwhile.get("error"), &meanwhile["result"]), (None, &Value::Null), "{meanwhile}");
+    unindexed_then(&meanwhile, "; dbt lsp is not running");
     until_initialized(&log, 2);
     let listed = |m: &Value| m["params"]["command"] == "dbt.listNodes";
     until_logged(&log, "the restarted server listed", |_| life(&log, 2).iter().any(listed));
@@ -800,7 +817,20 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     let inside_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28},
                             "context": {"includeDeclaration": false}});
     let references = session.request("textDocument/references", inside_ref);
-    assert_eq!((references.get("error"), &references["result"]), (None, &json!([])), "{references}");
+    // A request that only dbt lsp answers says why none will; a definition with no target, with no server, is null.
+    let completion = session.request("textDocument/completion", json!({}));
+    let definition = session.request("textDocument/definition", position_in(&orders, "select", 1));
+    let lost = json!({"code": -32803, "message": "dbt lsp is lost for good: dbt lsp exited (exit status: 3)"});
+    // One assertion of the three, as clippy counts each.
+    assert_eq!(
+        [
+            (references.get("error"), &references["result"]),
+            (completion.get("result"), &completion["error"]),
+            (definition.get("error"), &definition["result"]),
+        ],
+        [(None, &json!([])), (None, &lost), (None, &Value::Null)],
+        "{references}, {completion}, {definition}"
+    );
     // The graph is the last parse's, as alone: the scan would add stg_customers.
     let outgoing = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
     let parsed = |calls: &Value| details(calls, "to") == ["macro.shop_utils.is_positive", "model.shop.stg_orders"];
@@ -861,9 +891,9 @@ fn a_restarted_server_that_never_answers_its_initialize_is_killed_and_replaced()
     session.wait_for(|m| m["method"] == "window/showMessage");
     until_logged(&log, "the second life", |_| lives(&log).len() == 2);
     let started = std::fs::metadata(log.with_extension("jsonl.lives")).unwrap().modified().unwrap();
-    // Meanwhile the proxy answers alone.
+    // Meanwhile the proxy answers alone: its reason, then why dbt lsp gives none.
     let meanwhile = session.request("textDocument/hover", hover_at_start(&summary));
-    assert_eq!((meanwhile.get("error"), &meanwhile["result"]), (None, &Value::Null), "{meanwhile}");
+    unindexed_then(&meanwhile, "; dbt lsp is not running");
     session.received.clear();
     session.timeout = Duration::from_secs(20);
     let shown = session.wait_for(|m| m["method"] == "window/showMessage");
@@ -1493,7 +1523,7 @@ fn after_a_crash_the_scan_gives_the_graph() {
     session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", json!({"item": summary})), lists_orders);
     let position = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 0}});
     let hover = session.request("textDocument/hover", position);
-    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    unindexed_then(&hover, "; dbt lsp exited (exit status: 3)");
     let change = json!({"textDocument": {"uri": uri(&path), "version": 2},
                         "contentChanges": [{"text": "select * from {{ ref('stg_customers') }}"}]});
     session.notify("textDocument/didChange", change);
@@ -3075,6 +3105,82 @@ fn location(project: &Path, file: &str, line: u64, start: u64, end: u64) -> Valu
 }
 
 #[test]
+fn a_project_that_no_longer_reads_says_so_where_no_symbol_is_empty() {
+    let project = navigable("unreadable");
+    let (mut session, _) =
+        Session::fake_with("unreadable", json!({"no_lsp": true}), &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let configuration = project.join("dbt_project.yml");
+    let written = std::fs::read_to_string(&configuration).unwrap();
+    std::fs::write(&configuration, "name: [").unwrap();
+    let on_ref = position_in(&orders, "ref('stg_orders')", 6);
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project",
+        project.display()
+    );
+    let unreadable = json!({"code": -32803, "message": message});
+    let at_4_28 = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let asked = [
+        ("textDocument/definition", on_ref.clone()),
+        ("textDocument/references", without_declaration(on_ref.clone())),
+        ("workspace/symbol", json!({"query": "orders"})),
+        ("textDocument/prepareCallHierarchy", at_4_28),
+    ];
+    for (method, params) in asked {
+        let answer = session.request(method, params);
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &unreadable), "{method}: {answer}");
+    }
+    // Where no target is, no symbol either: empty, as before.
+    let nowhere = position_in(&orders, "select", 1);
+    let definition = session.request("textDocument/definition", nowhere.clone());
+    assert_eq!((definition.get("error"), &definition["result"]), (None, &Value::Null), "{definition}");
+    let references = session.request("textDocument/references", without_declaration(nowhere));
+    assert_eq!((references.get("error"), &references["result"]), (None, &json!([])), "{references}");
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&orders)}}));
+    assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    std::fs::write(&configuration, &written).unwrap();
+    let found = session.request("textDocument/definition", on_ref);
+    assert_eq!(found["result"], location(&project, "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_merge_a_project_that_no_longer_reads_leaves_a_claimed_definition_to_dbt_lsp_then_says_why() {
+    // In front of dbt lsp, the definition goes to it, whose answer stands: its bytes, odd spacing included.
+    let in_front = navigable("unreadable-merge");
+    let answer = r#"{"result": {"uri": "file:///elsewhere.sql", "range": null},  "id": $ID, "jsonrpc": "2.0"}"#;
+    let script = json!({"raw_answers": {"textDocument/definition": answer}});
+    let (mut session, _) =
+        Session::fake_with("unreadable-merge", script, &[Path::new("--project-dir"), &in_front], None);
+    session.initialize(&in_front);
+    std::fs::write(in_front.join("dbt_project.yml"), "name: [").unwrap();
+    let orders = in_front.join("models/marts/orders.sql");
+    let passed = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
+    let expected = answer.replace("$ID", &passed["id"].to_string());
+    assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "dbt lsp's answer: {passed}");
+    assert!(session.finish().success());
+    // When dbt lsp gives none, the proxy's reason first, then dbt lsp's.
+    let refusing = navigable("unreadable-refused");
+    let script = json!({"refuse_on": "textDocument/definition"});
+    let (mut session, _) =
+        Session::fake_with("unreadable-refused", script, &[Path::new("--project-dir"), &refusing], None);
+    session.initialize(&refusing);
+    std::fs::write(refusing.join("dbt_project.yml"), "name: [").unwrap();
+    let orders = refusing.join("models/marts/orders.sql");
+    let refused = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project; \
+         dbt lsp failed: refused by the script",
+        refusing.display()
+    );
+    let why = json!({"code": -32803, "message": message});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_definition_in_yaml_leads_where_dbt_looks() {
     let project = navigable("definition-yaml");
     // As dbt lsp 2.0.9 answers at every position of a properties file.
@@ -3588,6 +3694,54 @@ fn in_plus_a_hover_on_a_node_before_dbt_lsp_compiles_says_why() {
 }
 
 #[test]
+fn in_merge_a_hover_on_a_node_before_any_index_says_why_where_dbt_lsp_has_nothing() {
+    let orders = fixture().join("models/marts/orders.sql");
+    let waiting = "dbt parse has not finished: waiting for dbt lsp to compile the project";
+    // dbt lsp's answer, odd spacing included, so that only bytes passed as they came match.
+    let text = r#"{"result": {"contents": {"kind": "markdown", "value": "of dbt lsp"}},  "id": $ID, "jsonrpc": "2.0"}"#;
+    let null_body = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
+    // The session NAME with the hover's SCRIPTED answer, and its answer to the hover on the ref.
+    let hover = |name: &str, scripted: Value| {
+        let mut script = json!({"manifest": manifest(), "hold_compile": true});
+        script.as_object_mut().unwrap().extend(scripted.as_object().unwrap().clone());
+        let (mut session, _) = with_options(name, script, &[]);
+        session.initialize(&fixture());
+        session.open(&orders, None);
+        let answer = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+        (session, answer)
+    };
+    let (session, null_answer) =
+        hover("merge-unindexed-null", json!({"raw_answers": {"textDocument/hover": null_body}}));
+    let why = json!({"code": -32803, "message": waiting});
+    assert_eq!((null_answer.get("result"), &null_answer["error"]), (None, &why), "dbt lsp's null: {null_answer}");
+    assert!(session.finish().success());
+    let (session, refused) = hover("merge-unindexed-refused", json!({"refuse_on": "textDocument/hover"}));
+    let why = json!({"code": -32803, "message": format!("{waiting}; dbt lsp failed: refused by the script")});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "dbt lsp's error: {refused}");
+    assert!(session.finish().success());
+    let (session, passed) = hover("merge-unindexed-text", json!({"raw_answers": {"textDocument/hover": text}}));
+    let expected = text.replace("$ID", &passed["id"].to_string());
+    assert!(session.received_raw.iter().any(|raw| raw == expected.as_bytes()), "dbt lsp's text: {passed}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_late_server_says_it_is_compiling_at_2_s() {
+    let start = r#"{"jsonrpc":"2.0","method":"dbt/lspCompileStart","params":{}}"#;
+    let script = json!({"send_on": "textDocument/definition", "send": [start], "hold": ["textDocument/definition"]});
+    let (mut session, _) = Session::fake("merge-late-compiling", script);
+    session.initialize(&fixture());
+    let started = Instant::now();
+    let answer = session
+        .request("textDocument/definition", position_in(&fixture().join("models/marts/orders.sql"), "select", 1));
+    let took = started.elapsed();
+    assert!(Duration::from_secs(2) <= took && took < Duration::from_secs(4), "{took:?}");
+    let why = json!({"code": -32803, "message": "dbt lsp did not answer within 2 s: it is compiling the project"});
+    assert_eq!((answer.get("result"), &answer["error"]), (None, &why), "{answer}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_a_hover_left_to_dbt_asks_for_no_index() {
     let script = json!({"no_lsp": true, "manifest": manifest()});
     let (mut session, log) = with_options("mode-hover-alone", script, &["--mode", "textDocument/hover=dbt"]);
@@ -4040,8 +4194,20 @@ fn where_the_proxy_has_nothing() -> [(&'static str, Value, Value); 4] {
     ]
 }
 
+/// Checks ANSWER to METHOD of `where_the_proxy_has_nothing`, to which dbt
+/// lsp gave no answer: for the hints, the proxy's empty, NOTHING; for the
+/// others, which only dbt lsp could answer, -32803 and WHY.
+fn says_why_or_is_empty(answer: &Value, method: &str, nothing: &Value, why: &str) {
+    if method == "textDocument/inlayHint" {
+        assert_eq!((answer.get("error"), &answer["result"]), (None, nothing), "{method}: {answer}");
+    } else {
+        let error = json!({"code": -32803, "message": why});
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &error), "{method}: {answer}");
+    }
+}
+
 #[test]
-fn a_late_server_gives_the_proxy_s_nothing_at_2_s() {
+fn a_late_server_gives_its_reason_or_the_proxy_s_empty_at_2_s() {
     let mut session = parsed_with("merge-late-nothing", json!({"hold": MERGED}), &[]);
     let started = Instant::now();
     for (id, (method, params, _)) in (7001..).zip(where_the_proxy_has_nothing()) {
@@ -4053,7 +4219,7 @@ fn a_late_server_gives_the_proxy_s_nothing_at_2_s() {
     assert!(started.elapsed() >= Duration::from_secs(2), "before 2 s: {:?}", started.elapsed());
     for (id, (method, _, nothing)) in (7001..).zip(where_the_proxy_has_nothing()) {
         let answer = session.wait_for(|m| m["id"] == id && m.get("method").is_none());
-        assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing), "{method}: {answer}");
+        says_why_or_is_empty(&answer, method, &nothing, "dbt lsp did not answer within 2 s");
     }
     assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
     session.notify("test/release", json!({}));
@@ -4064,9 +4230,17 @@ fn a_late_server_gives_the_proxy_s_nothing_at_2_s() {
     let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
     let mut said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
     said.sort_unstable();
-    let methods = ["definition", "hover", "inlayHint", "references"];
-    assert_eq!(said.len(), 4, "{said:?}");
-    assert!(said.iter().zip(methods).all(|(said, method)| said.contains(&format!("{method} within 2000 ms"))));
+    // What the client got: the reason, but for the hints, the proxy's empty.
+    let logged =
+        |method: &str, got: &str| format!("dbt lsp did not answer textDocument/{method} within 2000 ms: {got}");
+    let reason = "dbt-lsp-plus answered with the reason";
+    let expected = [
+        logged("definition", reason),
+        logged("hover", reason),
+        logged("inlayHint", "dbt-lsp-plus answered alone"),
+        logged("references", reason),
+    ];
+    assert_eq!(said, expected);
     assert!(session.finish().success());
 }
 
@@ -4094,13 +4268,13 @@ fn in_dbt_a_late_server_is_awaited() {
 const REFUSAL: &str = r#"{"jsonrpc":"2.0","id":$ID,"error":{"code":-32603,"message":"no"}}"#;
 
 #[test]
-fn a_server_s_error_gives_the_proxy_s_part_or_nothing() {
+fn a_server_s_error_gives_the_proxy_s_part_or_why() {
     let refusals: serde_json::Map<String, Value> =
         MERGED.iter().map(|method| ((*method).to_owned(), json!(REFUSAL))).collect();
     let mut session = parsed_with("merge-errors", json!({"raw_answers": refusals}), &[]);
     for (method, params, nothing) in where_the_proxy_has_nothing() {
         let answer = session.request(method, params);
-        assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing), "{method}: {answer}");
+        says_why_or_is_empty(&answer, method, &nothing, "dbt lsp failed: no");
     }
     let kept = session.request("textDocument/hover", on_ref());
     assert!(kept["result"]["contents"]["value"].as_str().is_some_and(|text| text.contains("stg_orders")), "{kept}");
@@ -4149,7 +4323,7 @@ fn while_dbt_lsp_restarts_a_merged_request_gets_the_proxy_s_answer() {
     );
     for (method, params, nothing) in where_the_proxy_has_nothing() {
         let answer = session.request(method, params);
-        assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing), "{method}: {answer}");
+        says_why_or_is_empty(&answer, method, &nothing, "dbt lsp is not running");
     }
     the_proxy_s_on_ref(&mut session);
     let completion = session.request("textDocument/completion", json!({}));
@@ -4290,6 +4464,28 @@ fn a_late_server_is_logged_once_per_method_and_deadline() {
 }
 
 #[test]
+fn a_late_server_is_logged_once_per_method_deadline_and_what_the_client_got() {
+    let (mut session, _) = Session::fake("merge-late-both", json!({"hold": ["textDocument/definition"]}));
+    session.initialize(&fixture());
+    let scratch = fixture().join("models/marts/scratch.sql");
+    let text = "select id from {{ ref('nowhere') }}";
+    session.open(&scratch, Some(text));
+    // A ref that no file holds, the proxy's to answer, then a column, dbt lsp's alone: both held past 2 s.
+    let at = |needle: &str| json!({"textDocument": {"uri": uri(&scratch)}, "position": {"line": 0, "character": text.find(needle).unwrap() + 1}});
+    let claimed = session.request("textDocument/definition", at("nowhere"));
+    let column = session.request("textDocument/definition", at("id"));
+    let late = json!({"code": -32803, "message": "dbt lsp did not answer within 2 s"});
+    let answers = [(claimed.get("error"), &claimed["result"]), (column.get("result"), &column["error"])];
+    assert_eq!(answers, [(None, &Value::Null), (None, &late)], "{claimed}, {column}");
+    settle(&mut session);
+    let logged = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
+    let said: Vec<&str> = logged.map(|m| m["params"]["message"].as_str().unwrap()).collect();
+    let line = |got: &str| format!("dbt lsp did not answer textDocument/definition within 2000 ms: {got}");
+    assert_eq!(said, [line("dbt-lsp-plus answered alone"), line("dbt-lsp-plus answered with the reason")]);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_refused_or_lost_hover_keeps_the_proxy_s_summary() {
     let (mut session, _) = parsed_session("merge-refused", json!({"refuse_on": "textDocument/hover"}));
     let kept = session.request("textDocument/hover", on_ref());
@@ -4298,7 +4494,8 @@ fn a_refused_or_lost_hover_keeps_the_proxy_s_summary() {
     );
     let nowhere = position_in(&fixture().join("models/marts/orders.sql"), "select", 1);
     let refused = session.request("textDocument/hover", nowhere);
-    assert_eq!((refused.get("error"), &refused["result"]), (None, &Value::Null), "no part: its nothing: {refused}");
+    let failed = json!({"code": -32803, "message": "dbt lsp failed: refused by the script"});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &failed), "no part: why: {refused}");
     assert!(session.finish().success());
     let script = json!({"exit_on": "textDocument/hover", "exit_life": 1});
     let (mut lost, _) = parsed_session("merge-lost", script);

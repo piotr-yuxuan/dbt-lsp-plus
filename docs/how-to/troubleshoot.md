@@ -38,15 +38,18 @@ fails there (its dbt lsp, else the proxy's parse).
   wait for it 300 ms where the proxy has something to add (its
   locations, a summary, hints), 2 s where it has nothing; past that, or
   when `dbt lsp` fails, exits or is not running, the proxy answers with
-  its part, else null or `[]`, and logs once per method and deadline
-  that `dbt lsp` was late (`window/logMessage`, type 4).
+  its part, else its empty where it claims the position and for hints,
+  else error -32803 with why (`dbt lsp did not answer within 2 s`,
+  `dbt lsp failed: ...`), and logs once per method and deadline that
+  `dbt lsp` was late (`window/logMessage`, type 4).
   Set a method to `dbt` (`--mode textDocument/hover=dbt`) to wait for
   `dbt lsp` however long it takes.  Any other slow answer is the
   server's.
 - **Alone**, with dbt-oss, references at a position the proxy does not
   claim are `[]` and a definition there null; the proxy fails every other
   request it does not answer at once, with -32803, rather than leave it
-  waiting.
+  waiting: `dbt lsp is not running`; or, alone once `dbt lsp` could not
+  start or was lost, `dbt lsp is lost for good: ...` and why.
 
 ## A request times out
 
@@ -129,8 +132,9 @@ seconds, 10 by default.
 - **"...: dbt-lsp-plus answers alone." after restarts, or at the start.**
   `dbt lsp` ended four times in ten minutes, could not start, or exited
   before it answered `initialize`.  The message names why: its exit
-  status, or why it could not start; when it ran, its standard error, in
-  the client's log, says more.  The proxy then answers as with dbt-oss
+  status, why it could not start, or that it did not answer or refused its
+  `initialize`; when it ran, its standard error, in the client's log, says
+  more.  The proxy then answers as with dbt-oss
   (see [Use it with dbt-oss alone](use-with-dbt-oss.md)).
 - **"dbt lsp compiled nothing: …".**  `dbt lsp` compiled none of the
   project, so it has nothing to answer from (a listing answers

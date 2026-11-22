@@ -90,8 +90,15 @@ follow the proxy's.  A definition, references, hover or inlay hints
 that go to `dbt lsp` in `merge` get its answer when it comes within
 300 ms where the proxy adds something (locations, a summary, hints),
 within 2 s where it adds nothing; else, and when `dbt lsp` fails, exits
-or is not running, the proxy's own: its part, else null, or `[]` for
-references and hints.  A hover's text from `dbt lsp` follows the
+or is not running, the proxy's own: its part; else its empty, null or
+`[]`, at a position it claims and for hints; else, where only `dbt lsp`
+could answer, error -32803 with why, such as `dbt lsp did not answer
+within 2 s` (followed by `: it is compiling the project` while it
+compiles), `dbt lsp failed: ...`, `dbt lsp exited (...)` or `dbt lsp is
+not running`.  A hover on a node before the proxy's first index gets
+`dbt lsp`'s answer when it is not null, else error -32803 with
+nodeInfo's reason, `dbt parse has not finished: ...`, then, when `dbt
+lsp` gave none, why.  A hover's text from `dbt lsp` follows the
 proxy's part under a line `**dbt lsp**`, or `dbt lsp:` in plain text.
 The mode `plus` gives the proxy's answer by itself, at once.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
@@ -99,7 +106,14 @@ ten minutes, and gives it the open documents as they stand; while it
 restarts, the proxy keeps serving its own features, and
 `dbt-lsp-plus.nodeInfo`, the summary and the hints too, from its own
 parse.  After a fourth crash, and when `dbt lsp` cannot start or exits
-before it answers `initialize`, the proxy answers alone, as with dbt-oss.
+before it answers `initialize`, the proxy answers alone, as with dbt-oss,
+and a request only `dbt lsp` answers fails with `dbt lsp is lost for
+good: ...`.  When the root's `dbt_project.yml` no longer reads, a
+definition or references on a target, workspace symbols and the call
+hierarchy fail with `no dbt project at ...`, alone and in `plus`; in
+`merge` in front of `dbt lsp`, a definition or references goes to `dbt
+lsp`, and when it gives no answer, that reason comes first, then `dbt
+lsp`'s.
 With a `dbt lsp` that cannot start, its parse runs the same dbt and
 fails, and `nodeInfo` and a hover on a node give its failure.
 

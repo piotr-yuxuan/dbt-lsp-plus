@@ -246,13 +246,13 @@ impl Table {
         union && !alone && self.mode(method) == Mode::Merge
     }
 
-    /// What the proxy answers METHOD where it has nothing of its own, if it
-    /// answers it: null, or `[]` for a list, in `plus`, and in `dbt` when
-    /// ALONE, with no dbt lsp answering now; none where the server answers.
-    pub fn nothing(&self, method: &str, alone: bool) -> Option<Value> {
+    /// Whether the proxy answers METHOD with the method's nothing where it
+    /// has nothing of its own: in `plus`, and in `dbt` when ALONE, with no
+    /// dbt lsp answering now; not where the server answers.  The nothing's
+    /// shape, null or `[]`, is `Answer::Empty`'s.
+    pub fn answers_nothing(&self, method: &str, alone: bool) -> bool {
         let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
-        let empty = known && (mode == Mode::Plus || (alone && mode == Mode::Dbt));
-        empty.then(|| capability::empty(method))
+        known && (mode == Mode::Plus || (alone && mode == Mode::Dbt))
     }
 
     /// `experimental.dbtLspPlus`, version 2: the kinds and places of each
@@ -491,14 +491,14 @@ mod tests {
         let table = Table::new(&user, &|_| false);
         let definition = json!({"version": 2, "definition": every["definition"], "rename": every["rename"]});
         assert_eq!(table.flag(), definition, "plus lists, dbt does not");
-        assert_eq!(table.nothing("textDocument/definition", false), Some(Value::Null));
-        assert_eq!(table.nothing("textDocument/references", false), None, "dbt with a backend is forwarded");
+        assert!(table.answers_nothing("textDocument/definition", false));
+        assert!(!table.answers_nothing("textDocument/references", false), "dbt with a backend is forwarded");
         let none = Table::new(&user, &|_| false);
-        assert_eq!(none.nothing("textDocument/references", true), Some(json!([])), "dbt with no backend");
+        assert!(none.answers_nothing("textDocument/references", true), "dbt with no backend");
         assert_eq!(none.unanswered(true), ["textDocument/references"]);
         let hierarchy = settings(&[("textDocument/prepareCallHierarchy", "dbt")], None);
         let none = Table::new(&hierarchy, &|_| false);
-        assert_eq!(none.nothing("callHierarchy/incomingCalls", true), Some(Value::Null), "a follower too");
+        assert!(none.answers_nothing("callHierarchy/incomingCalls", true), "a follower too");
         assert!(table.unanswered(false).is_empty());
     }
 }
