@@ -145,11 +145,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     request of a command for clients, its run by dbt's CLI, and the run's
     answer, one handler each, so that `on_request` and `handle` stay
     dispatches;
-  - `commands::route`, `commands::announced`, `commands::own`,
-    `commands::arguments`, `commands::compiled` and `commands::listed`: the
-    decisions on a command's request and on a run's output, with tests of
-    their own; `commands::compile_job` and `commands::nodes_job`: one run
-    per command, its words and its reader;
+  - `commands::route`, `commands::announced`, `commands::arguments`,
+    `commands::compiled` and `commands::listed`: the decisions on a
+    command's request and on a run's output, with tests of their own;
+    `commands::compile_job` and `commands::nodes_job`: one run per
+    command, its words and its reader;
   - `cli::named`: the rule that a subcommand is the first word, tested
     without running the binary, apart from `main.rs`, whose `cli::main` is
     the module's entry point; `cli::asked`: the decision on a

@@ -4,6 +4,7 @@
 //! them, by dbt's CLI cut off the network.  How each request goes, the
 //! words of a run, and what its output answers, in dbt lsp 2.0.9's shapes.
 
+use crate::capability::{self, CAPABILITIES, Provider};
 use crate::config::{self, Running};
 use crate::parse_log;
 use crate::project::Project;
@@ -18,11 +19,6 @@ pub const COMPILE: &str = "dbt-lsp-plus.compile";
 pub const SHOW: &str = "dbt-lsp-plus.show";
 pub const NODES: &str = "dbt-lsp-plus.nodes";
 
-/// Each command, the command of dbt lsp's that does its work, and whether
-/// dbt's CLI does it without dbt lsp: `dbt show` would reach the network.
-const COMMANDS: [(&str, &str, bool); 3] =
-    [(COMPILE, "dbt.compileFile", true), (SHOW, "dbt.show", false), (NODES, "dbt.listNodes", true)];
-
 /// The rows of a show whose client names no limit: `dbt show`'s default.
 const LIMIT: u64 = 10;
 
@@ -33,43 +29,34 @@ pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus ru
 /// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
 
-/// How a request of a command goes.
-#[derive(Debug, PartialEq)]
-pub enum Via {
-    /// To dbt lsp, as its command of this name.
-    Server(&'static str),
-    /// By dbt's CLI.
-    Run,
-    /// Answered with this failure.
-    Refused(Value),
-}
-
-/// The proxy's command named NAME, if it is one.
-pub fn own(name: &str) -> Option<&'static str> {
-    COMMANDS.iter().map(|(command, ..)| *command).find(|command| *command == name)
-}
-
-/// The commands that `initialize` announces: each whose command of dbt
-/// lsp's the server LISTS, or that dbt's CLI does, when the system can CUT.
+/// The commands that `initialize` announces, in the table's order: each
+/// with a provider of dbt's present, dbt lsp when the server LISTS its
+/// command, dbt's CLI when the system can CUT.
 pub fn announced(lists: &dyn Fn(&str) -> bool, cut: bool) -> Vec<&'static str> {
-    let done = |(_, dbt, run): &&(&str, &str, bool)| lists(dbt) || (*run && cut);
-    COMMANDS.iter().filter(done).map(|(command, ..)| *command).collect()
+    let done = |own: &&capability::Capability| {
+        own.is_command() && route(own.name, lists, cut).is_ok_and(|provider| provider != Provider::Plus)
+    };
+    CAPABILITIES.iter().filter(done).map(|own| own.name).collect()
 }
 
-/// How a request of COMMAND goes: to dbt lsp when SERVES says that a server
-/// runs that listed its command; else by dbt's CLI, for a command that it
-/// does, when the system can CUT; else refused.
-pub fn route(command: &str, serves: &dyn Fn(&str) -> bool, cut: bool) -> Via {
-    let (_, dbt, run) = COMMANDS.iter().find(|(own, ..)| *own == command).copied().unwrap_or((command, "", false));
-    match (serves(dbt), run, cut) {
-        (true, ..) => Via::Server(dbt),
-        (false, true, true) => Via::Run,
-        (false, true, false) => {
-            Via::Refused(failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot"))
+/// Who answers a request of COMMAND: the first of its providers present,
+/// the proxy always, dbt lsp when SERVES says that a server runs that
+/// listed its command, dbt's CLI when the system can CUT; else the
+/// failure that says why none is.
+pub fn route(command: &str, serves: &dyn Fn(&str) -> bool, cut: bool) -> Result<Provider, Value> {
+    let own = capability::of(command).filter(|own| own.is_command());
+    let providers = own.map_or(&[][..], |own| own.providers);
+    let present = |provider: &&Provider| match provider {
+        Provider::Plus => true,
+        Provider::DbtLsp => own.and_then(|own| own.server).is_some_and(serves),
+        Provider::DbtCli => cut,
+    };
+    match providers.iter().find(present) {
+        Some(provider) => Ok(*provider),
+        None if providers.contains(&Provider::DbtCli) => {
+            Err(failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot"))
         }
-        (false, false, _) => {
-            Via::Refused(failure(command, "dbt-lsp-plus.show needs dbt lsp: dbt show alone would reach the network"))
-        }
+        None => Err(failure(command, "dbt-lsp-plus.show needs dbt lsp: dbt show alone would reach the network")),
     }
 }
 
@@ -272,14 +259,19 @@ mod tests {
     #[test]
     fn a_request_goes_to_dbt_lsp_when_it_listed_the_command_else_to_the_cli_under_the_cut() {
         let all = served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"]);
-        assert_eq!(route(COMPILE, &all, false), Via::Server("dbt.compileFile"));
-        assert_eq!(route(SHOW, &all, true), Via::Server("dbt.show"));
-        assert_eq!(route(NODES, &all, true), Via::Server("dbt.listNodes"));
+        let server = |command: &str| capability::of(command).and_then(|own| own.server);
+        assert_eq!(
+            [COMPILE, SHOW, NODES].map(server),
+            [Some("dbt.compileFile"), Some("dbt.show"), Some("dbt.listNodes")]
+        );
+        assert_eq!(route(COMPILE, &all, false), Ok(Provider::DbtLsp));
+        assert_eq!(route(SHOW, &all, true), Ok(Provider::DbtLsp));
+        assert_eq!(route(NODES, &all, true), Ok(Provider::DbtLsp));
         let none = served(&[]);
-        assert_eq!(route(COMPILE, &none, true), Via::Run);
-        assert_eq!(route(NODES, &none, true), Via::Run);
-        let refused = |via: Via| match via {
-            Via::Refused(failure) => failure["error"].as_str().unwrap().to_owned(),
+        assert_eq!(route(COMPILE, &none, true), Ok(Provider::DbtCli));
+        assert_eq!(route(NODES, &none, true), Ok(Provider::DbtCli));
+        let refused = |routed: Result<Provider, Value>| match routed {
+            Err(failure) => failure["error"].as_str().unwrap().to_owned(),
             other => panic!("{other:?}"),
         };
         assert!(refused(route(SHOW, &none, true)).contains("needs dbt lsp"), "never alone");
@@ -296,7 +288,13 @@ mod tests {
         assert_eq!(announced(&served(&[]), true), [COMPILE, NODES]);
         assert_eq!(announced(&served(&["dbt.show"]), false), [SHOW]);
         assert_eq!(announced(&served(&[]), false), Vec::<&str>::new());
-        assert_eq!((own(COMPILE), own("dbt.compileFile"), own(config::NODE_INFO)), (Some(COMPILE), None, None));
+        let providers = |name: &str| capability::of(name).map(|own| own.providers);
+        let dbt: &[Provider] = &[Provider::DbtLsp, Provider::DbtCli];
+        let plus: &[Provider] = &[Provider::Plus];
+        assert_eq!(
+            (providers(COMPILE), providers("dbt.compileFile"), providers(config::NODE_INFO)),
+            (Some(dbt), None, Some(plus))
+        );
     }
 
     #[test]

@@ -217,7 +217,7 @@ fn doctor(path: &Path, launch: Launch, command: &[String]) -> (Value, bool) {
 /// it did not run.  Refused before anything runs where the system cannot
 /// cut, without a project, or by the guard.
 fn select(selector: &str, command: &[String]) -> Value {
-    if let commands::Via::Refused(failure) = commands::route(commands::NODES, &|_| false, config::can_cut()) {
+    if let Err(failure) = commands::route(commands::NODES, &|_| false, config::can_cut()) {
         return failure;
     }
     let cwd = std::env::current_dir().unwrap_or_default();

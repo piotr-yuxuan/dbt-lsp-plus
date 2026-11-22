@@ -4,7 +4,7 @@
 //! server does not announce.
 
 use crate::capability::{self, CAPABILITIES, Provider};
-use crate::commands::{self, Via};
+use crate::commands;
 use crate::graph::{self, Graph, ServerNode};
 use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
@@ -1206,7 +1206,8 @@ impl<W: Write> Proxy<W> {
 
     /// A request of one of the proxy's commands for clients, COMMAND with
     /// PARAMS, kept as PENDING: sent to dbt lsp as its own command, queued
-    /// for dbt's CLI, or refused, as `commands::route` decides.
+    /// for dbt's CLI, answered here, or refused, as `commands::route`
+    /// decides.
     fn on_command(&mut self, command: &'static str, id: &Value, params: &Value, pending: Pending) {
         if self.shutdown {
             return self.reply_error(id, INVALID_REQUEST, "the client asked for shutdown");
@@ -1216,15 +1217,17 @@ impl<W: Write> Proxy<W> {
         };
         let serves = |dbt: &str| self.server.is_some() && self.server_commands.contains(dbt);
         match commands::route(command, &serves, self.runs_cli()) {
-            Via::Server(dbt) => {
+            Ok(Provider::DbtLsp) => {
+                let dbt = capability::of(command).and_then(|own| own.server);
                 let params = json!({"command": dbt, "arguments": arguments});
                 let request =
                     json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(&serde_json::to_vec(&request).unwrap_or_default());
             }
-            Via::Run => self.run_command(command, id, &arguments[0]),
-            Via::Refused(failure) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure})),
+            Ok(Provider::DbtCli) => self.run_command(command, id, &arguments[0]),
+            Ok(Provider::Plus) => self.answer(command, id, params, &pending),
+            Err(failure) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure})),
         }
     }
 
