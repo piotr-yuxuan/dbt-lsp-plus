@@ -180,8 +180,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     script makes one life do in place of an answer, apart from `main`'s
     loop over frames;
   - `Fake::compiles_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: which
-    of the client's notifications make dbt lsp 2.0.9 compile, apart from
-    those the script gives, so that `Fake::notified` stays a dispatch;
+    of the client's notifications make dbt lsp 2.0.9 compile, and what
+    they leave for the next (whether a document opened, the last
+    `didSave` and when, for the save window), as 2.0.9 does, apart from
+    `Fake::notified`'s dispatch of the script's own notifications, which
+    with these arms would pass a complexity of 10;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition`, `Proxy::on_references` and
     `Proxy::on_document`: the
