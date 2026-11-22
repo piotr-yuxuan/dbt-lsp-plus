@@ -1267,12 +1267,13 @@ rename of a CTE, which the server answers with null:
   lists it, the one its entry has here (`node::TYPES`): in workspace
   symbols and the call hierarchy too.  So a unit test is an Event and an
   exposure an Object in the call hierarchy as here, where only dbt lsp's
-  listing brings them; workspace symbols never list either.  A source
-  table is an Interface; a source, the group of its tables, which is no
-  node, a Module.  An entry runs from its first key to its last content:
-  the
-  blank lines and the comment lines less deep than its first key that end
-  it belong to what follows, while a key commented out and a block
+  listing brings them; workspace symbols never list either.  A doc,
+  which no entry declares, is a String (15) as its docs block is here,
+  and a type the table lacks a Class (5).  A source table is an
+  Interface; a source, the group of its tables, which is no node, a
+  Module.  An entry runs from its first key to its last content: the
+  blank lines and the comment lines less deep than its first key that
+  end it belong to what follows, while a key commented out and a block
   scalar's deeper lines stay in; in flow style it ends at its brace.  An
   entry without a name, such as one whose `name:` is being typed, is no
   symbol, and aliases are not followed.  Other YAML, such as
