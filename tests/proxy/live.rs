@@ -699,6 +699,15 @@ fn united_references(session: &mut Session, project: &Path) {
         started.elapsed() < Duration::from_millis(300)
     });
     assert!(in_time, "dbt lsp answered no references within 300 ms");
+    // Only a request that dbt lsp is asked can be late: so the first was.
+    let late = |m: &&Value| {
+        m["method"] == "window/logMessage"
+            && m["params"]["type"] == 4
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("textDocument/references within 300 ms"))
+    };
+    assert_eq!(session.received.iter().filter(late).count(), 1, "the first references, past the deadline");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.
