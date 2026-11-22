@@ -104,13 +104,16 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
     so that `answer` stays a dispatch;
-  - `Proxy::expire_listing`, `Proxy::start_restart` and
-    `Proxy::stop_server`: the deadline of a listing, and the start and the
-    teardown of the server process, each a resource's start or end;
+  - `Proxy::expire_listing`, `Proxy::tell_stalled`, `Proxy::start_restart`
+    and `Proxy::stop_server`: the deadline of a listing and that of a
+    compilation's end, and the start and the teardown of the server
+    process, each a resource's start or end;
   - `restart_delay`: the decision on a lost server, free of the clock,
     with tests of its own;
   - `changes_graph`: the decision whether a client's notification may
     change the graph, free of the file system, with tests of its own;
+  - `compile_failure`: what a compilation that compiled nothing reports,
+    read at the boundary, free of the session, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
     free of the file system, with tests of its own;
   - `project::versions_of`: the decision which versions a model's file
@@ -128,10 +131,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     failed;
   - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
     `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,
-    `Proxy::on_restarted`, `Proxy::on_time`, `Proxy::on_notification` and
-    `Proxy::on_problems`: one handler per kind of message or event, so that
-    `on_server`, `on_own_response`, `serve`, `handle`, `on_client` and
-    `on_parsed` stay dispatches;
+    `Proxy::on_restarted`, `Proxy::on_time`, `Proxy::on_notification`,
+    `Proxy::on_problems` and `Proxy::on_compiled`: one handler per kind of
+    message or event, so that `on_server`, `on_own_response`, `serve`,
+    `handle`, `on_client` and `on_parsed` stay dispatches;
   - `config::anchored`: the server command's relative paths made the
     proxy's directory's, apart from where dbt then runs, with tests of its
     own;
@@ -176,6 +179,12 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Fake::misbehaves` in `tests/support/fake_dbt_lsp.rs`: what the
     script makes one life do in place of an answer, apart from `main`'s
     loop over frames;
+  - `Fake::compiles_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: which
+    of the client's notifications make dbt lsp 2.0.9 compile, and what
+    they leave for the next (whether a document opened, the last
+    `didSave` and when, for the save window), as 2.0.9 does, apart from
+    `Fake::notified`'s dispatch of the script's own notifications, which
+    with these arms would pass a complexity of 10;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition`, `Proxy::on_references` and
     `Proxy::on_document`: the

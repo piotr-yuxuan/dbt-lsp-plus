@@ -969,6 +969,140 @@ fn a_refused_restart_ends_the_progress_it_began() {
 }
 
 #[test]
+fn the_fake_compiles_as_dbt_lsp_2_0_9_does() {
+    // The proxy's first listing held, so that the fake's own compilations are all that come.
+    let (mut session, log) = Session::fake("fake-compiles", json!({"hold": [ALL]}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    until_logged(&log, "the held listing", |_| listings(&log, "*") == 1);
+    barrier(&mut session);
+    let compilations = |session: &Session| -> Vec<(String, Value)> {
+        let compiling = session.received.iter().filter(|m| m["method"].as_str().is_some_and(|m| m.contains("Compile")));
+        compiling.map(|m| (m["method"].as_str().unwrap().to_owned(), m["params"]["compile_type"].clone())).collect()
+    };
+    let one = [
+        ("dbt/lspCompileStart", "incremental"),
+        ("dbt/lspCompileComplete", "incremental"),
+        ("dbt/lspBackgroundCompileStart", "full"),
+        ("dbt/lspBackgroundCompileComplete", "full"),
+    ]
+    .map(|(method, compile_type)| (method.to_owned(), json!(compile_type)));
+    assert_eq!(compilations(&session), one, "the first didOpen's");
+    let completion = session.received.iter().find(|m| m["method"] == "dbt/lspCompileComplete").unwrap();
+    let mut keys: Vec<&str> = completion["params"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let o4 = [
+        "adapter_type",
+        "adapter_unique_id",
+        "cause",
+        "compile_type",
+        "dbt_version",
+        "duration_ms",
+        "errors",
+        "models_count",
+        "project_id",
+    ];
+    assert_eq!(keys, o4, "2.0.9's keys");
+    let watched = |paths: &[&str]| {
+        let changes: Vec<Value> = paths.iter().map(|p| json!({"uri": uri(&fixture().join(p)), "type": 2})).collect();
+        json!({"changes": changes})
+    };
+    session.notify("workspace/didChangeWatchedFiles", watched(&["models/marts/orders.sql"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session), [&one[..], &one[..]].concat(), "a model's watched change");
+    session.notify("workspace/didChangeWatchedFiles", watched(&["models/staging/_sources.yml"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session), [&one[..], &one[..], &one[..]].concat(), "a properties file's");
+    session.notify("workspace/didChangeWatchedFiles", watched(&["target/compiled/shop/x.sql", "logs/dbt-lsp.log"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session).len(), 12, "dbt lsp's own output");
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    session.notify("workspace/didChangeWatchedFiles", watched(&["models/marts/orders.sql"]));
+    barrier(&mut session);
+    assert_eq!(
+        compilations(&session),
+        [&one[..], &one[..], &one[..], &one[..]].concat(),
+        "a save and its watched event"
+    );
+    assert_eq!(listings(&log, "*"), 1, "no listing compiled");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_compilation_that_compiled_nothing_is_said_once() {
+    let warning = json!({"code": "1005", "severity": "Warning",
+                         "message": "[InvalidConfig (dbt1005)]: doc macro reference 'no_such_doc' not found\n  --> models/marts/_models.yml:7:22"});
+    let error = json!({"code": "1005", "severity": "Error",
+                       "message": "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found\n(in :1:1)"});
+    // Every compilation fails as dbt lsp 2.0.9's does with a profile's env_var missing.
+    let failed = json!({"errors": [warning, error], "models_count": null});
+    let (mut session, log) = Session::fake("compiled-nothing", json!({"compile_complete": failed}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    until_logged(&log, "the first listing", |_| listings(&log, "*") == 1);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    until_logged(&log, "the listing after the save", |_| listings(&log, "*") == 2);
+    // Once shutdown is answered, every compilation before it has reached the client.
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    let compiling: Vec<&Value> =
+        session.received.iter().filter(|m| m["method"].as_str().is_some_and(|m| m.contains("Compile"))).collect();
+    let methods: Vec<&str> = compiling.iter().map(|m| m["method"].as_str().unwrap()).collect();
+    let one = ["dbt/lspCompileStart", "dbt/lspCompileComplete", "dbt/lspBackgroundCompileComplete"];
+    // The first didOpen's, the listings' and the save's, each with its background completion alone.
+    assert!(methods.len() >= 9 && methods.chunks(3).all(|three| three == one), "{methods:?}");
+    let completions: Vec<&Value> =
+        compiling.iter().filter(|m| m["method"] != "dbt/lspCompileStart").map(|m| &m["params"]).collect();
+    let as_sent = |params: &&Value| {
+        params["errors"] == failed["errors"]
+            && params["models_count"].is_null()
+            && params["compile_type"] == "incremental"
+    };
+    assert!(completions.iter().all(as_sent), "as the fake sent them: {completions:?}");
+    let shown: Vec<&Value> =
+        session.received.iter().filter(|m| m["method"] == "window/showMessage").map(|m| &m["params"]).collect();
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    let text = shown[0]["message"].as_str().unwrap();
+    assert_eq!(shown[0]["type"], 1);
+    assert!(text.contains("environment variable 'X' not found") && text.contains("logs/dbt-lsp.log"), "{text}");
+    assert!(!text.contains("no_such_doc"), "a warning quoted: {text}");
+    session.notify("exit", Value::Null);
+    assert!(session.wait().success());
+}
+
+#[test]
+fn the_failures_said_stay_said_across_a_restart() {
+    let error = json!({"code": "1005", "severity": "Error",
+                       "message": "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found\n(in :1:1)"});
+    // Both lives fail alike; the first exits on a hover.
+    let failed = json!({"errors": [error], "models_count": null});
+    let script = json!({"exit_on": "textDocument/hover", "exit_life": 1, "compile_complete": failed});
+    let (mut session, log) = Session::fake("compiled-nothing-restart", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let shown = |m: &Value, start: &str, end: &str| {
+        let text = m["params"]["message"].as_str().unwrap_or_default();
+        m["method"] == "window/showMessage" && text.starts_with(start) && text.ends_with(end)
+    };
+    session.wait_for(|m| shown(m, "dbt lsp compiled nothing", ""));
+    session.request("textDocument/hover", hover_at_start(&orders));
+    session.wait_for(|m| shown(m, "dbt lsp exited", "restarting it in 1 s."));
+    let restarted = session.received.len();
+    // The second life's compilations, of its replayed didOpen and its listing, before its listing's answer.
+    until_logged(&log, "the second life's listing", |_| {
+        life(&log, 2).iter().any(|m| m["params"]["arguments"][0] == "*")
+    });
+    barrier(&mut session);
+    let compiled = session.received[restarted..].iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+    assert!(compiled >= 1, "no compilation of the second life");
+    let said = session.received.iter().filter(|m| shown(m, "dbt lsp compiled nothing", "")).count();
+    assert_eq!(said, 1, "said again after the restart");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let (mut session, log) = Session::fake("no-feedback", json!({"answers": {ALL: all}}));
