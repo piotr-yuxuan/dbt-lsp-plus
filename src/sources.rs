@@ -92,7 +92,7 @@ fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
         Target::Source { source } => (&[&project.root_package], source),
         Target::Table { source, table } => (&[&project.root_package, source], table),
     };
-    let parent = parents.iter().try_fold(config.get("sources")?, |node, name| node.get(name))?;
+    let parent = parents.iter().try_fold(config.get("sources")?, |tree, name| tree.get(name))?;
     let (key, _) = parent.entry(key)?;
     let (_, range) = project::written(text, &LineStarts::new(text), key)?;
     Some(Occurrence { path, range, declaration: false })
