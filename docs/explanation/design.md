@@ -1608,7 +1608,8 @@ kept none of its problems, and the session answers as alone but for what
   `initialized`, when the client declares
   `workspace.didChangeWatchedFiles.dynamicRegistration`.
 - The dead server's pending requests fail once each, but the merged ones,
-  which get the proxy's part or empty; a `$/progress` it
+  which get the proxy's part or empty, else that failure (see "Modes");
+  a `$/progress` it
   began and never ended is ended for the client, unless `shutdown` came
   first: after it, the proxy sends nothing but answers.  Its diagnostics
   stay until the new server's first compilation, which publishes every
