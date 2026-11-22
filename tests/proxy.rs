@@ -1011,13 +1011,20 @@ fn the_fake_compiles_as_dbt_lsp_2_0_9_does() {
     session.notify("workspace/didChangeWatchedFiles", watched(&["models/marts/orders.sql"]));
     barrier(&mut session);
     assert_eq!(compilations(&session), [&one[..], &one[..]].concat(), "a model's watched change");
+    session.notify("workspace/didChangeWatchedFiles", watched(&["models/staging/_sources.yml"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session), [&one[..], &one[..], &one[..]].concat(), "a properties file's");
     session.notify("workspace/didChangeWatchedFiles", watched(&["target/compiled/shop/x.sql", "logs/dbt-lsp.log"]));
     barrier(&mut session);
-    assert_eq!(compilations(&session).len(), 8, "dbt lsp's own output");
+    assert_eq!(compilations(&session).len(), 12, "dbt lsp's own output");
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
     session.notify("workspace/didChangeWatchedFiles", watched(&["models/marts/orders.sql"]));
     barrier(&mut session);
-    assert_eq!(compilations(&session), [&one[..], &one[..], &one[..]].concat(), "a save and its watched event");
+    assert_eq!(
+        compilations(&session),
+        [&one[..], &one[..], &one[..], &one[..]].concat(),
+        "a save and its watched event"
+    );
     assert_eq!(listings(&log, "*"), 1, "no listing compiled");
     assert!(session.finish().success());
 }

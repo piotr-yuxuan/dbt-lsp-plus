@@ -916,6 +916,13 @@ listings, `*` and on its answer `source:*`, then the same after a
   A later compilation cut short by a save, a background one cut short,
   and a cancelled listing past the first compilation all kept
   `models_count` set.
+- S5, found by plan 035's second review on the fixture, dbt lsp alone:
+  after the first compilation, one watched event alone every 4 s, of
+  `models/staging/_sources.yml` (type 2), `macros/money.sql` (2), a new
+  model (1, `models_count` 7), its deletion (3, 6 again),
+  `dbt_project.yml` (2) and `models/marts/orders.sql` (2): each made one
+  foreground compilation, 83 to 91 ms, then a full background pair about
+  1.1 s later.
 
 So a compilation that compiled nothing reports `models_count` null and
 an entry of severity `Error` (S1, S2); `models_count` null with no error
@@ -924,9 +931,10 @@ error in a model leaves it a count.
 
 The fake (`tests/support/fake_dbt_lsp.rs`) compiles on the triggers
 seen: the first `didOpen`, each `didSave`, each listing, and a watched
-change (type 2) of a `.sql` file under `models/`, as 2.0.9 compiled on
-a changed model; it compiles on no other type of change nor any other
-file, which no probe tried.  Its window of 1 s, within which a watched
+event with a change of any type under its root outside `target/` and
+`logs/`, as 2.0.9 compiled on a model changed, created or deleted, a
+properties file, a macro and `dbt_project.yml` (O3, S5); other files,
+such as under `dbt_packages/` or `.git/`, no probe tried.  Its window of 1 s, within which a watched
 event of the file a `didSave` named compiles nothing more, is its own,
 chosen between O3's two cases (back to back, one compilation; 6 s
 apart, two), and no live test checks it.  Its frames carry O4's keys,
@@ -1958,8 +1966,8 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     them, no loop, at most three retries, none while the client's is pending
     nor after `shutdown`, an empty `*` and failed or cancelled listings
     keeping the graph;
-  - the compilations: the fake's as 2.0.9's, on a model's watched change,
-    on none of dbt's output alone, once for a save and its watched event,
+  - the compilations: the fake's as 2.0.9's, on a model's or a properties
+    file's watched change, on none of dbt's output alone, once for a save and its watched event,
     each with O4's keys and followed by its background pair; one that
     compiled nothing said once across several, and across a restart whose
     server fails alike, with dbt's first error and never a warning, its

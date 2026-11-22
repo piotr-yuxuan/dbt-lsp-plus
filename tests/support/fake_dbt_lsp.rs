@@ -9,13 +9,14 @@
 //! - it compiles, which it announces with `dbt/lspCompileStart` then
 //!   `dbt/lspCompileComplete`, after the first `didOpen`, after each
 //!   `didSave`, after each `workspace/didChangeWatchedFiles` with a change
-//!   (type 2) of a `.sql` file under `models/` of its root (its
-//!   `--project-dir`, else `initialize`'s `rootUri`), as 2.0.9 compiled on
-//!   a changed model, other types and files not observed, but for one
-//!   within 1 s of a `didSave` whose every change names the file that
-//!   `didSave` named, a window of the fake's own that no live test checks,
-//!   and for each `dbt.listNodes`, whose answer comes between the two
-//!   notifications;
+//!   of any type under its root (its `--project-dir`, else `initialize`'s
+//!   `rootUri`) outside `target/` and `logs/`, as 2.0.9 compiled on a
+//!   model changed, created or deleted, a properties file, a macro and
+//!   `dbt_project.yml` (other files, such as under `dbt_packages/` or
+//!   `.git/`, not observed), but for one within 1 s of a `didSave` whose
+//!   every change names the file that `didSave` named, a window of the
+//!   fake's own that no live test checks, and for each `dbt.listNodes`,
+//!   whose answer comes between the two notifications;
 //!   their params carry the keys of 2.0.9's, `compile_type` `incremental`,
 //!   the completion's `errors` `[]` and `models_count` 6 by default;
 //! - after each such compilation, its background one, which 2.0.9 sends
@@ -305,16 +306,16 @@ impl Fake {
                 let changes = params["changes"].as_array().map_or(&[][..], Vec::as_slice);
                 let saved = self.saved.as_ref().filter(|(_, at)| now.duration_since(*at) < SAVE_WINDOW);
                 let covered = saved.is_some_and(|(uri, _)| changes.iter().all(|change| change["uri"] == *uri));
-                // A model changed, which 2.0.9 was seen to compile on.
-                let model = |change: &Value| {
+                // Under the root, outside what 2.0.9 writes at each compilation.
+                let source = |change: &Value| {
                     let path = change["uri"].as_str().and_then(|uri| url::Url::parse(uri).ok()?.to_file_path().ok());
-                    let sql =
-                        path.as_ref().is_some_and(|path| path.extension().is_some_and(|extension| extension == "sql"));
-                    let root = self.root.as_deref();
-                    let under = path.is_some_and(|path| root.is_some_and(|root| path.starts_with(root.join("models"))));
-                    change["type"] == 2 && sql && under
+                    path.is_some_and(|path| {
+                        let relative = self.root.as_deref().and_then(|root| path.strip_prefix(root).ok());
+                        relative
+                            .is_some_and(|relative| !relative.starts_with("target") && !relative.starts_with("logs"))
+                    })
                 };
-                !covered && changes.iter().any(model)
+                !covered && changes.iter().any(source)
             }
             _ => false,
         }
