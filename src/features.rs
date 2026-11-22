@@ -2,8 +2,8 @@
 //! The answers of the features the proxy adds, as LSP JSON.  Pure: the
 //! texts, the project and the graph are inputs.
 
-use crate::config::ParseIndex;
 use crate::graph::{Edge, Graph, Item};
+use crate::navigation::Lookup;
 use crate::node::{self, TYPES, Type};
 use crate::project::Project;
 use crate::properties;
@@ -287,15 +287,18 @@ pub fn merge_locations(message: &Value, found: &Value, path_of: &dyn Fn(&str) ->
     merged
 }
 
-/// The relation hints of TEXT, whose calls are CALLS: after each `ref` or
-/// `source` whose node INDEX knows, right after its closing parenthesis,
-/// the relation dbt builds, or `ephemeral`; none for a disabled node, an
-/// analysis, or a `ref` that a keyword argument follows, whose version the
-/// index cannot tell.  Only those within RANGE, a range of byte offsets.
+/// The relation hints of TEXT, the file at PATH, whose calls are CALLS:
+/// after each `ref` or `source`, right after its closing parenthesis, the
+/// relation dbt builds for the node its definition leads to
+/// (`Lookup::node`) by LOOKUP, or `ephemeral`; none for a disabled node,
+/// or a `ref` that a keyword argument follows, whose closing parenthesis is
+/// not right after its name.  Only those within RANGE, a range of byte
+/// offsets.
 pub fn inlay_hints(
     text: &str,
     calls: Vec<scan::Call>,
-    index: &ParseIndex,
+    lookup: &Lookup,
+    path: &Path,
     range: Range<usize>,
     encoding: Encoding,
 ) -> Vec<Value> {
@@ -315,10 +318,7 @@ pub fn inlay_hints(
         if !(range.start..=range.end).contains(&after) {
             return None;
         }
-        let built = |node: &&Value| {
-            node["disabled"] != true && Type::named(node["resource_type"].as_str().unwrap_or_default()).built
-        };
-        let node = index.named(&call.name).filter(built)?;
+        let node = lookup.node(path, &call.name).filter(|node| node["disabled"] != true)?;
         let label = match node["config"]["materialized"].as_str() {
             Some("ephemeral") => "ephemeral",
             _ => node["relation"].as_str()?,
@@ -347,6 +347,7 @@ pub fn merge_hints(message: &Value, hints: &[Value]) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ParseIndex;
     use crate::project;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -730,16 +731,20 @@ mod tests {
     fn index() -> ParseIndex {
         let model = |name: &str, materialized: &str, relation: Value| {
             json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
-                   "package_name": "shop", "relation_name": relation, "config": {"materialized": materialized}})
+                   "package_name": "shop", "original_file_path": format!("models/{name}.sql"),
+                   "relation_name": relation, "config": {"materialized": materialized}})
         };
         let raw = json!({"unique_id": "source.shop.raw.orders", "name": "orders", "source_name": "raw",
                          "resource_type": "source", "package_name": "shop", "relation_name": "\"raw_orders\"",
                          "config": {}});
-        // Ephemeral, so that only the rule for them keeps their hint away.
+        // Ephemeral, so that only their lookup keeps their hint away: a `ref` names no analysis, nor a node
+        // the last manifest disables.
         let analysis = json!({"unique_id": "analysis.shop.counts", "name": "counts", "resource_type": "analysis",
-                              "package_name": "shop", "config": {"materialized": "ephemeral"}});
+                              "package_name": "shop", "original_file_path": "analyses/counts.sql",
+                              "config": {"materialized": "ephemeral"}});
         let off = json!({"unique_id": "model.shop.off", "name": "off", "resource_type": "model",
-                         "package_name": "shop", "config": {"materialized": "ephemeral"}});
+                         "package_name": "shop", "original_file_path": "models/off.sql",
+                         "config": {"materialized": "ephemeral"}});
         ParseIndex::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
             "model.shop.orders": model("orders", "table", json!("\"shop\".\"main\".\"orders\"")),
             "model.shop.eph": model("eph", "ephemeral", Value::Null),
@@ -748,9 +753,36 @@ mod tests {
             "disabled": {"model.shop.off": [off]}}))
     }
 
+    /// The project at /p that `index()` was parsed from: the root `shop`, its source `raw.orders`, and no files,
+    /// since `hinted` runs in two tests at once.
+    fn lookup_project() -> Project {
+        let text = "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: orders\n";
+        let sources = project::source_tables_in(
+            "shop",
+            Path::new("/p/models/_sources.yml"),
+            text,
+            &crate::yaml::parse(text).unwrap(),
+        );
+        Project {
+            root_package: "shop".into(),
+            packages: HashMap::from([("shop".to_owned(), PathBuf::from("/p"))]),
+            entities: Vec::new(),
+            sources,
+            files: HashMap::new(),
+        }
+    }
+
     /// The labels of TEXT's hints with the text up to each, all of TEXT asked.
     fn hinted(text: &str) -> Vec<(String, String)> {
-        let hints = inlay_hints(text, scan::calls(text), &index(), 0..text.len(), Encoding::Utf16);
+        let (project, index, path) = (lookup_project(), index(), Path::new("/p/models/x.sql"));
+        let hints = inlay_hints(
+            text,
+            scan::calls(text),
+            &Lookup::new(&project, Some(&index)),
+            path,
+            0..text.len(),
+            Encoding::Utf16,
+        );
         let lines = LineStarts::new(text);
         let before = |hint: &Value| text[..lines.offset_of(&hint["position"], Encoding::Utf16).unwrap()].to_owned();
         hints.iter().map(|hint| (hint["label"].as_str().unwrap().to_owned(), before(hint))).collect()
@@ -777,7 +809,8 @@ mod tests {
     #[test]
     fn a_relation_hint_is_dbt_s_or_none() {
         assert_eq!(hinted("{{ ref('eph') }}"), [("ephemeral".to_owned(), "{{ ref('eph')".to_owned())]);
-        // A version the index cannot tell, a disabled node, an analysis, an unknown node.
+        // A `ref` that a keyword argument follows, with no closing parenthesis right after its name, a disabled node,
+        // an analysis, an unknown node.
         for text in [
             "{{ ref('orders', v=2) }}",
             "{{ ref('orders', version=2) }}",
@@ -787,8 +820,15 @@ mod tests {
         ] {
             assert_eq!(hinted(text), Vec::new(), "{text}");
         }
-        let hints =
-            inlay_hints("{{ ref('orders') }}", scan::calls("{{ ref('orders') }}"), &index(), 0..3, Encoding::Utf16);
+        let (project, index, path) = (lookup_project(), index(), Path::new("/p/models/x.sql"));
+        let hints = inlay_hints(
+            "{{ ref('orders') }}",
+            scan::calls("{{ ref('orders') }}"),
+            &Lookup::new(&project, Some(&index)),
+            path,
+            0..3,
+            Encoding::Utf16,
+        );
         assert_eq!(hints, Vec::<Value>::new());
     }
 
@@ -796,7 +836,15 @@ mod tests {
     fn a_relation_hint_has_its_kind_tooltip_and_place_in_utf_16() {
         // 𝄞 is two UTF-16 units before the call on its line.
         let text = "select '𝄞' as x, * from {{ ref('orders') }}";
-        let hints = inlay_hints(text, scan::calls(text), &index(), 0..text.len(), Encoding::Utf16);
+        let (project, index, path) = (lookup_project(), index(), Path::new("/p/models/x.sql"));
+        let hints = inlay_hints(
+            text,
+            scan::calls(text),
+            &Lookup::new(&project, Some(&index)),
+            path,
+            0..text.len(),
+            Encoding::Utf16,
+        );
         let expected = json!([{"position": {"line": 0, "character": 41}, "label": "\"shop\".\"main\".\"orders\"",
                                "kind": 1, "paddingLeft": true, "tooltip": "model.shop.orders"}]);
         assert_eq!(Value::Array(hints), expected);

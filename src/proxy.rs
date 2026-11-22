@@ -1352,12 +1352,14 @@ impl<W: Write> Proxy<W> {
 
     /// Whether the position of PARAMS names a node, and which node of INDEX:
     /// that of the `ref` or `source` there, or of the entry whose `name:` is
-    /// there, else, when FILE, the one node its document defines, but never
-    /// in a YAML file: there the manifest places the generic tests a file
-    /// declares beside its node, a YAML snapshot's included, so neither the
-    /// scan nor `of_file` can name one node.  None when it names nothing;
-    /// `Some(None)` when it names a node that INDEX lacks, or that, without
-    /// an index, the scan tells is named but cannot give.
+    /// there, as `navigation::Lookup::node` finds it, else, when FILE, the
+    /// one node its document defines, but never in a YAML file: there the
+    /// manifest places the generic tests a file declares beside its node, a
+    /// YAML snapshot's included, so neither the scan nor `of_file` can name
+    /// one node.  None when it names nothing; `Some(None)` when it names a
+    /// node that the lookup does not find, as over a project that does not
+    /// read, or that, without an index, the scan tells is named but cannot
+    /// give.
     fn node_at<'a>(
         &self,
         index: Option<&'a config::ParseIndex>,
@@ -1373,7 +1375,9 @@ impl<W: Write> Proxy<W> {
         };
         if let Some(call) = scanned.calls.iter().find(inside) {
             let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
-            return named.then(|| index.and_then(|index| index.named(&call.name)));
+            return named.then(|| {
+                self.project().and_then(|project| navigation::Lookup::new(&project, index).node(&path, &call.name))
+            });
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
         let entry = navigation::reference_at(&path, &scanned, offset).filter(|name| {
@@ -1385,8 +1389,7 @@ impl<W: Write> Proxy<W> {
         });
         if let Some(name) = entry {
             let project = self.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
-            return Some(index.zip(found.first()).and_then(|(index, found)| index.node(&found.id)));
+            return Some(navigation::Lookup::new(&project, index).node(&path, &name));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
         if let Some(index) = index {
@@ -1974,12 +1977,14 @@ impl<W: Write> Proxy<W> {
                 // A panic leaves the server's answer as it is.
                 let hints = panic::catch_unwind(AssertUnwindSafe(|| {
                     let index = self.parsing.index.as_ref()?;
+                    let project = self.project()?;
                     let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
                     let lines = LineStarts::new(&text);
                     let start = lines.offset_of(params.pointer("/range/start")?, self.encoding)?;
                     let end = lines.offset_of(params.pointer("/range/end")?, self.encoding)?;
                     let calls = sources::file_calls(&path, &text);
-                    Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
+                    let lookup = navigation::Lookup::new(&project, Some(index));
+                    Some(features::inlay_hints(&text, calls, &lookup, &path, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
                 (hints.map_or(empty, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
@@ -3324,6 +3329,78 @@ mod tests {
         assert_eq!(proxy.node_info(&at(text.find("'f'").unwrap() + 1)), Some(Answer::Empty));
         let Some(Answer::Found(start)) = proxy.node_info(&at(0)) else { panic!("no node at the file's start") };
         assert_eq!(start["unique_id"], "model.shop.uses_f");
+    }
+
+    #[test]
+    fn hover_node_information_and_hints_describe_the_node_a_ref_s_definition_leads_to() {
+        const USES: &str = "select * from {{ ref('dim', v=1) }} join {{ ref('dim') }} join {{ ref('stale') }}";
+        const DIM: &str =
+            "version: 2\nmodels:\n  - name: dim\n    latest_version: 2\n    versions:\n      - v: 1\n      - v: 2\n";
+        let scratch = |name: &str, config: &str| {
+            let files = [
+                ("dbt_project.yml", config),
+                ("models/dim_v1.sql", "select 1"),
+                ("models/dim_v2.sql", "select 2"),
+                ("models/stale.sql", "select 3"),
+                ("models/_dim.yml", DIM),
+                ("models/uses.sql", USES),
+            ];
+            project::scratch_project(name, &files)
+        };
+        let version = |number: u64| {
+            json!({"unique_id": format!("model.shop.dim.v{number}"), "name": "dim", "resource_type": "model",
+                   "package_name": "shop", "original_file_path": format!("models/dim_v{number}.sql"),
+                   "version": number, "latest_version": 2, "relation_name": format!("v{number}"), "config": {}})
+        };
+        let versions = json!({"model.shop.dim.v1": version(1), "model.shop.dim.v2": version(2)});
+        // Disabled by a parse before the last, which lacks it, while its file remains.
+        let stale = json!({"unique_id": "model.shop.stale", "name": "stale", "resource_type": "model",
+                           "package_name": "shop", "original_file_path": "models/stale.sql",
+                           "config": {"materialized": "ephemeral"}});
+        let proxy_on = |root: &Path| {
+            let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root.to_owned()));
+            proxy.table = modes::Table::new(&modes::Settings::default(), &|_| false);
+            let shop = json!({"project_name": "shop"});
+            let mut index = config::ParseIndex::of(
+                &json!({"metadata": shop, "nodes": versions, "disabled": {"model.shop.stale": [stale]}}),
+            );
+            index.overlay(config::ParseIndex::of(&json!({"metadata": shop, "nodes": versions})));
+            proxy.parsing.index = Some(index);
+            proxy
+        };
+        // A hover and nodeInfo at `ref('dim', v=1)`'s argument, and hints over the whole of `uses.sql`.
+        let asked = |root: &Path| {
+            let uri = features::uri(&root.join("models/uses.sql"));
+            let position = json!({"line": 0, "character": USES.find("'dim'").unwrap() + 1});
+            let end = json!({"line": 0, "character": USES.len()});
+            (
+                json!({"textDocument": {"uri": uri}, "position": position}),
+                json!({"arguments": [{"uri": uri, "position": position}]}),
+                json!({"textDocument": {"uri": uri}, "range": {"start": {"line": 0, "character": 0}, "end": end}}),
+            )
+        };
+        let root = scratch("proxy-node-lookup", "name: shop\n");
+        let (at, info, hints) = asked(&root);
+        let mut proxy = proxy_on(&root);
+        let Some(Answer::Found(node)) = proxy.node_info(&info) else { panic!("no node at ref('dim', v=1)") };
+        assert_eq!(node["unique_id"], "model.shop.dim.v1");
+        let Part::Hover(text, _) = proxy.hover_part(&at) else { panic!("no hover at ref('dim', v=1)") };
+        assert!(text.contains("`model.shop.dim.v1`"), "{text}");
+        let Kept::Part(Part::Hints(hints)) = proxy.remember("textDocument/inlayHint", &json!(1), &hints).0.kept else {
+            panic!("no hints in uses.sql")
+        };
+        let labels: Vec<&Value> = hints.iter().map(|hint| &hint["label"]).collect();
+        assert_eq!(labels, [&json!("v2")], "none after `v=1)`, none for the stale disabled node");
+        // Over a project that does not read, none, as its definition fails there.
+        let broken = scratch("proxy-node-lookup-unreadable", "name: [");
+        let (at, info, hints) = asked(&broken);
+        let mut proxy = proxy_on(&broken);
+        assert_eq!(proxy.node_info(&info), Some(Answer::Empty));
+        assert!(proxy.hover_part(&at) == Part::Nothing, "a hover's part");
+        let kept = proxy.remember("textDocument/inlayHint", &json!(1), &hints).0.kept;
+        assert!(kept == Kept::Part(Part::Empty), "the hints' part");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(broken).unwrap();
     }
 
     #[test]

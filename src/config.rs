@@ -7,7 +7,6 @@
 use crate::graph::ServerNode;
 use crate::node::Type;
 use crate::parse_log;
-use crate::reference::{Kind, Name};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -290,34 +289,6 @@ impl ParseIndex {
         let mut nodes: Vec<ServerNode> = latest.filter(listed).filter_map(ServerNode::of).collect();
         nodes.sort_by(|one, other| one.id.cmp(&other.id));
         nodes
-    }
-
-    /// The node that a `ref` or a `source` of NAME names, as dbt looks it
-    /// up: an enabled one first, in the package the call names, else the
-    /// root project first, then any.
-    pub fn named(&self, name: &Name) -> Option<&Value> {
-        let names = |node: &&Value| match &name.kind {
-            Kind::Ref => {
-                Type::named(node["resource_type"].as_str().unwrap_or_default()).refable
-                    && node["name"] == name.name.as_str()
-                    && name.package.as_deref().is_none_or(|package| node["package_name"] == package)
-            }
-            Kind::Table { source } => {
-                node["resource_type"] == "source"
-                    && node["source_name"] == source.as_str()
-                    && node["name"] == name.name.as_str()
-            }
-            _ => false,
-        };
-        let candidates = self.named.get(&name.name).into_iter().flatten().filter_map(|id| self.nodes.get(id));
-        let mut found: Vec<&Value> = candidates.filter(names).collect();
-        // A versioned model without a version named is its latest version.
-        let latest = |node: &&Value| node["version"] == node["latest_version"] || node["latest_version"].is_null();
-        found.sort_by_key(|node| {
-            let package = node["package_name"] != self.root_package.as_str();
-            (node["disabled"] == true, package, !latest(node), node["unique_id"].to_string())
-        });
-        found.first().copied()
     }
 
     /// The one node of the root project that the file at PATH, relative to
@@ -736,17 +707,9 @@ mod tests {
     }
 
     #[test]
-    fn finds_a_named_node_as_dbt_looks_it_up_and_the_node_of_a_file() {
+    fn finds_the_one_node_of_a_file_of_the_root() {
         let index = ParseIndex::of(&manifest());
         let id = |node: Option<&Value>| node.map(|node| node["unique_id"].as_str().unwrap().to_owned());
-        let orders = Name { kind: Kind::Ref, package: None, name: "orders".into(), version: None };
-        assert_eq!(id(index.named(&orders)).as_deref(), Some("model.shop.orders"), "the root project first");
-        let theirs = Name { kind: Kind::Ref, package: Some("utils".into()), name: "orders".into(), version: None };
-        assert_eq!(id(index.named(&theirs)).as_deref(), Some("model.utils.orders"));
-        let customers = Name::new(Kind::Table { source: "raw".into() }, None, "customers");
-        assert_eq!(id(index.named(&customers)).as_deref(), Some("source.shop.raw.customers"));
-        let dim = Name { kind: Kind::Ref, package: None, name: "dim".into(), version: None };
-        assert_eq!(id(index.named(&dim)).as_deref(), Some("model.shop.dim.v2"), "the latest version");
         assert_eq!(id(index.of_file("models/marts/orders.sql")).as_deref(), Some("model.shop.orders"));
         assert_eq!(index.of_file("models/marts/_marts.yml").map(|_| ()), Some(()), "one test only");
         assert_eq!(index.of_file("models/orders.sql"), None, "a package's file");
@@ -776,27 +739,6 @@ mod tests {
         let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
         assert_eq!(ids, ["source.shop.raw.b"]);
         assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
-    }
-
-    #[test]
-    fn an_enabled_node_wins_over_a_disabled_one_of_the_root() {
-        let model = |id: &str, package: &str| {
-            json!({"unique_id": id, "name": "customers", "resource_type": "model", "package_name": package,
-                   "relation_name": format!("\"{package}\""), "config": {}})
-        };
-        let manifest = json!({"metadata": {"project_name": "shop"},
-            "nodes": {"model.utils.customers": model("model.utils.customers", "utils")},
-            "disabled": {"model.shop.customers": [model("model.shop.customers", "shop")]}});
-        let mut index = ParseIndex::of(&manifest);
-        let customers = Name { kind: Kind::Ref, package: None, name: "customers".into(), version: None };
-        assert_eq!(index.named(&customers).unwrap()["unique_id"], "model.utils.customers");
-        // A newer manifest's names are found too.
-        let newer = json!({"metadata": {"project_name": "shop"},
-            "nodes": {"model.shop.fresh": {"unique_id": "model.shop.fresh", "name": "fresh", "resource_type": "model",
-                                           "package_name": "shop", "config": {}}}});
-        index.overlay(ParseIndex::of(&newer));
-        let fresh = Name { kind: Kind::Ref, package: None, name: "fresh".into(), version: None };
-        assert_eq!(index.named(&fresh).unwrap()["unique_id"], "model.shop.fresh");
     }
 
     #[test]
