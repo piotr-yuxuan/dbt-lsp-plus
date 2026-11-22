@@ -809,7 +809,20 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     let inside_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28},
                             "context": {"includeDeclaration": false}});
     let references = session.request("textDocument/references", inside_ref);
-    assert_eq!((references.get("error"), &references["result"]), (None, &json!([])), "{references}");
+    // A request that only dbt lsp answers says why none will; a definition with no target, with no server, is null.
+    let completion = session.request("textDocument/completion", json!({}));
+    let definition = session.request("textDocument/definition", position_in(&orders, "select", 1));
+    let lost = json!({"code": -32803, "message": "dbt lsp is lost for good: dbt lsp exited (exit status: 3)"});
+    // One assertion of the three, as clippy counts each.
+    assert_eq!(
+        [
+            (references.get("error"), &references["result"]),
+            (completion.get("result"), &completion["error"]),
+            (definition.get("error"), &definition["result"]),
+        ],
+        [(None, &json!([])), (None, &lost), (None, &Value::Null)],
+        "{references}, {completion}, {definition}"
+    );
     // The graph is the last parse's, as alone: the scan would add stg_customers.
     let outgoing = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
     let parsed = |calls: &Value| details(calls, "to") == ["macro.shop_utils.is_positive", "model.shop.stg_orders"];

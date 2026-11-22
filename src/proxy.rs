@@ -1975,7 +1975,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// A request of the client: routed by `route`; without a server,
-    /// `initialize` is answered here, and any other forwarded request fails.
+    /// `initialize` is answered here, and any other forwarded request fails,
+    /// with why when dbt lsp is lost for good.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         // The server would get two requests under one id.
         let listing = self.backend.running().and_then(|running| running.listings.listing.as_ref());
@@ -1998,9 +1999,14 @@ impl<W: Write> Proxy<W> {
                 self.initialize = None;
                 self.initialize_alone(id);
             }
-            // A merged request gets the proxy's answer alone, any other the failure.
+            // A merged request gets the proxy's answer alone, any other the failure: for good, or for now.
             (Route::Forward, false, _) => {
-                let answer = pending.unserved(self.markdown, Reason::NotRunning, &self.parsing);
+                let why = if let Life::Lost(why) = &self.backend.life {
+                    Reason::Lost(why.clone())
+                } else {
+                    Reason::NotRunning
+                };
+                let answer = pending.unserved(self.markdown, why, &self.parsing);
                 self.send_client(&answer.frame(id, &pending.name))
             }
         }
