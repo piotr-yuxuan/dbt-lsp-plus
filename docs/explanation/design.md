@@ -357,8 +357,10 @@ proxy's, its reference `'stg_orders'` (4:25-37, the quotes included)
 holding the proxy's name.  Once it has compiled, it answers a definition
 within 20 ms; but it took 1.2 s over the first references of the
 session, past the deadline, where the proxy answers alone and logs it,
-then 2 ms over each later one.  No test depends on those times.  The
-live test checks the answers, the proxy's (`navigation`), and that dbt
+then 2 ms over each later one.  One check depends on those times:
+`navigation` asserts that no definition was late, which holds while dbt
+lsp answers a definition within the 300 ms deadline.  The live test
+checks the answers, the proxy's (`navigation`), and that dbt
 lsp is asked: `the_union_in_front_of_the_real_dbt_lsp` records dbt
 lsp's input by `tee` in the server command, and counts there one
 definition and one references in `merge` at a claimed position.  The
