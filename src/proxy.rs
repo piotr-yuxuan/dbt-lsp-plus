@@ -1365,14 +1365,15 @@ impl<W: Write> Proxy<W> {
         file: bool,
     ) -> Option<Option<&'a Value>> {
         let (path, scanned, offset) = self.scan_at(params, None)?;
-        // A `ref` or a `source` names a node at its arguments; a function, which a YAML file's scan holds too,
-        // names none.
-        let naming = |call: &&scan::Call| {
-            matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. })
-                && call.arguments.iter().any(|range| range.start <= offset && offset <= range.end)
+        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
+        // The calls of `sources::file_calls`, which leave out the function calls that a YAML file's scan holds too.
+        let inside = |call: &&scan::Call| {
+            call.arguments.iter().any(|range| range.start <= offset && offset <= range.end)
+                && !(yaml && call.name.kind == reference::Kind::Function)
         };
-        if let Some(call) = scanned.calls.iter().find(naming) {
-            return Some(index.and_then(|index| index.named(&call.name)));
+        if let Some(call) = scanned.calls.iter().find(inside) {
+            let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
+            return named.then(|| index.and_then(|index| index.named(&call.name)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
         let entry = navigation::reference_at(&path, &scanned, offset).filter(|name| {
@@ -1387,7 +1388,6 @@ impl<W: Write> Proxy<W> {
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
             return Some(index.zip(found.first()).and_then(|(index, found)| index.node(&found.id)));
         }
-        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
         if let Some(index) = index {
             return index.of_file(&relative.to_string_lossy()).map(Some);
@@ -3303,6 +3303,24 @@ mod tests {
         let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
         assert!(!Arc::ptr_eq(&scanned, &project.files[&path]), "a scan of its own");
         assert_eq!(scanned.text, open);
+    }
+
+    #[test]
+    fn a_node_s_information_at_a_function_s_argument_in_sql_is_empty_and_at_its_start_the_file_s() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let path = root.join("models/marts/uses_f.sql");
+        let text = "select {{ function('f') }}(1) as v";
+        let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
+        proxy.documents.insert(path.clone(), text.to_owned());
+        let node = json!({"unique_id": "model.shop.uses_f", "name": "uses_f", "resource_type": "model",
+                          "package_name": "shop", "original_file_path": "models/marts/uses_f.sql", "config": {}});
+        let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_f": node}});
+        proxy.parsing.index = Some(config::ParseIndex::of(&manifest));
+        let at = |character: usize| json!({"arguments": [{"uri": features::uri(&path), "position": {"line": 0, "character": character}}]});
+        // A call whose argument holds the position names its node, or none, as a function's does.
+        assert_eq!(proxy.node_info(&at(text.find("'f'").unwrap() + 1)), Some(Answer::Empty));
+        let Some(Answer::Found(start)) = proxy.node_info(&at(0)) else { panic!("no node at the file's start") };
+        assert_eq!(start["unique_id"], "model.shop.uses_f");
     }
 
     #[test]
