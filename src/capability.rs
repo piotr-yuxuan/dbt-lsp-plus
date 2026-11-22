@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn each_kind_shows_today_s_word_and_each_listed_word_is_a_kind_s() {
         // The word that each kind's position showed before plan 045, and a dispatch's, which no position names.
-        let words = [
+        let mut words = vec![
             (Kind::Ref, "ref"),
             (Kind::UnitTestModel, "ref"),
             (Kind::Table { source: "raw".into() }, "source"),
@@ -293,9 +293,11 @@ mod tests {
             (Kind::Function, "function"),
             (Kind::Doc, "doc"),
             (Kind::Test, "test"),
-            (Kind::Entry { label: "model" }, "entry"),
             (Kind::Dispatch, "dispatch"),
         ];
+        // An entry of each label, a macro's and a function's included.
+        let labels = ["model", "seed", "snapshot", "analysis", "macro", "function"];
+        words.extend(labels.map(|label| (Kind::Entry { label }, "entry")));
         for (kind, word) in &words {
             assert_eq!(kind.flag(), *word, "{kind:?}");
         }
