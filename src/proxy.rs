@@ -183,6 +183,34 @@ impl Running {
     fn new(server: Server) -> Running {
         Running { server, listings: Listings::default(), compiling: Compiling::default() }
     }
+
+    /// Sends the listing of selector SLOT, under an id past NEXT_ID that no
+    /// request of the client's in FORWARDED carries, as the listing in
+    /// flight; nothing once the client asked for SHUTDOWN, after which LSP
+    /// allows only `exit`.
+    fn send_list(
+        &mut self,
+        slot: usize,
+        next_id: &mut u64,
+        forwarded: &HashMap<String, (Value, Pending)>,
+        shutdown: bool,
+    ) {
+        if shutdown {
+            return;
+        }
+        let id = loop {
+            *next_id += 1;
+            let id = format!("{OWN_ID}{next_id}");
+            if !forwarded.contains_key(&key(&json!(id))) {
+                break id;
+            }
+        };
+        let params = json!({"command": "dbt.listNodes", "arguments": [SELECTORS[slot]]});
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
+        self.listings.listing = Some((id, slot, Instant::now()));
+        // A failed write means the server is gone; its reader reports it.
+        let _ = rpc::write_body(&mut self.server.stdin, &serde_json::to_vec(&request).unwrap_or_default());
+    }
 }
 
 /// The proxy's listings of one process, and the nodes they gave: a new
@@ -1658,29 +1686,8 @@ impl<W: Write> Proxy<W> {
         if running.listings.listing.is_some() || client {
             running.listings.relist = true;
         } else {
-            self.send_list(0);
+            running.send_list(0, &mut self.next_id, &self.forwarded, self.shutdown);
         }
-    }
-
-    /// Sends the listing of selector SLOT, under an id that no pending
-    /// request of the client's carries; nothing once the client asked for
-    /// shutdown, after which LSP allows only `exit`.
-    fn send_list(&mut self, slot: usize) {
-        if self.shutdown {
-            return;
-        }
-        let id = loop {
-            self.next_id += 1;
-            let id = format!("{OWN_ID}{}", self.next_id);
-            if !self.forwarded.contains_key(&key(&json!(id))) {
-                break id;
-            }
-        };
-        let params = json!({"command": "dbt.listNodes", "arguments": [SELECTORS[slot]]});
-        let request = json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
-        let Some(running) = self.backend.running_mut() else { return };
-        running.listings.listing = Some((id, slot, Instant::now()));
-        self.send_server(&serde_json::to_vec(&request).unwrap_or_default());
     }
 
     /// Lists the graph if a change came while it could not be.
@@ -1709,7 +1716,8 @@ impl<W: Write> Proxy<W> {
         }
         let client = self.client_listing();
         // The process's listings beside the Backend's count of their nodes.
-        let Life::Running(Running { listings, .. }) = &mut self.backend.life else { return };
+        let Life::Running(running) = &mut self.backend.life else { return };
+        let listings = &mut running.listings;
         let Some((_, slot, _)) = listings.listing.take_if(|(own, ..)| own == id) else { return };
         let result = message.get("result").unwrap_or(&Value::Null);
         if result.get("error") == Some(&json!("Operation cancelled")) && listings.attempts < MAX_ATTEMPTS {
@@ -1723,7 +1731,7 @@ impl<W: Write> Proxy<W> {
         match (slot, listed) {
             (0, Some(nodes)) if !client => {
                 listings.listed = nodes;
-                return self.send_list(1);
+                return running.send_list(1, &mut self.next_id, &self.forwarded, self.shutdown);
             }
             // The client's own listing would cancel the second selector: start again after it.
             (0, Some(_)) => listings.relist = true,
@@ -1966,6 +1974,7 @@ impl<W: Write> Proxy<W> {
             (None, Some(id)) => self.on_server_response(id, message, &frame.body),
             // Two compilations that overlap are timed from the last start.
             (Some("dbt/lspCompileStart" | "dbt/lspBackgroundCompileStart"), _) => {
+                // A process starting again arms none: its frames pass `handle`'s filter too.
                 if let Some(running) = self.backend.running_mut() {
                     running.compiling = Compiling { since: Some(Instant::now()), told: false };
                 }
@@ -1994,6 +2003,7 @@ impl<W: Write> Proxy<W> {
                 self.want_index();
             }
         }
+        // A process starting again has no timer to end: its frames pass `handle`'s filter too.
         if let Some(running) = self.backend.running_mut() {
             running.compiling.since = None;
         }
@@ -2007,11 +2017,9 @@ impl<W: Write> Proxy<W> {
                                  "params": {"type": 1, "message": text}}));
     }
 
-    /// A compilation past its deadline, `told` from now on: said once a
-    /// session, with dbt lsp's log, but after `shutdown`.
+    /// A compilation past its deadline, which the caller marks `told`: said
+    /// once a session, with dbt lsp's log, but after `shutdown`.
     fn tell_stalled(&mut self) {
-        let Some(running) = self.backend.running_mut() else { return };
-        running.compiling.told = true;
         if self.backend.stalled || self.shutdown {
             return;
         }
@@ -2472,7 +2480,10 @@ impl<W: Write> Proxy<W> {
                                          "params": {"type": 4, "message": text}}));
             }
         }
-        if self.backend.running().and_then(|running| running.compiling.due()).is_some_and(|due| due <= now) {
+        let stalled =
+            self.backend.running_mut().filter(|running| running.compiling.due().is_some_and(|due| due <= now));
+        if let Some(running) = stalled {
+            running.compiling.told = true;
             self.tell_stalled();
         }
         // A restart's due, or a restarted process's deadline: a running process's deadlines are spent above,
