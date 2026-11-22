@@ -969,6 +969,60 @@ fn a_refused_restart_ends_the_progress_it_began() {
 }
 
 #[test]
+fn the_fake_compiles_as_dbt_lsp_2_0_9_does() {
+    // The proxy's first listing held, so that the fake's own compilations are all that come.
+    let (mut session, log) = Session::fake("fake-compiles", json!({"hold": [ALL]}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    until_logged(&log, "the held listing", |_| listings(&log, "*") == 1);
+    barrier(&mut session);
+    let compilations = |session: &Session| -> Vec<(String, Value)> {
+        let compiling = session.received.iter().filter(|m| m["method"].as_str().is_some_and(|m| m.contains("Compile")));
+        compiling.map(|m| (m["method"].as_str().unwrap().to_owned(), m["params"]["compile_type"].clone())).collect()
+    };
+    let one = [
+        ("dbt/lspCompileStart", "incremental"),
+        ("dbt/lspCompileComplete", "incremental"),
+        ("dbt/lspBackgroundCompileStart", "full"),
+        ("dbt/lspBackgroundCompileComplete", "full"),
+    ]
+    .map(|(method, compile_type)| (method.to_owned(), json!(compile_type)));
+    assert_eq!(compilations(&session), one, "the first didOpen's");
+    let completion = session.received.iter().find(|m| m["method"] == "dbt/lspCompileComplete").unwrap();
+    let mut keys: Vec<&str> = completion["params"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let o4 = [
+        "adapter_type",
+        "adapter_unique_id",
+        "cause",
+        "compile_type",
+        "dbt_version",
+        "duration_ms",
+        "errors",
+        "models_count",
+        "project_id",
+    ];
+    assert_eq!(keys, o4, "2.0.9's keys");
+    let watched = |paths: &[&str]| {
+        let changes: Vec<Value> = paths.iter().map(|p| json!({"uri": uri(&fixture().join(p)), "type": 2})).collect();
+        json!({"changes": changes})
+    };
+    session.notify("workspace/didChangeWatchedFiles", watched(&["models/marts/orders.sql"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session), [&one[..], &one[..]].concat(), "a model's watched change");
+    session.notify("workspace/didChangeWatchedFiles", watched(&["target/compiled/shop/x.sql", "logs/dbt-lsp.log"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session).len(), 8, "dbt lsp's own output");
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
+    session.notify("workspace/didChangeWatchedFiles", watched(&["models/marts/orders.sql"]));
+    barrier(&mut session);
+    assert_eq!(compilations(&session), [&one[..], &one[..], &one[..]].concat(), "a save and its watched event");
+    assert_eq!(listings(&log, "*"), 1, "no listing compiled");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let (mut session, log) = Session::fake("no-feedback", json!({"answers": {ALL: all}}));

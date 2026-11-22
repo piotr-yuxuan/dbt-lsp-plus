@@ -176,6 +176,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Fake::misbehaves` in `tests/support/fake_dbt_lsp.rs`: what the
     script makes one life do in place of an answer, apart from `main`'s
     loop over frames;
+  - `Fake::compiles_as_2_0_9` in `tests/support/fake_dbt_lsp.rs`: which
+    of the client's notifications make dbt lsp 2.0.9 compile, apart from
+    those the script gives, so that `Fake::notified` stays a dispatch;
   - `Proxy::local_method`, `Proxy::targeted`, `Proxy::on_source`,
     `Proxy::on_rename`, `Proxy::on_definition`, `Proxy::on_references` and
     `Proxy::on_document`: the

@@ -8,8 +8,20 @@
 //!   configuration section "dbt" (request id 1);
 //! - it compiles, which it announces with `dbt/lspCompileStart` then
 //!   `dbt/lspCompileComplete`, after the first `didOpen`, after each
-//!   `didSave`, and for each `dbt.listNodes`, whose answer comes between the
-//!   two notifications;
+//!   `didSave`, after each `workspace/didChangeWatchedFiles` with a change
+//!   under its root (its `--project-dir`, else `initialize`'s `rootUri`)
+//!   outside `target/` and `logs/`, but for one within 1 s of a `didSave`
+//!   whose every change names the file that `didSave` named, and for each
+//!   `dbt.listNodes`, whose answer comes between the two notifications;
+//!   their params carry the keys of 2.0.9's, `compile_type` `incremental`,
+//!   the completion's `errors` `[]` and `models_count` 6 by default;
+//! - after each such compilation, its background one, which 2.0.9 sends
+//!   about 1.1 s later and once for several: at once here, so that no test
+//!   waits, `dbt/lspBackgroundCompileStart` then
+//!   `dbt/lspBackgroundCompileComplete`, `compile_type` `full`, the
+//!   completion's `errors` and `models_count` the foreground's; where
+//!   `models_count` is null, as when 2.0.9 compiled nothing, the
+//!   background completion alone, `incremental`;
 //! - a `dbt.listNodes` cancels one still pending, which gets
 //!   `{"error": "Operation cancelled", ...}`; with no scripted answer, a
 //!   listing finds no node, `{"error": "No nodes found", ...}`;
@@ -44,6 +56,9 @@
 //!     `orphan_life` or `send_life` numbers, from 1, when given;
 //!   - `hold_compile`, true when it announces no compilation until the
 //!     notification `test/compile`;
+//!   - `compile_complete`, an object laid over the params of each
+//!     foreground compilation's completion, which the background one
+//!     copies;
 //!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
 //!     `manifest`, written as `manifest.json` under `--target-path`;
 //!     `parse_log`, a file whose text it writes first on its standard
@@ -80,10 +95,14 @@ use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const LISTING: &str = "workspace/executeCommand dbt.listNodes";
+/// How soon after a `didSave` 2.0.9's compilation of it covers a watched
+/// event of its file: it made one compilation of the two back to back, two
+/// of them 6 s apart.
+const SAVE_WINDOW: Duration = Duration::from_secs(1);
 
 fn capabilities_of_2_0_9() -> Value {
     json!({
@@ -114,12 +133,33 @@ fn send_raw(body: &str) {
     rpc::write_body(&mut io::stdout().lock(), body.as_bytes()).expect("write to the proxy");
 }
 
-fn compile_start() {
-    send(json!({"method": "dbt/lspCompileStart", "params": {"cause": "didSave"}}));
+/// The params of a compilation's start of COMPILE_TYPE, as 2.0.9 sends
+/// them: its `cause` is `didSave` whatever the trigger.
+fn compile_params(compile_type: &str) -> Value {
+    json!({"adapter_type": "duckdb", "adapter_unique_id": "8ad8a8320c59b06e1dadab91e0b2cfee", "cause": "didSave",
+           "compile_type": compile_type, "dbt_version": "2.0.9", "project_id": "fb54f3c5992b96d001bb16e8e92d968d"})
 }
 
-fn compile_complete() {
-    send(json!({"method": "dbt/lspCompileComplete", "params": {"cause": "didSave", "errors": []}}));
+fn compile_start() {
+    send(json!({"method": "dbt/lspCompileStart", "params": compile_params("incremental")}));
+}
+
+/// The foreground compilation's completion, the script's over 2.0.9's,
+/// then the background compilation that follows it.
+fn compile_complete(script: &Value) {
+    let mut params = compile_params("incremental");
+    params["duration_ms"] = json!(1);
+    params["errors"] = json!([]);
+    params["models_count"] = json!(6);
+    for (key, value) in script["compile_complete"].as_object().into_iter().flatten() {
+        params[key.as_str()] = value.clone();
+    }
+    send(json!({"method": "dbt/lspCompileComplete", "params": params.clone()}));
+    if !params["models_count"].is_null() {
+        send(json!({"method": "dbt/lspBackgroundCompileStart", "params": compile_params("full")}));
+        params["compile_type"] = json!("full");
+    }
+    send(json!({"method": "dbt/lspBackgroundCompileComplete", "params": params}));
 }
 
 /// What 2.0.9 answers to METHOD with PARAMS, a listing when LISTING, when
@@ -153,6 +193,10 @@ struct Fake {
     held: Vec<(Value, String, Value)>,
     /// Which process of the session this is, from 1.
     life: usize,
+    /// The project: its `--project-dir`, else `initialize`'s `rootUri`.
+    root: Option<PathBuf>,
+    /// The URI that the last `didSave` named, and when it came.
+    saved: Option<(Value, Instant)>,
 }
 
 impl Fake {
@@ -227,12 +271,41 @@ impl Fake {
         }
         send(json!({"id": id, "result": answer}));
         if compiling {
-            compile_complete();
+            compile_complete(&self.script);
         }
     }
 
-    /// Acts on the notification METHOD.
-    fn notified(&mut self, method: &str) {
+    /// Whether the client's notification METHOD, of PARAMS, makes 2.0.9
+    /// compile, apart from what the script makes the fake do.
+    fn compiles_as_2_0_9(&mut self, method: &str, params: &Value) -> bool {
+        let now = Instant::now();
+        match method {
+            "textDocument/didOpen" => !std::mem::replace(&mut self.opened, true),
+            "textDocument/didSave" => {
+                self.saved = Some((params["textDocument"]["uri"].clone(), now));
+                true
+            }
+            "workspace/didChangeWatchedFiles" => {
+                let changes = params["changes"].as_array().map_or(&[][..], Vec::as_slice);
+                let saved = self.saved.as_ref().filter(|(_, at)| now.duration_since(*at) < SAVE_WINDOW);
+                let covered = saved.is_some_and(|(uri, _)| changes.iter().all(|change| change["uri"] == *uri));
+                // Under the root, outside what 2.0.9 writes at each compilation.
+                let source = |change: &Value| {
+                    let path = change["uri"].as_str().and_then(|uri| url::Url::parse(uri).ok()?.to_file_path().ok());
+                    path.is_some_and(|path| {
+                        let relative = self.root.as_deref().and_then(|root| path.strip_prefix(root).ok());
+                        relative
+                            .is_some_and(|relative| !relative.starts_with("target") && !relative.starts_with("logs"))
+                    })
+                };
+                !covered && changes.iter().any(source)
+            }
+            _ => false,
+        }
+    }
+
+    /// Acts on the notification METHOD, of PARAMS.
+    fn notified(&mut self, method: &str, params: &Value) {
         let compiles = match method {
             "initialized" => {
                 send(json!({"id": 1, "method": "workspace/configuration", "params": {"items": [{"section": "dbt"}]}}));
@@ -244,7 +317,6 @@ impl Fake {
                     .for_each(send_raw);
                 false
             }
-            "textDocument/didOpen" => !std::mem::replace(&mut self.opened, true),
             "test/release" => {
                 for (id, method, params) in std::mem::take(&mut self.held) {
                     let key = answer_key(&method, &params);
@@ -254,7 +326,7 @@ impl Fake {
             }
             "test/compile" => {
                 compile_start();
-                compile_complete();
+                compile_complete(&self.script);
                 self.script["raw_on_compile"]
                     .as_array()
                     .into_iter()
@@ -264,11 +336,11 @@ impl Fake {
                 false
             }
             "exit" => std::process::exit(0),
-            _ => method == "textDocument/didSave",
+            _ => self.compiles_as_2_0_9(method, params),
         };
         if compiles && self.script["hold_compile"] != json!(true) {
             compile_start();
-            compile_complete();
+            compile_complete(&self.script);
         }
     }
 }
@@ -424,7 +496,8 @@ fn main() {
         std::fs::read_to_string(&lives).expect("read the lives").lines().count()
     });
     refuse_or_help(&script, &arguments, true);
-    let mut fake = Fake { script, opened: false, held: Vec::new(), life };
+    let root = flag(&arguments, "--project-dir").map(PathBuf::from);
+    let mut fake = Fake { script, opened: false, held: Vec::new(), life, root, saved: None };
     let mut input = BufReader::new(io::stdin());
     while let Ok(Some(frame)) = rpc::read_frame(&mut input) {
         if let Some(log) = &mut log {
@@ -437,12 +510,15 @@ fn main() {
         }
         match (method, id) {
             ("initialize", Some(id)) => {
+                let root_uri = message.pointer("/params/rootUri").and_then(Value::as_str);
+                let given = root_uri.and_then(|uri| url::Url::parse(uri).ok()?.to_file_path().ok());
+                fake.root = fake.root.take().or(given);
                 let capabilities = fake.script.get("capabilities").cloned().unwrap_or_else(capabilities_of_2_0_9);
                 let info = json!({"name": "dbt-lsp", "version": "2.0.9"});
                 send(json!({"id": id, "result": {"capabilities": capabilities, "serverInfo": info}}));
             }
             (method, Some(id)) => fake.respond(method, id, message.get("params").cloned().unwrap_or(Value::Null)),
-            (method, None) => fake.notified(method),
+            (method, None) => fake.notified(method, message.get("params").unwrap_or(&Value::Null)),
         }
     }
 }
