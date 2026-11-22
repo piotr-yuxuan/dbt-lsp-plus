@@ -373,15 +373,15 @@ impl Log {
 /// A session's shadow: its counts, and its log where there is a place for
 /// it, the first failure of which is said.
 #[derive(Debug, Default)]
-pub struct Session {
+pub struct Shadow {
     pub counts: Counts,
     log: Option<Log>,
     failed: bool,
 }
 
-impl Session {
-    pub fn new(log: Option<Log>) -> Session {
-        Session { log, ..Session::default() }
+impl Shadow {
+    pub fn new(log: Option<Log>) -> Shadow {
+        Shadow { log, ..Shadow::default() }
     }
 
     /// Appends LINE to the log; what to say of the session's first failure,
@@ -731,10 +731,10 @@ mod tests {
     fn a_log_that_cannot_be_written_or_has_no_place_is_said_once() {
         let base = scratch_project("shadow-unwritable", &[]);
         let log = Log { path: base.join("missing/dir/x.jsonl") };
-        let mut session = Session::new(Some(log));
-        assert!(session.write("{}").is_some_and(|said| said.contains("cannot be written")));
-        assert_eq!(session.write("{}"), None, "said once");
-        let mut nowhere = Session::new(None);
+        let mut shadow = Shadow::new(Some(log));
+        assert!(shadow.write("{}").is_some_and(|said| said.contains("cannot be written")));
+        assert_eq!(shadow.write("{}"), None, "said once");
+        let mut nowhere = Shadow::new(None);
         assert!(nowhere.write("{}").is_some_and(|said| said.contains("no place")), "no place, said");
         assert_eq!(nowhere.write("{}"), None, "once");
         assert!(!base.exists(), "nothing made");

@@ -436,7 +436,7 @@ struct Proxy<W: Write> {
     graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
     /// The shadow, on from the server's answer to `initialize` when the user
     /// set it.
-    shadow: Option<shadow::Session>,
+    shadow: Option<shadow::Shadow>,
     /// The commands that the server listed in its answer to `initialize`.
     server_commands: HashSet<String>,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
@@ -1889,7 +1889,7 @@ impl<W: Write> Proxy<W> {
             self.shadow = self.settings.shadow.then(|| {
                 let log =
                     config::cache_base().zip(self.root.as_ref()).map(|(base, root)| shadow::Log::open(&base, root));
-                shadow::Session::new(log)
+                shadow::Shadow::new(log)
             });
             if let Some(capabilities) = message.pointer_mut("/result/capabilities").and_then(Value::as_object_mut) {
                 self.add_capabilities(capabilities);

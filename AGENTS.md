@@ -162,7 +162,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `shadow::target`, `shadow::oracle`, `shadow::start`, `Record::line`
     and `Counts::end`: the log's lines in one place, apart from where the
     proxy reads what they hold;
-  - `Log::open`, `Log::append` and `Session::write`: the start of the
+  - `Log::open`, `Log::append` and `Shadow::write`: the start of the
     shadow's log and its writes, a resource's start and use;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
