@@ -176,14 +176,16 @@ pub fn compare(ours: &[Location], dbt: &[Location]) -> Compared {
     Compared { relation, ours_only, dbt_only, both }
 }
 
-/// NAME as the log shows it: its kind, package, name and version, a
-/// table's name as `source.table`.
+/// NAME as the log shows it: its kind, its package but for a source, its
+/// name, a table's as `source.table`, and a `ref`'s version.
 pub fn target(name: &Name) -> Value {
-    let shown = match name.source_table() {
-        Some((source, Some(table))) => format!("{source}.{table}"),
-        _ => name.name.clone(),
+    let (package, shown) = match name.source_table() {
+        Some((source, Some(table))) => (None, format!("{source}.{table}")),
+        Some((source, None)) => (None, source.to_owned()),
+        None => (name.package.as_ref(), name.name.clone()),
     };
-    json!({"kind": name.kind.flag(), "package": name.package, "name": shown, "version": name.version})
+    let version = name.version.as_ref().filter(|_| name.kind == Kind::Ref);
+    json!({"kind": name.kind.flag(), "package": package, "name": shown, "version": version})
 }
 
 /// The ids and files of what dbt resolved a call to.
