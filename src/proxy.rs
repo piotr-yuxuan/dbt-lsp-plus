@@ -21,7 +21,7 @@ use std::fs;
 use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitCode, ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -171,6 +171,25 @@ struct Server {
     /// Which process of the session it is, from 0: its events carry it, so
     /// that those of a process the proxy let go of are dropped.
     generation: u64,
+}
+
+impl Server {
+    /// Ends the process: its input closed, GRACE to exit, then killed
+    /// unless it exited, and reaped; its status, if known.
+    fn reap(self, grace: Duration) -> Option<ExitStatus> {
+        let Server { mut child, stdin, .. } = self;
+        drop(stdin);
+        let deadline = Instant::now() + grace;
+        let mut status = child.try_wait().ok().flatten();
+        while status.is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+            status = child.try_wait().ok().flatten();
+        }
+        if status.is_none() {
+            let _ = child.kill();
+        }
+        status.or_else(|| child.wait().ok())
+    }
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
@@ -2206,12 +2225,8 @@ impl<W: Write> Proxy<W> {
     /// `initialize`, only remember why, for its answer.
     fn on_server_closed(&mut self) {
         let starting = || self.restart.starting.take().map(|(server, ..)| server);
-        let Some(mut server) = self.server.take().or_else(starting) else { return };
-        let status = server.child.try_wait().ok().flatten();
-        if status.is_none() {
-            let _ = server.child.kill();
-        }
-        let status = status.or_else(|| server.child.wait().ok());
+        let Some(server) = self.server.take().or_else(starting) else { return };
+        let status = server.reap(Duration::ZERO);
         let why = format!("dbt lsp exited ({})", status.map_or("unknown status".into(), |s| s.to_string()));
         if let Some(id) = &self.initialize {
             self.forwarded.remove(&key(id));
@@ -2291,10 +2306,9 @@ impl<W: Write> Proxy<W> {
     /// the server, initialized, given the client's open documents as they
     /// stand, and listed; refused, or after `shutdown`, it is stopped.
     fn on_restarted(&mut self, message: &Value) {
-        let Some((mut server, ..)) = self.restart.starting.take() else { return };
+        let Some((server, ..)) = self.restart.starting.take() else { return };
         if message.get("error").is_some() || self.shutdown {
-            let _ = server.child.kill();
-            let _ = server.child.wait();
+            server.reap(Duration::ZERO);
             return self.lost_server("dbt lsp refused its initialize");
         }
         self.server = Some(server);
@@ -2343,9 +2357,8 @@ impl<W: Write> Proxy<W> {
         if self.compiling.due().is_some_and(|due| due <= now) {
             self.tell_stalled();
         }
-        if let Some((mut server, ..)) = self.restart.starting.take_if(|(.., deadline)| *deadline <= now) {
-            let _ = server.child.kill();
-            let _ = server.child.wait();
+        if let Some((server, ..)) = self.restart.starting.take_if(|(.., deadline)| *deadline <= now) {
+            server.reap(Duration::ZERO);
             self.lost_server("dbt lsp did not answer its initialize");
         }
     }
@@ -2403,18 +2416,12 @@ impl<W: Write> Proxy<W> {
 
     /// Waits for the server to exit after `exit`, within EXIT_GRACE, then kills it.
     fn stop_server(&mut self) {
-        if let Some((mut starting, ..)) = self.restart.starting.take() {
-            let _ = starting.child.kill();
-            let _ = starting.child.wait();
+        if let Some((starting, ..)) = self.restart.starting.take() {
+            starting.reap(Duration::ZERO);
         }
-        let Some(mut server) = self.server.take() else { return };
-        drop(server.stdin);
-        let deadline = Instant::now() + EXIT_GRACE;
-        while Instant::now() < deadline && matches!(server.child.try_wait(), Ok(None)) {
-            thread::sleep(Duration::from_millis(20));
+        if let Some(server) = self.server.take() {
+            server.reap(EXIT_GRACE);
         }
-        let _ = server.child.kill();
-        let _ = server.child.wait();
     }
 }
 
