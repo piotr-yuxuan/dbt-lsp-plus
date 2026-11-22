@@ -176,8 +176,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Log::open`, `Log::append` and `Shadow::write`: the start of the
     shadow's log and its writes, a resource's start and use;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
-    which `Running::stop` ends, a resource's start, as `Log::open`,
-    `Proxy::start_restart` and `Proxy::stop_server` are;
+    which `Running::stop` ends, a resource's start, as `Log::open` and
+    `Proxy::start_restart` are, where `Proxy::stop_server` is an end;
+  - `run::Output::error_line`: the list commands' reader of dbt's first
+    error, a text log's `[error]` line, kept apart from `error_event` so
+    that plan 048 changed no answer; plan 050 merges the two;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart
