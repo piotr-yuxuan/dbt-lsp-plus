@@ -304,6 +304,16 @@ dbt lsp leaving out the `ref` of `snapshots/orders_snapshot.sql`.  The
 live test leaves definitions and references to dbt lsp (`dbt`) to follow
 them.
 
+With the union (plan 042), the same requests in `merge` get the proxy's
+answer, observed on 2026-11-22: dbt lsp 2.0.9's locations all match the
+proxy's, its reference `'stg_orders'` (4:25-37, the quotes included)
+holding the proxy's name.  Once it has compiled, it answers a definition
+within 20 ms; but it took 1.2 s over the first references of the
+session, past the deadline, where the proxy answers alone and logs it,
+then 2 ms over each later one.  The live test checks both (`navigation`,
+`united_references`); the fake answers at once, and its `hold` stands
+for a late server.
+
 ## Commands for clients
 
 The proxy's commands for clients (`src/commands.rs`, plan 022) do what

@@ -81,6 +81,7 @@ fn in_front_of_the_real_dbt_lsp() {
     }
     document_features(&mut session, &project);
     navigation(&mut session, &project);
+    united_references(&mut session, &project);
     last_run(&mut session, &project);
     lineage(&mut session, &project);
     watcher(&mut session, &project);
@@ -456,12 +457,12 @@ fn node_information(session: &mut Session, project: &Path) {
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
     // Once dbt lsp has compiled: during a compilation, its hover may miss the deadline, the summary alone.
-    let merged =
-        |result: &Value| result["contents"]["value"].as_str().is_some_and(|value| value.contains("\n\n---\n\n"));
+    let heading = "\n\n---\n\n**dbt lsp**\n\n";
+    let merged = |result: &Value| result["contents"]["value"].as_str().is_some_and(|value| value.contains(heading));
     let hover = json!({"result": session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), merged)});
     let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
-    let kept = value.split_once("\n\n---\n\n").map(|(_, server)| server.trim());
+    let kept = value.split_once(heading).map(|(_, server)| server.trim());
     assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
     // Inlay hints: dbt lsp 2.0.9 answers [] on a model; the proxy's relations follow.
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 100, "character": 0}});
@@ -650,7 +651,23 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
     let on_column = session.request("textDocument/definition", at("customer_id", 2));
     assert_eq!(on_column["result"], Value::Null, "{on_column}");
-    // An answer of the proxy's own, after which a log of that deadline would have come; its container the id.
+    // A ref in SQL is the proxy's in front of dbt lsp too, and its references
+    // hold the snapshot's, which dbt lsp 2.0.9 leaves out.  dbt lsp is asked
+    // too: its locations all match the proxy's.
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+    let found = session.request("textDocument/definition", on_ref.clone());
+    let start = json!({"line": 0, "character": 0});
+    let stg_orders =
+        json!({"uri": uri(&project.join("models/staging/stg_orders.sql")), "range": {"start": start, "end": start}});
+    assert_eq!(found["result"], stg_orders, "one location, the proxy's");
+    let mut references = on_ref;
+    references["context"] = json!({"includeDeclaration": false});
+    let used = session.request("textDocument/references", references);
+    let uses = [json!(orders), json!(uri(&project.join("snapshots/orders_snapshot.sql")))];
+    let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
+    assert_eq!(files, uses.iter().collect::<Vec<_>>(), "{used}");
+    // An answer of the proxy's own, after which a log of those deadlines would have come; its container the id.
     let symbols = session.request("workspace/symbol", json!({"query": "orders"}));
     let model = |s: &Value| s["name"] == "orders" && s["containerName"] == "model.shop.orders";
     assert!(symbols["result"].as_array().is_some_and(|found| found.iter().any(model)), "{symbols}");
@@ -659,17 +676,29 @@ fn navigation(session: &mut Session, project: &Path) {
             && m["params"]["type"] == 4
             && m["params"]["message"].as_str().is_some_and(|text| text.contains("textDocument/definition"))
     };
-    assert_eq!(session.received.iter().filter(late).count(), 0, "dbt lsp was late on the column");
-    // A ref in SQL is the proxy's in front of dbt lsp too, and its references
-    // hold the snapshot's, which dbt lsp 2.0.9 leaves out.
+    let said: Vec<&Value> = session.received.iter().filter(late).collect();
+    assert!(said.is_empty(), "dbt lsp was late on a definition: {said:?}");
+}
+
+/// References united with dbt lsp's, observed: dbt lsp 2.0.9 takes about a
+/// second over a session's first references once compiled, past the
+/// deadline, where the proxy answers alone; then a few milliseconds, its
+/// location within the proxy's, so that the union is the proxy's answer.
+fn united_references(session: &mut Session, project: &Path) {
     let orders = uri(&project.join("models/marts/orders.sql"));
-    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
-    assert_eq!(file(&session.request("textDocument/definition", on_ref.clone())), "stg_orders.sql");
-    let mut references = on_ref;
-    references["context"] = json!({"includeDeclaration": false});
-    let used = session.request("textDocument/references", references);
-    let snapshot = json!(uri(&project.join("snapshots/orders_snapshot.sql")));
-    assert!(used["result"].as_array().is_some_and(|found| found.iter().any(|l| l["uri"] == snapshot)), "{used}");
+    let params = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28},
+                        "context": {"includeDeclaration": false}});
+    let uses = json!([orders, uri(&project.join("snapshots/orders_snapshot.sql"))]);
+    // Bounded: dbt lsp answers, one after the other, the requests it got
+    // before, whose deadline passed.
+    let in_time = (0..20).any(|_| {
+        let started = Instant::now();
+        let used = session.request("textDocument/references", params.clone());
+        let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
+        assert_eq!(json!(files), uses, "{used}");
+        started.elapsed() < Duration::from_millis(300)
+    });
+    assert!(in_time, "dbt lsp answered no references within 300 ms");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.
