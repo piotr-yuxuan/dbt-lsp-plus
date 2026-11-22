@@ -104,9 +104,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline` and `Proxy::hierarchy`: one function per owned method,
     so that `answer` stays a dispatch;
-  - `Proxy::expire_listing`, `Proxy::start_restart` and
-    `Proxy::stop_server`: the deadline of a listing, and the start and the
-    teardown of the server process, each a resource's start or end;
+  - `Proxy::expire_listing`, `Proxy::tell_stalled`, `Proxy::start_restart`
+    and `Proxy::stop_server`: the deadline of a listing and that of a
+    compilation's end, and the start and the teardown of the server
+    process, each a resource's start or end;
   - `restart_delay`: the decision on a lost server, free of the clock,
     with tests of its own;
   - `changes_graph`: the decision whether a client's notification may

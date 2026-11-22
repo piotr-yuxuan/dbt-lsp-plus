@@ -65,6 +65,11 @@ const RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
 /// How long a restarted server has to answer its `initialize`.
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long dbt lsp compiles before the proxy says it has not ended: the
+/// longest compilation seen on 2.0.9 took 2.7 s, the first of 3,000 models
+/// on DuckDB; a warehouse may take longer, and 60 s is past every client's
+/// timeout.
+const COMPILE_STALL: Duration = Duration::from_secs(60);
 /// The client's notifications after which the graph may have changed.  The
 /// server's `dbt/lspCompileComplete` is no such signal: a listing makes the
 /// server compile, so listing on it would never end.
@@ -297,8 +302,22 @@ struct Parsing {
 /// What dbt lsp said of its compilations.
 #[derive(Default)]
 struct Compiling {
+    /// Since when it has compiled, from its last start, with no end since.
+    since: Option<Instant>,
+    /// Whether that compilation's deadline has passed, said or not.
+    told: bool,
+    /// Whether a compilation with no end was said: once a session.
+    stalled: bool,
     /// The failures said this session, each by its first error's key.
     said: HashSet<String>,
+}
+
+impl Compiling {
+    /// When the compilation under way has gone `COMPILE_STALL` with no end;
+    /// none once that is `told`, and with no compilation.
+    fn due(&self) -> Option<Instant> {
+        self.since.filter(|_| !self.told).map(|since| since + COMPILE_STALL)
+    }
 }
 
 /// The generations of the project, the server's nodes and the index a
@@ -1830,6 +1849,11 @@ impl<W: Write> Proxy<W> {
         let Some(message) = &frame.value else { return self.send_client_body(&frame.body) };
         match (message.get("method").and_then(Value::as_str), message.get("id")) {
             (None, Some(id)) => self.on_server_response(id, message, &frame.body),
+            // Two compilations that overlap are timed from the last start.
+            (Some("dbt/lspCompileStart" | "dbt/lspBackgroundCompileStart"), _) => {
+                (self.compiling.since, self.compiling.told) = (Some(Instant::now()), false);
+                self.send_client_body(&frame.body);
+            }
             (Some(method @ ("dbt/lspCompileComplete" | "dbt/lspBackgroundCompileComplete")), _) => {
                 self.on_compiled(method == "dbt/lspCompileComplete", message, &frame.body)
             }
@@ -1841,9 +1865,9 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The completion of a compilation of the server's, MESSAGE, BODY as it
-    /// came, forwarded, of the FOREGROUND one or the background one; a
-    /// compilation that compiled nothing is said once for each first error,
-    /// across restarts, but after `shutdown`.
+    /// came, forwarded, of the FOREGROUND one or the background one: the
+    /// compilation's deadline ends, and one that compiled nothing is said
+    /// once for each first error, across restarts, but after `shutdown`.
     fn on_compiled(&mut self, foreground: bool, message: &Value, body: &[u8]) {
         // The server has resolved the packages: dbt may parse, for a
         // request that wanted an index before.
@@ -1853,16 +1877,36 @@ impl<W: Write> Proxy<W> {
                 self.want_index();
             }
         }
+        self.compiling.since = None;
         self.send_client_body(body);
         let Some((text, key)) = compile_failure(&message["params"]) else { return };
         if self.shutdown || !self.compiling.said.insert(key) {
             return;
         }
-        let log = self.root.as_deref().unwrap_or(Path::new("")).join("logs/dbt-lsp.log");
         let quoted = if text.is_empty() { text } else { format!(": {text}") };
-        let text = format!("dbt lsp compiled nothing{quoted} (its log: {})", log.display());
+        let text = format!("dbt lsp compiled nothing{quoted} (its log: {})", self.server_log().display());
         self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
                                  "params": {"type": 1, "message": text}}));
+    }
+
+    /// A compilation past its deadline, `told` from now on: said once a
+    /// session, with dbt lsp's log, but after `shutdown`.
+    fn tell_stalled(&mut self) {
+        self.compiling.told = true;
+        if self.compiling.stalled || self.shutdown {
+            return;
+        }
+        self.compiling.stalled = true;
+        let (stall, log) = (COMPILE_STALL.as_secs(), self.server_log());
+        let text = format!("dbt lsp has been compiling for {stall} s with no end yet (its log: {})", log.display());
+        self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
+                                 "params": {"type": 2, "message": text}}));
+    }
+
+    /// dbt lsp's log, which 2.0.9 writes under its project whatever its
+    /// `--log-path` says.
+    fn server_log(&self) -> PathBuf {
+        self.root.as_deref().unwrap_or(Path::new("")).join("logs/dbt-lsp.log")
     }
 
     /// The server's `$/progress`, BODY as it came, forwarded: the tokens it
@@ -2185,6 +2229,7 @@ impl<W: Write> Proxy<W> {
         self.attempts = 0;
         self.listed.clear();
         self.relist = false;
+        self.compiling.since = None;
         self.nodes = None;
         self.nodes_generation += 1;
         self.absent = Some(why.clone());
@@ -2270,7 +2315,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// What is due when the loop wakes with no event: the listing's deadline,
-    /// a restart after its delay, a restarted server that did not answer.
+    /// a restart after its delay, a restarted server that did not answer, a
+    /// compilation with no end.
     fn on_time(&mut self) {
         self.expire_listing();
         let now = Instant::now();
@@ -2294,6 +2340,9 @@ impl<W: Write> Proxy<W> {
         if self.restart.due.take_if(|due| *due <= now).is_some() {
             self.start_restart();
         }
+        if self.compiling.due().is_some_and(|due| due <= now) {
+            self.tell_stalled();
+        }
         if let Some((mut server, ..)) = self.restart.starting.take_if(|(.., deadline)| *deadline <= now) {
             let _ = server.child.kill();
             let _ = server.child.wait();
@@ -2308,7 +2357,7 @@ impl<W: Write> Proxy<W> {
             let listing = self.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
             let replay = self.restart.starting.as_ref().map(|(.., deadline)| *deadline);
             let merge = self.deadlines.values().map(|(at, _)| *at).min();
-            let next = [listing, self.restart.due, replay, merge].into_iter().flatten().min();
+            let next = [listing, self.restart.due, replay, merge, self.compiling.due()].into_iter().flatten().min();
             let wait = next.map_or(Duration::MAX, |at| at.saturating_duration_since(Instant::now()));
             let event = match inbox.recv_timeout(wait) {
                 Ok(event) => event,
@@ -2688,6 +2737,93 @@ mod tests {
             .map(|frame| &frame.body)
             .collect();
         assert_eq!(forwarded, bodies.iter().collect::<Vec<_>>(), "each completion as it came");
+    }
+
+    #[test]
+    fn dbt_lsp_s_frames_set_and_clear_the_compilation_s_deadline() {
+        let waiting = json!({"method": "$/progress", "params": {"token": "t:dbt/progress/references",
+                             "value": {"kind": "begin", "title": "Finding All References",
+                                       "message": "Waiting for compilation to complete...", "cancellable": true}}});
+        let compiling = |method: &str| json!({"method": method, "params": {"models_count": 6, "errors": []}});
+        // Each frame, after `told` is set as given, and whether a deadline and `parsing.compiled` follow it.
+        let steps = [
+            ("a progress that awaits a compilation", waiting, false, (false, false)),
+            ("a background start", compiling("dbt/lspBackgroundCompileStart"), false, (true, false)),
+            (
+                "its completion, which leaves compiled as it was",
+                compiling("dbt/lspBackgroundCompileComplete"),
+                false,
+                (false, false),
+            ),
+            ("a start", compiling("dbt/lspCompileStart"), false, (true, false)),
+            ("its completion", compiling("dbt/lspCompileComplete"), false, (false, true)),
+            ("a start after one told", compiling("dbt/lspCompileStart"), true, (true, true)),
+        ];
+        let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        for (name, message, told, expected) in steps {
+            proxy.compiling.told = told;
+            let before = Instant::now();
+            proxy.on_server(frame_of(&message));
+            let due = proxy.compiling.due();
+            let after = Instant::now();
+            assert!(due.is_none_or(|due| before + COMPILE_STALL <= due && due <= after + COMPILE_STALL), "{name}");
+            assert_eq!((due.is_some(), proxy.parsing.compiled), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_compilation_without_its_end_is_told_after_its_deadline() {
+        let said = |proxy: &Proxy<Vec<u8>>| -> Vec<Value> {
+            let frames = written(&proxy.client).into_iter().filter_map(|frame| frame.value);
+            frames.filter(|m| m["method"] == "window/showMessage").collect()
+        };
+        // A start AGO, as dbt lsp sends it.
+        let started = |proxy: &mut Proxy<Vec<u8>>, ago: Duration| {
+            proxy.on_server(frame_of(&json!({"method": "dbt/lspCompileStart", "params": {}})));
+            proxy.compiling.since = Some(Instant::now() - ago);
+        };
+        let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        started(&mut proxy, Duration::ZERO);
+        proxy.on_time();
+        assert!(said(&proxy).is_empty() && proxy.compiling.due().is_some(), "started just now");
+        started(&mut proxy, COMPILE_STALL);
+        proxy.on_time();
+        let text = "dbt lsp has been compiling for 60 s with no end yet (its log: /p/logs/dbt-lsp.log)";
+        let told = json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 2, "message": text}});
+        assert_eq!(said(&proxy), std::slice::from_ref(&told));
+        proxy.on_time();
+        assert_eq!(said(&proxy), std::slice::from_ref(&told), "told once");
+        started(&mut proxy, COMPILE_STALL);
+        proxy.on_time();
+        assert_eq!((said(&proxy), proxy.compiling.due()), (vec![told], None), "once a session");
+        let mut after = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
+        after.shutdown = true;
+        started(&mut after, COMPILE_STALL);
+        after.on_time();
+        assert_eq!((said(&after), after.compiling.due()), (Vec::new(), None), "nothing after shutdown");
+    }
+
+    #[test]
+    fn a_lost_server_keeps_the_failures_said_and_clears_its_deadline() {
+        let mut child = Command::new("sh").args(["-c", "cat > /dev/null"]).stdin(Stdio::piped()).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let server = Server { child, stdin, generation: 0 };
+        let mut proxy = Proxy::new(Vec::new(), Some(server), None, Some(PathBuf::from("/p")));
+        let [e, ..] = reported();
+        let failed = json!({"method": "dbt/lspCompileComplete", "params": {"models_count": null, "errors": [e]}});
+        let shown = |proxy: &Proxy<Vec<u8>>| {
+            let frames = written(&proxy.client).into_iter().filter_map(|frame| frame.value);
+            frames.filter(|m| m["method"] == "window/showMessage").count()
+        };
+        proxy.on_server(frame_of(&failed));
+        assert_eq!(shown(&proxy), 1);
+        proxy.on_server(frame_of(&json!({"method": "dbt/lspCompileStart", "params": {}})));
+        assert!(proxy.compiling.due().is_some());
+        proxy.on_server_closed();
+        assert!(proxy.server.is_none() && proxy.compiling.due().is_none(), "no deadline of a lost server");
+        // The next server's first failure, the same.
+        proxy.on_server(frame_of(&failed));
+        assert_eq!(shown(&proxy), 1);
     }
 
     #[test]
