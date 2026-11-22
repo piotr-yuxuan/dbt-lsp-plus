@@ -290,32 +290,55 @@ mod tests {
 
     #[test]
     fn the_disk_stamp_changes_with_the_files_that_may_hold_a_resource() {
-        let dir = scratch_project("cache-stamp", &[("dbt_project.yml", "name: shop\n"), ("models/a.sql", "select 1")]);
+        let files =
+            [("dbt_project.yml", "name: shop\n"), ("models/a.sql", "select 1"), ("models/schema.yml", "version: 2\n")];
+        let dir = scratch_project("cache-stamp", &files);
         let write = |path: &str, text: &str| {
             let path = dir.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         };
-        let first = super::disk(&dir);
-        assert_eq!(super::disk(&dir), first, "nothing changed");
+        // The stamp after each step.
+        let mut seen = vec![("first", super::disk(&dir))];
+        let mut look = |step: &'static str| seen.push((step, super::disk(&dir)));
+        look("again");
         // Outside the resource paths, hidden, an editor's auto-save and its backup.
         write("target/x.sql", "select 3");
         write(".written", "");
         write("models/#a.sql#", "select 4");
         write("models/a.sql~", "select 5");
-        assert_eq!(super::disk(&dir), first, "files that hold no resource");
+        look("files that hold no resource");
         write("models/a.sql", "select 22");
-        let rewritten = super::disk(&dir);
-        assert_ne!(rewritten, first, "a file rewritten at another size");
+        look("a model rewritten at another size");
         write("models/b.sql", "select 2");
-        assert_ne!(super::disk(&dir), rewritten, "a file added");
+        look("a model added");
         fs::remove_file(dir.join("models/b.sql")).unwrap();
-        assert_eq!(super::disk(&dir), rewritten, "the file added, then removed");
+        look("the model removed");
+        write("models/schema.yml", "version: 2\nmodels: []\n");
+        look("a properties file rewritten at another size");
+        write("models/doc.md", "{% docs d %}d{% enddocs %}");
+        look("a docs file added");
         write("packages.yml", "packages:\n  - local: vendor/shared\n");
         write("vendor/shared/dbt_project.yml", "name: shared\n");
-        assert_ne!(super::disk(&dir), rewritten, "a local package named");
+        look("a local package named");
         write("dbt_project.yml", "name: [");
-        assert_eq!(super::disk(&dir), 0, "a project that does not read");
+        look("a project that does not read");
+        // Whether each step changed the stamp.
+        let changed: Vec<(&str, bool)> = seen.windows(2).map(|pair| (pair[1].0, pair[1].1 != pair[0].1)).collect();
+        let expected = [
+            ("again", false),
+            ("files that hold no resource", false),
+            ("a model rewritten at another size", true),
+            ("a model added", true),
+            ("the model removed", true),
+            ("a properties file rewritten at another size", true),
+            ("a docs file added", true),
+            ("a local package named", true),
+            ("a project that does not read", true),
+        ];
+        assert_eq!(changed, expected);
+        assert_eq!(seen[5].1, seen[3].1, "the model removed: the stamp before it was added");
+        assert_eq!(seen[9].1, 0, "a project that does not read");
         let none = scratch_project("cache-stamp-none", &[("models/a.sql", "select 1")]);
         assert_eq!(super::disk(&none), 0, "no project");
         fs::remove_dir_all(&dir).unwrap();
