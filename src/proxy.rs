@@ -1392,7 +1392,7 @@ impl<W: Write> Proxy<W> {
             answer["summary"] = json!(index.summary(node));
             answer
         };
-        Some(node.map_or(Answer::Empty, |node| Answer::Found(summarised(node))))
+        Some(node.map(summarised).map_or(Answer::Empty, Answer::Found))
     }
 
     /// Starts a parse when the index is stale and dbt can parse: with no

@@ -692,9 +692,9 @@ fn document_features(session: &mut Session, project: &Path) {
     // has no index: never a null.
     let start = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
     let first = session.request("textDocument/hover", start);
-    let said = first["error"]["message"].as_str().filter(|_| first["error"]["code"] == -32803);
-    let unindexed = said.is_some_and(|message| message.starts_with("dbt parse has not finished: "));
-    assert!(unindexed || first.get("result").is_some_and(|result| !result.is_null()), "{first}");
+    let message = first["error"]["message"].as_str().unwrap_or_default();
+    let unindexed = first["error"]["code"] == -32803 && message.starts_with("dbt parse has not finished: ");
+    assert!(unindexed || !first["result"].is_null(), "{first}");
     // The server's hover passes through: on ref('stg_orders'), line 4.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
