@@ -3223,7 +3223,7 @@ fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why(
     std::fs::create_dir_all(m.parent().unwrap()).unwrap();
     std::fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
     std::fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
-    let script = json!({"refuse_on": "textDocument/hover"});
+    let script = json!({"refuse_on": "textDocument/hover", "manifest": manifest()});
     // References in `plus`, and the call hierarchy, which the proxy owns, in `merge`.
     let modes = ["--mode", "textDocument/references=plus", "--mode", "textDocument/prepareCallHierarchy=merge"];
     let flags = [Path::new("--project-dir"), &project];
@@ -3252,6 +3252,21 @@ fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why(
     assert_eq!((definition.get("error"), &definition["result"]["echo"]), (None, &json!("textDocument/definition")));
     let asked = |method: &str| logged(&log).iter().any(|message| message["method"] == method);
     assert!(!asked("textDocument/references") && !asked("textDocument/prepareCallHierarchy"), "dbt lsp was asked");
+    // Over a project that no longer reads, once there is an index, a hover's reason first, then dbt lsp's.
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let by_id =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), by_id, |result| result["unique_id"] == "model.shop.orders");
+    std::fs::write(project.join("dbt_project.yml"), "name: [").unwrap();
+    let refused = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project; \
+         dbt lsp failed: refused by the script",
+        project.display()
+    );
+    let why = json!({"code": -32803, "message": message});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
     assert!(session.finish().success());
 }
 
