@@ -3059,6 +3059,29 @@ mod tests {
         assert!(after_shutdown.client.is_empty(), "nothing after shutdown");
     }
 
+    #[test]
+    fn lost_for_good_a_hover_on_a_node_before_any_index_says_why() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let orders = features::uri(&root.join("models/marts/orders.sql"));
+        let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+        // No `initialize` answered: only the life says who answers.  The parse failed, as with a missing dbt.
+        let hover = |life: Life| {
+            let mut proxy = Proxy::new(Vec::new(), life, Some(root.clone()));
+            proxy.table = modes::Table::new(&modes::Settings::default(), &|_| false);
+            (proxy.parsing.fresh, proxy.parsing.failure) = (true, Some("dbt parse failed: x".into()));
+            proxy.on_request("textDocument/hover", &json!(1), &inside_ref, b"");
+            written(&proxy.client).into_iter().filter_map(|frame| frame.value).find(|m| m["id"] == 1).unwrap()
+        };
+        let lost = hover(Life::Lost("dbt lsp exited (x)".into()));
+        assert_eq!(
+            lost["error"],
+            json!({"code": REQUEST_FAILED, "message": "dbt parse has not finished: dbt parse failed: x"})
+        );
+        // In front, a restart awaited: the merge's part alone, null.
+        let waiting = hover(Life::Waiting(Instant::now() + Duration::from_secs(60)));
+        assert_eq!((waiting.get("error"), &waiting["result"]), (None, &Value::Null), "{waiting}");
+    }
+
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
     }
