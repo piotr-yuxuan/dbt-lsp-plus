@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The resolved configuration of a project's nodes, which dbt lsp 2.0.9 does
-//! not expose, from the user's own `dbt parse`: the command line that
-//! matches the server's, its run in a thread of its own, the index of the
-//! manifest it writes, and the summary of a node.
+//! not expose, from the user's own `dbt parse`: the user's dbt as a project
+//! runs it, read once from the server command, the parse's run and outcome,
+//! the index of the manifest it writes, and the summary of a node.
 
 use crate::graph::ServerNode;
 use crate::node::Type;
 use crate::parse_log;
+use crate::run::{self, Ending, Output, Run, Running};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 /// The command under which dbt-lsp-plus answers a node's information.
 pub const NODE_INFO: &str = "dbt-lsp-plus.nodeInfo";
 
-/// How long a parse may run before it is killed.
+/// How long a run of dbt, the parse or a command's, may run before it is
+/// killed.
 pub const PARSE_DEADLINE: Duration = Duration::from_secs(120);
 
 /// How long a probe of what a command can do, such as `dbt lsp --help`,
@@ -50,49 +50,84 @@ const CUT: [&str; 5] = [
     r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && here=$(pwd -P) && cd -- "$here" && exec "$@""#,
 ];
 
-/// The words of the proxy's `dbt parse`, as `dbt_command` takes them.
+/// The words of the proxy's `dbt parse`, as `Dbt::run` takes them.
 pub const PARSE: [&str; 3] = ["parse", "--log-format", "json"];
 
-/// Starts COMMAND in DIR, when given, with no input and both its outputs in
-/// the file at LOG.
-pub fn spawn_logged(command: &[String], dir: Option<&Path>, log: &Path) -> std::io::Result<Child> {
-    let out = File::create(log)?;
-    let err = out.try_clone()?;
-    let mut child = Command::new(&command[0]);
-    child.args(&command[1..]).stdin(Stdio::null()).stdout(out).stderr(err);
-    if let Some(dir) = dir {
-        child.current_dir(dir);
-    }
-    child.spawn()
+/// The log of a parse, at its cache's root, as `remove_stale` reads it.
+pub const PARSE_LOG: &str = "parse.log";
+
+/// The log of a command's run, in its cache's `run/`, as `remove_stale`
+/// reads it.
+pub const RUN_LOG: &str = "run.log";
+
+/// The user's dbt as a project runs it: the server command, read once, and
+/// where dbt runs.
+#[derive(Debug, Default)]
+pub struct Dbt {
+    command: Vec<String>,
+    /// Where dbt runs: the project, when the client's folder or a document
+    /// named it; none, the proxy's working directory.
+    dir: Option<PathBuf>,
+    /// The words before `lsp`, as `uvx dbt` or `env X=1 dbt`; none without
+    /// it, as a wrapper of its own.
+    launcher: Option<Vec<String>>,
+    /// The flags of KEPT after `lsp`, as `--flag X`.
+    kept: Vec<String>,
 }
 
-/// The dbt command WORDS, as `PARSE`, that matches
-/// SERVER, the command that runs `dbt lsp`: every word before `lsp`, as
-/// `uvx dbt` or `env X=1 dbt`, then WORDS; the flags of KEPT after it, as
-/// `--flag X` or `--flag=X`; the project at ROOT; its output under CACHE,
-/// with neither telemetry nor a check of versions; under the cut when CUT,
-/// which guards ROOT.  None when SERVER has no `lsp` word, as a wrapper of
-/// its own.
-pub fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, words: &[String]) -> Option<Vec<String>> {
-    let at = server.iter().position(|word| word == "lsp")?;
-    let path = |path: &Path| path.to_string_lossy().into_owned();
-    let mut command: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
-    command.extend(cut.then(|| path(root)));
-    command.extend_from_slice(&server[..at]);
-    command.extend_from_slice(words);
-    let mut rest = server[at + 1..].iter();
-    while let Some(word) = rest.next() {
-        let (flag, value) = word.split_once('=').map_or((word.as_str(), None), |(flag, value)| (flag, Some(value)));
-        if KEPT.contains(&flag) {
-            command.push(flag.to_owned());
-            command.extend(value.map(str::to_owned).or_else(|| rest.next().cloned()));
+impl Dbt {
+    /// The dbt of COMMAND, the server command, run in DIR when given: every
+    /// word before `lsp`, and the flags of KEPT after it, as `--flag X` or
+    /// `--flag=X`.
+    pub fn new(command: Vec<String>, dir: Option<PathBuf>) -> Dbt {
+        let at = command.iter().position(|word| word == "lsp");
+        let launcher = at.map(|at| command[..at].to_vec());
+        let mut kept = Vec::new();
+        let mut rest = command[at.map_or(command.len(), |at| at + 1)..].iter();
+        while let Some(word) = rest.next() {
+            let (flag, value) = word.split_once('=').map_or((word.as_str(), None), |(flag, value)| (flag, Some(value)));
+            if KEPT.contains(&flag) {
+                kept.push(flag.to_owned());
+                kept.extend(value.map(str::to_owned).or_else(|| rest.next().cloned()));
+            }
         }
+        Dbt { command, dir, launcher, kept }
     }
-    command.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
-    command.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
-    let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
-    command.extend(quiet.map(str::to_owned));
-    Some(command)
+
+    /// The server command, as read.
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+
+    /// Where dbt runs; none, the proxy's working directory.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Whether its command has `lsp`, from which its runs are made.
+    pub fn runs(&self) -> bool {
+        self.launcher.is_some()
+    }
+
+    /// The run of dbt WORDS, as `PARSE`: the words before `lsp`, then WORDS,
+    /// then the flags of KEPT; the project at ROOT; its output under CACHE,
+    /// its log LOG there, with neither telemetry nor a check of versions;
+    /// under the cut when CUT, which guards ROOT; killed past
+    /// `PARSE_DEADLINE`.  None when the command has no `lsp` word.
+    pub fn run(&self, words: &[String], root: &Path, cache: PathBuf, log: &'static str, cut: bool) -> Option<Run> {
+        let launcher = self.launcher.as_ref()?;
+        let path = |path: &Path| path.to_string_lossy().into_owned();
+        let mut line: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
+        line.extend(cut.then(|| path(root)));
+        line.extend_from_slice(launcher);
+        line.extend_from_slice(words);
+        line.extend_from_slice(&self.kept);
+        line.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
+        line.extend(["--log-path".into(), path(&cache.join("logs")), "--write-json".into()]);
+        let quiet = ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"];
+        line.extend(quiet.map(str::to_owned));
+        Some(Run { line, cwd: self.dir.clone(), dir: cache, log, deadline: PARSE_DEADLINE })
+    }
 }
 
 /// SERVER, a server command, with what it names from the directory DIR,
@@ -122,7 +157,7 @@ pub fn can_cut() -> bool {
     let mut probe = Command::new(CUT[0]);
     probe.args(&CUT[1..]).arg(std::env::temp_dir()).arg("true");
     probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let status = probe.spawn().ok().and_then(|child| finish(child, PROBE_DEADLINE, &AtomicBool::new(false)));
+    let status = probe.spawn().ok().and_then(|child| run::finish(child, PROBE_DEADLINE, &AtomicBool::new(false)));
     status.is_some_and(|status| status.success())
 }
 
@@ -163,8 +198,8 @@ pub fn remove_stale(cache: &Path) {
     let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
     for sibling in siblings.filter(|sibling| Some(sibling.file_name().as_os_str()) != own) {
         let path = sibling.path();
-        let parsed = modified(&path.join("parse.log")).or_else(|| modified(&path));
-        let written = parsed.max(modified(&path.join("run/run.log")));
+        let parsed = modified(&path.join(PARSE_LOG)).or_else(|| modified(&path));
+        let written = parsed.max(modified(&path.join("run").join(RUN_LOG)));
         let age = written.and_then(|written| written.elapsed().ok());
         if age.is_some_and(|age| age > STALE_AFTER) {
             let _ = fs::remove_dir_all(sibling.path());
@@ -397,110 +432,53 @@ pub struct Outcome {
     pub problems: Option<Vec<parse_log::Problem>>,
 }
 
-/// A parse under way, which its owner stops at the latest when it ends.
-pub struct Running {
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Running {
-    /// Runs WORK in a thread of its own, which the flag it gets, set when the
-    /// run is stopped, asks to end.
-    pub fn spawn(work: impl FnOnce(&AtomicBool) + Send + 'static) -> Running {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        Running { stop, thread: Some(thread::spawn(move || work(&stopped))) }
-    }
-
-    /// Stops the parse, killing dbt if it still runs, and waits for the
-    /// thread, which has then reported.
-    pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
 type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 
-/// Hands a parse's outcome over once: the one the thread sends, else a
-/// failure, should the thread end without one.
-struct Report(Option<ReportFn>);
-
-impl Drop for Report {
-    fn drop(&mut self) {
-        if let Some(report) = self.0.take() {
-            let failure = Some("the parse ended without an outcome".into());
-            report(Outcome { index: None, failure, problems: None });
-        }
-    }
-}
-
-/// Runs COMMAND, a `dbt parse` writing under CACHE, in DIR when given, in a
-/// thread of its own, with no input and its output in `CACHE/parse.log`,
-/// and hands REPORT the outcome.  dbt is killed past DEADLINE, or when the
-/// parse is stopped.
-pub fn start(
-    command: Vec<String>,
-    dir: Option<PathBuf>,
-    cache: PathBuf,
-    deadline: Duration,
-    report: ReportFn,
-) -> Running {
-    Running::spawn(move |stopped| {
-        let mut report = Report(Some(report));
-        let (log, manifest) = (cache.join("parse.log"), cache.join("target/manifest.json"));
-        let _ = fs::create_dir_all(&cache);
-        // Only a manifest this run writes counts.
-        let _ = fs::remove_file(&manifest);
-        let status = spawn_logged(&command, dir.as_deref(), &log).map(|child| finish(child, deadline, stopped));
-        let text = fs::read_to_string(&log).unwrap_or_default();
-        // dbt's first error, else the first line that is none of its events,
-        // as a launcher's own.
-        let read = parse_log::read(&text);
-        let mut errors = read.problems.iter().filter(|problem| problem.severity == 1);
-        let other = || text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'));
-        let first = errors.next().map(|error| error.message.clone()).or_else(|| other().map(str::to_owned));
-        let failure = match status {
-            Ok(Some(status)) if status.success() => None,
-            Ok(Some(status)) => Some(
-                first.map_or_else(|| format!("dbt parse {status}"), |first| format!("{first} (see {})", log.display())),
-            ),
-            Ok(None) => Some("dbt parse was stopped, or ran past its deadline".into()),
-            Err(error) => Some(format!("cannot run {}: {error}", command[0])),
+/// Runs RUN, a `dbt parse`, as `run::start` runs it, and hands REPORT the
+/// outcome: a failure words dbt's first error event, else the first line
+/// that is none of its events, as a launcher's own, and names the log; one
+/// that ends with no outcome, as on a panic, fails.
+pub fn start(run: Run, report: ReportFn) -> Running {
+    let read = |output: &Output| {
+        let first = output.error_event().or_else(|| output.line().map(str::to_owned));
+        let failure = match &output.ending {
+            Ending::Exited(status) if status.success() => None,
+            Ending::Exited(status) => Some(first.map_or_else(
+                || format!("dbt parse {status}"),
+                |first| format!("{first} (see {})", output.log.display()),
+            )),
+            Ending::Stopped => Some("dbt parse was stopped, or ran past its deadline".into()),
+            Ending::NotStarted(why) => Some(why.clone()),
         };
-        let manifest = fs::read_to_string(&manifest).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        if let Some(report) = report.0.take() {
-            let problems = read.completed.then_some(read.problems);
-            report(Outcome { index: manifest.as_ref().map(ParseIndex::of), failure, problems });
-        }
-    })
-}
-
-/// Waits for CHILD to exit within DEADLINE, unless STOP is set; else kills
-/// and reaps it, and gives none.
-pub fn finish(mut child: Child, deadline: Duration, stop: &AtomicBool) -> Option<ExitStatus> {
-    let end = Instant::now() + deadline;
-    while Instant::now() < end && !stop.load(Ordering::Relaxed) {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Some(status);
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    None
+        let read = parse_log::read(&output.text);
+        let problems = read.completed.then_some(read.problems);
+        Outcome { index: output.manifest.as_ref().map(ParseIndex::of), failure, problems }
+    };
+    let ended = Outcome { index: None, failure: Some("the parse ended without an outcome".into()), problems: None };
+    run::start(run, read, ended, report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::project::scratch_project;
+    use std::fs::File;
     use std::sync::mpsc;
+    use std::time::Instant;
 
     fn words(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// `start` with the Run's parts as it took them before the Run.
+    fn start(line: Vec<String>, cwd: Option<PathBuf>, dir: PathBuf, deadline: Duration, report: ReportFn) -> Running {
+        super::start(Run { line, cwd, dir, log: PARSE_LOG, deadline }, report)
+    }
+
+    /// The command line of the Dbt of SERVER's run of WORDS, as it was made
+    /// before the Dbt.
+    fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, words: &[String]) -> Option<Vec<String>> {
+        Dbt::new(server.to_vec(), None).run(words, root, cache.to_owned(), PARSE_LOG, cut).map(|run| run.line)
     }
 
     #[test]
@@ -551,6 +529,14 @@ mod tests {
             dbt_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), true, &parse),
             None
         );
+    }
+
+    #[test]
+    fn a_dbt_s_run_runs_where_the_dbt_runs_within_the_parse_s_deadline() {
+        let dbt = Dbt::new(words(&["dbt", "lsp"]), Some(PathBuf::from("/root")));
+        let run = dbt.run(&words(&["list"]), Path::new("/root"), PathBuf::from("/cache/run"), RUN_LOG, true).unwrap();
+        let expected = (Some(PathBuf::from("/root")), PathBuf::from("/cache/run"), RUN_LOG, PARSE_DEADLINE);
+        assert_eq!((run.cwd, run.dir, run.log, run.deadline), expected, "a command's run as the parse");
     }
 
     #[test]

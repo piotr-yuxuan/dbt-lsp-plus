@@ -3623,6 +3623,52 @@ fn with_dbt_lsp_a_function_keeps_its_callers_after_the_listing() {
 }
 
 #[test]
+fn with_dbt_lsp_the_graph_looks_its_calls_up_with_the_index() {
+    // The root disables its `ext.payments`, which `pkg` declares too, enabled: only the index tells that dbt's
+    // `source` leads to the package's.
+    let project = copy_fixture("graph-index-project");
+    let declared = "version: 2\nsources:\n  - name: ext\n    tables:\n      - name: payments\n";
+    let files = [
+        ("models/_ext.yml", declared),
+        ("models/marts/uses_ext.sql", "select * from {{ source('ext', 'payments') }}"),
+        ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+        ("dbt_packages/pkg/models/_ext.yml", declared),
+    ];
+    for (path, text) in files {
+        std::fs::create_dir_all(project.join(path).parent().unwrap()).unwrap();
+        std::fs::write(project.join(path), text).unwrap();
+    }
+    let payments = |package: &str| {
+        json!({"unique_id": format!("source.{package}.ext.payments"), "name": "payments", "source_name": "ext",
+               "resource_type": "source", "package_name": package, "original_file_path": "models/_ext.yml",
+               "depends_on": {"nodes": []}, "config": {}})
+    };
+    // Only the server says that uses_ext depends on orders: once it shows, the listing is applied.
+    let uses =
+        node("model.shop.uses_ext", "models/marts/uses_ext.sql", &["source.pkg.ext.payments", "model.shop.orders"]);
+    let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_ext": uses},
+                          "sources": {"source.pkg.ext.payments": payments("pkg")},
+                          "disabled": {"source.shop.ext.payments": [payments("shop")]}});
+    let answers = json!({ALL: {"error": null, "nodes": [uses]}, SOURCES: {"error": null, "nodes": [payments("pkg")]}});
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, _) =
+        Session::fake_with("graph-index", json!({"manifest": manifest, "answers": answers}), &flags, None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/uses_ext.sql"), None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    // The index, made in front of the server once it compiled.
+    let info = json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.uses_ext"]});
+    session.poll(Duration::from_secs(10), ("workspace/executeCommand", info), |result| result.is_object());
+    let uses_ext = json!({"item": {"data": {"uniqueId": "model.shop.uses_ext"}}});
+    let listed = |calls: &Value| calls.as_array().unwrap().iter().any(|c| c["to"]["detail"] == "model.shop.orders");
+    let outgoing = session.poll(Duration::from_secs(10), ("callHierarchy/outgoingCalls", uses_ext), listed);
+    // The listing's edge keeps the scanned site of the call, which the scan finds only with the index.
+    let to_payments = call(&outgoing, "to", "source.pkg.ext.payments");
+    assert_eq!(to_payments["fromRanges"][0]["start"], json!({"line": 0, "character": 17}), "{outgoing}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_with_dbt_lsp() {
     let python = "def model(dbt, session):\n    return dbt.ref('stg_orders')\n";
     for alone in [true, false] {

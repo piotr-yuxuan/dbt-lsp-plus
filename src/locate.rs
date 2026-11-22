@@ -5,7 +5,7 @@
 //! `PATH`; and the probe that tells a dbt 2 with `lsp`, one without, and
 //! anything else apart.
 
-use crate::{config, packages};
+use crate::{config, packages, run};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
@@ -69,7 +69,7 @@ fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let stdout = child.stdout.take()?;
     // Two short lines, which the pipe holds until git has exited.
-    let status = config::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false))?;
+    let status = run::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false))?;
     let mut text = String::new();
     stdout.take(1 << 16).read_to_string(&mut text).ok()?;
     let lines: Vec<PathBuf> = text.lines().map(PathBuf::from).collect();
@@ -232,7 +232,7 @@ pub fn probe(command: &[String], dir: Option<&Path>) -> Probe {
         let _ = stderr.take(1 << 16).read_to_end(&mut text);
         let _ = sender.send(text);
     });
-    let status = config::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false));
+    let status = run::finish(child, config::PROBE_DEADLINE, &AtomicBool::new(false));
     let stderr = read.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
     let refused = String::from_utf8_lossy(&stderr).contains("unrecognized subcommand 'lsp'");
     match (status, status.and_then(|status| status.code())) {

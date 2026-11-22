@@ -494,12 +494,15 @@ refused.  Its answer is the `compiled_path` of the node of the root package
 whose `original_file_path` is R, a test's never (as of a properties file),
 in the manifest the run wrote, resolved from the working directory; none
 answers dbt lsp's "Compiled file path not
-found."; a failed run, dbt's first error from its JSON log.  `nodes` runs
+found."; a failed run, dbt's first error (below).  `nodes` runs
 `dbt list --select=SELECTOR --output json` with dbt's text log and
-`--quiet`, and answers its JSON lines with a `unique_id`; a failed run, its
-first `[error]` line; else, for either, the first line that is none of
-dbt's events, as a launcher's own, with how the run ended.  The compiled
-file lives while the session does, as the cache.
+`--quiet`, and answers its JSON lines with a `unique_id`.  Either answers
+dbt's first error, whatever its exit status, from the log it asks for: a
+compile, the first error event of its JSON log; a list, the first
+`[error]` line of its text log (`run::Output`), though dbt may write the
+other kind (below); else, for a failed run, the first line that is none
+of dbt's events, as a launcher's own, with how the run ended.  The
+compiled file lives while the session does, as the cache.
 
 ### What dbt does for these commands, observed on 2026-11-17
 
@@ -541,6 +544,19 @@ alike unless said:
 - `dbt show` and `dbt build` fail offline: dbt fetches the DuckDB driver
   from its CDN when the home has none.  `dbt show --help` (2.0.11) gives
   `--limit` "[default: 10]".
+- Observed on 2026-11-22, by plan 048's review, on dbt 2.0.9 and
+  dbt-oss 2.0.11 alike, offline in a scratch home: a log may hold the
+  kind its format does not name.  With `DBT_LOG_FORMAT=json` in its
+  environment and no `--log-format`, `dbt list --select=S --output json`
+  logs JSON events alone: with no `profiles.yml`, the error event
+  `[error] [InvalidConfig (dbt1005)]: No profiles.yml found at …`, no
+  other line, and status 1.  With `--log-format json`, a target path that
+  dbt cannot create, its log path writable, gives the bare line `[error]
+  [IoError (dbt1001)]: Failed to create output directory: …`, no event,
+  and status 1; a project directory that cannot be canonicalised does
+  the same, which the cut's mount stops before dbt runs.  A list answers
+  the first as how dbt ended, and a compile the second as a launcher's
+  line with how dbt ended, until one rule reads both kinds (plan 050).
 
 ## Root
 
@@ -1396,8 +1412,10 @@ So the proxy runs the user's own `dbt parse`.
 
 ### How the proxy runs it
 
-- The command: the server command with its `lsp` word replaced by `parse`,
-  every word before it kept (`uvx dbt`), then from after it only
+- The command: made from the project's Dbt (`config::Dbt`), the server
+  command read once, as every run of dbt is: the server command with its
+  `lsp` word replaced by `parse`, every word before it kept (`uvx dbt`),
+  then from after it only
   `--profiles-dir`, `--profile`, `--target`, `--vars` and
   `--packages-install-path`, in either form; always `--project-dir <root>`,
   `--target-path` and `--log-path` under the cache, `--write-json`,
@@ -1759,7 +1777,7 @@ second binary would be one more file to install, put on a harness's
   on its standard error, is doctor's `cut`.
 - **select is `dbt-lsp-plus.nodes` from a shell.**  The same refusal
   without the cut (`commands::route`), the same guard, the same run
-  (`commands::nodes_job`, `config::dbt_command` under the cut,
+  (`commands::nodes_job`, `config::Dbt::run` under the cut,
   `commands::start` with the parse's deadline), in a run directory of
   its own under the user's cache, removed once the answer is read; its
   answer is `listed`'s, as a client gets it.

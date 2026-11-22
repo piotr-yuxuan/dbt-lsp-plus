@@ -13,7 +13,7 @@ use crate::project::{self, Project, Scanned};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
 use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, reference, runs, scan, shadow,
+    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, scan, shadow,
     sources,
 };
 use serde_json::{Value, json};
@@ -468,11 +468,12 @@ impl Pending {
 /// What the proxy knows of the user's `dbt parse`.
 #[derive(Default)]
 struct Parsing {
-    /// The server command, from which the parse's is made.
-    server: Vec<String>,
+    /// The user's dbt, from which every run of dbt is made: the server
+    /// command, and where dbt's processes run.
+    dbt: config::Dbt,
     /// Where a parse reports; none in the unit tests, which parse nothing.
     events: Option<Sender<Event>>,
-    running: Option<config::Running>,
+    running: Option<run::Running>,
     index: Option<config::ParseIndex>,
     /// Whether no change came since the last parse started.
     fresh: bool,
@@ -486,10 +487,6 @@ struct Parsing {
     failure: Option<String>,
     /// Whether a parse runs cut off the network and from writing the project.
     cut: bool,
-    /// Where dbt's processes run: the project, when the client's folder or
-    /// a document named it; none, the proxy's working directory, when the
-    /// server command did.
-    dir: Option<PathBuf>,
     cache: Option<PathBuf>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
@@ -609,10 +606,9 @@ struct Proxy<W: Write> {
     /// set it.
     shadow: Option<shadow::Shadow>,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
-    /// waiting, with the client's id, their command line and their
-    /// directory, and the one under way.
-    runs: VecDeque<(Value, commands::Job, Vec<String>, PathBuf)>,
-    run: Option<config::Running>,
+    /// waiting, with the client's id and their run, and the one under way.
+    runs: VecDeque<(Value, commands::Job, run::Run)>,
+    run: Option<run::Running>,
 }
 
 /// PATH with each `..` dropping the component before it, as written: no
@@ -936,8 +932,8 @@ impl<W: Write> Proxy<W> {
     fn take_project(&mut self, root: PathBuf, document: bool) {
         let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
         // What the user wrote from the proxy's directory still names the same from the project.
-        let server = std::env::current_dir().map(|cwd| config::anchored(&self.parsing.server, &cwd));
-        let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.parsing.server.clone()), &git);
+        let server = std::env::current_dir().map(|cwd| config::anchored(self.parsing.dbt.command(), &cwd));
+        let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.parsing.dbt.command().to_vec()), &git);
         let no_lsp =
             || found.lsp.map_or_else(|| locate::probe(&found.command, Some(&root)) == Probe::NoLsp, |lsp| !lsp);
         let route = if document { locate::Route::Document } else { locate::Route::Folder };
@@ -953,11 +949,11 @@ impl<W: Write> Proxy<W> {
         let line = format!("dbt-lsp-plus: project {root_shown}, dbt {named} ({source}){skipped}{tail}");
         eprintln!("{line}");
         self.line = Some(line);
-        (self.parsing.server, self.parsing.dir) = (found.command, Some(root.clone()));
+        self.parsing.dbt = config::Dbt::new(found.command, Some(root.clone()));
         // Without a channel, in the unit tests, in front with none started.
         self.backend.life = match (alone, self.parsing.events.clone()) {
             (Some(why), _) => Life::NotStarted(why.to_owned()),
-            (None, Some(events)) => match spawn_server(&self.parsing.server, &events, 0, Some(&root)) {
+            (None, Some(events)) => match spawn_server(self.parsing.dbt.command(), &events, 0, Some(&root)) {
                 Ok(server) => Life::Running(Running::new(server)),
                 Err(why) => Life::Lost(why),
             },
@@ -1447,19 +1443,19 @@ impl<W: Write> Proxy<W> {
         let can = self.backend.running().is_none() || parsing.compiled;
         let ready = !parsing.fresh && can && parsing.running.is_none();
         let Some(root) = self.root.clone().filter(|_| ready && !self.shutdown) else { return };
-        if let Some(why) = packages::refused(&root, &self.parsing.server, self.parsing.cut, self.guards_packages()) {
+        let refused = packages::refused(&root, self.parsing.dbt.command(), self.parsing.cut, self.guards_packages());
+        if let Some(why) = refused {
             return self.log_parse(&why);
         }
         let cache = self.cache(&root);
         let parse = config::PARSE.map(str::to_owned);
-        let Some(command) = config::dbt_command(&self.parsing.server, &root, &cache, self.parsing.cut, &parse) else {
+        let Some(run) = self.parsing.dbt.run(&parse, &root, cache, config::PARSE_LOG, self.parsing.cut) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };
         let Some(events) = self.parsing.events.clone() else { return };
         self.parsing.fresh = true;
         let report = Box::new(move |outcome| drop(events.send(Event::Parsed(outcome))));
-        let dir = self.parsing.dir.clone();
-        self.parsing.running = Some(config::start(command, dir, cache, config::PARSE_DEADLINE, report));
+        self.parsing.running = Some(config::start(run, report));
     }
 
     /// Whether dbt's packages are guarded as alone: no dbt lsp runs, and
@@ -1472,7 +1468,7 @@ impl<W: Write> Proxy<W> {
     /// This process's cache of ROOT, under the user's, made at its first
     /// use, the caches beside it that no parse wrote for a day removed then.
     fn cache(&mut self, root: &Path) -> PathBuf {
-        let server = &self.parsing.server;
+        let server = self.parsing.dbt.command();
         let cache = self.parsing.cache.get_or_insert_with(|| {
             let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), root, server);
             config::remove_stale(&cache);
@@ -1511,7 +1507,7 @@ impl<W: Write> Proxy<W> {
     /// Whether dbt's CLI can do a command for clients: under the cut, by a
     /// server command with `lsp`, from which the run's is made.
     fn runs_cli(&self) -> bool {
-        self.parsing.cut && self.parsing.server.iter().any(|word| word == "lsp")
+        self.parsing.cut && self.parsing.dbt.runs()
     }
 
     /// Queues the run of COMMAND by dbt's CLI, under the cut, for the
@@ -1532,13 +1528,12 @@ impl<W: Write> Proxy<W> {
             }
             _ => Ok(commands::nodes_job(argument.as_str().unwrap_or_default())),
         };
-        let refused = packages::refused(&root, &self.parsing.server, true, self.guards_packages());
+        let refused = packages::refused(&root, self.parsing.dbt.command(), true, self.guards_packages());
         let dir = self.cache(&root).join("run");
-        let line =
-            job.as_ref().ok().and_then(|job| config::dbt_command(&self.parsing.server, &root, &dir, true, &job.words));
-        let failure = match (job, refused, line) {
-            (Ok(job), None, Some(line)) => {
-                self.runs.push_back((id.clone(), job, line, dir));
+        let run = job.as_ref().ok().and_then(|job| self.parsing.dbt.run(&job.words, &root, dir, config::RUN_LOG, true));
+        let failure = match (job, refused, run) {
+            (Ok(job), None, Some(run)) => {
+                self.runs.push_back((id.clone(), job, run));
                 return self.next_run();
             }
             (Err(failure), ..) => failure,
@@ -1553,12 +1548,11 @@ impl<W: Write> Proxy<W> {
         if self.run.is_some() {
             return;
         }
-        let (Some(events), Some((id, job, line, dir))) = (self.parsing.events.clone(), self.runs.pop_front()) else {
+        let (Some(events), Some((id, job, run))) = (self.parsing.events.clone(), self.runs.pop_front()) else {
             return;
         };
         let report = Box::new(move |result| drop(events.send(Event::Ran(id, result))));
-        let cwd = self.parsing.dir.clone();
-        self.run = Some(commands::start(job, line, cwd, dir, config::PARSE_DEADLINE, report));
+        self.run = Some(commands::start(job, run, report));
     }
 
     /// A run's RESULT, the answer to the client's request ID; then the next
@@ -1670,7 +1664,7 @@ impl<W: Write> Proxy<W> {
     /// The working directory of dbt's processes: the project's when the
     /// client's folder or a document named it, else the proxy's.
     fn dbt_dir(&self) -> Option<PathBuf> {
-        self.parsing.dir.clone().or_else(|| std::env::current_dir().ok())
+        self.parsing.dbt.dir().map(Path::to_owned).or_else(|| std::env::current_dir().ok())
     }
 
     /// Asks a client that can refresh its inlay hints to do so, since they
@@ -1698,7 +1692,7 @@ impl<W: Write> Proxy<W> {
     /// Stops a parse and a run under way and removes this process's cache.
     fn stop_parse(&mut self) {
         let under_way = [self.parsing.running.take(), self.run.take()];
-        under_way.into_iter().flatten().for_each(config::Running::stop);
+        under_way.into_iter().flatten().for_each(run::Running::stop);
         if let Some(cache) = self.parsing.cache.take() {
             let _ = fs::remove_dir_all(cache);
         }
@@ -1888,7 +1882,7 @@ impl<W: Write> Proxy<W> {
     /// `initialized` start with a project; then the line that says so.
     fn on_first_project(&mut self, params: &Value) {
         let path = uri_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
-        let Some(root) = path.and_then(|path| locate::project_of(&path, &self.parsing.server)) else { return };
+        let Some(root) = path.and_then(|path| locate::project_of(&path, self.parsing.dbt.command())) else { return };
         self.take_project(root, true);
         self.scan_first();
         self.watch_runs();
@@ -2521,7 +2515,7 @@ impl<W: Write> Proxy<W> {
         }
         self.backend.restarts.push(Instant::now());
         self.backend.spawned += 1;
-        match spawn_server(&self.parsing.server, &events, self.backend.spawned, self.parsing.dir.as_deref()) {
+        match spawn_server(self.parsing.dbt.command(), &events, self.backend.spawned, self.parsing.dbt.dir()) {
             Ok(mut server) => {
                 self.next_id += 1;
                 let id = format!("{OWN_ID}{}", self.next_id);
@@ -2745,7 +2739,8 @@ pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch)
     if given.is_some() && !cut {
         eprintln!("{NO_CUT}");
     }
-    let parsing = Parsing { server: command.to_vec(), events: Some(events.clone()), cut, ..Parsing::default() };
+    let dbt = config::Dbt::new(command.to_vec(), None);
+    let parsing = Parsing { dbt, events: Some(events.clone()), cut, ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), life, given);
     (proxy.never, proxy.settings) = (never, settings);
@@ -3200,7 +3195,7 @@ mod tests {
     #[test]
     fn a_give_up_during_a_parse_starts_no_second_one() {
         // Whether the index is still fresh once the last restart of the window is spent, a parse under way or not.
-        let fresh_after_give_up = |running: Option<config::Running>| {
+        let fresh_after_give_up = |running: Option<run::Running>| {
             let mut proxy = Proxy::new(Vec::new(), Life::default(), None);
             proxy.initialized = true;
             let ago = |seconds| Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap();
@@ -3213,7 +3208,7 @@ mod tests {
             fresh
         };
         // A parse in flight, whose `Parsed` event `on_parsed` has yet to take.
-        assert!(fresh_after_give_up(Some(config::Running::spawn(|_| {}))), "a parse under way");
+        assert!(fresh_after_give_up(Some(run::Running::spawn(|_| {}))), "a parse under way");
         assert!(!fresh_after_give_up(None), "no parse under way");
     }
 

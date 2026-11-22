@@ -239,13 +239,14 @@ fn select(selector: &str, command: &[String]) -> Value {
     let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &project, &dbt.command);
     // What a select or a proxy killed by a signal left, swept after a day, as `Proxy::cache` does.
     config::remove_stale(&cache);
-    let (job, run) = (commands::nodes_job(selector), cache.join("run"));
-    let Some(line) = config::dbt_command(&dbt.command, &project, &run, true, &job.words) else {
+    let job = commands::nodes_job(selector);
+    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), config::RUN_LOG, true);
+    let Some(run) = run else {
         return commands::failure(commands::NODES, commands::NO_LSP_WORD);
     };
     let (sender, answer) = mpsc::channel();
     let report = Box::new(move |result| drop(sender.send(result)));
-    let running = commands::start(job, line, dir, run, config::PARSE_DEADLINE, report);
+    let running = commands::start(job, run, report);
     let ended = || commands::failure(commands::NODES, "the run ended without an answer");
     let result = answer.recv().unwrap_or_else(|_| ended());
     running.stop();
