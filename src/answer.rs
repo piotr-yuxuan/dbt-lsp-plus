@@ -71,6 +71,11 @@ impl fmt::Display for Reason {
 }
 
 impl Answer {
+    /// A rename's answer: its edit, or its refusal as the reason.
+    pub fn of_rename(edit: Result<Value, String>) -> Answer {
+        edit.map_or_else(|why| Answer::Unanswered(vec![Reason::Refused(why)]), Answer::Found)
+    }
+
     /// The JSON-RPC response to the request ID of NAME, a method or a
     /// command: its result; for an empty one, `capability::empty(NAME)`; for
     /// an unanswered one, error -32803 whose message is its reasons, joined

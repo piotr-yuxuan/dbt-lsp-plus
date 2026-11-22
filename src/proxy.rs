@@ -3,6 +3,7 @@
 //! byte for byte, and answers itself the requests of the features that the
 //! server does not announce.
 
+use crate::answer::{Answer, Reason};
 use crate::capability::{self, CAPABILITIES, Provider};
 use crate::commands;
 use crate::graph::{self, Graph, ServerNode};
@@ -34,7 +35,6 @@ use url::Url;
 pub const OWN_ID: &str = "dbt-lsp-plus/";
 /// How long the server has to exit after `exit` before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
-const REQUEST_FAILED: i64 = -32803;
 const INVALID_REQUEST: i64 = -32600;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
@@ -43,9 +43,9 @@ const INTERNAL_ERROR: i64 = -32603;
 enum Route {
     /// Itself, as this method.
     Here(&'static str),
-    /// Itself, with this result: nothing, null or `[]` for a list, or the
-    /// shadow's counts.
-    Answer(Value),
+    /// Itself, with this answer: null before a project, the shadow's
+    /// counts, or the method's nothing.
+    Answer(Answer),
     /// By the server.
     Forward,
     /// As this command of the proxy's for clients.
@@ -375,11 +375,12 @@ enum Part {
 impl Pending {
     /// The server's answer, MESSAGE, as this kind of part makes it, for a
     /// client that reads markdown when MARKDOWN, its locations' URIs read as
-    /// paths by PATH_OF; none to pass it unchanged.  An error to a request
-    /// with a part of the proxy's gives that part.
+    /// paths by PATH_OF; none to pass it unchanged.  An error to a merged
+    /// request gives what `unserved` gives for it.
     fn merged(&self, message: &Value, markdown: bool, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Value> {
-        if message.get("error").is_some() {
-            return self.part(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
+        if let (Some(error), Kept::Part(_)) = (message.get("error"), &self.kept) {
+            let failed = Reason::Failed(error["message"].as_str().unwrap_or_default().to_owned());
+            return Some(self.unserved(markdown, failed).frame(&message["id"], &self.name));
         }
         match &self.kept {
             Kept::Part(Part::Hover(text, hard)) => features::merge_hover(message, text, *hard, markdown),
@@ -389,20 +390,31 @@ impl Pending {
         }
     }
 
-    /// The proxy's part by itself, as the answer when the server gives
-    /// none: a hover's text, the hints, a merged request's nothing; none
-    /// for a request that is not merged.
-    fn part(&self, markdown: bool) -> Option<Value> {
+    /// The proxy's part found, by itself, for a client that reads markdown
+    /// when MARKDOWN: a hover's text, the hints, the locations; none for its
+    /// nothing, and for a request that is not merged.
+    fn found(&self, markdown: bool) -> Option<Value> {
         let Kept::Part(part) = &self.kept else { return None };
         match part {
-            Part::Nothing => Some(capability::empty(&self.name)),
-            Part::Unindexed => Some(Value::Null),
+            Part::Nothing | Part::Unindexed => None,
             Part::Hover(text, hard) => {
                 let alone = features::merge_hover(&json!({"result": null}), text, *hard, markdown);
                 alone.map(|alone| alone["result"].clone())
             }
             Part::Hints(hints) => Some(Value::Array(hints.clone())),
             Part::Locations(found) => Some(found.clone()),
+        }
+    }
+
+    /// What the client gets for this request when dbt lsp gives it no
+    /// answer, for WHY, as it reads markdown when MARKDOWN: the proxy's part
+    /// found; its nothing, the method's; else, for a request that is not
+    /// merged, why.
+    fn unserved(&self, markdown: bool, why: Reason) -> Answer {
+        match (&self.kept, self.found(markdown)) {
+            (_, Some(found)) => Answer::Found(found),
+            (Kept::Part(Part::Nothing | Part::Unindexed), None) => Answer::Empty,
+            _ => Answer::Unanswered(vec![why]),
         }
     }
 
@@ -451,6 +463,18 @@ struct Parsing {
     cache: Option<PathBuf>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
+}
+
+impl Parsing {
+    /// Why no index answers yet, as nodeInfo and a hover say it.
+    fn unindexed(&self) -> Reason {
+        let why = match (self.running.is_some(), &self.failure) {
+            (true, _) => "it is running",
+            (false, Some(failure)) => failure,
+            (false, None) => "waiting for dbt lsp to compile the project",
+        };
+        Reason::Unindexed(why.to_owned())
+    }
 }
 
 /// What a dbt lsp process said of its compilations: whether one runs.
@@ -1076,21 +1100,21 @@ impl<W: Write> Proxy<W> {
 
     /// The answer to the call hierarchy's METHOD, on the graph of the files
     /// with the server's nodes once listed, or, alone, the last parse's.
-    fn hierarchy(&self, method: &str, params: &Value) -> Option<Value> {
-        let Some(project) = self.project() else { return Some(Value::Null) };
+    fn hierarchy(&self, method: &str, params: &Value) -> Option<Answer> {
+        let Some(project) = self.project() else { return Some(Answer::Empty) };
         let graph = self.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
             let incoming = method == "callHierarchy/incomingCalls";
-            return Some(features::calls(&project, &graph, id, incoming, self.encoding));
+            return Some(Answer::Found(features::calls(&project, &graph, id, incoming, self.encoding)));
         }
         // A document that is no file, such as an unsaved buffer, holds no resource.
         let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else {
-            return Some(Value::Null);
+            return Some(Answer::Empty);
         };
         let text = project.text(&path).unwrap_or_default();
         let offset = LineStarts::new(text).offset_of(params.get("position")?, self.encoding)?;
-        Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
+        Some(Answer::Found(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding)))
     }
 
     /// The document of a request, its text, open or on disk, and the offset
@@ -1122,7 +1146,7 @@ impl<W: Write> Proxy<W> {
         // every method the proxy announces, and of each an agent was seen to
         // send.
         if self.root.is_none() && method != "initialize" {
-            return Route::Answer(Value::Null);
+            return Route::Answer(Answer::Found(Value::Null));
         }
         // Alone, hovers and hints are the proxy's, whole.
         let whole = || capability::of(method).filter(|c| self.backend.alone() && c.whole()).map(|c| c.name);
@@ -1131,7 +1155,7 @@ impl<W: Write> Proxy<W> {
         }
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
         if let (Some(shadow::SUMMARY), Some(shadow)) = (command, &self.shadow) {
-            return Route::Answer(shadow.counts.summary());
+            return Route::Answer(Answer::Found(shadow.counts.summary()));
         }
         // A command of the proxy's alone is answered here, one of dbt's goes by `commands::route`.
         if let Some(own) = command.and_then(capability::of).filter(|own| own.is_command()) {
@@ -1148,8 +1172,9 @@ impl<W: Write> Proxy<W> {
         }
         // Without a server, a definition with no target is null, not a failure, and `shutdown` is null as LSP asks.
         let lifecycle = ["textDocument/definition", "shutdown"].contains(&method);
-        let unserved = (lifecycle && self.backend.running().is_none()).then_some(Value::Null);
-        self.table.nothing(method, self.backend.alone()).or(unserved).map_or(Route::Forward, Route::Answer)
+        let unserved = (lifecycle && self.backend.running().is_none()).then_some(Answer::Empty);
+        let nothing = self.table.nothing(method, self.backend.alone()).and(Some(Answer::Empty));
+        nothing.or(unserved).map_or(Route::Forward, Route::Answer)
     }
 
     /// A request of a capability with kinds of target that the proxy
@@ -1187,34 +1212,34 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The definition of the target at the request's position, by dbt
-    /// 2.0.9's lookup: its location, several, or null.
-    fn on_definition(&self, params: &Value) -> Option<Result<Value, String>> {
+    /// 2.0.9's lookup: its location, several, or none.
+    fn on_definition(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
         let target = navigation::target_at(&path, &text, offset);
-        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(Value::Null)) };
+        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Answer::Empty) };
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
-        Some(Ok(match &locations[..] {
-            [] => Value::Null,
-            [location] => location.clone(),
-            _ => Value::Array(locations),
-        }))
+        Some(match &locations[..] {
+            [] => Answer::Empty,
+            [location] => Answer::Found(location.clone()),
+            _ => Answer::Found(Value::Array(locations)),
+        })
     }
 
     /// The references of the source, the node or the macro at the request's
     /// position, with their declaration when the client asks.
-    fn on_references(&self, params: &Value) -> Option<Result<Value, String>> {
+    fn on_references(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
         let target = navigation::target_at(&path, &text, offset);
-        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Ok(json!([]))) };
+        let (Some(target), Some(project)) = (target, self.project()) else { return Some(Answer::Empty) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
         if let navigation::Target::Source(source) = &target {
             let uri_of = |path: &Path| self.uri_of(path);
-            return Some(Ok(sources::references(&project, source, declaration, self.encoding, &uri_of)));
+            return Some(Answer::Found(sources::references(&project, source, declaration, self.encoding, &uri_of)));
         }
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let found = navigation::references(&lookup, &path, &target, declaration);
-        Some(Ok(Value::Array(self.locations(&project, &found))))
+        Some(Answer::Found(Value::Array(self.locations(&project, &found))))
     }
 
     /// The URI of the file at PATH, as the client spelt it if it opened it.
@@ -1236,21 +1261,21 @@ impl<W: Write> Proxy<W> {
 
     /// The rename of the source at the request's position, in a file the scan
     /// holds: a rename that left the asking file as it is would be wrong.
-    fn on_source(&self, params: &Value) -> Option<Result<Value, String>> {
-        let Some((project, target)) = self.source_at(params) else { return Some(Ok(Value::Null)) };
+    fn on_source(&self, params: &Value) -> Option<Answer> {
+        let Some((project, target)) = self.source_at(params) else { return Some(Answer::Empty) };
         let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
-        Some(sources::rename(&project, &target, new, self.encoding, &uri_of))
+        Some(Answer::of_rename(sources::rename(&project, &target, new, self.encoding, &uri_of)))
     }
 
     /// The rename of the source, else of the CTE, at the request's position.
-    fn on_rename(&self, params: &Value) -> Option<Result<Value, String>> {
+    fn on_rename(&self, params: &Value) -> Option<Answer> {
         if self.source_at(params).is_some() {
             return self.on_source(params);
         }
         let (_, text, offset) = self.document_at(params)?;
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
-        Some(document::rename_cte(&text, uri, offset, new, self.encoding).unwrap_or(Ok(Value::Null)))
+        Some(document::rename_cte(&text, uri, offset, new, self.encoding).map_or(Answer::Empty, Answer::of_rename))
     }
 
     /// The folding ranges, highlights or selection ranges of a document;
@@ -1324,21 +1349,11 @@ impl<W: Write> Proxy<W> {
         (project.entities.iter().filter(defines).count() == 1).then_some(None)
     }
 
-    /// Why no index answers yet, as nodeInfo and a hover say it.
-    fn unindexed(&self) -> String {
-        let why = match (self.parsing.running.is_some(), &self.parsing.failure) {
-            (true, _) => "it is running",
-            (false, Some(failure)) => failure,
-            (false, None) => "waiting for dbt lsp to compile the project",
-        };
-        format!("dbt parse has not finished: {why}")
-    }
-
     /// The information of a node, named by its id or by a position: the
-    /// manifest's node with its relation and the summary a hover shows, null
-    /// for no node; a failure while no parse has finished.
-    fn node_info(&self, params: &Value) -> Option<Result<Value, String>> {
-        let Some(index) = &self.parsing.index else { return Some(Err(self.unindexed())) };
+    /// manifest's node with its relation and the summary a hover shows,
+    /// none for no node; why while no parse has finished.
+    fn node_info(&self, params: &Value) -> Option<Answer> {
+        let Some(index) = &self.parsing.index else { return Some(Answer::Unanswered(vec![self.parsing.unindexed()])) };
         let argument = params.pointer("/arguments/0")?;
         let node = match argument.as_str() {
             Some(id) => index.node(id),
@@ -1352,7 +1367,7 @@ impl<W: Write> Proxy<W> {
             answer["summary"] = json!(index.summary(node));
             answer
         };
-        Some(Ok(node.map_or(Value::Null, summarised)))
+        Some(node.map_or(Answer::Empty, |node| Answer::Found(summarised(node))))
     }
 
     /// Starts a parse when the index is stale and dbt can parse: with no
@@ -1641,34 +1656,33 @@ impl<W: Write> Proxy<W> {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
-            "textDocument/documentSymbol" => self.outline(params).map(Ok),
+            "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
             "workspace/symbol" => params.get("query").and_then(Value::as_str).map(|query| {
-                Ok(self
-                    .project()
-                    .map_or(json!([]), |project| features::workspace_symbols(&project, query, self.encoding)))
+                self.project().map_or(Answer::Empty, |project| {
+                    Answer::Found(features::workspace_symbols(&project, query, self.encoding))
+                })
             }),
             config::NODE_INFO => self.node_info(params),
             "textDocument/references" => self.on_references(params),
             "textDocument/definition" => self.on_definition(params),
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
-                self.on_document(method, params).map(Ok)
+                self.on_document(method, params).map(Answer::Found)
             }
             // Asked for first, as nodeInfo does, so that the reason is that of the parse it may start.
             "textDocument/hover" if pending.kept == Kept::Part(Part::Unindexed) => {
                 self.want_index();
-                Some(Err(self.unindexed()))
+                Some(Answer::Unanswered(vec![self.parsing.unindexed()]))
             }
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
-                Some(Ok(pending.part(self.markdown).unwrap_or_else(|| capability::empty(method))))
+                Some(pending.found(self.markdown).map_or(Answer::Empty, Answer::Found))
             }
-            _ => self.hierarchy(method, params).map(Ok),
+            _ => self.hierarchy(method, params),
         }));
         match computed {
-            Ok(Some(Ok(result))) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
-            Ok(Some(Err(reason))) => self.reply_error(id, REQUEST_FAILED, &reason),
+            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
             Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
             Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
@@ -1867,8 +1881,10 @@ impl<W: Write> Proxy<W> {
             "textDocument/references" => self.on_references(params),
             _ => self.on_definition(params),
         }));
-        let found = found.ok().flatten().and_then(Result::ok).filter(|found| !found.is_null() && *found != json!([]));
-        Some(found.map_or(Part::Nothing, Part::Locations))
+        Some(match found.ok().flatten() {
+            Some(Answer::Found(found)) if !found.is_null() && found != json!([]) => Part::Locations(found),
+            _ => Part::Nothing,
+        })
     }
 
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
@@ -1941,7 +1957,7 @@ impl<W: Write> Proxy<W> {
         let (pending, fresh) = self.remember(method, id, params);
         match (self.route(method, params), self.backend.running().is_some(), method) {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
-            (Route::Answer(result), ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result})),
+            (Route::Answer(answer), ..) => self.send_client(&answer.frame(id, method)),
             (Route::Command(command), ..) => self.on_command(command, id, params, pending),
             (Route::Forward, true, _) => {
                 // dbt lsp adds to the proxy's part, or replaces its nothing, but never holds it up.
@@ -1955,10 +1971,9 @@ impl<W: Write> Proxy<W> {
                 self.initialize_alone(id);
             }
             // A merged request gets the proxy's answer alone, any other the failure.
-            (Route::Forward, false, _) => match pending.part(self.markdown) {
-                Some(part) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
-                None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
-            },
+            (Route::Forward, false, _) => {
+                self.send_client(&pending.unserved(self.markdown, Reason::NotRunning).frame(id, &pending.name))
+            }
         }
         // Once the request is forwarded, so that a listing takes no id of the client's.
         if fresh {
@@ -2132,7 +2147,12 @@ impl<W: Write> Proxy<W> {
                         "textDocument/references" => None,
                         _ => self.on_definition(params),
                     };
-                    shadow::compare(&shadow::locations(&ours.and_then(Result::ok).unwrap_or_default(), &path_of), &dbt)
+                    // The proxy's nothing and its failure hold no location, as null.
+                    let ours = match ours {
+                        Some(Answer::Found(found)) => found,
+                        _ => Value::Null,
+                    };
+                    shadow::compare(&shadow::locations(&ours, &path_of), &dbt)
                 }
             };
             let read = self.document_at(params);
@@ -2341,18 +2361,18 @@ impl<W: Write> Proxy<W> {
             }
         };
         let status = server.reap(Duration::ZERO);
-        let why = format!("dbt lsp exited ({})", status.map_or("unknown status".into(), |s| s.to_string()));
+        let exited = Reason::Exited(status.map_or("unknown status".into(), |s| s.to_string()));
+        let why = exited.to_string();
         self.backend.life = Life::Lost(why.clone());
         if let Some(id) = &self.initialize {
             self.forwarded.remove(&key(id));
         }
         self.deadlines.clear();
         for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
-            match (pending.name.as_str(), &pending.kept, pending.part(self.markdown)) {
-                ("shutdown", ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
-                (_, Kept::Answered, _) => {}
-                (.., Some(part)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
-                _ => self.reply_error(&id, REQUEST_FAILED, &why),
+            match (pending.name.as_str(), &pending.kept) {
+                ("shutdown", _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+                (_, Kept::Answered) => {}
+                _ => self.send_client(&pending.unserved(self.markdown, exited.clone()).frame(&id, &pending.name)),
             }
         }
         self.backend.nodes_generation += 1;
@@ -2471,9 +2491,10 @@ impl<W: Write> Proxy<W> {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
-            let (id, part) = (id.clone(), pending.part(self.markdown));
+            let why = Reason::Late { waited, compiling: false };
+            let answer = pending.unserved(self.markdown, why).frame(id, &pending.name);
             pending.kept = Kept::Answered;
-            self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
+            self.send_client(&answer);
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();
                 let text = format!("dbt lsp did not answer {method} within {ms} ms: dbt-lsp-plus answered alone");
@@ -2686,6 +2707,7 @@ mod tests {
         let page = page.unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
         let sources = [
             ("proxy.rs", include_str!("proxy.rs")),
+            ("answer.rs", include_str!("answer.rs")),
             ("cli.rs", include_str!("cli.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("packages.rs", include_str!("packages.rs")),
@@ -2699,7 +2721,7 @@ mod tests {
         // What the page quotes, then the code at the site it cites, with enough around it to be that site alone.
         let quoted = [
             ("dbt parse has not finished: it is running", r#"(true, _) => "it is running""#),
-            ("dbt parse has not finished:", r#"format!("dbt parse has not finished: {why}")"#),
+            ("dbt parse has not finished:", r#"write!(f, "dbt parse has not finished: {why}")"#),
             (
                 "dbt parse has not finished: waiting for dbt lsp to compile the project",
                 r#"(false, None) => "waiting for dbt lsp to compile the project""#,
@@ -2710,7 +2732,7 @@ mod tests {
             ),
             // The arm that puts a failure after the prefix, which the quotes of a failure rest on.
             ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
-            ("`dbt lsp is not running`", r#"None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running")"#),
+            ("`dbt lsp is not running`", r#"Reason::NotRunning => f.write_str("dbt lsp is not running")"#),
             ("ends `dbt-lsp-plus answers alone.`", r#"format!("; {why}: dbt-lsp-plus answers alone.")"#),
             // The warnings of a dbt lsp that could not start or exited first, and of one lost for good.
             (
@@ -3105,7 +3127,7 @@ mod tests {
         let lost = hover(Life::Lost("dbt lsp exited (x)".into()));
         assert_eq!(
             lost["error"],
-            json!({"code": REQUEST_FAILED, "message": "dbt parse has not finished: dbt parse failed: x"})
+            json!({"code": -32803, "message": "dbt parse has not finished: dbt parse failed: x"})
         );
         // In front, a restart awaited: the merge's part alone, null.
         let waiting = hover(Life::Waiting(Instant::now() + Duration::from_secs(60)));
