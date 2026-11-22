@@ -2473,15 +2473,16 @@ impl<W: Write> Proxy<W> {
         if self.backend.running().and_then(|running| running.compiling.due()).is_some_and(|due| due <= now) {
             self.tell_stalled();
         }
-        match &self.backend.life {
-            Life::Waiting(due) if *due <= now => self.start_restart(),
-            Life::Starting(.., deadline) if *deadline <= now => {
-                if let Life::Starting(server, ..) = std::mem::take(&mut self.backend.life) {
+        // A running process's deadlines are spent above: what is due now is a restart's, or a restarted one's.
+        if self.backend.due().is_some_and(|due| due <= now) {
+            match std::mem::take(&mut self.backend.life) {
+                Life::Waiting(_) => self.start_restart(),
+                Life::Starting(server, ..) => {
                     server.reap(Duration::ZERO);
+                    self.lost_server("dbt lsp did not answer its initialize");
                 }
-                self.lost_server("dbt lsp did not answer its initialize");
+                life => self.backend.life = life,
             }
-            _ => {}
         }
     }
 
