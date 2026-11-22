@@ -584,23 +584,38 @@ fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
 #[test]
 fn the_call_hierarchy_asks_for_a_parse_alone_and_none_in_front() {
     let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    let path = fixture().join("models/marts/orders.sql");
+    let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
     // Alone, the graph is the last parse's: a follower asks for one, with no document opened.
     let (mut session, log) = Session::fake("hierarchy-parse-alone", json!({"no_lsp": true, "manifest": manifest()}));
     session.initialize(&fixture());
     session.request("callHierarchy/outgoingCalls", orders.clone());
     until_logged(&log, "the parse", |_| parses(&log).len() == 1);
     assert!(session.finish().success());
+    // So do its two other requests, each the first of a session of its own.
+    let others = [
+        ("prepare", "textDocument/prepareCallHierarchy", &on_with),
+        ("incoming", "callHierarchy/incomingCalls", &orders),
+    ];
+    for (name, method, params) in others {
+        let script = json!({"no_lsp": true, "manifest": manifest()});
+        let (mut session, log) = Session::fake(&format!("hierarchy-parse-alone-{name}"), script);
+        session.initialize(&fixture());
+        session.request(method, params.clone());
+        until_logged(&log, &format!("the parse {method} asks for"), |_| parses(&log).len() == 1);
+        assert!(session.finish().success());
+    }
     // In front, once dbt lsp compiled, the graph is its listing's: none.
     let (mut session, log) = Session::fake("hierarchy-parse-in-front", json!({"manifest": manifest()}));
     session.initialize(&fixture());
-    let path = fixture().join("models/marts/orders.sql");
     session.open(&path, None);
     session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
-    let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
+    // The proxy's own answers, which dbt lsp's echo would not be.
     let prepared = session.request("textDocument/prepareCallHierarchy", on_with);
-    assert!(prepared.get("result").is_some(), "{prepared}");
+    assert_eq!(prepared["result"][0]["data"]["uniqueId"], "model.shop.orders", "{prepared}");
     let outgoing = session.request("callHierarchy/outgoingCalls", orders);
-    assert!(outgoing.get("result").is_some(), "{outgoing}");
+    let to = ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"];
+    assert_eq!(details(&outgoing["result"], "to"), to, "{outgoing}");
     parses_stay(&log, 0);
     assert!(session.finish().success());
 }
@@ -2356,6 +2371,17 @@ fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
     parses_stay(&log, 2);
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
     until_logged(&log, "the parse after the second save", |_| parses(&log).len() == 3);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_completion_starts_no_parse() {
+    let (mut session, log) = Session::fake("standalone-completion", json!({"no_lsp": true, "manifest": manifest()}));
+    session.initialize(&fixture());
+    // No dbt lsp answers it, and no answer of the proxy's reads the index.
+    let orders = fixture().join("models/marts/orders.sql");
+    session.request("textDocument/completion", position_in(&orders, "select", 1));
+    parses_stay(&log, 0);
     assert!(session.finish().success());
 }
 

@@ -1884,7 +1884,9 @@ checked against dbt; the profile and the target in doctor, which need
   `<file> lies in the dbt project at <package>, ...`, and so do a hover,
   a definition and references alone and in `plus`; in `merge` in front
   of a running dbt lsp, the default, these three go to dbt lsp, whose
-  answer stands, and when it gives none that reason comes first.
+  answer stands, and when it gives none that reason comes first.  A
+  method set to `dbt` gets no such reason (`Proxy::outside` gives none):
+  it goes to dbt lsp as it came, and alone gets its nothing, a hover null.
   `locate::elsewhere` reads the install path from the flag, the variable
   in the server command or the proxy's environment, and the key as
   written (plan 056).

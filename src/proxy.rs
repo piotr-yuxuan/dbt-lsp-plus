@@ -1745,7 +1745,8 @@ impl<W: Write> Proxy<W> {
             }
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that; why
-            // the proxy could not answer, as over a project that does not read.
+            // the proxy could not answer, as over a project that does not
+            // read; for a hover on a node before any index, why there is none yet.
             "textDocument/hover" | "textDocument/inlayHint" => {
                 Some(pending.unserved(self.markdown, None, &self.parsing))
             }
