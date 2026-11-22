@@ -57,7 +57,7 @@ seconds, 10 by default.
    `merge` with `dbt lsp` running, a definition, references, hover or
    inlay hints go to `dbt lsp`, at the kinds that
    `experimental.dbtLspPlus` lists too, and never wait for it more than
-   2 s; in `plus`, at those kinds, `dbt lsp` is not asked.
+   2 s; in `plus`, `dbt lsp` is not asked for these methods at all.
 2. `dbt lsp` answers once it has compiled the project.  A large project
    may take longer than the client's timeout to compile, after the server
    starts or the project changes; the server reports its progress, then
