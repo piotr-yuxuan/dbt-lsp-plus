@@ -3985,12 +3985,19 @@ fn in_merge_dbt_lsp_s_other_locations_follow_the_proxy_s() {
 #[test]
 fn in_merge_dbt_lsp_s_matching_locations_add_nothing() {
     let range = |end: u64| json!({"start": {"line": 0, "character": 0}, "end": {"line": end, "character": 0}});
-    let link = json!({"targetUri": uri(&fixture().join("models/staging/stg_orders.sql")),
-                      "targetRange": range(14), "targetSelectionRange": range(0)});
-    let (mut session, _) = Session::fake("merge-link", json!({"answers": {"textDocument/definition": [link]}}));
+    let link = |file: &str| json!({"targetUri": uri(&fixture().join(file)), "targetRange": range(14), "targetSelectionRange": range(0)});
+    let matching = link("models/staging/stg_orders.sql");
+    // The first definition gets the matching link alone, the next one another link too.
+    let script = json!({"answers_once": {"textDocument/definition": [matching]},
+                        "answers": {"textDocument/definition": [matching, link("models/marts/customers.sql")]}});
+    let (mut session, _) = Session::fake("merge-link", script);
     session.initialize(&fixture());
     let found = session.request("textDocument/definition", on_ref());
-    assert_eq!(found["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
+    let stg_orders = location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0);
+    assert_eq!(found["result"], stg_orders, "{found}");
+    let other = session.request("textDocument/definition", on_ref());
+    let customers = location(&fixture(), "models/marts/customers.sql", 0, 0, 0);
+    assert_eq!(other["result"], json!([stg_orders, customers]), "a link is read, as its target's selection: {other}");
     assert!(session.finish().success());
     let (mut plus, _) = with_options("merge-link-plus", json!({}), &["--default-mode", "plus"]);
     plus.initialize(&fixture());
