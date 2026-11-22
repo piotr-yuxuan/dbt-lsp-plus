@@ -146,7 +146,7 @@ are one closed set, whose words live in one place, `Reason`'s
 | `Refused` | the proxy | a rename's refusal, as written |
 | `NotRunning` | dbt lsp | `dbt lsp is not running` |
 | `Lost` | dbt lsp | `dbt lsp is lost for good: <why>`, as the give-up or the failed start said it |
-| `Late` | dbt lsp | `dbt lsp did not answer within 2 s`, then `: it is compiling the project` while a compilation it started has not ended |
+| `Late` | dbt lsp | `dbt lsp did not answer within 2 s`, then `: it is compiling the project` while a compilation it started has not ended, nor been told as having no end |
 | `Failed` | dbt lsp | `dbt lsp failed: <its error's message>` |
 | `Exited` | dbt lsp | `dbt lsp exited (<status>)` |
 

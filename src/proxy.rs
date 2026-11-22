@@ -2544,7 +2544,8 @@ impl<W: Write> Proxy<W> {
         // A merge past its deadline: the proxy's part or empty alone, else why, the server's late answer dropped.
         let due: Vec<(String, String)> =
             self.deadlines.iter().filter(|(_, (at, _))| *at <= now).map(|(k, (_, m))| (k.clone(), m.clone())).collect();
-        let compiling = self.backend.running().is_some_and(|running| running.compiling.since.is_some());
+        // Compiling while a compilation runs whose stall is not told: past it, dbt lsp may never end it.
+        let compiling = self.backend.running().is_some_and(|running| running.compiling.due().is_some());
         for (late, method) in due {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
@@ -3240,6 +3241,26 @@ mod tests {
             !given_up.contains("waiting for dbt lsp") && left.len() == 1 && left[0].starts_with(&given_up),
             "{left:?}"
         );
+    }
+
+    #[test]
+    fn a_late_answer_says_it_is_compiling_only_until_the_stall_is_told() {
+        // The message of a definition that dbt lsp left past its deadline, its compilation as given.
+        let late = |since: Option<Instant>, told: bool| {
+            let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
+            proxy.backend.running_mut().unwrap().compiling = Compiling { since, told };
+            let pending = Pending { name: "textDocument/definition".into(), kept: Kept::Part(Part::Nothing) };
+            proxy.forwarded.insert(key(&json!(1)), (json!(1), pending));
+            proxy.deadlines.insert(key(&json!(1)), (Instant::now(), "textDocument/definition".into()));
+            proxy.on_time();
+            proxy.stop_server();
+            let answer = written(&proxy.client).into_iter().filter_map(|frame| frame.value).find(|m| m["id"] == 1);
+            answer.unwrap()["error"]["message"].clone()
+        };
+        let plain = "dbt lsp did not answer within 2 s";
+        assert_eq!(late(None, false), plain, "no compilation");
+        assert_eq!(late(Some(Instant::now()), false), format!("{plain}: it is compiling the project"));
+        assert_eq!(late(Some(Instant::now() - COMPILE_STALL), true), plain, "a stall told");
     }
 
     #[test]
