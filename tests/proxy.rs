@@ -2399,11 +2399,17 @@ fn alone_a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_reque
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
     session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    // A hover, once there is an index, asks for it after its answer: another write, another parse.
+    std::fs::write(project.join("models/marts/later.sql"), "select 2").unwrap();
+    session.received.clear();
+    session.request("textDocument/hover", position_in(&orders, "stg_orders", 1));
+    until_logged(&log, "the parse a hover asks for", |_| parses(&log).len() == 3);
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
     // An open text is no change on disk.
     let change = json!({"textDocument": {"uri": uri(&orders), "version": 2}, "contentChanges": [{"text": "select 1"}]});
     session.notify("textDocument/didChange", change);
     node_info(&mut session, json!("model.shop.orders"));
-    parses_stay(&log, 2);
+    parses_stay(&log, 3);
     assert!(session.finish().success());
 }
 
@@ -2411,24 +2417,36 @@ fn alone_a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_reque
 fn in_front_a_file_changed_on_disk_is_parsed_at_the_next_request_with_no_compilation() {
     let project = copy_fixture("in-front-disk-change");
     let flags = [Path::new("--project-dir"), &project];
-    let (mut session, log) =
-        Session::fake_with("in-front-disk-change-session", json!({"manifest": manifest()}), &flags, None);
-    session.initialize(&project);
-    session.open(&project.join("models/marts/orders.sql"), None);
+    // A completion ends its first life, and its second never answers its `initialize`.
+    let script = json!({"manifest": manifest(), "exit_on": "textDocument/completion", "hang_on": "initialize",
+                        "hang_life": 2});
+    let (mut session, log) = Session::fake_with("in-front-disk-change-session", script, &flags, None);
+    session.initialize_as(&project, json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
     session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
     assert_eq!(parses(&log).len(), 1, "the parse of the first request");
     session.received.clear();
-    // Written with no notification: dbt lsp hears of no change, and compiles nothing.
+    // Written with no notification: dbt lsp hears of no change, and compiles nothing.  A hover, forwarded to it,
+    // asks for the index once forwarded.
     std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
-    node_info(&mut session, json!("model.shop.orders"));
-    until_logged(&log, "the parse after the write", |_| parses(&log).len() == 2);
+    let on_ref = position_in(&orders, "stg_orders", 1);
+    session.request("textDocument/hover", on_ref.clone());
+    until_logged(&log, "the parse a hover asks for", |_| parses(&log).len() == 2);
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
     node_info(&mut session, json!("model.shop.orders"));
     let compiled = |m: &&Value| m["method"] == "dbt/lspCompileStart" || m["method"] == "dbt/lspCompileComplete";
     let compilations: Vec<&Value> = session.received.iter().filter(compiled).collect();
     assert!(compilations.is_empty(), "{compilations:?}");
+    // While dbt lsp restarts, a hover asks for the index before its answer: another write, another parse.
+    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    std::fs::write(project.join("models/marts/restarting.sql"), "select 2").unwrap();
+    session.request("textDocument/hover", on_ref);
+    until_logged(&log, "the parse a hover asks for while dbt lsp restarts", |_| parses(&log).len() == 3);
     assert!(session.finish().success());
 }
 
