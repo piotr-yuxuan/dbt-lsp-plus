@@ -274,7 +274,7 @@ impl Pending {
     /// An error to a request with a part of the proxy's gives that part.
     fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
         if message.get("error").is_some() {
-            return self.alone(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
+            return self.part(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
         }
         match self {
             Pending::Hover(text, hard) => features::merge_hover(message, text, *hard, markdown),
@@ -286,7 +286,7 @@ impl Pending {
     /// The proxy's part alone, as the answer when the server gives none: a
     /// hover's text, the hints, a merged request's nothing; none for a
     /// request that is not merged.
-    fn alone(&self, markdown: bool) -> Option<Value> {
+    fn part(&self, markdown: bool) -> Option<Value> {
         let nothing = match self {
             Pending::Hover(..) => json!({"result": null}),
             Pending::Hints(_) => json!({"result": []}),
@@ -1515,7 +1515,7 @@ impl<W: Write> Proxy<W> {
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
-                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| modes::empty(method))))
+                Some(Ok(pending.part(self.markdown).unwrap_or_else(|| modes::empty(method))))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1804,7 +1804,7 @@ impl<W: Write> Proxy<W> {
                 self.initialize_alone(id);
             }
             // A merged request gets the proxy's answer alone, any other the failure.
-            (Route::Forward, None, _) => match pending.alone(self.markdown) {
+            (Route::Forward, None, _) => match pending.part(self.markdown) {
                 Some(part) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
                 None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
             },
@@ -2140,7 +2140,7 @@ impl<W: Write> Proxy<W> {
         }
         self.deadlines.clear();
         for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
-            let part = pending.alone(self.markdown);
+            let part = pending.part(self.markdown);
             match (pending, part) {
                 (Pending::Shutdown, _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
                 (Pending::Answered, _) => {}
@@ -2248,7 +2248,7 @@ impl<W: Write> Proxy<W> {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
-            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).alone(self.markdown));
+            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).part(self.markdown));
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();
