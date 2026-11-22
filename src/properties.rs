@@ -4,7 +4,7 @@
 
 use crate::project;
 use crate::text::{Encoding, LineIndex};
-use crate::yaml::{self, Node};
+use crate::yaml::{self, Tree};
 use std::ops::Range;
 
 /// Where named entries are: the label of what holds them (none for the
@@ -55,14 +55,14 @@ pub struct Test {
     pub range: Range<usize>,
 }
 
-/// The entries that NODE, of LABEL, holds, in the order of the text, each
+/// The entries that TREE, of LABEL, holds, in the order of the text, each
 /// with its label; an alias holds none, its anchor being elsewhere.
-fn held<'a>(node: &'a Node, label: &str) -> Vec<(&'a Node, &'static str)> {
-    let Node::Map { entries, .. } = node else { return Vec::new() };
+fn held<'a>(tree: &'a Tree, label: &str) -> Vec<(&'a Tree, &'static str)> {
+    let Tree::Map { entries, .. } = tree else { return Vec::new() };
     let lists = entries.iter().filter_map(|(key, value)| {
         // A model's version has no name: its columns count as the model's.
         if label == "model" && key.as_str() == Some("versions") {
-            let columns = value.items().iter().filter_map(|version| version.get("columns")).flat_map(Node::items);
+            let columns = value.items().iter().filter_map(|version| version.get("columns")).flat_map(Tree::items);
             return Some(columns.map(|item| (item, "column")).collect::<Vec<_>>());
         }
         let (.., child) = HELD.iter().find(|(parent, held, _)| *parent == label && key.as_str() == Some(held))?;
@@ -79,17 +79,17 @@ pub fn entries(text: &str) -> Vec<Entry> {
 
 /// The named entries of the properties file TEXT, whose tree is ROOT, as
 /// `entries` gives them: those of the top level only, unless NESTED.
-pub fn entries_in(text: &str, root: &Node, nested: bool) -> Vec<Entry> {
+pub fn entries_in(text: &str, root: &Tree, nested: bool) -> Vec<Entry> {
     let index = LineIndex::new(text);
     // Popped from the end: what comes first in the text pops first.
     let mut pending = held(root, "");
     pending.reverse();
     let mut found = Vec::new();
     while let Some((item, label)) = pending.pop() {
-        let Node::Map { entries, end } = item else { continue };
+        let Tree::Map { entries, end } = item else { continue };
         // The first key that has a place: an alias or a complex key has none.
         let first = entries.iter().find_map(|(key, _)| match key {
-            Node::Scalar { line, column, .. } => Some((*line, *column)),
+            Tree::Scalar { line, column, .. } => Some((*line, *column)),
             _ => None,
         });
         // A `name:` still being typed is empty, and placed at the next token;
@@ -145,23 +145,23 @@ pub fn tests(text: &str) -> Vec<Test> {
 
 /// The generic tests of the properties file TEXT, whose tree is ROOT, as
 /// `tests` gives them.
-pub fn tests_in(text: &str, root: &Node) -> Vec<Test> {
-    let Node::Map { entries: top, .. } = root else { return Vec::new() };
+pub fn tests_in(text: &str, root: &Tree) -> Vec<Test> {
+    let Tree::Map { entries: top, .. } = root else { return Vec::new() };
     let index = LineIndex::new(text);
-    let mut pending: Vec<&Node> = top.iter().map(|(_, value)| value).collect();
+    let mut pending: Vec<&Tree> = top.iter().map(|(_, value)| value).collect();
     let mut found = Vec::new();
-    while let Some(node) = pending.pop() {
-        match node {
-            Node::Seq(items) => pending.extend(items),
-            Node::Map { entries, .. } => {
+    while let Some(tree) = pending.pop() {
+        match tree {
+            Tree::Seq(items) => pending.extend(items),
+            Tree::Map { entries, .. } => {
                 for (key, value) in entries {
                     if matches!(key.as_str(), Some("data_tests" | "tests")) {
                         let named = value.items().iter().filter_map(|item| match item {
-                            Node::Map { entries, .. } if item.get("test_name").is_none() => match &entries[..] {
+                            Tree::Map { entries, .. } if item.get("test_name").is_none() => match &entries[..] {
                                 [(key, _)] => Some(key),
                                 _ => None,
                             },
-                            Node::Map { .. } => item.get("test_name"),
+                            Tree::Map { .. } => item.get("test_name"),
                             _ => Some(item),
                         });
                         let written = named.filter_map(|name| project::written(text, &index, name));

@@ -6,7 +6,7 @@
 use crate::config::Index;
 use crate::project::{self, Entity, Project};
 use crate::sources;
-use crate::yaml::{self, Node};
+use crate::yaml::{self, Tree};
 use crate::{properties, scan};
 use regex::Regex;
 use serde_json::Value;
@@ -207,7 +207,7 @@ impl<'a> Lookup<'a> {
                 config.get("flags").and_then(|flags| flags.get("require_ref_searches_node_package_before_root"));
             // As dbt reads the flag: neither `fAlse` nor a quoted `'false'`.
             let yaml_false = ["false", "False", "FALSE"];
-            matches!(value, Some(Node::Scalar { value, plain: true, .. }) if yaml_false.contains(&value.as_str()))
+            matches!(value, Some(Tree::Scalar { value, plain: true, .. }) if yaml_false.contains(&value.as_str()))
         });
         let mut packages: Vec<&str> = project.packages.keys().map(String::as_str).collect();
         packages.sort_by_key(|package| (*package != root, *package));

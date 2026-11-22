@@ -185,7 +185,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     refused; where `dbt_project.yml` configures a source), with tests of
     its own;
   - `sources::argument_naming`: which argument of a call names a target;
-  - `yaml::Node::shares` and `yaml::Node::repeats`: walks of the tree,
+  - `yaml::Tree::shares` and `yaml::Tree::repeats`: walks of the tree,
     which need a function of their own to recurse;
   - `Proxy::node_info`, `Proxy::remember` and `Proxy::handle`: the answer of
     the proxy's command; what the proxy keeps of a forwarded request apart

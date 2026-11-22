@@ -7,7 +7,7 @@ use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
 use crate::text::{self, Encoding, LineIndex};
-use crate::yaml::{self, Node};
+use crate::yaml::{self, Tree};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -104,29 +104,29 @@ impl Scanned {
             |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
         let entries: Vec<Entry> = properties::entries_in(&text, &root, false).into_iter().filter(resource).collect();
         let index = LineIndex::new(&text);
-        let relation = |item: &Node| {
+        let relation = |item: &Tree| {
             Some((written(&text, &index, item.get("name")?)?.1, written(&text, &index, item.get("relation")?)?.1))
         };
         let relations: Vec<_> =
-            root.get("snapshots").map_or(&[][..], Node::items).iter().filter_map(relation).collect();
+            root.get("snapshots").map_or(&[][..], Tree::items).iter().filter_map(relation).collect();
         let declared = |entry: &Entry| {
             let (_, relation) =
                 relations.iter().find(|(name, _)| entry.label == "snapshot" && *name == entry.name_range)?;
             Some((entry.clone(), relation.clone()))
         };
-        let version = |item: &Node| {
-            let defined_in = item.get("defined_in").and_then(Node::as_str).map(str::to_owned);
+        let version = |item: &Tree| {
+            let defined_in = item.get("defined_in").and_then(Tree::as_str).map(str::to_owned);
             Some((item.get("v")?.as_str()?.to_owned(), defined_in))
         };
-        let versioned = |model: &Node| {
+        let versioned = |model: &Tree| {
             let versions: Vec<_> = model.get("versions")?.items().iter().filter_map(version).collect();
-            let latest = model.get("latest_version").and_then(Node::as_str).map(str::to_owned);
+            let latest = model.get("latest_version").and_then(Tree::as_str).map(str::to_owned);
             let name = model.get("name")?.as_str()?.to_owned();
             (!versions.is_empty()).then_some(Versioned { name, latest, versions })
         };
         Scanned {
             tables: source_tables_in("", path, &text, &root),
-            versions: root.get("models").map_or(&[][..], Node::items).iter().filter_map(versioned).collect(),
+            versions: root.get("models").map_or(&[][..], Tree::items).iter().filter_map(versioned).collect(),
             snapshots: entries.iter().filter_map(declared).collect(),
             entries,
             models: unit_test_models(&text, &root),
@@ -346,17 +346,17 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
 
 /// The models of the unit tests of the properties file TEXT, whose tree is
 /// ROOT: each `model:` as written.
-pub fn unit_test_models(text: &str, root: &Node) -> Vec<(String, Range<usize>)> {
+pub fn unit_test_models(text: &str, root: &Tree) -> Vec<(String, Range<usize>)> {
     let index = LineIndex::new(text);
-    let models = root.get("unit_tests").map_or(&[][..], Node::items).iter().filter_map(|unit| unit.get("model"));
+    let models = root.get("unit_tests").map_or(&[][..], Tree::items).iter().filter_map(|unit| unit.get("model"));
     models.filter_map(|model| written(text, &index, model)).collect()
 }
 
-/// The value of the scalar NODE of TEXT and its range as written: inside
+/// The value of the scalar TREE of TEXT and its range as written: inside
 /// its quotes, escapes included, else as long as its value, else to the end
 /// of its line.
-pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Range<usize>)> {
-    let Node::Scalar { value, line, column, .. } = node else { return None };
+pub fn written(text: &str, index: &LineIndex, tree: &Tree) -> Option<(String, Range<usize>)> {
+    let Tree::Scalar { value, line, column, .. } = tree else { return None };
     let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
     let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
     let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
@@ -370,8 +370,8 @@ pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Ra
 
 /// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
 /// range, and where a line goes after it.
-fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
-    let Node::Scalar { line: key_line, column: key_column, .. } = key else { return None };
+fn placed(text: &str, index: &LineIndex, key: &Tree, value: &Tree) -> Option<(String, Range<usize>, Insertion)> {
+    let Tree::Scalar { line: key_line, column: key_column, .. } = key else { return None };
     let (value, range) = written(text, index, value)?;
     let line_end = text[range.end..].find(['\n', '\r']).map_or(text.len(), |end| range.end + end);
     let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
@@ -393,16 +393,16 @@ pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable>
 
 /// The tables of the `sources:` of the properties file TEXT of PACKAGE,
 /// whose tree is ROOT, as `source_tables` gives them.
-pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Node) -> Vec<SourceTable> {
+pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Tree) -> Vec<SourceTable> {
     let index = LineIndex::new(text);
     // An anchor anywhere in the file may hold a name, a schema or an identifier.
     let anchored = root.shares();
     let mut found = Vec::new();
-    for source in root.get("sources").map_or(&[][..], Node::items) {
+    for source in root.get("sources").map_or(&[][..], Tree::items) {
         let own = source.entry("name").filter(|_| source.get("overrides").is_none());
         let Some((key, value)) = own else { continue };
         let Some((source_name, source_range, source_insertion)) = placed(text, &index, key, value) else { continue };
-        for table in source.get("tables").map_or(&[][..], Node::items) {
+        for table in source.get("tables").map_or(&[][..], Tree::items) {
             let Some((key, value)) = table.entry("name") else { continue };
             let Some((table_name, table_range, table_insertion)) = placed(text, &index, key, value) else { continue };
             found.push(SourceTable {
@@ -453,7 +453,7 @@ fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
 }
 
 /// The name and configuration in a package's `dbt_project.yml`.
-pub fn package_config(dir: &Path) -> Option<(String, Node)> {
+pub fn package_config(dir: &Path) -> Option<(String, Tree)> {
     let config = yaml::parse(&text::read(&dir.join("dbt_project.yml"))?)?;
     let name = config.get("name")?.as_str()?.to_owned();
     Some((name, config))
@@ -485,12 +485,12 @@ pub struct Listing {
 /// named `dbt_project.yml`.
 pub fn find(root: &Path) -> Option<Listing> {
     let (root_package, root_config) = package_config(root)?;
-    let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
+    let install = root_config.get("packages-install-path").and_then(Tree::as_str).unwrap_or("dbt_packages");
     let mut installed: Vec<PathBuf> =
         fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
     installed.sort();
     let others = installed.into_iter().filter_map(|dir| package_config(&dir).map(|(name, config)| (name, dir, config)));
-    let mut packages: Vec<(String, PathBuf, Node)> =
+    let mut packages: Vec<(String, PathBuf, Tree)> =
         std::iter::once((root_package, root.to_owned(), root_config)).chain(others).collect();
     // A local package not installed yet, as in a fresh clone, where its packages file names it.
     for dir in packages::local_dirs(root) {
@@ -505,7 +505,7 @@ pub fn find(root: &Path) -> Option<Listing> {
         for (at, layout) in LAYOUT.iter().enumerate() {
             let configured: Vec<&str> = config
                 .get(layout.key)
-                .map_or(Vec::new(), |paths| paths.items().iter().filter_map(Node::as_str).collect());
+                .map_or(Vec::new(), |paths| paths.items().iter().filter_map(Tree::as_str).collect());
             let dirs = if configured.is_empty() { vec![layout.default] } else { configured };
             let listed = dirs.iter().flat_map(|sub| files(&dir.join(sub)));
             found.extend(listed.map(|(path, metadata)| Found {

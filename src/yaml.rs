@@ -5,7 +5,7 @@ use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
 
 #[derive(Debug, PartialEq)]
-pub enum Node {
+pub enum Tree {
     /// A scalar, with whether it was written plain (neither quoted nor a
     /// block), its line (from 0) and column (in characters, from 0).
     Scalar {
@@ -14,57 +14,57 @@ pub enum Node {
         line: usize,
         column: usize,
     },
-    Seq(Vec<Node>),
+    Seq(Vec<Tree>),
     /// A mapping, with where the parser saw it end: the line (from 0) and
     /// column (in characters, from 0) of its `}` in flow style; in block
     /// style, of the next token, of a lower indentation, or of the end of
     /// the text, the blank and comment lines before it skipped.
     Map {
-        entries: Vec<(Node, Node)>,
+        entries: Vec<(Tree, Tree)>,
         end: (usize, usize),
     },
     /// An alias: dbt's schema files do not need them resolved.
     Alias,
 }
 
-impl Node {
+impl Tree {
     /// The value under KEY of a mapping.
-    pub fn get(&self, key: &str) -> Option<&Node> {
+    pub fn get(&self, key: &str) -> Option<&Tree> {
         self.entry(key).map(|(_, value)| value)
     }
 
     /// The key KEY of a mapping, with its value.
-    pub fn entry(&self, key: &str) -> Option<(&Node, &Node)> {
-        let Node::Map { entries, .. } = self else { return None };
+    pub fn entry(&self, key: &str) -> Option<(&Tree, &Tree)> {
+        let Tree::Map { entries, .. } = self else { return None };
         entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(k, value)| (k, value))
     }
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Node::Scalar { value, .. } => Some(value),
+            Tree::Scalar { value, .. } => Some(value),
             _ => None,
         }
     }
 
-    /// Whether an alias or a merge key appears anywhere in this node, so that
+    /// Whether an alias or a merge key appears anywhere in this tree, so that
     /// a value under it may come from elsewhere in its document.
     pub fn shares(&self) -> bool {
         match self {
-            Node::Alias => true,
-            Node::Seq(items) => items.iter().any(Node::shares),
-            Node::Map { entries, .. } => {
+            Tree::Alias => true,
+            Tree::Seq(items) => items.iter().any(Tree::shares),
+            Tree::Map { entries, .. } => {
                 entries.iter().any(|(key, value)| key.as_str() == Some("<<") || value.shares())
             }
-            Node::Scalar { .. } => false,
+            Tree::Scalar { .. } => false,
         }
     }
 
-    /// Whether a mapping anywhere in this node names a key twice, where a
+    /// Whether a mapping anywhere in this tree names a key twice, where a
     /// reader may take the first value or the last.
     pub fn repeats(&self) -> bool {
         match self {
-            Node::Seq(items) => items.iter().any(Node::repeats),
-            Node::Map { entries, .. } => {
+            Tree::Seq(items) => items.iter().any(Tree::repeats),
+            Tree::Map { entries, .. } => {
                 let mut keys = std::collections::HashSet::new();
                 entries.iter().any(|(key, value)| !keys.insert(key.as_str()) || value.repeats())
             }
@@ -72,34 +72,34 @@ impl Node {
         }
     }
 
-    /// The items of a sequence; nothing for any other node.
-    pub fn items(&self) -> &[Node] {
+    /// The items of a sequence; nothing for any other tree.
+    pub fn items(&self) -> &[Tree] {
         match self {
-            Node::Seq(items) => items,
+            Tree::Seq(items) => items,
             _ => &[],
         }
     }
 }
 
 enum Frame {
-    Seq(Vec<Node>),
-    Map(Vec<(Node, Node)>, Option<Node>),
+    Seq(Vec<Tree>),
+    Map(Vec<(Tree, Tree)>, Option<Tree>),
 }
 
 #[derive(Default)]
 struct Builder {
     stack: Vec<Frame>,
-    root: Option<Node>,
+    root: Option<Tree>,
 }
 
 impl Builder {
-    fn attach(&mut self, node: Node) {
+    fn attach(&mut self, tree: Tree) {
         match self.stack.last_mut() {
-            None => self.root = self.root.take().or(Some(node)),
-            Some(Frame::Seq(items)) => items.push(node),
+            None => self.root = self.root.take().or(Some(tree)),
+            Some(Frame::Seq(items)) => items.push(tree),
             Some(Frame::Map(entries, key)) => match key.take() {
-                None => *key = Some(node),
-                Some(k) => entries.push((k, node)),
+                None => *key = Some(tree),
+                Some(k) => entries.push((k, tree)),
             },
         }
     }
@@ -108,19 +108,19 @@ impl Builder {
 impl MarkedEventReceiver for Builder {
     fn on_event(&mut self, event: Event, mark: Marker) {
         match event {
-            Event::Scalar(value, style, ..) => self.attach(Node::Scalar {
+            Event::Scalar(value, style, ..) => self.attach(Tree::Scalar {
                 value,
                 plain: style == TScalarStyle::Plain,
                 line: mark.line().saturating_sub(1),
                 column: mark.col(),
             }),
-            Event::Alias(_) => self.attach(Node::Alias),
+            Event::Alias(_) => self.attach(Tree::Alias),
             Event::SequenceStart(..) => self.stack.push(Frame::Seq(Vec::new())),
             Event::MappingStart(..) => self.stack.push(Frame::Map(Vec::new(), None)),
             Event::SequenceEnd | Event::MappingEnd => match self.stack.pop() {
-                Some(Frame::Seq(items)) => self.attach(Node::Seq(items)),
+                Some(Frame::Seq(items)) => self.attach(Tree::Seq(items)),
                 Some(Frame::Map(entries, _)) => {
-                    self.attach(Node::Map { entries, end: (mark.line().saturating_sub(1), mark.col()) })
+                    self.attach(Tree::Map { entries, end: (mark.line().saturating_sub(1), mark.col()) })
                 }
                 None => {}
             },
@@ -130,7 +130,7 @@ impl MarkedEventReceiver for Builder {
 }
 
 /// The first document of TEXT, or `None` when TEXT is not valid YAML.
-pub fn parse(text: &str) -> Option<Node> {
+pub fn parse(text: &str) -> Option<Tree> {
     let mut builder = Builder::default();
     Parser::new_from_str(text).load(&mut builder, false).ok()?;
     builder.root
@@ -147,12 +147,12 @@ mod tests {
         let source = &root.get("sources").unwrap().items()[0];
         assert_eq!(
             source.get("name"),
-            Some(&Node::Scalar { value: "événements".into(), plain: false, line: 1, column: 10 })
+            Some(&Tree::Scalar { value: "événements".into(), plain: false, line: 1, column: 10 })
         );
         let table = &source.get("tables").unwrap().items()[0];
         assert_eq!(
             table.get("name"),
-            Some(&Node::Scalar { value: "page_views".into(), plain: true, line: 3, column: 14 })
+            Some(&Tree::Scalar { value: "page_views".into(), plain: true, line: 3, column: 14 })
         );
     }
 
@@ -161,7 +161,7 @@ mod tests {
         let text = "plain: a\nsingle: 'a'\ndouble: \"a\"\nliteral: |\n  a\nfolded: >\n  a\n";
         let root = parse(text).unwrap();
         let plain = |key: &str| match root.get(key) {
-            Some(Node::Scalar { plain, .. }) => *plain,
+            Some(Tree::Scalar { plain, .. }) => *plain,
             other => panic!("not a scalar: {other:?}"),
         };
         assert!(plain("plain"));
@@ -170,8 +170,8 @@ mod tests {
         }
     }
 
-    fn end(node: &Node) -> (usize, usize) {
-        let Node::Map { end, .. } = node else { panic!("not a mapping: {node:?}") };
+    fn end(tree: &Tree) -> (usize, usize) {
+        let Tree::Map { end, .. } = tree else { panic!("not a mapping: {tree:?}") };
         *end
     }
 
