@@ -4,7 +4,7 @@
 //! references that dbt lsp 2.0.9 does not give.  Pure.
 
 use crate::config::ParseIndex;
-use crate::node::{self, Type};
+use crate::node::{self, TYPES, Type};
 use crate::project::{self, Entity, Project, Scanned};
 use crate::reference::{Kind, Name};
 use crate::scan;
@@ -232,7 +232,7 @@ impl<'a> Lookup<'a> {
                         None => entity.latest,
                     };
                     let plain = versions.is_empty() && version.is_none();
-                    let rows = [&node::MODEL, &node::SEED, &node::SNAPSHOT].into_iter().filter(|_| plain);
+                    let rows = TYPES.iter().filter(|row| row.refable && plain);
                     let unversioned = rows.flat_map(|row| get(node::id(row, package, called)).iter().copied());
                     versions.into_iter().filter(chosen).chain(unversioned).map(found).collect()
                 }
@@ -338,8 +338,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Found> {
         Kind::Entry { label } => Some(label),
         _ => None,
     };
-    let resource =
-        resource_type.is_some_and(|kind| ["model", "seed", "snapshot"].contains(&kind)) && name.package.is_none();
+    let resource = resource_type.is_some_and(|kind| Type::named(kind).refable) && name.package.is_none();
     let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, &name.name));
     let typed = nodes.into_iter().filter(|node| node["resource_type"].as_str() == resource_type);
     let mut parsed: Vec<Found> = typed.filter_map(|node| lookup.parsed_at(node)).collect();

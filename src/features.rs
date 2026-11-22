@@ -4,6 +4,7 @@
 
 use crate::config::ParseIndex;
 use crate::graph::{Edge, Graph, Item};
+use crate::node::Type;
 use crate::project::Project;
 use crate::properties;
 use crate::reference;
@@ -329,7 +330,9 @@ pub fn inlay_hints(
         if !(range.start..=range.end).contains(&after) {
             return None;
         }
-        let built = |node: &&Value| node["disabled"] != true && node["resource_type"] != "analysis";
+        let built = |node: &&Value| {
+            node["disabled"] != true && Type::named(node["resource_type"].as_str().unwrap_or_default()).built
+        };
         let node = index.named(&call.name).filter(built)?;
         let label = match node["config"]["materialized"].as_str() {
             Some("ephemeral") => "ephemeral",

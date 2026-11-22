@@ -6,6 +6,7 @@
 
 use crate::config::{self, ParseIndex};
 use crate::modes::Table;
+use crate::node::{self, Type};
 use crate::project::Project;
 use crate::reference::{Kind, Name};
 use serde_json::{Value, json};
@@ -200,15 +201,15 @@ pub type Oracle = Vec<(String, Option<PathBuf>)>;
 /// not hold, its id read and the scan's file.  None for any other name,
 /// or for a file with no one node.
 pub fn oracle(index: &ParseIndex, project: &Project, relative: &str, name: &Name) -> Option<Oracle> {
-    let (kinds, version): (&[&str], _) = match name.kind {
-        Kind::Ref => (&["model", "seed", "snapshot"], name.version.as_deref().filter(|v| !v.is_empty())),
-        Kind::Function => (&["function"], None),
+    let (wanted, version): (fn(&str) -> bool, _) = match name.kind {
+        Kind::Ref => (|t| Type::named(t).refable, name.version.as_deref().filter(|v| !v.is_empty())),
+        Kind::Function => (|t| t == node::FUNCTION.name, None),
         _ => return None,
     };
     let in_package = |named: Option<&str>| name.package.as_deref().is_none_or(|package| named == Some(package));
     let resolved = |node: &Value| {
         let at = node["version"].as_str().map_or_else(|| node["version"].to_string(), str::to_owned);
-        kinds.iter().any(|kind| node["resource_type"] == *kind)
+        wanted(node["resource_type"].as_str().unwrap_or_default())
             && node["name"] == name.name.as_str()
             && in_package(node["package_name"].as_str())
             && version.is_none_or(|version| at == version)
@@ -216,7 +217,7 @@ pub fn oracle(index: &ParseIndex, project: &Project, relative: &str, name: &Name
     // `KIND.PACKAGE.NAME`, as a function's id is.
     let by_id = |id: &str| {
         let parts: Vec<&str> = id.splitn(3, '.').collect();
-        kinds.contains(&parts[0]) && parts.get(2) == Some(&name.name.as_str()) && in_package(parts.get(1).copied())
+        wanted(parts[0]) && parts.get(2) == Some(&name.name.as_str()) && in_package(parts.get(1).copied())
     };
     let file = |id: &str| match index.node(id) {
         Some(node) => {
