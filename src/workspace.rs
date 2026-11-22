@@ -142,9 +142,11 @@ impl Workspace {
     /// A look at the files on disk on behalf of a request: one that may hold
     /// a resource and that changed since the last parse started makes the
     /// index stale, as a change told does.  Nothing to compare before a parse.
-    pub fn notice(&mut self) {
-        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return };
+    /// Whether it found such a change.
+    pub fn notice(&mut self) -> bool {
+        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return false };
         self.fresh = cache::disk(root) == stamp;
+        !self.fresh
     }
 
     /// A parse's end, its INDEX and its FAILURE: its run stopped; its index

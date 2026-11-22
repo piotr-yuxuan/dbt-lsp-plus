@@ -478,6 +478,10 @@ struct Parsing {
     /// Whether a request wanted an index before the server had compiled:
     /// the server's compilation then starts the parse.
     wanted: bool,
+    /// Whether the Workspace found a change on disk since the server's last
+    /// compilation, a change dbt lsp never heard of: its resolution of the
+    /// packages no longer holds.
+    found: bool,
 }
 
 /// What a dbt lsp process said of its compilations: whether one runs.
@@ -1385,15 +1389,16 @@ impl<W: Write> Proxy<W> {
     /// On behalf of a request: the Workspace looks at the files on disk
     /// first, then `want_index`.
     fn ask_index(&mut self) {
-        self.workspace.notice();
+        self.parsing.found |= self.workspace.notice();
         self.want_index();
     }
 
-    /// Whether dbt's packages are guarded as alone: no dbt lsp runs, and
-    /// none compiled since the last change, as one that did resolved them,
+    /// Whether dbt's packages are guarded as alone: a change found on disk
+    /// since dbt lsp's last compilation, or no dbt lsp runs and none
+    /// compiled since the last change told, as one that did resolved them,
     /// though it may be gone since.
     fn guards_packages(&self) -> bool {
-        self.backend.running().is_none() && !self.parsing.compiled
+        self.parsing.found || (self.backend.running().is_none() && !self.parsing.compiled)
     }
 
     /// A request of one of the proxy's commands for clients, COMMAND with
@@ -2048,10 +2053,10 @@ impl<W: Write> Proxy<W> {
     /// compilation's deadline ends, and one that compiled nothing is said
     /// once for each first error, across restarts, but after `shutdown`.
     fn on_compiled(&mut self, foreground: bool, message: &Value, body: &[u8]) {
-        // The server has resolved the packages: dbt may parse, for a
-        // request that wanted an index before.
+        // The server has resolved the packages, from the disk as it is: dbt
+        // may parse, for a request that wanted an index before.
         if foreground {
-            self.parsing.compiled = true;
+            (self.parsing.compiled, self.parsing.found) = (true, false);
             if std::mem::take(&mut self.parsing.wanted) {
                 self.want_index();
             }

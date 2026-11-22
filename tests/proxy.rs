@@ -2820,6 +2820,26 @@ fn after_dbt_lsp_is_lost_with_no_change_its_compilation_still_guards_the_package
 }
 
 #[test]
+fn in_front_a_change_found_on_disk_guards_the_packages_as_alone() {
+    let (mut session, log, project) = hub_package_without_a_cut("found-guard-alone");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(parses(&log).len(), 1, "the parse that dbt lsp's compilation allows");
+    // dbt lsp never heard of the write, and has not resolved the packages since.
+    std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
+    node_info(&mut session, json!("model.shop.orders"));
+    session.wait_for(says_no_cut);
+    parses_stay(&log, 1);
+    // A change told, which dbt lsp compiles from the disk as it is: its resolution holds again.
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after dbt lsp's compilation", |_| parses(&log).len() == 2);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn exit_stops_a_parse_under_way() {
     let (mut session, log) = Session::fake("parse-hangs", json!({"manifest": manifest(), "parse_hang": true}));
     session.initialize(&fixture());

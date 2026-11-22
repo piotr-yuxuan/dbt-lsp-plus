@@ -1489,10 +1489,12 @@ So the proxy runs the user's own `dbt parse`.
   the index stale too, with no change told, as after Claude Code's `Edit`
   of a file it had not opened, which it opens without saving (the
   Workspace's own refresh).  In front of dbt lsp, such a change waits for
-  no compilation: the guard on packages still holds each start.  A parse
-  starts only when the server has compiled since the change, so that dbt has resolved the packages
-  itself, or when no server runs (after a crash, while the restart's
-  process starts: plan 037), and such a request
+  no compilation, and its parse is guarded on packages as alone, as dbt
+  lsp has not resolved them since, until its next compilation.  A
+  parse after a change told starts only when the server has compiled
+  since, so that dbt has resolved the packages itself, or when no server
+  runs (after a crash, while the restart's process starts: plan 037),
+  and such a request
   made before that compilation starts it once it comes,
   when every package is local or `package-lock.yml` is no older than the
   file naming the packages (an empty or comment-only file names none), with
@@ -1502,7 +1504,8 @@ So the proxy runs the user's own `dbt parse`.
   agent may ask for a node without opening one.  A reason a parse cannot
   start, or a failure, is logged once with `window/logMessage`, and never
   after `shutdown`.  While no server runs, the guard on packages is the
-  alone one unless a server compiled since the last change: a dbt lsp
+  alone one unless a server compiled since the last change, told or found
+  on disk: a dbt lsp
   that compiled and then crashed, with no change since, has resolved the
   packages as it does when it runs.  With a dbt lsp that could not start,
   the parse's dbt is the same command, which fails too: `nodeInfo` then
