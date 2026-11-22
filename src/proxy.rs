@@ -3312,6 +3312,9 @@ mod tests {
         let text = "select {{ function('f') }}(1) as v";
         let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
         proxy.documents.insert(path.clone(), text.to_owned());
+        let position = json!({"textDocument": {"uri": features::uri(&path)},
+                              "position": {"line": 0, "character": text.find("'f'").unwrap() + 1}});
+        assert_eq!(proxy.node_at(None, &position, false), None, "a function's argument names no node before any parse");
         let node = json!({"unique_id": "model.shop.uses_f", "name": "uses_f", "resource_type": "model",
                           "package_name": "shop", "original_file_path": "models/marts/uses_f.sql", "config": {}});
         let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_f": node}});
