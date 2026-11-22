@@ -2711,6 +2711,15 @@ mod tests {
             ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
             ("`dbt lsp is not running`", r#"None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running")"#),
             ("ends `dbt-lsp-plus answers alone.`", r#"format!("; {why}: dbt-lsp-plus answers alone.")"#),
+            // The warnings of a dbt lsp that could not start or exited first, and of one lost for good.
+            (
+                "`window/showMessage` ending `dbt-lsp-plus answers alone.`",
+                r#"let text = format!("{why}: dbt-lsp-plus answers alone.");"#,
+            ),
+            (
+                "`window/showMessage` ending `dbt-lsp-plus answers alone.`",
+                r#"None => format!("{why}: dbt-lsp-plus answers alone."),"#,
+            ),
             (
                 r#""alone":"dbt lsp is not started for a project found from a file""#,
                 r#"(_, Route::Document) => Some("dbt lsp is not started for a project found from a file")"#,
