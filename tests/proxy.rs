@@ -1216,13 +1216,13 @@ fn answers_references_on_a_source_and_forwards_the_others() {
         .collect();
     files.sort();
     assert_eq!(files, ["_sources.yml", "stg_page_views.sql"]);
-    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    assert_eq!(received(&log, "textDocument/references"), 1, "asked too, in merge");
     // On a ref, the proxy answers the references too, and the server a rename.
     let orders = uri(&fixture().join("models/marts/orders.sql"));
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}, "context": {"includeDeclaration": true}});
     let found = session.request("textDocument/references", on_ref.clone());
     assert_eq!(found["result"].as_array().map(Vec::len), Some(3), "with its declaration: {found}");
-    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    assert_eq!(received(&log, "textDocument/references"), 2, "asked too, in merge");
     let mut rename_ref = on_ref;
     rename_ref["newName"] = json!("orders_v2");
     let forwarded = session.request("textDocument/rename", rename_ref);
@@ -1635,7 +1635,7 @@ fn a_source_request_counts_no_byte_order_mark() {
                     "context": {"includeDeclaration": false}});
     let found = session.request("textDocument/references", at);
     assert_eq!(found["result"].as_array().map(Vec::len), Some(1), "{found}");
-    assert!(!methods(&log).contains(&"textDocument/references".to_owned()));
+    assert_eq!(received(&log, "textDocument/references"), 1, "asked too, in merge");
     assert!(session.finish().success());
 }
 
@@ -2482,12 +2482,13 @@ fn a_hover_on_a_ref_gets_the_summary_first_and_any_other_passes_byte_for_byte() 
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap();
-    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"  \n`model.shop.stg_orders`\n\n---\n\nServer text");
+    let server = "\n\n---\n\n**dbt lsp**\n\nServer text";
+    assert_eq!(value, format!("model view, \"shop\".\"main\".\"stg_orders\"  \n`model.shop.stg_orders`{server}"));
     // Line 1, column 1 stands for the file's own model.
     let start = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
     let own = session.request("textDocument/hover", start);
     let value = own["result"]["contents"]["value"].as_str().unwrap();
-    assert_eq!(value, "model table, \"shop\".\"main\".\"orders\"  \n`model.shop.orders`\n\n---\n\nServer text");
+    assert_eq!(value, format!("model table, \"shop\".\"main\".\"orders\"  \n`model.shop.orders`{server}"));
     let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 3, "character": 0}});
     let plain = session.request("textDocument/hover", elsewhere);
     let expected = answer.replace("$ID", &plain["id"].to_string());
@@ -2879,8 +2880,10 @@ fn location(project: &Path, file: &str, line: u64, start: u64, end: u64) -> Valu
 #[test]
 fn a_definition_in_yaml_leads_where_dbt_looks() {
     let project = navigable("definition-yaml");
+    // As dbt lsp 2.0.9 answers at every position of a properties file.
+    let script = json!({"answers": {"textDocument/definition": null}});
     let (mut session, log) =
-        Session::fake_with("definition-yaml", json!({}), &[Path::new("--project-dir"), &project], None);
+        Session::fake_with("definition-yaml", script, &[Path::new("--project-dir"), &project], None);
     session.initialize(&project);
     let yml = project.join("models/marts/_models.yml");
     let mut definition = |needle: &str, delta: usize| {
@@ -2912,7 +2915,7 @@ fn a_definition_in_yaml_leads_where_dbt_looks() {
     assert_eq!(on_source["result"], location(&project, "models/staging/_sources.yml", 3, 10, 13));
     let on_table = session.request("textDocument/definition", position_in(&sources, "name: orders", 8));
     assert_eq!(on_table["result"], location(&project, "models/staging/_sources.yml", 6, 14, 20));
-    assert!(!methods(&log).contains(&"textDocument/definition".to_owned()));
+    assert_eq!(received(&log, "textDocument/definition"), 12, "asked too, in merge");
     assert!(session.finish().success());
 }
 
@@ -3114,7 +3117,7 @@ fn with_dbt_lsp_the_references_of_a_ref_are_the_proxy_s() {
         location(&fixture(), "snapshots/orders_snapshot.sql", 2, 22, 32),
     ];
     assert_eq!(answer["result"], json!(uses), "as alone: {answer}");
-    assert_eq!(received(&log, "textDocument/references"), 0);
+    assert_eq!(received(&log, "textDocument/references"), 1, "asked too, in merge");
     assert!(session.finish().success());
 }
 
@@ -3130,7 +3133,7 @@ fn with_dbt_lsp_a_ref_and_a_macro_call_in_sql_are_the_proxy_s() {
     let block = json!({"uri": uri(&fixture().join("dbt_packages/shop_utils/macros/is_positive.sql")),
                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 15}}});
     assert_eq!(answer["result"], block, "its whole block, as alone");
-    assert_eq!(received(&log, "textDocument/definition"), 0);
+    assert_eq!(received(&log, "textDocument/definition"), 2, "asked too, in merge");
     assert!(session.finish().success());
 }
 
@@ -3163,12 +3166,9 @@ fn without_declaration(mut params: Value) -> Value {
     params
 }
 
-/// Whether the fake got no definition and no references, and nothing was
-/// said to be late, in SESSION with the fake's LOG.
-fn none_asked_nor_late(session: &Session, log: &Path) -> bool {
-    let counts = ["textDocument/definition", "textDocument/references"].map(|method| received(log, method));
-    let late = session.received.iter().any(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
-    counts == [0, 0] && !late
+/// Whether nothing was said to be late in SESSION.
+fn none_late(session: &Session) -> bool {
+    !session.received.iter().any(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4)
 }
 
 #[test]
@@ -3185,7 +3185,9 @@ fn in_front_of_the_feedback_s_null_answers_a_ref_is_the_proxy_s_as_alone() {
         let files: Vec<&Value> = used["result"].as_array().unwrap().iter().map(|l| &l["uri"]).collect();
         assert_eq!(json!(files), uses, "{used}");
     }
-    assert!(none_asked_nor_late(&session, &log));
+    let counts = ["textDocument/definition", "textDocument/references"].map(|method| received(&log, method));
+    assert_eq!(counts, [2, 2], "asked too, in merge");
+    assert!(none_late(&session));
     assert!(session.finish().success());
 }
 
@@ -3203,7 +3205,9 @@ fn in_front_of_the_feedback_s_null_answers_a_macro_and_a_function_are_the_proxy_
     let hover = session.request("textDocument/hover", at("models/marts/orders.sql", "ref('stg_orders')", 6));
     let text = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(text.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "the summary alone: {hover}");
-    assert!(none_asked_nor_late(&session, &log));
+    let counts = ["textDocument/definition", "textDocument/references"].map(|method| received(&log, method));
+    assert_eq!(counts, [2, 1], "asked too, in merge");
+    assert!(none_late(&session));
     assert!(session.finish().success());
 }
 
@@ -3287,7 +3291,7 @@ fn with_dbt_lsp_a_function_call_and_its_entry_are_the_proxy_s() {
     let answer = session.request("textDocument/definition", on_entry);
     assert_eq!(answer["result"], location(&project, "functions/f.sql", 0, 0, 0), "{answer}");
     let counts = ["textDocument/definition", "textDocument/references"].map(|method| received(&log, method));
-    assert_eq!(counts, [0, 0]);
+    assert_eq!(counts, [2, 1], "asked too, in merge");
     assert!(session.finish().success());
 }
 
@@ -3366,7 +3370,7 @@ fn one_method_left_to_dbt_lsp_keeps_the_others_as_they_were() {
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&staging)}}));
     assert!(outline["result"].is_array(), "{outline}");
     let counts = ["textDocument/definition", "textDocument/references", "textDocument/documentSymbol"];
-    assert_eq!(counts.map(|method| received(&log, method)), [1, 0, 0]);
+    assert_eq!(counts.map(|method| received(&log, method)), [1, 1, 0], "references asked too, in merge");
     assert!(session.finish().success());
 }
 
@@ -3903,7 +3907,23 @@ fn a_server_s_error_gives_the_proxy_s_part_or_nothing() {
     }
     let kept = session.request("textDocument/hover", on_ref());
     assert!(kept["result"]["contents"]["value"].as_str().is_some_and(|text| text.contains("stg_orders")), "{kept}");
+    the_proxy_s_on_ref(&mut session);
     assert!(session.finish().success());
+}
+
+/// The uses of `stg_orders` in the fixture: each file, line and characters.
+const USES_OF_STG_ORDERS: [(&str, u64, u64, u64); 2] =
+    [("models/marts/orders.sql", 4, 26, 36), ("snapshots/orders_snapshot.sql", 2, 22, 32)];
+
+/// Checks that a definition and references without the declaration on
+/// `on_ref()` get the proxy's answers in SESSION: the start of
+/// `stg_orders.sql`, and its two uses.
+fn the_proxy_s_on_ref(session: &mut Session) {
+    let definition = session.request("textDocument/definition", on_ref());
+    assert_eq!(definition["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{definition}");
+    let references = session.request("textDocument/references", without_declaration(on_ref()));
+    let uses = USES_OF_STG_ORDERS.map(|(file, line, start, end)| location(&fixture(), file, line, start, end));
+    assert_eq!(references["result"], json!(uses), "{references}");
 }
 
 #[test]
@@ -3934,8 +3954,94 @@ fn while_dbt_lsp_restarts_a_merged_request_gets_the_proxy_s_answer() {
         let answer = session.request(method, params);
         assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing), "{method}: {answer}");
     }
+    the_proxy_s_on_ref(&mut session);
     let completion = session.request("textDocument/completion", json!({}));
     assert_eq!(completion["error"]["message"], "dbt lsp is not running", "{completion}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_merge_dbt_lsp_s_other_locations_follow_the_proxy_s() {
+    let customers = location(&fixture(), "models/marts/customers.sql", 0, 0, 0);
+    // The whole call, which holds the proxy's location of its name.
+    let call = location(&fixture(), "models/marts/orders.sql", 4, 21, 38);
+    let answers = json!({"textDocument/definition": customers, "textDocument/references": [customers, call]});
+    let (mut session, log) = Session::fake("merge-union", json!({"answers": answers}));
+    session.initialize(&fixture());
+    let found = session.request("textDocument/definition", on_ref());
+    let stg_orders = location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0);
+    assert_eq!(found["result"], json!([stg_orders, customers]), "{found}");
+    let used = session.request("textDocument/references", without_declaration(on_ref()));
+    let mut uses =
+        USES_OF_STG_ORDERS.map(|(file, line, start, end)| location(&fixture(), file, line, start, end)).to_vec();
+    uses.push(customers);
+    assert_eq!(used["result"], json!(uses), "{used}");
+    let counts = ["textDocument/definition", "textDocument/references"].map(|method| received(&log, method));
+    assert_eq!(counts, [1, 1]);
+    assert!(none_late(&session));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_merge_dbt_lsp_s_matching_locations_add_nothing() {
+    let range = |end: u64| json!({"start": {"line": 0, "character": 0}, "end": {"line": end, "character": 0}});
+    let link = |file: &str| json!({"targetUri": uri(&fixture().join(file)), "targetRange": range(14), "targetSelectionRange": range(0)});
+    let matching = link("models/staging/stg_orders.sql");
+    // The first definition gets the matching link alone, the next one another link too.
+    let script = json!({"answers_once": {"textDocument/definition": [matching]},
+                        "answers": {"textDocument/definition": [matching, link("models/marts/customers.sql")]}});
+    let (mut session, _) = Session::fake("merge-link", script);
+    session.initialize(&fixture());
+    let found = session.request("textDocument/definition", on_ref());
+    let stg_orders = location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0);
+    assert_eq!(found["result"], stg_orders, "{found}");
+    let other = session.request("textDocument/definition", on_ref());
+    let customers = location(&fixture(), "models/marts/customers.sql", 0, 0, 0);
+    assert_eq!(other["result"], json!([stg_orders, customers]), "a link is read, as its target's selection: {other}");
+    assert!(session.finish().success());
+    let (mut plus, _) = with_options("merge-link-plus", json!({}), &["--default-mode", "plus"]);
+    plus.initialize(&fixture());
+    assert_eq!(plus.request("textDocument/definition", on_ref())["result"], found["result"], "as in plus");
+    assert!(plus.finish().success());
+}
+
+#[test]
+fn in_merge_a_late_dbt_lsp_gives_the_proxy_s_locations_at_300_ms() {
+    let (mut session, _) = Session::fake("merge-late-locations", json!({"hold": ["textDocument/definition"]}));
+    session.initialize(&fixture());
+    let started = Instant::now();
+    let found = session.request("textDocument/definition", on_ref());
+    let took = started.elapsed();
+    assert!(Duration::from_millis(300) <= took && took < Duration::from_secs(2), "{took:?}");
+    assert_eq!(found["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
+    session.notify("test/release", json!({}));
+    settle(&mut session);
+    assert_eq!(frames_of(&session, &found["id"]), 1, "the late answer reached the client");
+    let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
+    let said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
+    assert!(said.len() == 1 && said[0].contains("textDocument/definition within 300 ms"), "{said:?}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_merge_the_proxy_s_nothing_at_a_listed_kind_waits_2_s() {
+    let (mut session, _) = Session::fake("merge-late-null", json!({"hold": ["textDocument/definition"]}));
+    session.initialize(&fixture());
+    let scratch = fixture().join("models/marts/scratch.sql");
+    let text = "select * from {{ ref('nowhere') }}";
+    session.open(&scratch, Some(text));
+    let started = Instant::now();
+    // An unsaved document's ref to a model that no file holds.
+    let at = json!({"line": 0, "character": text.find("nowhere").unwrap() + 2});
+    let found =
+        session.request("textDocument/definition", json!({"textDocument": {"uri": uri(&scratch)}, "position": at}));
+    let took = started.elapsed();
+    assert!(Duration::from_secs(2) <= took && took < Duration::from_secs(4), "{took:?}");
+    assert_eq!((found.get("error"), &found["result"]), (None, &Value::Null), "{found}");
+    settle(&mut session);
+    let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
+    let said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
+    assert!(said.len() == 1 && said[0].contains("textDocument/definition within 2000 ms"), "{said:?}");
     assert!(session.finish().success());
 }
 
@@ -4061,15 +4167,22 @@ fn alone_a_versioned_ref_in_yaml_leads_to_its_version_once_parsed() {
 
 #[test]
 fn with_dbt_lsp_a_versioned_ref_in_yaml_is_the_proxy_s() {
-    let (project, _) = versioned("versioned-server");
+    let (project, manifest) = versioned("versioned-server");
     let flags = [Path::new("--project-dir"), &project];
-    let (mut session, log) = Session::fake_with("versioned-server", json!({}), &flags, None);
+    // As dbt lsp 2.0.9 answers at every position of a properties file.
+    let script = json!({"manifest": manifest, "answers": {"textDocument/definition": null}});
+    let (mut session, log) = Session::fake_with("versioned-server", script, &flags, None);
     session.initialize(&project);
-    let on_ref = position_in(&project.join("models/marts/_dim.yml"), "ref('dim'", 5);
-    let answer = session.request("textDocument/definition", on_ref);
+    let yml = project.join("models/marts/_dim.yml");
+    // The first listing makes the fake compile, after which a parse may run.
+    session.open(&yml, None);
+    let on_ref = position_in(&yml, "ref('dim'", 5);
+    let answer = session.request("textDocument/definition", on_ref.clone());
     assert_eq!((answer.get("error"), &answer["result"]), (None, &Value::Null), "{answer}");
-    barrier(&mut session);
-    assert!(!methods(&log).iter().any(|method| method == "textDocument/definition"), "forwarded");
+    let v2 = location(&project, "models/marts/dim_v2.sql", 0, 0, 0);
+    let found = session.poll(Duration::from_secs(10), ("textDocument/definition", on_ref), |result| *result == v2);
+    assert_eq!(found, v2);
+    assert!(methods(&log).iter().any(|method| method == "textDocument/definition"), "asked too, in merge");
     assert!(session.finish().success());
 }
 

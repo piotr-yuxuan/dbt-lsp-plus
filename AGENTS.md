@@ -47,6 +47,7 @@ src/sources.rs                references and renames of sources
 src/navigation.rs             the targets of definitions and references, dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
+src/capability.rs             what a session offers: one descriptor per method or command
 src/modes.rs                  who answers each method: the user's settings and the session's table
 src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
@@ -89,10 +90,12 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
 
 ## Rules of the code
 
-- Forward what the proxy does not own byte for byte; never re-serialise it.
-- Route a method by its mode (`src/modes.rs`); unset, a mode is its
-  shipped default: the methods the proxy adds its own only when the
-  server does not announce them, the others `merge`.
+- Forward what the proxy does not own or merge byte for byte; never
+  re-serialise it.
+- Route a method by its capability (`src/capability.rs`) and its mode
+  (`src/modes.rs`); unset, a mode is its shipped default: the methods
+  the proxy adds its own only when the server does not announce them,
+  the others `merge`.
 - The proxy's own requests carry ids `dbt-lsp-plus/N`, and their answers
   never reach the client.
 - What `dbt lsp` does is observed, not documented: record each new
@@ -117,8 +120,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     cache changes only once the project is built;
   - `Proxy::graph`: the graph kept while what it is made of stays, apart
     from the hierarchy's answer;
-  - `Pending::merged`: what each kind of forwarded request does to the
-    server's answer, so that `on_server` stays a dispatch;
+  - `Pending::merged`: what each kind of part does to the server's
+    answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
     hints, apart from the outcome of the parse that changes them;
   - `runs::locator`: where a failed node is written, apart from how it
@@ -143,11 +146,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     request of a command for clients, its run by dbt's CLI, and the run's
     answer, one handler each, so that `on_request` and `handle` stay
     dispatches;
-  - `commands::route`, `commands::announced`, `commands::own`,
-    `commands::arguments`, `commands::compiled` and `commands::listed`: the
-    decisions on a command's request and on a run's output, with tests of
-    their own; `commands::compile_job` and `commands::nodes_job`: one run
-    per command, its words and its reader;
+  - `commands::route`, `commands::announced`, `commands::arguments`,
+    `commands::compiled` and `commands::listed`: the decisions on a
+    command's request and on a run's output, with tests of their own;
+    `commands::compile_job` and `commands::nodes_job`: one run per
+    command, its words and its reader;
   - `cli::named`: the rule that a subcommand is the first word, tested
     without running the binary, apart from `main.rs`, whose `cli::main` is
     the module's entry point; `cli::asked`: the decision on a
@@ -195,6 +198,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     node's summary and facts, a docs block, a test's signature) or why it
     has nothing, apart from what the proxy keeps of other requests, as
     `on_definition` and the others are for `answer`;
+  - `Proxy::union_part`: one concern, what a definition or references
+    gets first when the proxy unites dbt lsp's answer with its own, or
+    nothing, apart from what the proxy keeps of other requests, as
+    `hover_part` is for a hover;
   - `Proxy::on_parsed`, `Proxy::stop_parse` and `config::finish`: a parse's
     outcome and its end, each the end of a resource, as `stop_server`;
   - the sections of `tests/proxy/live.rs` (`document_features`,

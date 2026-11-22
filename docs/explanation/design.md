@@ -67,6 +67,9 @@ owns all state and writes both outputs.
     first (see "Node information and hover"), and to an inlay hint
     request, which gets the proxy's hints after the server's (see "Inlay
     hints");
+  - in `merge`, the answer to a definition or references at a kind of
+    target that the proxy claims, which gets the proxy's locations
+    first, then the server's that match none of them (see "Modes");
   - the server's diagnostics of a file where the user's last run failed,
     which get the proxy's appended (see "The last run as diagnostics");
   - the answers to the proxy's own requests, which never reach the client.
@@ -89,17 +92,21 @@ owns all state and writes both outputs.
   holds this page to, a source in SQL, YAML and Python and a CTE in
   SQL.  Until plan 037, `ref` in SQL and Python, `macro` and `function`
   were listed alone only.  A kind listed at a place is the proxy's at
-  every position of that kind there, possibly null or `[]`, never
-  forwarded, in any file under the root: references come from the scan
-  whichever file asks, while a rename needs a file the scan holds, since
-  it would leave the asking file as it is.  The kinds are by position, and
-  the lists follow the modes (see "Modes"): `entry` is the `name:` of an
-  entry, a function's under `functions:` included, `test` a generic test's
-  name, `ref` in YAML a unit test's `model:` too, `function` either
-  argument of `function()`, and `macro` the `ref` and `function` keywords
-  themselves, which a project's macro may replace, and the name in the tag
-  of a macro or a generic test.  dbt-mode steps aside for exactly those
-  (its plan 014, agreed with plans 017 and 018), and reads version 2 only:
+  every position of that kind there, possibly null or `[]`, in any file
+  under the root: references come from the scan whichever file asks,
+  while a rename needs a file the scan holds, since it would leave the
+  asking file as it is.  In `merge` with a backend, a definition or
+  references there goes to the server too, and the server's locations
+  that match none of the proxy's follow them (plan 042); in `plus`, and
+  without a backend, a listed kind is never forwarded.  The kinds are by
+  position, and the lists follow the modes (see "Modes"): `entry` is the
+  `name:` of an entry, a function's under `functions:` included, `test`
+  a generic test's name, `ref` in YAML a unit test's `model:` too,
+  `function` either argument of `function()`, and `macro` the `ref` and
+  `function` keywords themselves, which a project's macro may replace,
+  and the name in the tag of a macro or a generic test.  dbt-mode steps
+  aside for exactly those (its plan 014, agreed with plans 017 and 018),
+  and reads version 2 only:
   it asks only for the kinds it knows, and maps only `.sql`, `.yml` and
   `.yaml` to places, so plan 018's `function` and `python` changed nothing
   for it.
@@ -119,7 +126,16 @@ owns all state and writes both outputs.
 
 ## Modes
 
-Each method the proxy answers has a mode (`src/modes.rs`): `plus`, the
+Each method the proxy answers has a capability (`src/capability.rs`,
+plan 042): one descriptor per method or command for clients, which says
+who can answer it (its providers: the proxy, dbt lsp, dbt's CLI), how
+their answers combine, the capability that announces it, the method
+whose mode a follower takes, whether its nothing is `[]`, whether it
+wants the parse's index, and the kinds of target the flag lists for it.
+The capabilities announced, `experimental.dbtLspPlus`, the commands
+listed and the methods that take a mode all come from that one table,
+and the reference's table of who answers what is held to it by a unit
+test.  Each method has a mode (`src/modes.rs`): `plus`, the
 proxy alone, nothing sent to the server for it; `dbt`, the server alone,
 answered byte for byte, the proxy computing nothing for it; `merge`, both,
 as the proxy merges them.  The methods are `textDocument/documentSymbol`,
@@ -138,31 +154,56 @@ settings.  The shipped defaults:
 | documentSymbol, workspace/symbol, the call hierarchy, folding, highlights, selection ranges | `plus` when the first server does not announce the capability, else `dbt` |
 | hover, inlay hints, definition, references, rename, diagnostics | `merge` |
 
-In `merge`, a hover gets the node's summary first, the hints come after
-the server's, the diagnostics are per file the server's and the proxy's,
-and definitions, references and renames go by the kind of target (see
-"Navigation"), every row of `experimental.dbtLspPlus` the proxy's; the
-methods the proxy adds are its own.  In `plus`, a definition, references
+In `merge`, a hover gets the node's summary first and the server's text
+after it under a line naming it, the hints come after the server's, the
+diagnostics are per file the server's and the proxy's, definitions and
+references are the union of both answers, the proxy's first, and a
+rename goes by the kind of target (see "Navigation"), every row of
+`experimental.dbtLspPlus` the proxy's; the methods the proxy adds are
+its own, the server never asked.  In `plus`, a definition, references
 or a rename is answered where the proxy claims the position, and with
 null or `[]` elsewhere; a hover or hints are the proxy's part alone; diagnostics,
 what the proxy publishes in `merge` without the server's part.
 
 dbt lsp adds to the proxy's answer, but never holds it up.  A merged
 request is a definition, references, a hover or inlay hints in `merge`
-that goes to dbt lsp: a definition or references at a position the proxy
-does not claim, a hover, hints.  Each remembers the proxy's answer: its
-part (a summary, a docs block, a test's signature, its hints), else its
-nothing, null, or `[]` for references and hints.  The client gets that
-answer alone when dbt lsp has not answered within 300 ms of the
-forwarding where the proxy has a part (`MERGE_DEADLINE`), within 2 s
-where it has nothing (`NOTHING_DEADLINE`, plan 037); dbt lsp's late answer
+that goes to dbt lsp: with a backend, every definition and references,
+a hover, hints.  Each remembers the proxy's answer: its part (its
+locations where it claims the position, a summary, a docs block, a
+test's signature, its hints), else its nothing, null, or `[]` for
+references and hints.  The client gets that answer alone when dbt lsp
+has not answered within 300 ms of the forwarding where the proxy has a
+part (`MERGE_DEADLINE`), within 2 s where it has nothing
+(`NOTHING_DEADLINE`, plan 037), both in `src/capability.rs`, whose
+`Capability::deadline` is the one place that a later plan with evidence
+of a difference between methods would change; dbt lsp's late answer
 is then dropped, logged once per method and deadline (`window/logMessage`,
 type 4, naming the deadline that passed), so that a 2 s drop shows after a
 300 ms one.  dbt lsp's error, its exit before it
 answers, and no dbt lsp running when the request comes, give the
 proxy's answer too, where any other request gets dbt lsp's error or
 -32803.  dbt lsp's own null or `[]` passes byte for byte; any other answer
-passes as it came, or with the part merged.  Rename is no merged
+passes as it came, or with the part merged.  The union (plan 042) reads
+each of dbt lsp's entries by its shape first, a `uri` or `targetUri`
+that is a string and a `range` or `targetSelectionRange` whose start
+and end have a line and a character, a `LocationLink` written as a
+`Location` of its target's selection, any other entry dropped (the
+fake's echo is one), then by its path as the shadow reads it; two
+locations match by the shadow's rule, in one file, the range of one
+holding the other's, and one whose path cannot be read matches only
+itself.  When dbt lsp
+adds nothing, the client gets the proxy's answer as it is, one
+`Location` staying one.  Its cost: every definition and references at a
+claimed position waits for dbt lsp, up to 300 ms, where `plus` answers
+at once, and each one does during a long compilation; dbt lsp 2.0.9
+took 1.2 s over a session's first references on the fixture, once
+compiled (see "Shadow"), past which the proxy answers alone.  Where dbt
+lsp's answer was seen it equals the proxy's or lies within it, but for
+a versioned `ref` in SQL, which dbt lsp 2.0.9 reads without its version
+(see "Navigation"): its location there follows the proxy's, and is
+wrong.  A user who finds dbt lsp wrong sets the method to `plus`.  The
+narrower rule that plan 042 recorded for the owner would forward a
+claimed position only where the proxy finds nothing.  Rename is no merged
 request: dbt lsp computes a model's rename over the project, and a null
 at a deadline would read as nothing to rename.  So dbt lsp's own answers
 where the proxy has nothing (a CTE's or a column's definition, its hover
@@ -175,18 +216,21 @@ the whole compilation, 1.9 s; every other one took under 1 ms.  It ignores `$/ca
 during its compilation was answered with its result 110 ms later.
 
 Plan 020 narrowed the roadmap's merge table.  Definition and references
-stay per kind of target: the kinds the flag lists are the proxy's alone,
-dbt lsp answering nothing there.  Plan 020 left the definition and
+stay per kind of target: the kinds the flag lists are the proxy's, dbt
+lsp answering nothing there, with dbt lsp's other locations after them
+in `merge` since plan 042.  Plan 020 left the definition and
 references of `ref` in SQL and Python, `macro` and `function` to dbt lsp,
 whose null on a package's `ref` or on a name two packages hold, and
 references from the asking file only, passed as they came; with dbt lsp
 running, an agent's definition on a `ref` came back null after 40 s.  Plan
 037 lists them with a server too, on the corpus's evidence (see
 "Conformance"), the live baseline (see "Shadow") and those nulls, as the
-owner decided on 2026-11-17, and announced the change to dbt-mode.  The
-union of both answers, with their provenance, is plan 042's: wherever dbt
-lsp 2.0.9's answer was seen, it equals the proxy's or lies within it.  The
-union of
+owner decided on 2026-11-17, and announced the change to dbt-mode.  Plan
+042 built the union of both answers at those kinds in `merge`, on the
+owner's decision of 2026-11-17 ("`merge` is the union of both servers'
+answers, `plus`'s first"), and announced it to dbt-mode first; the
+provenance of a hover's part is its heading, and a location has none in
+LSP.  The union of
 workspace symbols and the call hierarchy by unique id waits for a server
 that announces them, and the rows where the proxy has no answer
 (completion, code lenses and actions, prepareRename, formatting,
@@ -224,10 +268,11 @@ method's shipped mode may change.  Off by default, it is set for the
 session by `--shadow` or `initializationOptions.dbtLspPlus.shadow: true`,
 and on from dbt lsp's answer to `initialize`: with no backend it is off,
 and said once.  It follows each definition or references request in
-`dbt`, decided from the method alone; none in `plus` or `merge`, since
-`merge` forwards only where the proxy has no target, which the switching
-rule cannot use, and a merged request falls back to its nothing (plan
-037).  With the shadow on and neither definition nor references in `dbt`,
+`dbt`, decided from the method alone; none in `plus` or `merge`: in
+`merge` the union decides what the switching rule was to settle, and a
+merged request falls back to the proxy's part (plans 037 and 042), so
+that with the shipped modes the shadow's log holds no provenance of a
+merged location.  With the shadow on and neither definition nor references in `dbt`,
 one warning after `initialize` says that it has nothing to follow.  The
 client gets dbt lsp's answer first, as it came; then, on the loop, the
 proxy computes its own (`on_definition`, `on_references`, whatever the
@@ -294,7 +339,9 @@ every relation where dbt lsp has a location the proxy lacks, are under
 definition and references of `ref`, `macro` and `function`, which the
 proxy now answers in `merge`, on the owner's decision of 2026-11-17 to
 fix the agent's null answers first; no data of 200 followed requests
-was recorded.  The log's names (`oursAdds`, `oursOnly` and the others)
+was recorded.  Plan 042 built the full union in `merge` on the owner's
+decision of the same day, not on the rule, which still holds for the
+requests that the shadow follows in `dbt`.  The log's names (`oursAdds`, `oursOnly` and the others)
 keep the mode's former name: they are its format.
 
 The baseline, live in front of dbt lsp 2.0.9 on the fixture: a
@@ -303,6 +350,21 @@ in `orders.sql` is `equal`; references on that `ref` are `oursAdds`,
 dbt lsp leaving out the `ref` of `snapshots/orders_snapshot.sql`.  The
 live test leaves definitions and references to dbt lsp (`dbt`) to follow
 them.
+
+With the union (plan 042), the same requests in `merge` get the proxy's
+answer, observed on 2026-11-22: dbt lsp 2.0.9's locations all match the
+proxy's, its reference `'stg_orders'` (4:25-37, the quotes included)
+holding the proxy's name.  Once it has compiled, it answers a definition
+within 20 ms; but it took 1.2 s over the first references of the
+session, past the deadline, where the proxy answers alone and logs it,
+then 2 ms over each later one.  One check depends on those times:
+`navigation` asserts that no definition was late, which holds while dbt
+lsp answers a definition within the 300 ms deadline.  The live test
+checks the answers, the proxy's (`navigation`), and that dbt
+lsp is asked: `the_union_in_front_of_the_real_dbt_lsp` records dbt
+lsp's input by `tee` in the server command, and counts there one
+definition and one references in `merge` at a claimed position.  The
+fake answers at once, and its `hold` stands for a late server.
 
 ## Commands for clients
 
@@ -1244,9 +1306,12 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   node as nodeInfo's position does, a YAML file aside (a properties
   file, or a YAML snapshot's), resolved from the
   document's text when the request arrives, the server's answer gets the
-  node's summary and facts first, then a rule;
-  plain text gets a blank line instead, an array of marked strings the
-  summary as its first item, a null answer the summary alone.  Elsewhere,
+  node's summary and facts first, then a rule and a line `**dbt lsp**`
+  above the server's text (plan 042), so that everything above it is the
+  proxy's; plain text gets a blank line and `dbt lsp:` instead, an array
+  of marked strings the summary as its first item and `**dbt lsp**` as
+  its second, a null answer, or a server's text that is empty or blank,
+  the summary alone.  Elsewhere,
   or without an index, the answer passes byte for byte.  The summary is one
   line of what dbt builds and where, then one of what is set beyond the
   defaults: group and owner, access when not protected, an enforced

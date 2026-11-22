@@ -128,9 +128,9 @@ name `--project-dir`.
 
 | Operation | LSP method | Alone | In front of dbt lsp |
 |-----------|------------|-------|---------------------|
-| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null | dbt-lsp-plus at the kinds below; else dbt lsp's answer within 2 s, else null |
-| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` | dbt-lsp-plus at the kinds below; else dbt lsp's answer within 2 s, else `[]` |
-| hover | `textDocument/hover` | dbt-lsp-plus: a node's summary and facts, a docs block, a test's signature; before the first parse, the error above | dbt lsp's answer within 300 ms, under dbt-lsp-plus's summary where it has one, else within 2 s; past that, dbt-lsp-plus's summary, else null |
+| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else null |
+| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else `[]` |
+| hover | `textDocument/hover` | dbt-lsp-plus: a node's summary and facts, a docs block, a test's signature; before the first parse, the error above | dbt lsp's answer within 300 ms, under dbt-lsp-plus's summary and a line `**dbt lsp**` where it has one, else within 2 s; past that, dbt-lsp-plus's summary, else null |
 | documentSymbol | `textDocument/documentSymbol` | dbt-lsp-plus | dbt-lsp-plus, since dbt lsp 2.0.9 does not announce it; not observed |
 | workspaceSymbol | `workspace/symbol` | dbt-lsp-plus | dbt-lsp-plus |
 | goToImplementation | `textDocument/implementation` | none: `dbt lsp is not running` | dbt lsp; 2.0.9 answers `No such method textDocument/implementation` |
@@ -138,17 +138,21 @@ name `--project-dir`.
 
 dbt-lsp-plus's answers carry a node's unique id: a symbol reads
 `orders (Class) - Line 1 in model.shop.orders`, a call hierarchy item
-ends `[model.shop.orders]`.  The mode `plus` changes little for an
-agent: the default, `merge`, already gives dbt-lsp-plus's answer wherever
-it has one ([the modes](../reference/features.md#modes)).
+ends `[model.shop.orders]`.  The default, `merge`, gives dbt-lsp-plus's
+answer wherever it has one, with dbt lsp's other locations after it;
+the mode `plus` gives dbt-lsp-plus's alone, at once, where `merge`
+waits for dbt lsp up to 300 ms, 2 s where dbt-lsp-plus finds nothing,
+and none of dbt lsp's locations, such as its unversioned one on a
+versioned `ref` in SQL ([the modes](../reference/features.md#modes)).
 
 ### Where dbt-lsp-plus answers definitions and references
 
 In the modes `merge`, the default, and `plus`, at these kinds of
 target, by the file the position is in, dbt-lsp-plus answers itself,
 with dbt lsp or without; the answer to `initialize` lists them under
-`capabilities.experimental.dbtLspPlus`.  A request set to `dbt` lists
-none.
+`capabilities.experimental.dbtLspPlus`.  In `merge` in front of dbt
+lsp, dbt lsp is asked too, and its locations that match none of
+dbt-lsp-plus's follow them.  A request set to `dbt` lists none.
 
 | request | kind | places | meaning |
 |---------|------|--------|---------|

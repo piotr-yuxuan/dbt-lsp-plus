@@ -10,6 +10,7 @@
 //! given is not the kind it needs, and passes.
 
 use crate::support::{Session, copy_fixture, uri};
+use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -142,6 +143,62 @@ fn the_shadow_in_front_of_the_real_dbt_lsp() {
     let references = lines.iter().find(|line| line["method"] == "references").unwrap();
     assert_eq!(references["oursOnly"][0]["path"], "snapshots/orders_snapshot.sql", "{references}");
     assert_eq!(lines.last().unwrap()["counts"], counts);
+}
+
+/// The union in front of the real dbt lsp, by what dbt lsp received: in
+/// `merge`, a definition and references at a position the proxy claims go
+/// to dbt lsp too, and the client gets the proxy's answer, dbt lsp 2.0.9's
+/// locations all within it.  `tee` in the server command records dbt lsp's
+/// input, the fixture's texts and the requests; the proxy takes the words
+/// before `lsp` as dbt's, so its probe and its parse run through it too,
+/// with no input.
+#[test]
+#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
+fn the_union_in_front_of_the_real_dbt_lsp() {
+    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
+    let project = copy_fixture("live-union");
+    let home = project.with_file_name("home");
+    std::fs::create_dir_all(&home).unwrap();
+    if !has_lsp(&dbt, &home, true, "the_union_in_front_of_the_real_dbt_lsp") {
+        return;
+    }
+    let record = project.with_file_name("dbt-lsp-input");
+    let project_arg = project.to_string_lossy().into_owned();
+    let tee = r#"tee -a "$DBT_LSP_INPUT" | "$0" "$@""#;
+    let server = ["sh".into(), "-c".into(), tee.into(), dbt, "lsp".into(), "--project-dir".into(), project_arg.clone()];
+    let flags = ["--profiles-dir".into(), project_arg, "--no-send-anonymous-usage-stats".into()];
+    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1")), ("DBT_LSP_INPUT", record.as_path())];
+    let mut session = Session::start(&[&server[..], &flags[..]].concat(), &env, Some(&project));
+    session.timeout = Duration::from_secs(180);
+    let result = session.initialize(&project);
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "probed through tee: {result}");
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
+    let found = session.request("textDocument/definition", on_ref.clone());
+    let start = json!({"line": 0, "character": 0});
+    let stg_orders = uri(&project.join("models/staging/stg_orders.sql"));
+    assert_eq!(found["result"], json!({"uri": stg_orders, "range": {"start": start, "end": start}}), "{found}");
+    let mut references = on_ref;
+    references["context"] = json!({"includeDeclaration": false});
+    let used = session.request("textDocument/references", references);
+    let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
+    assert_eq!(json!(files), json!([uri(&orders), uri(&project.join("snapshots/orders_snapshot.sql"))]), "{used}");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    let parsed = session.poll(Duration::from_secs(120), request, |result| result.is_object());
+    assert_eq!(parsed["relation"], "\"shop\".\"main\".\"orders\"", "parsed through tee: {parsed}");
+    assert!(session.finish().success());
+    let input = std::fs::read(&record).unwrap();
+    let mut frames = &input[..];
+    let mut methods = Vec::new();
+    while let Ok(Some(frame)) = rpc::read_frame(&mut frames) {
+        methods.extend(frame.value.and_then(|message| message["method"].as_str().map(str::to_owned)));
+    }
+    let asked = ["textDocument/definition", "textDocument/references"]
+        .map(|method| methods.iter().filter(|m| *m == method).count());
+    assert_eq!(asked, [1, 1], "what dbt lsp received: {methods:?}");
 }
 
 /// With a dbt that has no `lsp`, such as dbt-oss: the proxy alone, its
@@ -456,12 +513,12 @@ fn node_information(session: &mut Session, project: &Path) {
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
     // Once dbt lsp has compiled: during a compilation, its hover may miss the deadline, the summary alone.
-    let merged =
-        |result: &Value| result["contents"]["value"].as_str().is_some_and(|value| value.contains("\n\n---\n\n"));
+    let heading = "\n\n---\n\n**dbt lsp**\n\n";
+    let merged = |result: &Value| result["contents"]["value"].as_str().is_some_and(|value| value.contains(heading));
     let hover = json!({"result": session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), merged)});
     let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
-    let kept = value.split_once("\n\n---\n\n").map(|(_, server)| server.trim());
+    let kept = value.split_once(heading).map(|(_, server)| server.trim());
     assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
     // Inlay hints: dbt lsp 2.0.9 answers [] on a model; the proxy's relations follow.
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 100, "character": 0}});
@@ -650,7 +707,23 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
     let on_column = session.request("textDocument/definition", at("customer_id", 2));
     assert_eq!(on_column["result"], Value::Null, "{on_column}");
-    // An answer of the proxy's own, after which a log of that deadline would have come; its container the id.
+    // A ref in SQL is the proxy's in front of dbt lsp too, and its references
+    // hold the snapshot's, which dbt lsp 2.0.9 leaves out: one location, and
+    // two.  That dbt lsp is asked too is `the_union_in_front_of_the_real_dbt_lsp`'s.
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
+    let found = session.request("textDocument/definition", on_ref.clone());
+    let start = json!({"line": 0, "character": 0});
+    let stg_orders =
+        json!({"uri": uri(&project.join("models/staging/stg_orders.sql")), "range": {"start": start, "end": start}});
+    assert_eq!(found["result"], stg_orders, "one location, the proxy's");
+    let mut references = on_ref;
+    references["context"] = json!({"includeDeclaration": false});
+    let used = session.request("textDocument/references", references);
+    let uses = [json!(orders), json!(uri(&project.join("snapshots/orders_snapshot.sql")))];
+    let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
+    assert_eq!(files, uses.iter().collect::<Vec<_>>(), "{used}");
+    // An answer of the proxy's own, after which a log of those deadlines would have come; its container the id.
     let symbols = session.request("workspace/symbol", json!({"query": "orders"}));
     let model = |s: &Value| s["name"] == "orders" && s["containerName"] == "model.shop.orders";
     assert!(symbols["result"].as_array().is_some_and(|found| found.iter().any(model)), "{symbols}");
@@ -659,17 +732,8 @@ fn navigation(session: &mut Session, project: &Path) {
             && m["params"]["type"] == 4
             && m["params"]["message"].as_str().is_some_and(|text| text.contains("textDocument/definition"))
     };
-    assert_eq!(session.received.iter().filter(late).count(), 0, "dbt lsp was late on the column");
-    // A ref in SQL is the proxy's in front of dbt lsp too, and its references
-    // hold the snapshot's, which dbt lsp 2.0.9 leaves out.
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
-    assert_eq!(file(&session.request("textDocument/definition", on_ref.clone())), "stg_orders.sql");
-    let mut references = on_ref;
-    references["context"] = json!({"includeDeclaration": false});
-    let used = session.request("textDocument/references", references);
-    let snapshot = json!(uri(&project.join("snapshots/orders_snapshot.sql")));
-    assert!(used["result"].as_array().is_some_and(|found| found.iter().any(|l| l["uri"] == snapshot)), "{used}");
+    let said: Vec<&Value> = session.received.iter().filter(late).collect();
+    assert!(said.is_empty(), "dbt lsp was late on a definition: {said:?}");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.

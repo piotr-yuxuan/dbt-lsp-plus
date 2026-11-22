@@ -3,7 +3,8 @@
 //! byte for byte, and answers itself the requests of the features that the
 //! server does not announce.
 
-use crate::commands::{self, Via};
+use crate::capability::{self, CAPABILITIES, Provider};
+use crate::commands;
 use crate::graph::{self, Graph, ServerNode};
 use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
@@ -38,31 +39,6 @@ const INVALID_REQUEST: i64 = -32600;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
-/// Each capability the proxy adds when the server lacks it, with the
-/// methods it then answers.
-const ADDED: [(&str, &[&str]); 6] = [
-    ("documentSymbolProvider", &["textDocument/documentSymbol"]),
-    ("workspaceSymbolProvider", &["workspace/symbol"]),
-    (
-        "callHierarchyProvider",
-        &["textDocument/prepareCallHierarchy", "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"],
-    ),
-    ("foldingRangeProvider", &["textDocument/foldingRange"]),
-    ("documentHighlightProvider", &["textDocument/documentHighlight"]),
-    ("selectionRangeProvider", &["textDocument/selectionRange"]),
-];
-
-/// The capabilities of the requests that the proxy answers in `plus`
-/// whatever the server announces, and whether it then answers them as a
-/// whole, as a hover, rather than by target.
-const PROVIDERS: [(&str, &str, bool); 5] = [
-    ("hoverProvider", "textDocument/hover", true),
-    ("inlayHintProvider", "textDocument/inlayHint", true),
-    ("definitionProvider", "textDocument/definition", false),
-    ("referencesProvider", "textDocument/references", false),
-    ("renameProvider", "textDocument/rename", false),
-];
-
 /// How the proxy answers a request of the client's.
 enum Route {
     /// Itself, as this method.
@@ -76,38 +52,6 @@ enum Route {
     Command(&'static str),
 }
 
-/// The requests that the proxy answers itself on some targets, since dbt
-/// lsp 2.0.9 answers them with nothing there: references and renames of a
-/// source, a rename of a CTE, a definition that `navigation` finds;
-/// elsewhere they go to the server.
-const TARGETED: [&str; 3] = ["textDocument/references", "textDocument/rename", "textDocument/definition"];
-
-/// What the proxy answers itself, as `experimental.dbtLspPlus` announces
-/// it, version 2: per request, each kind of target with the places where a
-/// request's position may be, `sql`, `yaml` or `python` by the file's
-/// extension.  A kind listed at a place is the proxy's at every position of
-/// that kind there, never forwarded, with dbt lsp or without.
-const ANSWERED: [(&str, &str, &[&str]); 13] = [
-    ("definition", "source", &["sql", "yaml", "python"]),
-    ("definition", "ref", &["sql", "yaml", "python"]),
-    ("definition", "macro", &["sql", "yaml"]),
-    ("definition", "doc", &["yaml"]),
-    ("definition", "entry", &["yaml"]),
-    ("definition", "test", &["yaml"]),
-    ("definition", "function", &["sql", "yaml"]),
-    ("references", "source", &["sql", "yaml", "python"]),
-    ("references", "ref", &["sql", "yaml", "python"]),
-    ("references", "macro", &["sql", "yaml"]),
-    ("references", "function", &["sql", "yaml"]),
-    ("rename", "source", &["sql", "yaml", "python"]),
-    ("rename", "cte", &["sql"]),
-];
-
-/// The requests answered by the proxy that ask for the parse's index, in
-/// both modes: nodeInfo, and a definition or references for versions and
-/// disabled nodes.  A stale index is parsed again, as for a hover.
-const WANT_INDEX: [&str; 3] = [config::NODE_INFO, "textDocument/definition", "textDocument/references"];
-
 /// The selectors of the graph, one request each: `dbt.listNodes` reads only
 /// its first argument, `*` leaves sources out, and a second request in
 /// flight cancels the first.
@@ -116,15 +60,6 @@ const SELECTORS: [&str; 2] = ["*", "source:*"];
 const MAX_ATTEMPTS: u32 = 3;
 /// A listing unanswered for this long is abandoned.
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
-/// A request to which the proxy adds a part is answered with it alone if the
-/// server has not answered within this long: three times what dbt lsp 2.0.9
-/// took on the fixture during a compilation.
-const MERGE_DEADLINE: Duration = Duration::from_millis(300);
-/// A merged request to which the proxy has nothing to add is answered with
-/// that nothing if the server has not answered within this long: above the
-/// slowest answer of dbt lsp 2.0.9 seen, 1.9 s for the first hover on 2,000
-/// models during its compilation.
-const NOTHING_DEADLINE: Duration = Duration::from_secs(2);
 /// At most this many restarts of a server that died, within the window.
 const RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
@@ -234,14 +169,34 @@ struct Server {
 }
 
 /// What the proxy remembers of a request of the client's that it forwarded.
-#[derive(Clone, PartialEq)]
-enum Pending {
-    Request,
-    /// A `dbt.listNodes`: the proxy lists only when none is pending, since a
-    /// second listing cancels the first.
-    Listing,
-    /// Answered with null if the server dies first, as LSP asks of `shutdown`.
-    Shutdown,
+#[derive(PartialEq)]
+struct Pending {
+    /// The method, or for `workspace/executeCommand` the command.
+    name: String,
+    kept: Kept,
+}
+
+/// What the proxy keeps of a forwarded request.
+#[derive(PartialEq)]
+enum Kept {
+    /// Nothing of the proxy's: in `dbt`, a listing, `shutdown`, any other.
+    Plain,
+    /// A merged request: the proxy's part.
+    Part(Part),
+    /// Answered with the proxy's part alone once the server was late: its
+    /// answer, when it comes, is dropped.
+    Answered,
+    /// A definition or references that the shadow follows: its parameters,
+    /// and the count of the client's changes when it came.
+    Shadow(Value, u64),
+}
+
+/// The proxy's part of a merged request.
+#[derive(PartialEq)]
+enum Part {
+    /// Nothing to add: its nothing, null or `[]`, is its answer when the
+    /// server's is an error, late, or none.
+    Nothing,
     /// A hover whose answer gets this text first, and whether its line
     /// breaks are hard in markdown: true for a node's summary and facts,
     /// lines of plain text and code spans; false for a docs block's text or
@@ -249,63 +204,63 @@ enum Pending {
     Hover(String, bool),
     /// An inlay hint request, whose answer gets these hints after its own.
     Hints(Vec<Value>),
-    /// A merged request to which the proxy adds nothing: this nothing, null
-    /// or `[]`, is its answer when the server's is an error, late, or none.
-    Nothing(Value),
+    /// A definition or references at a position the proxy claims, whose
+    /// answer gets the server's other locations after these.
+    Locations(Value),
     /// A hover whose position names a node while no index exists: in front
     /// of the server, a nothing, null; answered by the proxy, why it has
     /// no index yet.
     Unindexed,
-    /// Answered with the proxy's part alone once the server was late: its
-    /// answer, when it comes, is dropped.
-    Answered,
-    /// A definition or references that the shadow follows: its method and
-    /// parameters, and the count of the client's changes when it came.
-    Shadow {
-        method: String,
-        params: Value,
-        changes: u64,
-    },
 }
 
 impl Pending {
-    /// The server's answer, MESSAGE, as this kind of request makes it, for a
-    /// client that reads markdown when MARKDOWN; none to pass it unchanged.
-    /// An error to a request with a part of the proxy's gives that part.
-    fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
+    /// The server's answer, MESSAGE, as this kind of part makes it, for a
+    /// client that reads markdown when MARKDOWN, its locations' URIs read as
+    /// paths by PATH_OF; none to pass it unchanged.  An error to a request
+    /// with a part of the proxy's gives that part.
+    fn merged(&self, message: &Value, markdown: bool, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Value> {
         if message.get("error").is_some() {
             return self.part(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
         }
-        match self {
-            Pending::Hover(text, hard) => features::merge_hover(message, text, *hard, markdown),
-            Pending::Hints(hints) => features::merge_hints(message, hints),
+        match &self.kept {
+            Kept::Part(Part::Hover(text, hard)) => features::merge_hover(message, text, *hard, markdown),
+            Kept::Part(Part::Hints(hints)) => features::merge_hints(message, hints),
+            Kept::Part(Part::Locations(found)) => Some(features::merge_locations(message, found, path_of)),
             _ => None,
         }
     }
 
-    /// The proxy's part alone, as the answer when the server gives none: a
-    /// hover's text, the hints, a merged request's nothing; none for a
-    /// request that is not merged.
+    /// The proxy's part by itself, as the answer when the server gives
+    /// none: a hover's text, the hints, a merged request's nothing; none
+    /// for a request that is not merged.
     fn part(&self, markdown: bool) -> Option<Value> {
-        let nothing = match self {
-            Pending::Hover(..) => json!({"result": null}),
-            Pending::Hints(_) => json!({"result": []}),
-            Pending::Nothing(nothing) => return Some(nothing.clone()),
-            Pending::Unindexed => return Some(Value::Null),
-            _ => return None,
-        };
-        self.merged(&nothing, markdown).map(|merged| merged["result"].clone())
+        let Kept::Part(part) = &self.kept else { return None };
+        match part {
+            Part::Nothing => Some(capability::empty(&self.name)),
+            Part::Unindexed => Some(Value::Null),
+            Part::Hover(text, hard) => {
+                let alone = features::merge_hover(&json!({"result": null}), text, *hard, markdown);
+                alone.map(|alone| alone["result"].clone())
+            }
+            Part::Hints(hints) => Some(Value::Array(hints.clone())),
+            Part::Locations(found) => Some(found.clone()),
+        }
     }
 
-    /// How long the server has to answer this kind of request before the
-    /// client gets the proxy's answer alone: a part is worth showing at
-    /// once, a nothing only once the server is clearly late.
+    /// How long the server has to answer this request before the client
+    /// gets the proxy's answer alone, as its capability waits: a part is
+    /// worth showing at once, a nothing only once the server is clearly
+    /// late.
     fn deadline(&self) -> Option<Duration> {
-        match self {
-            Pending::Hover(..) | Pending::Hints(_) => Some(MERGE_DEADLINE),
-            Pending::Nothing(_) | Pending::Unindexed => Some(NOTHING_DEADLINE),
-            _ => None,
-        }
+        let Kept::Part(part) = &self.kept else { return None };
+        capability::of(&self.name)?.deadline(!matches!(part, Part::Nothing | Part::Unindexed))
+    }
+
+    /// Whether it is a listing, the server's `dbt.listNodes` or the
+    /// proxy's command that it does: the proxy lists only when none is
+    /// pending, since a second listing cancels the first.
+    fn listing(&self) -> bool {
+        self.name == "dbt.listNodes" || self.name == commands::NODES
     }
 }
 
@@ -605,35 +560,36 @@ impl<W: Write> Proxy<W> {
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}));
     }
 
-    /// Adds to CAPABILITIES each capability of ADDED that it lacks, and owns its methods.
+    /// Adds to CAPABILITIES each capability that the proxy adds and that it
+    /// lacks, and owns its methods; announces and owns those in `plus`.
     fn add_capabilities(&mut self, capabilities: &mut serde_json::Map<String, Value>) {
-        let lacks = |capabilities: &serde_json::Map<String, Value>, capability: &str| {
-            capabilities.get(capability).is_none_or(|value| value.is_null() || *value == json!(false))
+        let lacks = |capabilities: &serde_json::Map<String, Value>, key: &str| {
+            capabilities.get(key).is_none_or(|value| value.is_null() || *value == json!(false))
         };
-        let announced = |method: &str| {
-            ADDED.iter().any(|(capability, methods)| methods.contains(&method) && !lacks(capabilities, capability))
-        };
+        let announced =
+            |method: &str| capability::of(method).and_then(|c| c.key).is_some_and(|key| !lacks(capabilities, key));
         self.table = modes::Table::new(&self.settings, &announced, self.standalone);
         // A method the proxy answers is announced; one left to the server, as the server announced it,
         // and with no backend, not at all.
-        for (capability, methods) in ADDED.iter().filter(|(_, methods)| self.table.mode(methods[0]) != Mode::Dbt) {
-            if lacks(capabilities, capability) {
-                capabilities.insert((*capability).to_owned(), json!(true));
+        let added = CAPABILITIES.iter().filter(|c| c.added && self.table.mode(c.name) != Mode::Dbt);
+        for (key, added) in added.filter_map(|c| c.key.map(|key| (key, c))) {
+            if lacks(capabilities, key) {
+                capabilities.insert(key.to_owned(), json!(true));
             }
-            self.owned.extend(*methods);
+            let followers = CAPABILITIES.iter().filter(|c| c.leader == Some(added.name)).map(|c| c.name);
+            self.owned.extend(std::iter::once(added.name).chain(followers));
         }
-        let unanswered =
-            PROVIDERS.iter().filter(|(_, method, _)| self.standalone && self.table.mode(method) == Mode::Dbt);
-        for (capability, ..) in unanswered {
-            capabilities.remove(*capability);
+        let unanswered = CAPABILITIES.iter().filter(|c| self.standalone && self.table.mode(c.name) == Mode::Dbt);
+        for key in unanswered.filter_map(|c| c.key) {
+            capabilities.remove(key);
         }
-        for (capability, method, owned) in
-            PROVIDERS.iter().filter(|(_, method, _)| self.table.mode(method) == Mode::Plus)
-        {
-            if lacks(capabilities, capability) {
-                capabilities.insert((*capability).to_owned(), json!(true));
+        // The others in `plus`: the whole of a method the proxy answers whole, else its kinds of target.
+        let provided = CAPABILITIES.iter().filter(|c| !c.added && self.table.mode(c.name) == Mode::Plus);
+        for (key, provided) in provided.filter_map(|c| c.key.map(|key| (key, c))) {
+            if lacks(capabilities, key) {
+                capabilities.insert(key.to_owned(), json!(true));
             }
-            self.owned.extend(owned.then_some(*method));
+            self.owned.extend(provided.kinds.is_empty().then_some(provided.name));
         }
         // Which requests the proxy answers itself, project-wide, on which kinds
         // of target, beside the server's own experimental capabilities: a
@@ -643,17 +599,18 @@ impl<W: Write> Proxy<W> {
             *experimental = json!({});
         }
         if let Some(experimental) = experimental.as_object_mut() {
-            experimental.insert("dbtLspPlus".into(), self.table.flag(&ANSWERED));
+            experimental.insert("dbtLspPlus".into(), self.table.flag());
         }
         // The proxy's own commands, beside the server's, which it may forward its commands for clients to.
         let provider = capabilities.entry("executeCommandProvider").or_insert_with(|| json!({}));
         let listed = provider.get("commands").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
         self.server_commands = listed.map(str::to_owned).collect();
         let clients = commands::announced(&|dbt| self.server_commands.contains(dbt), self.runs_cli());
-        let own = [Some(config::NODE_INFO), self.shadow.as_ref().map(|_| shadow::SUMMARY)];
+        let plus = CAPABILITIES.iter().filter(|c| c.is_command() && c.providers == [Provider::Plus]).map(|c| c.name);
+        let own = plus.chain(self.shadow.as_ref().map(|_| shadow::SUMMARY));
         if let Some(commands) = provider.as_object_mut().map(|provider| provider.entry("commands").or_insert(json!([])))
         {
-            let own: Vec<Value> = own.into_iter().flatten().chain(clients).map(|command| json!(command)).collect();
+            let own: Vec<Value> = own.chain(clients).map(|command| json!(command)).collect();
             commands.as_array_mut().into_iter().for_each(|commands| commands.extend(own.iter().cloned()));
         }
     }
@@ -665,7 +622,10 @@ impl<W: Write> Proxy<W> {
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
         if !said.is_empty() {
-            said.push(format!("the methods that take a mode are {}", modes::METHODS.join(", ")));
+            said.push(format!(
+                "the methods that take a mode are {}",
+                capability::with_mode().collect::<Vec<_>>().join(", ")
+            ));
         }
         said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
         let unanswered = self.table.unanswered();
@@ -692,17 +652,19 @@ impl<W: Write> Proxy<W> {
         let mut capabilities = serde_json::Map::new();
         capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2}));
         // Alone, the proxy still answers references and renames of sources,
-        // and definitions on the targets of `navigation`.
-        capabilities.insert("referencesProvider".into(), json!(true));
-        capabilities.insert("renameProvider".into(), json!(true));
-        capabilities.insert("definitionProvider".into(), json!(true));
+        // and definitions on the targets of `navigation`: its kinds.
+        let provided = CAPABILITIES.iter().filter(|c| !c.added).filter_map(|c| c.key.map(|key| (key, c)));
+        for (key, _) in provided.clone().filter(|(_, c)| !c.kinds.is_empty()) {
+            capabilities.insert(key.into(), json!(true));
+        }
         // Alone for good, it wants saves, which start a parse, and answers
-        // hovers and hints from the parse alone.
+        // hovers and hints from the parse alone: whole.
         if self.standalone {
             capabilities.insert("textDocumentSync".into(), json!({"openClose": true, "change": 2, "save": {}}));
-            capabilities.insert("hoverProvider".into(), json!(true));
-            capabilities.insert("inlayHintProvider".into(), json!(true));
-            self.owned.extend(["textDocument/hover", "textDocument/inlayHint"]);
+            for (key, whole) in provided.filter(|(_, c)| c.kinds.is_empty()) {
+                capabilities.insert(key.into(), json!(true));
+                self.owned.insert(whole.name);
+            }
         }
         self.add_capabilities(&mut capabilities);
         self.watch_runs();
@@ -996,14 +958,16 @@ impl<W: Write> Proxy<W> {
             return Route::Here(owned);
         }
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
-        if command == Some(config::NODE_INFO) {
-            return Route::Here(config::NODE_INFO);
-        }
         if let (Some(shadow::SUMMARY), Some(shadow)) = (command, &self.shadow) {
             return Route::Answer(shadow.counts.summary());
         }
-        if let Some(own) = command.and_then(commands::own) {
-            return Route::Command(own);
+        // A command of the proxy's alone is answered here, one of dbt's goes by `commands::route`.
+        if let Some(own) = command.and_then(capability::of).filter(|own| own.is_command()) {
+            return if own.providers == [Provider::Plus] { Route::Here(own.name) } else { Route::Command(own.name) };
+        }
+        // Where it unites, dbt lsp is asked at every position, and the proxy's part kept.
+        if self.table.unites(method) {
+            return Route::Forward;
         }
         // In `dbt`, the proxy looks at nothing.
         let mine = self.table.mode(method) != Mode::Dbt;
@@ -1016,22 +980,24 @@ impl<W: Write> Proxy<W> {
         self.table.nothing(method).or(unserved).map_or(Route::Forward, Route::Answer)
     }
 
-    /// A request of `TARGETED` that the proxy answers itself, by what its
-    /// position holds: references and rename on a source, a rename on a CTE
-    /// of a SQL file, or a definition on a target of `navigation`.
+    /// A request of a capability with kinds of target that the proxy
+    /// answers itself, by what its position holds: references and rename on
+    /// a source, a rename on a CTE of a SQL file, or a definition on a
+    /// target of `navigation`.
     fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
-        let method = TARGETED.into_iter().find(|targeted| *targeted == method)?;
+        let method = capability::of(method).filter(|capability| !capability.kinds.is_empty())?.name;
         let (path, text, offset) = self.document_at(params)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
         let answered = match method {
-            "textDocument/definition" => navigation::target_at(&path, &text, offset)
-                .is_some_and(|target| self.claims("definition", &target, &path)),
+            "textDocument/definition" => {
+                navigation::target_at(&path, &text, offset).is_some_and(|target| self.claims(method, &target, &path))
+            }
             // A CTE lives in its file; a source only the scan sees whole, and so its references.
             "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
             // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
             "textDocument/references" => {
                 let claimed = navigation::target_at(&path, &text, offset)
-                    .is_some_and(|target| self.claims("references", &target, &path));
+                    .is_some_and(|target| self.claims(method, &target, &path));
                 claimed && self.root.as_ref().is_some_and(|root| path.starts_with(root))
             }
             _ => self.source_at(params).is_some(),
@@ -1039,15 +1005,13 @@ impl<W: Write> Proxy<W> {
         answered.then_some(method)
     }
 
-    /// Whether the proxy answers REQUEST itself on TARGET in the file at
-    /// PATH, as `ANSWERED` says.
-    fn claims(&self, request: &str, target: &navigation::Target, path: &Path) -> bool {
+    /// Whether the proxy answers METHOD itself on TARGET in the file at
+    /// PATH, as its capability's kinds say, when the table lists it.
+    fn claims(&self, method: &str, target: &navigation::Target, path: &Path) -> bool {
         let Some(place) = place(path) else { return false };
-        let listed = |(answered, kind, places): &&(&str, &str, &[&str])| {
-            let listed = self.table.lists(&format!("textDocument/{answered}"));
-            *answered == request && *kind == target.kind() && places.contains(&place) && listed
-        };
-        ANSWERED.iter().any(|row| listed(&row))
+        let kinds = capability::of(method).map_or(&[][..], |capability| capability.kinds);
+        let listed = |(kind, places): &&(&str, &[&str])| *kind == target.kind() && places.contains(&place);
+        self.table.lists(method) && kinds.iter().any(|kind| listed(&kind))
     }
 
     /// The definition of the target at the request's position, by dbt
@@ -1266,7 +1230,8 @@ impl<W: Write> Proxy<W> {
 
     /// A request of one of the proxy's commands for clients, COMMAND with
     /// PARAMS, kept as PENDING: sent to dbt lsp as its own command, queued
-    /// for dbt's CLI, or refused, as `commands::route` decides.
+    /// for dbt's CLI, answered here, or refused, as `commands::route`
+    /// decides.
     fn on_command(&mut self, command: &'static str, id: &Value, params: &Value, pending: Pending) {
         if self.shutdown {
             return self.reply_error(id, INVALID_REQUEST, "the client asked for shutdown");
@@ -1276,15 +1241,17 @@ impl<W: Write> Proxy<W> {
         };
         let serves = |dbt: &str| self.server.is_some() && self.server_commands.contains(dbt);
         match commands::route(command, &serves, self.runs_cli()) {
-            Via::Server(dbt) => {
+            Ok(Provider::DbtLsp) => {
+                let dbt = capability::of(command).and_then(|own| own.server);
                 let params = json!({"command": dbt, "arguments": arguments});
                 let request =
                     json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
                 self.forwarded.insert(key(id), (id.clone(), pending));
                 self.send_server(&serde_json::to_vec(&request).unwrap_or_default());
             }
-            Via::Run => self.run_command(command, id, &arguments[0]),
-            Via::Refused(failure) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure})),
+            Ok(Provider::DbtCli) => self.run_command(command, id, &arguments[0]),
+            Ok(Provider::Plus) => self.answer(command, id, params, &pending),
+            Err(failure) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure})),
         }
     }
 
@@ -1490,7 +1457,7 @@ impl<W: Write> Proxy<W> {
     fn answer(&mut self, method: &str, id: &Value, params: &Value, pending: &Pending) {
         // Alone, the call hierarchy's graph needs the index too.
         let hierarchy = method.ends_with("CallHierarchy") || method.starts_with("callHierarchy/");
-        if WANT_INDEX.contains(&method) || (self.standalone && hierarchy) {
+        if capability::of(method).is_some_and(|capability| capability.wants_index) || (self.standalone && hierarchy) {
             self.want_index();
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| match method {
@@ -1508,14 +1475,14 @@ impl<W: Write> Proxy<W> {
                 self.on_document(method, params).map(Ok)
             }
             // Asked for first, as nodeInfo does, so that the reason is that of the parse it may start.
-            "textDocument/hover" if *pending == Pending::Unindexed => {
+            "textDocument/hover" if pending.kept == Kept::Part(Part::Unindexed) => {
                 self.want_index();
                 Some(Err(self.unindexed()))
             }
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
-                Some(Ok(pending.part(self.markdown).unwrap_or_else(|| modes::empty(method))))
+                Some(Ok(pending.part(self.markdown).unwrap_or_else(|| capability::empty(method))))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1528,7 +1495,7 @@ impl<W: Write> Proxy<W> {
     }
 
     fn client_listing(&self) -> bool {
-        self.forwarded.values().any(|(_, pending)| *pending == Pending::Listing)
+        self.forwarded.values().any(|(_, pending)| pending.listing())
     }
 
     /// Asks the server for the graph, unless a listing is under way, the
@@ -1701,7 +1668,7 @@ impl<W: Write> Proxy<W> {
     /// summary and facts of the node named there, else a doc's or a generic
     /// test's block; else nothing, null, which a node named before any index
     /// turns into why the proxy has none.
-    fn hover_part(&self, params: &Value) -> Pending {
+    fn hover_part(&self, params: &Value) -> Part {
         let index = self.parsing.index.as_ref();
         // Line 1, column 1 of a file stands for the node it defines.
         let start = params["position"] == json!({"line": 0, "character": 0});
@@ -1719,37 +1686,51 @@ impl<W: Write> Proxy<W> {
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
             navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
         };
-        let nothing =
-            if named.is_some() && index.is_none() { Pending::Unindexed } else { Pending::Nothing(Value::Null) };
-        summary.or_else(block).map_or(nothing, |(text, hard)| Pending::Hover(text, hard))
+        let nothing = if named.is_some() && index.is_none() { Part::Unindexed } else { Part::Nothing };
+        summary.or_else(block).map_or(nothing, |(text, hard)| Part::Hover(text, hard))
+    }
+
+    /// What a definition or references at PARAMS gets first when the proxy
+    /// unites dbt lsp's answer with its own: where it claims the position,
+    /// its locations, or nothing for null or `[]`; none where it claims
+    /// nothing.  A panic gives nothing.
+    fn union_part(&self, method: &str, params: &Value) -> Option<Part> {
+        let claimed = self.targeted(method, params)?;
+        let found = panic::catch_unwind(AssertUnwindSafe(|| match claimed {
+            "textDocument/references" => self.on_references(params),
+            _ => self.on_definition(params),
+        }));
+        let found = found.ok().flatten().and_then(Result::ok).filter(|found| !found.is_null() && *found != json!([]));
+        Some(found.map_or(Part::Nothing, Part::Locations))
     }
 
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
-    /// proxy must not cancel, the summary that a hover's answer gets, a
-    /// request that the shadow follows, the nothing that a merged request
-    /// falls back to; and whether, once routed, it asks for a fresh index: a
-    /// hover keeps the index fresh, an inlay hint only makes one, and in
-    /// `dbt` neither; a shadowed request wants what `plus` reads.
+    /// proxy must not cancel, the summary that a hover's answer gets, the
+    /// locations that a united one's gets, a request that the shadow
+    /// follows, the nothing that a merged request falls back to; and
+    /// whether, once routed, it asks for a fresh index: a hover keeps the
+    /// index fresh, an inlay hint only makes one, and in `dbt` neither; a
+    /// united request at a position the proxy claims wants what its answer
+    /// reads, and a shadowed one what `plus` reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
+        let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
+        let name = command.unwrap_or(method).to_owned();
         // Outside `dbt`, hints, a definition or references with no part of the proxy's.
-        let nothing = Pending::Nothing(modes::empty(method));
-        let pending = match (method, params["command"].as_str()) {
-            ("initialize", _) => {
+        let nothing = Kept::Part(Part::Nothing);
+        let (kept, fresh) = match method {
+            "initialize" => {
                 self.on_initialize(params);
                 self.initialized = true;
                 self.initialize = Some(id.clone());
-                Pending::Request
+                (Kept::Plain, false)
             }
-            ("shutdown", _) => {
+            "shutdown" => {
                 self.shutdown = true;
-                Pending::Shutdown
+                (Kept::Plain, false)
             }
-            (_, Some("dbt.listNodes" | commands::NODES)) => Pending::Listing,
-            ("textDocument/hover", _) if self.table.mode(method) != Mode::Dbt => {
-                return (self.hover_part(params), true);
-            }
-            ("textDocument/inlayHint", _) if self.table.mode(method) != Mode::Dbt => {
+            "textDocument/hover" if self.table.mode(method) != Mode::Dbt => (Kept::Part(self.hover_part(params)), true),
+            "textDocument/inlayHint" if self.table.mode(method) != Mode::Dbt => {
                 // A panic leaves the server's answer as it is.
                 let hints = panic::catch_unwind(AssertUnwindSafe(|| {
                     let index = self.parsing.index.as_ref()?;
@@ -1761,23 +1742,23 @@ impl<W: Write> Proxy<W> {
                     Some(features::inlay_hints(&text, calls, index, start..end, self.encoding))
                 }));
                 let hints = hints.ok().flatten().filter(|hints| !hints.is_empty());
-                return (hints.map_or(nothing, Pending::Hints), self.parsing.index.is_none());
+                (hints.map_or(nothing, |hints| Kept::Part(Part::Hints(hints))), self.parsing.index.is_none())
             }
-            // Followed in `dbt` only: one the proxy answers is no one's to compare, and `merge` forwards only
-            // where the proxy has no target.
-            ("textDocument/definition" | "textDocument/references", _) => {
+            "textDocument/definition" | "textDocument/references" if self.table.unites(method) => {
+                let part = self.union_part(method, params);
+                let fresh = part.is_some() && capability::of(method).is_some_and(|capability| capability.wants_index);
+                (Kept::Part(part.unwrap_or(Part::Nothing)), fresh)
+            }
+            // Followed in `dbt` only: one the proxy answers or unites is no one's to compare.
+            "textDocument/definition" | "textDocument/references" => {
                 let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
-                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Pending::Shadow {
-                    method: method.to_owned(),
-                    params: params.clone(),
-                    changes,
-                });
+                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Kept::Shadow(params.clone(), changes));
                 let fresh = shadowed.is_some();
-                return (shadowed.unwrap_or(if dbt { Pending::Request } else { nothing }), fresh);
+                (shadowed.unwrap_or(if dbt { Kept::Plain } else { nothing }), fresh)
             }
-            _ => Pending::Request,
+            _ => (Kept::Plain, false),
         };
-        (pending, false)
+        (Pending { name, kept }, fresh)
     }
 
     /// A request of the client: routed by `route`; without a server,
@@ -1871,7 +1852,7 @@ impl<W: Write> Proxy<W> {
         let pending = self.forwarded.remove(&key(id));
         self.deadlines.remove(&key(id));
         // The client had the proxy's part alone: the late answer is no one's.
-        if let Some((_, Pending::Answered)) = pending {
+        if pending.as_ref().is_some_and(|(_, pending)| pending.kept == Kept::Answered) {
             return;
         }
         if let (None, Some(own)) = (&pending, id.as_str())
@@ -1879,10 +1860,11 @@ impl<W: Write> Proxy<W> {
         {
             return self.on_own_response(own, message);
         }
-        if let Some((_, Pending::Listing)) = pending {
+        if pending.as_ref().is_some_and(|(_, pending)| pending.listing()) {
             self.resume();
         }
-        if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown)) {
+        let path_of = |uri: &str| self.path_of(uri);
+        if let Some(merged) = pending.as_ref().and_then(|(_, kind)| kind.merged(message, self.markdown, &path_of)) {
             return self.send_client(&merged);
         }
         if self.initialize.as_ref() == Some(id) {
@@ -1906,8 +1888,8 @@ impl<W: Write> Proxy<W> {
             return self.watch_runs();
         }
         self.send_client_body(body);
-        if let Some((_, Pending::Shadow { method, params, changes })) = pending {
-            self.compare(&method, &params, changes, message);
+        if let Some((_, Pending { name, kept: Kept::Shadow(params, changes) })) = pending {
+            self.compare(&name, &params, changes, message);
         }
     }
 
@@ -1919,11 +1901,7 @@ impl<W: Write> Proxy<W> {
     fn compare(&mut self, method: &str, params: &Value, changes: u64, message: &Value) {
         let record = panic::catch_unwind(AssertUnwindSafe(|| {
             let root = self.root.as_deref().unwrap_or(Path::new(""));
-            // Outside the root, each side may spell a file its own way.
-            let path_of = |uri: &str| {
-                let path = self.local_path(Some(uri))?;
-                Some(if path.starts_with(root) { path } else { fs::canonicalize(&path).unwrap_or(path) })
-            };
+            let path_of = |uri: &str| self.path_of(uri);
             let file = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
             let inside = file.as_deref().is_some_and(|file| file.starts_with(root));
             let compared = match shadow::read(message, self.changes != changes, &path_of, &|path| path.is_file()) {
@@ -1966,6 +1944,15 @@ impl<W: Write> Proxy<W> {
             shadow.counts.add(&record);
         }
         self.shadow_line(&line);
+    }
+
+    /// The path of URI as both answers of a comparison or a union read it:
+    /// under the root as the client spells it, resolved elsewhere, where
+    /// each side may spell a file its own way.
+    fn path_of(&self, uri: &str) -> Option<PathBuf> {
+        let root = self.root.as_deref().unwrap_or(Path::new(""));
+        let path = self.local_path(Some(uri))?;
+        Some(if path.starts_with(root) { path } else { fs::canonicalize(&path).unwrap_or(path) })
     }
 
     /// Logs LINE in the shadow, if on; a log that cannot be written is said
@@ -2140,11 +2127,10 @@ impl<W: Write> Proxy<W> {
         }
         self.deadlines.clear();
         for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
-            let part = pending.part(self.markdown);
-            match (pending, part) {
-                (Pending::Shutdown, _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
-                (Pending::Answered, _) => {}
-                (_, Some(part)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
+            match (pending.name.as_str(), &pending.kept, pending.part(self.markdown)) {
+                ("shutdown", ..) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
+                (_, Kept::Answered, _) => {}
+                (.., Some(part)) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
                 _ => self.reply_error(&id, REQUEST_FAILED, &why),
             }
         }
@@ -2248,7 +2234,8 @@ impl<W: Write> Proxy<W> {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
-            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).part(self.markdown));
+            let (id, part) = (id.clone(), pending.part(self.markdown));
+            pending.kept = Kept::Answered;
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();
@@ -2427,38 +2414,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_method_the_proxy_adds_or_takes_has_a_mode() {
-        let mut settings = modes::Settings::default();
-        settings.set_default("plus").unwrap();
-        let table = modes::Table::new(&settings, &|_| false, false);
-        let added = ADDED.iter().flat_map(|(_, methods)| methods.iter());
-        for method in added.chain(PROVIDERS.iter().map(|(_, method, _)| method)) {
-            assert_eq!(table.mode(method), Mode::Plus, "{method} is not among modes::METHODS");
-        }
-    }
-
-    #[test]
-    fn the_flag_lists_every_row_in_plus_and_merge_with_a_backend_or_none() {
-        let every = json!({"version": 2,
-            "definition": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"], "macro": ["sql", "yaml"],
-                           "doc": ["yaml"], "entry": ["yaml"], "test": ["yaml"], "function": ["sql", "yaml"]},
-            "references": {"source": ["sql", "yaml", "python"], "ref": ["sql", "yaml", "python"],
-                           "macro": ["sql", "yaml"], "function": ["sql", "yaml"]},
-            "rename": {"source": ["sql", "yaml", "python"], "cte": ["sql"]}});
-        let mut plus = modes::Settings::default();
-        plus.set_default("plus").unwrap();
-        for (settings, none) in [(modes::Settings::default(), false), (modes::Settings::default(), true), (plus, false)]
-        {
-            assert_eq!(modes::Table::new(&settings, &|_| false, none).flag(&ANSWERED), every, "{settings:?} {none}");
-        }
-        let mut dbt = modes::Settings::default();
-        dbt.set("textDocument/definition", "dbt").unwrap();
-        dbt.set("textDocument/references", "dbt").unwrap();
-        let rename = json!({"version": 2, "rename": every["rename"]});
-        assert_eq!(modes::Table::new(&dbt, &|_| false, false).flag(&ANSWERED), rename);
-    }
-
-    #[test]
     fn the_agent_page_lists_the_kinds_that_the_flag_announces() {
         use std::collections::{BTreeMap, BTreeSet};
         type Kinds = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
@@ -2480,7 +2435,7 @@ mod tests {
             let places = listed.entry(row[0].clone()).or_default().entry(row[1].clone()).or_default();
             places.extend(row[2].split(',').map(|place| place.trim().to_string()));
         }
-        let flag = modes::Table::new(&modes::Settings::default(), &|_| false, false).flag(&ANSWERED);
+        let flag = modes::Table::new(&modes::Settings::default(), &|_| false, false).flag();
         let known = ["version", "definition", "references", "rename"];
         assert!(flag.as_object().unwrap().keys().all(|key| known.contains(&key.as_str())), "{flag}");
         let announced = ["definition", "references"].map(|request| (request.to_string(), flag[request].clone()));
