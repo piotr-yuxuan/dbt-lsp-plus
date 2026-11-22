@@ -29,7 +29,7 @@ pub struct Problem {
 
 /// What a parse's log says.
 #[derive(Debug, PartialEq)]
-pub struct Log {
+pub struct Logged {
     pub problems: Vec<Problem>,
     /// Whether dbt reached its end, `CommandCompleted` (Q039): a parse
     /// killed or stopped before says nothing of what it did not reach.
@@ -38,7 +38,7 @@ pub struct Log {
 
 /// The problems of LOG, a parse's output, in order.  A line that is no JSON
 /// object, as a launcher's own, is skipped, and so is any other event.
-pub fn read(log: &str) -> Log {
+pub fn read(log: &str) -> Logged {
     let spot = |message: &str| {
         let pointed = message.lines().last()?.trim_start().strip_prefix("--> ")?;
         let mut parts = pointed.rsplitn(3, ':');
@@ -49,7 +49,7 @@ pub fn read(log: &str) -> Log {
             _ => Spot { path: pointed.to_owned(), at: None },
         })
     };
-    let mut read = Log { problems: Vec::new(), completed: false };
+    let mut read = Logged { problems: Vec::new(), completed: false };
     for event in log.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
         let info = &event["info"];
         read.completed |= info["code"] == "Q039";
