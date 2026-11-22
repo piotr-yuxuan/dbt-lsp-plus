@@ -789,23 +789,38 @@ fn watcher(session: &mut Session, project: &Path) {
     let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
     let watchers = &registered["params"]["registrations"][0]["registerOptions"]["watchers"];
     assert_eq!(watchers, &json!([{"globPattern": "**/*"}]), "{registered}");
-    // A model's change makes the proxy list, and dbt lsp compile and write within the window.
+    // A model's change makes dbt lsp compile, then the proxy list twice, each
+    // listing a compilation, and dbt lsp's background compilation follows
+    // them, about 1.1 s after the last: what they all write, the window's
+    // first round reports.
     let compile_once = |session: &mut Session| {
-        let completed =
-            |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
-        let before = completed(session);
+        let mark = session.received.len();
+        let seen = |session: &Session| {
+            let since = &session.received[mark..];
+            let completed = since.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+            let first = since.iter().position(|m| m["method"] == "dbt/lspCompileComplete").unwrap_or(since.len());
+            let full =
+                |m: &Value| m["method"] == "dbt/lspBackgroundCompileStart" && m["params"]["compile_type"] == "full";
+            let background = since[first..].iter().position(full).map_or(since.len(), |at| first + at);
+            let paired = since[background..].iter().any(|m| m["method"] == "dbt/lspBackgroundCompileComplete");
+            completed >= 3 && paired
+        };
         let model = json!({"changes": [{"uri": uri(&project.join("models/marts/orders.sql")), "type": 2}]});
         session.notify("workspace/didChangeWatchedFiles", model);
         let waited = Instant::now() + Duration::from_secs(60);
-        while completed(session) < before + 2 && Instant::now() < waited {
+        while !seen(session) && Instant::now() < waited {
             session.request("workspace/symbol", json!({"query": "orders"}));
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(completed(session) >= before + 2, "no compilation after a model's change");
+        let compiling =
+            session.received[mark..].iter().filter(|m| m["method"].as_str().is_some_and(|m| m.contains("Compile")));
+        let compiling: Vec<(&Value, &Value)> =
+            compiling.map(|m| (&m["method"], &m["params"]["compile_type"])).collect();
+        assert!(seen(session), "not dbt lsp's own, two listings' and a full background compilation: {compiling:#?}");
     };
+    let mut seen = look();
     compile_once(session);
     let start = session.received.len();
-    let mut seen = look();
     let mut sent = 0;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -837,9 +852,34 @@ fn watcher(session: &mut Session, project: &Path) {
 }
 
 /// What design.md records of dbt lsp 2.0.9, and the fake models, from the
-/// server's initialize RESULT and its listings.
+/// server's initialize RESULT, its compilations and its listings.
 fn recorded_observations(session: &mut Session, result: &Value) {
     assert!(result["capabilities"].get("positionEncoding").is_none(), "{result}");
+    let completion = session.received.iter().find(|m| m["method"] == "dbt/lspCompileComplete").unwrap();
+    let mut keys: Vec<&str> = completion["params"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let o4 = [
+        "adapter_type",
+        "adapter_unique_id",
+        "cause",
+        "compile_type",
+        "dbt_version",
+        "duration_ms",
+        "errors",
+        "models_count",
+        "project_id",
+    ];
+    assert_eq!(keys, o4, "{completion}");
+    // A compilation's progress counts in percent, from its begin on.
+    let progress = |kind: &str| {
+        let of = |m: &&Value| m["method"] == "$/progress" && m["params"]["value"]["kind"] == kind;
+        session.received.iter().filter(of).map(|m| &m["params"]).collect::<Vec<_>>()
+    };
+    let analyzing = |p: &&&Value| p["value"]["message"] == "Analyzing" && p["value"]["percentage"].is_number();
+    let begun: Vec<&Value> = progress("begin").iter().filter(analyzing).map(|p| &p["token"]).collect();
+    assert!(!begun.is_empty(), "no Analyzing begin with a percentage");
+    let counted = |p: &&Value| begun.contains(&&p["token"]) && p["value"]["percentage"].is_number();
+    assert!(progress("report").iter().any(counted), "no report with a percentage of an Analyzing token");
     let listing = |selectors: &[&str]| json!({"command": "dbt.listNodes", "arguments": selectors});
     let types = |answer: &Value| -> Vec<String> {
         let nodes = answer["result"]["nodes"].as_array().unwrap_or_else(|| panic!("no nodes in {answer}"));

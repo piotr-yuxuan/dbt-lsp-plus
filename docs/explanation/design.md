@@ -785,8 +785,10 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
 So the proxy lists `*` and then `source:*`, one after the other.  It lists
 on the client's signals only:
 - the first `didOpen`, and no later one, even when that listing failed:
-  each listing compiles the whole project, and an editor that restores a
-  session opens many documents; the next change lists again;
+  each listing makes dbt lsp compile, if only incrementally where nothing
+  changed (see "What a compilation does, observed on 2.0.9"), and an
+  editor that restores a session opens many documents; the next change
+  lists again;
 - `didSave`;
 - `workspace/didChangeWatchedFiles`, and files created, renamed or deleted;
   but not a watched change whose every file is a `file:` URI in dbt's own
@@ -802,6 +804,116 @@ sends the second selector then, nor anything after `shutdown`.  It retries a
 cancelled listing at most three times, and abandons one unanswered after two
 minutes, on time, even when the client is quiet; no test waits the two
 minutes, so only a unit test of the abandonment covers it.
+
+### What a compilation does, observed on 2.0.9
+
+Probed for plan 035 on 2026-11-22 with dbt 2.0.9, the proprietary build,
+by a client of its own that plays an editor's phases on scratch copies:
+the fixture with the live test's `LIVE_MODELS`, whose unknown doc is a
+standing warning; the projects of `scripts/bench/generate.py` with 1,000
+and 3,000 models and 15 columns each, on DuckDB, which report 20 errors
+of their own at every compilation (their snapshots lack a `strategy`,
+dbt1005); the fixture with its package as a `local:` one; and three
+more after it: S1, the fixture whose `profiles.yml` has `path: "{{
+env_var('DBT_LSP_PLUS_PROBE_MISSING') }}"`; S2, the fixture whose
+`dbt_project.yml` ends with `on-run-start: ["select * from
+no_such_table"]`; S3, a model's watched change, then the proxy's two
+listings, `*` and on its answer `source:*`, then the same after a
+`didSave` and its watched event.  Durations are the completions' own
+`duration_ms`.
+
+- O1: `dbt.listNodes ["* source:*"]` answers `{"error": "No nodes
+  found", "nodes": []}`: one selector a request.
+- O2: a listing's compilation with nothing changed is incremental and
+  short: 13 to 20 ms on the fixture, 28 to 37 ms on 1,000 models, 49 to
+  63 ms on 3,000; `*` then `source:*` makes two foreground compilations
+  and one background compilation after both.
+- O3: a compilation follows the first `didOpen`, each `didSave`, each
+  listing, and a watched change of a model with no `didSave` (6 s after
+  a save, one foreground and one background); a `didSave` and its
+  watched event back to back make one, of each.  Every completion's
+  `cause` is `didSave`, whatever the trigger.
+- O4: a start carries `adapter_type`, `adapter_unique_id`, `cause`,
+  `compile_type` (`incremental` in the foreground, `full` in the
+  background), `dbt_version` and `project_id` (the first start's adapter
+  and ids null); a completion those and `duration_ms`, `errors` and
+  `models_count`.
+- O5: `errors` holds objects `{"code", "message", "severity"}`,
+  `severity` `Error` or `Warning`, the message on several lines, its
+  place `\n(in models/marts/orders.sql:24:9)\n  --> models/marts/orders.sql:24:9`
+  or only `\n  --> models/marts/customers.sql:3:10`.  dbt lsp publishes
+  each entry as a diagnostic on its file, severity 1 for an error and 2
+  for a warning, source `dbt`.  With a Jinja error in a model, or a
+  missing ref, `models_count` stays 6: the other models compiled.
+- O6: the same state compiled again gives the same entries in another
+  order; a background completion lacked an entry of its foreground's
+  (dbt1048).
+- O7: the first compilation takes 106 ms on the fixture, 997 ms on 1,000
+  models, 2,726 ms on 3,000; a background full compilation 17 to 101 ms,
+  171 to 512 ms, 479 to 1,471 ms; the background start comes about 1.1 s
+  after the last foreground completion.
+- O8: each compilation's `$/progress` begin carries `"percentage": 0`,
+  `"title": ""` and the message `Analyzing`, or `Background Analyzing`;
+  its reports carry a `percentage` counting up, one a file (`Loading:
+  profiles.yml`, `Parsing: PATH`, `Rendering: PATH`, `Rendered: PATH`):
+  1,147 on the first compilation of 1,000 models.  lsp-mode shows that
+  percentage.
+- O9: a listing gets a progress of its own, `<uuid>:dbt/progress/listNodes`,
+  title `Computing Lineage`, message `Waiting for compilation to
+  complete...`, cancellable, ended with its compilation; a references
+  request gets one too, `<uuid>:dbt/progress/references`, `Finding All
+  References`, the same message, ended at once after its answer whether a
+  compilation runs or not.  That message is no sign of a wait.
+- O10: the first compilation writes `package-lock.yml` and
+  `dbt_packages/shop_utils`, a link to the local package; the listings
+  after it write nothing outside `target/` and `logs/`.
+- O11: each compilation adds 84 to 175 lines to `logs/dbt-lsp.log`: a
+  header, `Processed: 6 models | 1 snapshot | 2 seeds | 1 analysis`,
+  `Summary: 10 total | 10 success`, `Cached model count updated: 6 models
+  (accurate)`, and on failure `Finished 'compile' with 1 warning and 2
+  errors`.
+- O12: `lsp --help` lists, among others, `--threads`,
+  `--static-analysis`, `--defer`, `--no-defer`, `--state`,
+  `--favor-state`, `--dirty`, `--compute`, `--select`, `--exclude`,
+  `--selector`, `--resource-type`, `--log-level`, `--log-level-file`,
+  `--lint-enabled`, `--no-manage-state`, `--no-version-check`,
+  `--write-catalog` and `--generate-info-schema`.  The proxy passes none
+  of them: it runs the user's server command as given.
+- O13: `dbt/lspBackgroundCompileStart` then
+  `dbt/lspBackgroundCompileComplete` follow the foreground compilations,
+  one pair for several in quick succession, with the same keys, the
+  completion's `errors` its own.
+- O14: `errors` is a list, warnings included: the fixture's unknown doc
+  is in it, `Warning`, and `models_count` is 6 with errors as with none.
+- S1: with the profile's `env_var` missing, the first `didOpen` brings no
+  compilation, no progress and no diagnostic; each listing a foreground
+  start, then within 1 ms a completion whose `models_count` is null and
+  whose one entry is `{"code": "1005", "message": "[InvalidConfig
+  (dbt1005)]: Jinja render error: invalid operation: 'env_var':
+  environment variable 'DBT_LSP_PLUS_PROBE_MISSING' not found\n(in
+  :1:1)", "severity": "Error"}`, then a background completion alone, no
+  start, `incremental`, the same; the listing is answered `Compilation
+  failed`, and the diagnostic lands on `dbt_project.yml`.
+- S2: with a hook that fails, the first `didOpen` brings a foreground
+  start, a completion after 2,353 ms whose `models_count` is null and
+  whose one entry is `[DbDriverFailed (dbt1308)]: Catalog Error: Table
+  with name no_such_table does not exist! ... (in <RUN_OPERATION>:1:9)`,
+  `Error`, then a background completion alone, the same; the diagnostic
+  lands on `<RUN_OPERATION>`, a file that does not exist.
+- S3: a model's watched change, then the proxy's two listings: three
+  foreground compilations (dbt lsp's own, 93 and 94 ms, the listings'
+  13 to 22 ms) and one background pair after them, about 1.1 s after the
+  last; the same after a `didSave` and its watched event.
+
+So `models_count` null is what a compilation that compiled nothing
+reports, and only a failure reports it; an error in a model leaves it a
+count.  The fake (`tests/support/fake_dbt_lsp.rs`) compiles on the same
+triggers, its frames carry O4's keys, and its background pair comes at
+once after each foreground compilation, where 2.0.9 sends it about 1.1 s
+later and joins several, so that no test waits; where its completion's
+`models_count` is null, the background completion comes alone, as in S1
+and S2.  The live test checks O3's and O13's shape in `watcher`, O4's
+keys and O8's percentage in `recorded_observations`.
 
 ## Sources
 
