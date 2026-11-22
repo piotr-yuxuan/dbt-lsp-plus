@@ -573,6 +573,7 @@ mod tests {
             ("tests/t.sql", "select 1"),
             ("macros/mac.sql", "{% macro mac() %}1{% endmacro %}\n"),
             ("macros/positive.sql", "{% test positive(model, column_name) %}select 1{% endtest %}\n"),
+            ("macros/mat.sql", "{% materialization mat, default %}select 1{% endmaterialization %}\n"),
             ("functions/f.sql", "x * 2"),
         ];
         let root = crate::project::scratch_project("features-each-type-s-kind", &files);
@@ -600,6 +601,19 @@ mod tests {
             ("test", 24),
         ];
         assert_eq!(kinds, expected, "each resource's type and kind, a generic test's block a macro");
+        // The same kinds in the outline of each block that defines a node: a materialization, which the scan
+        // holds as no resource, is a macro to dbt too.
+        let blocks = ["snapshots/snap.sql", "macros/mac.sql", "macros/positive.sql", "macros/mat.sql", "models/d.md"];
+        let outlined: Vec<(String, u64)> = blocks
+            .into_iter()
+            .flat_map(|path| {
+                let (_, text) = files.iter().find(|(file, _)| *file == path).unwrap();
+                document_symbols(text, Encoding::Utf16, true, &uri(&root.join(path))).as_array().unwrap().clone()
+            })
+            .map(|s| (s["detail"].as_str().unwrap().to_owned(), s["kind"].as_u64().unwrap()))
+            .collect();
+        let expected = [("snapshot", 5), ("macro", 12), ("test", 12), ("materialization", 12), ("docs", 15)];
+        assert_eq!(outlined, expected.map(|(detail, kind)| (detail.to_owned(), kind)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
