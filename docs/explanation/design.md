@@ -2206,7 +2206,9 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   It checks the facts of a hover at a model's start, from its properties
   file, and a workspace symbol's id as its container; and, before any
   request asked for an index, that a hover at a model's start is dbt
-  lsp's text or the parse's reason, never null.
+  lsp's text or the parse's reason, and a null, or dbt lsp's reason
+  alone, only once nodeInfo, asked at once, shows an index, which the
+  parse that the hover starts made in between.
   It ends by killing the server, which the proxy restarts: diagnostics
   are published again and a hover is answered, and the client, which
   declares dynamic registration, gets dbt's watcher registration once.

@@ -689,12 +689,14 @@ fn document_features(session: &mut Session, project: &Path) {
     let highlights = session.request("textDocument/documentHighlight", on_orders);
     assert_eq!(highlights["result"].as_array().map(Vec::len), Some(4), "{highlights}");
     // Before any request asked for an index, a hover at the model's start is dbt lsp's text, or why the proxy
-    // has no index: never a null.
+    // has no index; a null, or dbt lsp's reason alone, only once the parse that the hover starts has ended in
+    // between, which nodeInfo, asked at once, then shows.
     let start = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
     let first = session.request("textDocument/hover", start);
+    let indexed = crate::node_info(session, json!("model.shop.orders"));
     let message = first["error"]["message"].as_str().unwrap_or_default();
     let unindexed = first["error"]["code"] == -32803 && message.starts_with("dbt parse has not finished: ");
-    assert!(unindexed || !first["result"].is_null(), "{first}");
+    assert!(unindexed || !first["result"].is_null() || indexed["result"].is_object(), "{first}, {indexed}");
     // The server's hover passes through: on ref('stg_orders'), line 4.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
