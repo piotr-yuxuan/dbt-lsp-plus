@@ -272,24 +272,25 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
 /// result the proxy's locations FOUND first, then each of the server's
 /// entries that matches none before it, URIs read as paths by PATH_OF.
 /// An entry is a location by its shape alone, a `uri` or a `targetUri`
-/// that is a string, a `range` or a `targetSelectionRange` that is an
-/// object, and written as a `Location`, a link's of its target's
-/// selection; any other is dropped.  One whose URI PATH_OF cannot read
-/// matches none.  When the server adds nothing, the result is FOUND as it
-/// is, else an array.
+/// that is a string, a `range` or a `targetSelectionRange` whose start and
+/// end each have a line and a character, and written as a `Location`, a
+/// link's of its target's selection; any other is dropped.  One whose URI
+/// PATH_OF cannot read matches none but itself, given again.  When the
+/// server adds nothing, the result is FOUND as it is, else an array.
 pub fn merge_locations(message: &Value, found: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Value {
     let written = |entry: &&Value| {
         let uri = entry.get("uri").or_else(|| entry.get("targetUri")).filter(|uri| uri.is_string())?;
-        let range =
-            entry.get("range").or_else(|| entry.get("targetSelectionRange")).filter(|range| range.is_object())?;
-        Some(json!({"uri": uri, "range": range}))
+        let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
+        let at = |end: &str| ["line", "character"].iter().all(|key| range[end][*key].is_u64());
+        (at("start") && at("end")).then(|| json!({"uri": uri, "range": range}))
     };
     let mut united: Vec<Value> = shadow::entries(found).into_iter().cloned().collect();
     let own = united.len();
     let mut seen: Vec<shadow::Location> = united.iter().filter_map(|entry| shadow::location(entry, path_of)).collect();
     for entry in shadow::entries(&message["result"]).iter().filter_map(written) {
         let location = shadow::location(&entry, path_of);
-        if location.as_ref().is_some_and(|location| seen.iter().any(|before| before.matches(location))) {
+        let matched = location.as_ref().is_some_and(|location| seen.iter().any(|before| before.matches(location)));
+        if matched || united.contains(&entry) {
             continue;
         }
         seen.extend(location);
@@ -746,7 +747,8 @@ mod tests {
         let united = |found: &Value, result: Value| merge_locations(&answer(result), found, &path_of)["result"].clone();
         let ours = at("a.sql", (0, 0), (0, 0));
         let echo = json!({"echo": "textDocument/definition", "params": {}});
-        for nothing in [Value::Null, json!([]), json!(3), echo, json!([{"range": ours["range"]}])] {
+        let no_range = json!({"uri": "file:///p/b.sql", "range": {}});
+        for nothing in [Value::Null, json!([]), json!(3), echo, json!([{"range": ours["range"]}]), no_range] {
             assert_eq!(united(&ours, nothing.clone()), ours, "one location stays one: {nothing}");
         }
         let holding = at("a.sql", (0, 0), (14, 0));
@@ -757,7 +759,7 @@ mod tests {
                           "targetSelectionRange": at("c.sql", (0, 0), (0, 3))["range"]});
         assert_eq!(united(&ours, link), json!([ours, at("c.sql", (0, 0), (0, 3))]), "a link as its target's selection");
         let unread = json!({"uri": "untitled:x", "range": ours["range"]});
-        assert_eq!(united(&ours, json!([unread])), json!([ours, unread]), "a URI the reader cannot read");
+        assert_eq!(united(&ours, json!([unread, unread])), json!([ours, unread]), "a URI the reader cannot read");
         assert_eq!(united(&ours, json!([other, other])), json!([ours, other]), "given twice, once");
         let uses = json!([at("a.sql", (4, 26), (4, 36)), at("s.sql", (2, 22), (2, 32))]);
         let server = json!([at("s.sql", (2, 22), (2, 32)), other, at("a.sql", (4, 21), (4, 38))]);

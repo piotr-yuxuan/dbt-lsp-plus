@@ -185,11 +185,13 @@ proxy's answer too, where any other request gets dbt lsp's error or
 -32803.  dbt lsp's own null or `[]` passes byte for byte; any other answer
 passes as it came, or with the part merged.  The union (plan 042) reads
 each of dbt lsp's entries by its shape first, a `uri` or `targetUri`
-that is a string and a `range` or `targetSelectionRange` that is an
-object, a `LocationLink` written as a `Location` of its target's
-selection, any other entry dropped (the fake's echo is one), then by
-its path as the shadow reads it; two locations match by the shadow's
-rule, in one file, the range of one holding the other's.  When dbt lsp
+that is a string and a `range` or `targetSelectionRange` whose start
+and end have a line and a character, a `LocationLink` written as a
+`Location` of its target's selection, any other entry dropped (the
+fake's echo is one), then by its path as the shadow reads it; two
+locations match by the shadow's rule, in one file, the range of one
+holding the other's, and one whose path cannot be read matches only
+itself.  When dbt lsp
 adds nothing, the client gets the proxy's answer as it is, one
 `Location` staying one.  Its cost: every definition and references at a
 claimed position waits for dbt lsp, up to 300 ms, where `plus` answers
