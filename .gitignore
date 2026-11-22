@@ -12,3 +12,4 @@ __pycache__/
 
 # A binary commits its lock file, whatever a global ignore says.
 !/Cargo.lock
+/.codegraph/
