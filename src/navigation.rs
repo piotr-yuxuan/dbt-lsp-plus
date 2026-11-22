@@ -3,7 +3,7 @@
 //! give: the target at a position, as its document alone shows it, and
 //! what it names in the project, by dbt 2.0.9's lookup.  Pure.
 
-use crate::config::Index;
+use crate::config::ParseIndex;
 use crate::project::{self, Entity, Project};
 use crate::sources;
 use crate::yaml::{self, Tree};
@@ -184,7 +184,7 @@ pub struct Lookup<'a> {
     project: &'a Project,
     /// What the last parse knows that the scan does not: versions, Python
     /// models, snapshots defined in YAML, and which nodes are disabled.
-    index: Option<&'a Index>,
+    index: Option<&'a ParseIndex>,
     /// The resources of each id, in order, so that a package's macros read
     /// as a range; two files may give one id, one of them disabled.
     by_id: BTreeMap<&'a str, Vec<&'a Entity>>,
@@ -199,7 +199,7 @@ pub struct Lookup<'a> {
 
 impl<'a> Lookup<'a> {
     /// The lookup of PROJECT, with INDEX, the last parse's, if any.
-    pub fn new(project: &'a Project, index: Option<&'a Index>) -> Lookup<'a> {
+    pub fn new(project: &'a Project, index: Option<&'a ParseIndex>) -> Lookup<'a> {
         let root = project.root_package.as_str();
         let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));
         let root_first = config.and_then(yaml::parse).is_some_and(|config| {
@@ -812,7 +812,7 @@ models:
                    "package_name": "shop", "original_file_path": file})
         };
         let nodes = json!({"snapshot.shop.ys": node("ys", "snapshots/_s.yml"), "snapshot.shop.old": node("old", "snapshots/old.sql")});
-        let index = Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": nodes}));
+        let index = ParseIndex::of(&json!({"metadata": {"project_name": "shop"}, "nodes": nodes}));
         let parsed = Lookup::new(&project, Some(&index));
         assert_eq!(at(&parsed, "ys"), expected("ys"), "its name, not its file's start");
         assert_eq!(at(&parsed, "old"), expected("old"), "a snapshot's block at its name, as before the parse");
@@ -890,7 +890,7 @@ models:
             "model.shop.fact.v1": node("model.shop.fact.v1", "fact", "models/fact.sql", json!(1)),
             "model.shop.fact.v2": node("model.shop.fact.v2", "fact", "models/fact_v2.sql", json!(2)),
             "model.shop.twin": enabled}, "disabled": {"model.shop.twin": [twin]}});
-        let index = Index::of(&manifest);
+        let index = ParseIndex::of(&manifest);
         let files_of = |lookup: &Lookup, target: Target| -> Vec<String> {
             let found = resolve(lookup, &root.join("models/m.sql"), &target);
             found.iter().map(|found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()).collect()
@@ -960,7 +960,7 @@ models:
             },
             "disabled": {"model.pkg.orders": [node("model.pkg.orders", "pkg", "models/orders.sql", Value::Null, Value::Null)]},
         });
-        let index = Index::of(&manifest);
+        let index = ParseIndex::of(&manifest);
         let leads = |lookup: &Lookup, rel: &str, name: &str, version: Option<&str>| -> Vec<(String, String)> {
             let target = scan::Target::Ref { package: None, name: name.into(), version: version.map(str::to_owned) };
             let relative = |found: &Found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();

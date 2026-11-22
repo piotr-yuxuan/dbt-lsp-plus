@@ -317,7 +317,7 @@ struct Parsing {
     /// Where a parse reports; none in the unit tests, which parse nothing.
     events: Option<Sender<Event>>,
     running: Option<config::Running>,
-    index: Option<config::Index>,
+    index: Option<config::ParseIndex>,
     /// Whether no change came since the last parse started.
     fresh: bool,
     /// Whether the server compiled since the last change: dbt has then
@@ -918,7 +918,7 @@ impl<W: Write> Proxy<W> {
             return graph.clone();
         }
         let scanned = Graph::scanned(project);
-        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::Index::listed);
+        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::ParseIndex::listed);
         let graph = Rc::new(match parsed.as_ref().or(self.nodes.as_ref()) {
             Some(nodes) => scanned.with_server(nodes, project),
             None => scanned,
@@ -1146,7 +1146,12 @@ impl<W: Write> Proxy<W> {
     /// scan nor `of_file` can name one node.  None when it names nothing;
     /// `Some(None)` when it names a node that INDEX lacks, or that, without
     /// an index, the scan tells is named but cannot give.
-    fn node_at<'a>(&self, index: Option<&'a config::Index>, params: &Value, file: bool) -> Option<Option<&'a Value>> {
+    fn node_at<'a>(
+        &self,
+        index: Option<&'a config::ParseIndex>,
+        params: &Value,
+        file: bool,
+    ) -> Option<Option<&'a Value>> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
             |call: &scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
@@ -1173,7 +1178,7 @@ impl<W: Write> Proxy<W> {
         if let Some(index) = index {
             return index.of_file(&relative.to_string_lossy()).map(Some);
         }
-        // As `Index::of_file` reads the manifest: the kinds of resources it holds as nodes.
+        // As `ParseIndex::of_file` reads the manifest: the kinds of resources it holds as nodes.
         let project = self.project()?;
         let defines = |entity: &&project::Entity| {
             entity.path == path

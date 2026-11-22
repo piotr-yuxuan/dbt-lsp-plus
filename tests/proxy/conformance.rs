@@ -48,7 +48,7 @@ fn corpus() {
         versions.insert(manifest["metadata"]["dbt_version"].as_str().unwrap_or("of no version").to_owned());
         let project = project::scan(&copy, &HashMap::new()).expect("scan the case");
         // Navigation as the proxy runs it once a parse exists.
-        let index = config::Index::of(&manifest);
+        let index = config::ParseIndex::of(&manifest);
         let lookup = navigation::Lookup::new(&project, Some(&index));
         missed.extend(references_missed(&project, &lookup).into_iter().map(|call| format!("{name}\t{call}")));
         let compared = [

@@ -2,7 +2,7 @@
 //! The answers of the features the proxy adds, as LSP JSON.  Pure: the
 //! texts, the project and the graph are inputs.
 
-use crate::config::Index;
+use crate::config::ParseIndex;
 use crate::graph::{Edge, Graph, Item};
 use crate::project::Project;
 use crate::properties;
@@ -259,7 +259,7 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
 pub fn inlay_hints(
     text: &str,
     calls: Vec<scan::Call>,
-    index: &Index,
+    index: &ParseIndex,
     range: Range<usize>,
     encoding: Encoding,
 ) -> Vec<Value> {
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
     }
 
-    fn index() -> Index {
+    fn index() -> ParseIndex {
         let model = |name: &str, materialized: &str, relation: Value| {
             json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
                    "package_name": "shop", "relation_name": relation, "config": {"materialized": materialized}})
@@ -594,7 +594,7 @@ mod tests {
                               "package_name": "shop", "config": {"materialized": "ephemeral"}});
         let off = json!({"unique_id": "model.shop.off", "name": "off", "resource_type": "model",
                          "package_name": "shop", "config": {"materialized": "ephemeral"}});
-        Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
+        ParseIndex::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
             "model.shop.orders": model("orders", "table", json!("\"shop\".\"main\".\"orders\"")),
             "model.shop.eph": model("eph", "ephemeral", Value::Null),
             "analysis.shop.counts": analysis},

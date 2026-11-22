@@ -4,7 +4,7 @@
 //! session and logged on the user's disk, never sent anywhere: the evidence
 //! on which a method's shipped mode may change.
 
-use crate::config::{self, Index};
+use crate::config::{self, ParseIndex};
 use crate::modes::Table;
 use crate::navigation::Target;
 use crate::project::Project;
@@ -199,7 +199,7 @@ pub type Oracle = Vec<(String, Option<PathBuf>)>;
 /// node's own in its package, else, for a function, which the index does
 /// not hold, its id read and the scan's file.  None for any other target,
 /// or for a file with no one node.
-pub fn oracle(index: &Index, project: &Project, relative: &str, target: &Target) -> Option<Oracle> {
+pub fn oracle(index: &ParseIndex, project: &Project, relative: &str, target: &Target) -> Option<Oracle> {
     let (kinds, package, name, version): (&[&str], _, _, _) = match target {
         Target::Call(scan::Target::Ref { package, name, version }) => {
             (&["model", "seed", "snapshot"], package, name, version.as_deref().filter(|v| !v.is_empty()))
@@ -532,7 +532,7 @@ mod tests {
         assert_eq!(read(&json!({"id": 1, "result": null}), false), Response::Locations(vec![]));
     }
 
-    fn index() -> Index {
+    fn index() -> ParseIndex {
         let node = |id: &str, name: &str, path: &str, depends_on: &[&str]| {
             let mut parts = id.split('.');
             json!({"unique_id": id, "name": name, "resource_type": parts.next(), "package_name": parts.next(),
@@ -553,7 +553,7 @@ mod tests {
             "model.shop.other",
             "function.shop.f",
         ];
-        Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
+        ParseIndex::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
             "model.shop.orders": node("model.shop.orders", "orders", "models/orders.sql", &orders),
             "model.shop.stg_orders": node("model.shop.stg_orders", "stg_orders", "models/stg_orders.sql", &[]),
             "model.utils.stg_orders": node("model.utils.stg_orders", "stg_orders", "models/stg.sql", &[]),
