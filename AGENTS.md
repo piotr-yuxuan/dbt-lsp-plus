@@ -121,7 +121,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     server's answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
     hints, apart from the outcome of the parse that changes them;
-  - `runs::place`: where a failed node is written, apart from how it
+  - `runs::locator`: where a failed node is written, apart from how it
     failed;
   - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
     `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,

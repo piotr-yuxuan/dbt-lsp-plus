@@ -1410,9 +1410,9 @@ impl<W: Write> Proxy<W> {
         let cwd = self.dbt_dir();
         let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
         for problem in problems {
-            let path = problem.place.as_ref().and_then(|place| {
+            let path = problem.spot.as_ref().and_then(|spot| {
                 // dbt names a file from a sibling directory with `..`.
-                let file = |dir: &Path| Some(lexical(&dir.join(&place.path))).filter(|path| path.is_file());
+                let file = |dir: &Path| Some(lexical(&dir.join(&spot.path))).filter(|path| path.is_file());
                 let in_cwd =
                     || cwd.as_deref().and_then(file).and_then(|path| self.local_path(Some(&features::uri(&path))));
                 let mut held = packages.iter().filter_map(|dir| file(dir));
@@ -2100,7 +2100,7 @@ impl<W: Write> Proxy<W> {
         let lines = LineStarts::new(&text);
         let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
-            let range = runs::locate(&text, &entries, &tests, &failure.place);
+            let range = runs::locate(&text, &entries, &tests, &failure.locator);
             json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
         }));
@@ -2108,7 +2108,7 @@ impl<W: Write> Proxy<W> {
         // when dbt gives none.
         let problems = self.diagnostics.parsed.get(path).map_or(&[][..], Vec::as_slice);
         diagnostics.extend(problems.iter().map(|problem| {
-            let (line, column) = problem.place.as_ref().and_then(|place| place.at).unwrap_or((1, 1));
+            let (line, column) = problem.spot.as_ref().and_then(|spot| spot.at).unwrap_or((1, 1));
             let at = lines.offset(line.saturating_sub(1), column.saturating_sub(1), Encoding::Utf32);
             json!({"range": lines.range(at, at, self.encoding), "severity": problem.severity,
                    "source": "dbt parse", "code": problem.code, "message": problem.message})

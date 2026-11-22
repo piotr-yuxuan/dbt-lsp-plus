@@ -10,7 +10,7 @@ use serde_json::Value;
 /// or of its package, and its line and column, from 1, the column in code
 /// points, when dbt gives them.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Place {
+pub struct Spot {
     pub path: String,
     pub at: Option<(u64, u64)>,
 }
@@ -22,9 +22,9 @@ pub struct Problem {
     /// dbt's code, the bare number, as `1048`.
     pub code: String,
     /// dbt's message without its `[error] ` or `[warning] ` prefix, its
-    /// place included, as dbt lsp 2.0.9 shows it.
+    /// spot included, as dbt lsp 2.0.9 shows it.
     pub message: String,
-    pub place: Option<Place>,
+    pub spot: Option<Spot>,
 }
 
 /// What a parse's log says.
@@ -39,14 +39,14 @@ pub struct Log {
 /// The problems of LOG, a parse's output, in order.  A line that is no JSON
 /// object, as a launcher's own, is skipped, and so is any other event.
 pub fn read(log: &str) -> Log {
-    let place = |message: &str| {
-        let spot = message.lines().last()?.trim_start().strip_prefix("--> ")?;
-        let mut parts = spot.rsplitn(3, ':');
+    let spot = |message: &str| {
+        let pointed = message.lines().last()?.trim_start().strip_prefix("--> ")?;
+        let mut parts = pointed.rsplitn(3, ':');
         let (column, line, path) = (parts.next()?, parts.next(), parts.next());
         let at = line.and_then(|line| Some((line.parse().ok()?, column.parse().ok()?)));
         Some(match (at, path) {
-            (Some(at), Some(path)) => Place { path: path.to_owned(), at: Some(at) },
-            _ => Place { path: spot.to_owned(), at: None },
+            (Some(at), Some(path)) => Spot { path: path.to_owned(), at: Some(at) },
+            _ => Spot { path: pointed.to_owned(), at: None },
         })
     };
     let mut read = Log { problems: Vec::new(), completed: false };
@@ -63,7 +63,7 @@ pub fn read(log: &str) -> Log {
             severity,
             code: info["code"].as_str().unwrap_or_default().to_owned(),
             message: message.strip_prefix(prefix).unwrap_or(message).to_owned(),
-            place: place(message),
+            spot: spot(message),
         });
     }
     read
@@ -114,13 +114,13 @@ mod tests {
         assert!(
             jinja.message.starts_with("[MacroSyntaxInvalid (dbt1502)]: Failed") && jinja.message.ends_with(":2:22")
         );
-        assert_eq!(jinja.place, Some(Place { path: "models/marts/a.sql".into(), at: Some((2, 22)) }));
+        assert_eq!(jinja.spot, Some(Spot { path: "models/marts/a.sql".into(), at: Some((2, 22)) }));
         let unused = &read.problems[1];
         assert_eq!(
-            (unused.severity, unused.place.clone()),
-            (2, Some(Place { path: "models/marts/_notes.yml".into(), at: None }))
+            (unused.severity, unused.spot.clone()),
+            (2, Some(Spot { path: "models/marts/_notes.yml".into(), at: None }))
         );
-        assert_eq!(read.problems[2].place, None, "a warning on no file");
+        assert_eq!(read.problems[2].spot, None, "a warning on no file");
         assert_eq!(read.problems.len(), 3);
     }
 
