@@ -26,17 +26,20 @@ fails there (its dbt lsp, else the proxy's parse).
   dbt-lsp-plus answers definitions and
   references](use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references).
   The answer to `initialize` names those kinds, per request, under
-  `capabilities.experimental.dbtLspPlus`.  For each operation of an
-  agent's LSP tool, see [Who answers
-  what](use-with-an-agent.md#who-answers-what).
+  `capabilities.experimental.dbtLspPlus`.  In the default mode, `merge`,
+  with `dbt lsp` running, it asks `dbt lsp` there too, and `dbt lsp`'s
+  locations that match none of its own follow them.  For each operation
+  of an agent's LSP tool, see [Who answers
+  what](use-with-an-agent.md#who-answers-what); for each method, [the
+  modes](../reference/features.md#modes).
 - **`dbt lsp`** answers everything else: the proxy forwards the request
   and the answer unchanged, byte for byte.  In the default mode, `merge`,
-  a definition, references, hover or inlay hints it leaves to `dbt lsp`
-  wait for it 300 ms where the proxy has something to add, 2 s where it
-  has nothing; past that, or when `dbt lsp` fails, exits or is not
-  running, the proxy answers with its part, else null or `[]`, and logs
-  once per method and deadline that `dbt lsp` was late
-  (`window/logMessage`, type 4).
+  a definition, references, hover or inlay hints that go to `dbt lsp`
+  wait for it 300 ms where the proxy has something to add (its
+  locations, a summary, hints), 2 s where it has nothing; past that, or
+  when `dbt lsp` fails, exits or is not running, the proxy answers with
+  its part, else null or `[]`, and logs once per method and deadline
+  that `dbt lsp` was late (`window/logMessage`, type 4).
   Set a method to `dbt` (`--mode textDocument/hover=dbt`) to wait for
   `dbt lsp` however long it takes.  Any other slow answer is the
   server's.
@@ -50,9 +53,11 @@ fails there (its dbt lsp, else the proxy's parse).
 A client gives up after a while: lsp-mode after `lsp-response-timeout`
 seconds, 10 by default.
 
-1. Find who was asked, from the position and the list in
-   `experimental.dbtLspPlus`.  In `merge`, a definition, references,
-   hover or inlay hints never wait for `dbt lsp` more than 2 s.
+1. Find who was asked, from the method, its mode and the position: in
+   `merge` with `dbt lsp` running, a definition, references, hover or
+   inlay hints go to `dbt lsp`, at the kinds that
+   `experimental.dbtLspPlus` lists too, and never wait for it more than
+   2 s; in `plus`, at those kinds, `dbt lsp` is not asked.
 2. `dbt lsp` answers once it has compiled the project.  A large project
    may take longer than the client's timeout to compile, after the server
    starts or the project changes; the server reports its progress, then

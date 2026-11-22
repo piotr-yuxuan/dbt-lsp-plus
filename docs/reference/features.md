@@ -80,12 +80,20 @@ a CTE, and the definitions and references at the kinds of target that
 [Where dbt-lsp-plus answers definitions and
 references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)
 lists; the initialize result names those, per kind of target and kind of
-file, under `experimental.dbtLspPlus`.  A definition, references, hover
-or inlay hints left to `dbt lsp` get its answer when it comes within
-300 ms where the proxy adds something (a summary, hints), within 2 s
-where it adds
-nothing; else, and when `dbt lsp` fails, exits or is not running, the
-proxy's own: its part, else null, or `[]` for references and hints.
+file, under `experimental.dbtLspPlus`.  In `merge`, the default, with
+`dbt lsp` running, a definition or references there goes to `dbt lsp`
+too, and its locations that match none of the proxy's (in one file,
+the range of one holding the other's) follow the proxy's, in one array.
+`dbt lsp` 2.0.9's answers on the fixture add nothing; it reads a
+versioned `ref` in SQL without its version, so its location there may
+follow the proxy's.  A definition, references, hover or inlay hints
+that go to `dbt lsp` in `merge` get its answer when it comes within
+300 ms where the proxy adds something (locations, a summary, hints),
+within 2 s where it adds nothing; else, and when `dbt lsp` fails, exits
+or is not running, the proxy's own: its part, else null, or `[]` for
+references and hints.  A hover's text from `dbt lsp` follows the
+proxy's part under a line `**dbt lsp**`, or `dbt lsp:` in plain text.
+The mode `plus` gives the proxy's answer by itself, at once.
 When `dbt lsp` crashes, the proxy starts it again, at most three times in
 ten minutes, and gives it the open documents as they stand.  Without
 `dbt lsp`, and while it restarts, the proxy keeps serving its own
@@ -155,19 +163,48 @@ A value goes in the next word or after `=`, as `--backend=never`.
 Each method the proxy answers has a mode: `plus`, the proxy alone; `dbt`,
 `dbt lsp` alone, its answer passed as it is; `merge`, both.  `ours`,
 `plus`'s former name, is still read as `plus`, with one warning a
-session.  Set nothing and each method takes its shipped default: `merge`
-for hover, inlay hints, definition, references, rename and diagnostics;
-for the methods the proxy adds, `plus` unless `dbt lsp` announces them.
-The methods are
-`textDocument/documentSymbol`, `workspace/symbol`,
-`textDocument/prepareCallHierarchy` (with the call hierarchy's two
-others), `textDocument/foldingRange`, `textDocument/documentHighlight`,
-`textDocument/selectionRange`, `textDocument/hover`,
-`textDocument/inlayHint`, `textDocument/definition`,
-`textDocument/references`, `textDocument/rename` and
-`textDocument/publishDiagnostics`; any other is `dbt lsp`'s.  Besides the
-command line, a client sets them in `initializationOptions`, which win
-method by method:
+session.  Set nothing and each method takes its shipped default.  The
+table says, for each method and command the proxy takes part in, who
+can answer it, its shipped mode, how the answers combine in `merge`, and
+how long a request of it in `merge` waits for `dbt lsp`; any other
+method is `dbt lsp`'s, and a command takes no mode.  Where the proxy's
+answer stands alone, `dbt-lsp-plus's`, `dbt lsp` is not asked in
+`merge`, even when the proxy finds nothing: the methods it adds, the
+call hierarchy's two others and `dbt-lsp-plus.nodeInfo`.  A rename is
+the proxy's at its kinds of target, else `dbt lsp`'s; a command goes to
+the first of its providers present, `dbt lsp` when it runs and lists
+the command, else dbt's CLI under the cut.  A definition and references
+are the proxy's at the kinds of target that `experimental.dbtLspPlus`
+lists ([Where dbt-lsp-plus answers definitions and
+references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)),
+with `dbt lsp`'s other locations after them, and `dbt lsp`'s elsewhere.
+A wait is 300 ms where the proxy has something of its own, 2 s where it
+has nothing; `no` is no deadline: the proxy's answer at once, or `dbt
+lsp`'s however long it takes.
+
+| Method or command | Answered by | Shipped mode | Combined | Waits for dbt lsp |
+|---|---|---|---|---|
+| `textDocument/documentSymbol` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
+| `workspace/symbol` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
+| `textDocument/prepareCallHierarchy` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
+| `callHierarchy/incomingCalls` | dbt-lsp-plus, dbt lsp | prepareCallHierarchy's | dbt-lsp-plus's | no |
+| `callHierarchy/outgoingCalls` | dbt-lsp-plus, dbt lsp | prepareCallHierarchy's | dbt-lsp-plus's | no |
+| `textDocument/foldingRange` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
+| `textDocument/documentHighlight` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
+| `textDocument/selectionRange` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
+| `textDocument/hover` | dbt-lsp-plus, dbt lsp | merge | dbt-lsp-plus's text, then dbt lsp's under its name | 300 ms, 2 s with nothing |
+| `textDocument/inlayHint` | dbt-lsp-plus, dbt lsp | merge | dbt lsp's, then dbt-lsp-plus's | 300 ms, 2 s with nothing |
+| `textDocument/definition` | dbt-lsp-plus, dbt lsp | merge | the union, dbt-lsp-plus's first | 300 ms, 2 s with nothing |
+| `textDocument/references` | dbt-lsp-plus, dbt lsp | merge | the union, dbt-lsp-plus's first | 300 ms, 2 s with nothing |
+| `textDocument/rename` | dbt-lsp-plus, dbt lsp | merge | dbt-lsp-plus's at its kinds, else dbt lsp's | no |
+| `textDocument/publishDiagnostics` | dbt-lsp-plus, dbt lsp | merge | both, per file | no |
+| `dbt-lsp-plus.nodeInfo` | dbt-lsp-plus | none | dbt-lsp-plus's | no |
+| `dbt-lsp-plus.compile` | dbt lsp, dbt's CLI | none | the first present | no |
+| `dbt-lsp-plus.show` | dbt lsp | none | the first present | no |
+| `dbt-lsp-plus.nodes` | dbt lsp, dbt's CLI | none | the first present | no |
+
+Besides the command line, a client sets the modes in
+`initializationOptions`, which win method by method:
 
 ```json
 {"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}

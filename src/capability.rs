@@ -229,6 +229,51 @@ mod tests {
     }
 
     #[test]
+    fn the_reference_page_shows_each_capability() {
+        let page = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/reference/features.md")).unwrap();
+        let heading = "### Modes";
+        let section =
+            page.lines().skip_while(|line| *line != heading).skip(1).take_while(|line| !line.starts_with('#'));
+        let table = section.skip_while(|line| !line.starts_with('|')).take_while(|line| line.starts_with('|'));
+        let cells = |line: &str| -> Vec<String> {
+            let cells = line.trim().trim_matches('|').split('|');
+            cells.map(|cell| cell.trim_matches(|c| c == ' ' || c == '`').to_owned()).collect()
+        };
+        let rows: Vec<Vec<String>> = table.map(cells).collect();
+        let columns = ["Method or command", "Answered by", "Shipped mode", "Combined", "Waits for dbt lsp"];
+        assert_eq!(rows.first().map(Vec::as_slice), Some(&columns.map(str::to_owned)[..]), "the table under {heading}");
+        let names = [(Provider::Plus, "dbt-lsp-plus"), (Provider::DbtLsp, "dbt lsp"), (Provider::DbtCli, "dbt's CLI")];
+        let rules = [
+            (Combine::Union, "the union, dbt-lsp-plus's first"),
+            (Combine::Sections, "dbt-lsp-plus's text, then dbt lsp's under its name"),
+            (Combine::Append, "dbt lsp's, then dbt-lsp-plus's"),
+            (Combine::PerFile, "both, per file"),
+        ];
+        let rendered = CAPABILITIES.iter().map(|capability| {
+            let named = |provider: &Provider| names.iter().find(|(named, _)| named == provider).map(|(_, name)| *name);
+            let providers: Vec<&str> = capability.providers.iter().filter_map(named).collect();
+            let leader = capability.leader.map(|leader| format!("{}'s", leader.trim_start_matches("textDocument/")));
+            let shipped = match (capability.is_command(), capability.added) {
+                (true, _) => "none".to_owned(),
+                (false, true) => "plus, or dbt where dbt lsp announces it".to_owned(),
+                (false, false) => leader.unwrap_or_else(|| "merge".to_owned()),
+            };
+            let first = match (capability.providers.contains(&Provider::Plus), capability.kinds.is_empty()) {
+                (false, _) => "the first present",
+                (true, true) => "dbt-lsp-plus's",
+                (true, false) => "dbt-lsp-plus's at its kinds, else dbt lsp's",
+            };
+            let rule = rules.iter().find(|(rule, _)| *rule == capability.combine).map_or(first, |(_, said)| *said);
+            let waits = capability.deadline(true).zip(capability.deadline(false));
+            let waits = waits.map_or("no".to_owned(), |(part, nothing)| {
+                format!("{} ms, {} s with nothing", part.as_millis(), nothing.as_secs())
+            });
+            [capability.name.to_owned(), providers.join(", "), shipped, rule.to_owned(), waits].to_vec()
+        });
+        assert_eq!(rows.get(2..), Some(&rendered.collect::<Vec<_>>()[..]), "the rows under {heading}");
+    }
+
+    #[test]
     fn a_merge_that_waits_for_dbt_lsp_has_both_deadlines() {
         let waiting =
             ["textDocument/hover", "textDocument/inlayHint", "textDocument/definition", "textDocument/references"];
