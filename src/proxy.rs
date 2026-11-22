@@ -47,7 +47,8 @@ enum Route {
     /// Itself, with this answer: null before a project, the shadow's
     /// counts, or the method's nothing.
     Answer(Answer),
-    /// By the server.
+    /// By the server: `forward`, which also says what the request gets
+    /// when none runs.
     Forward,
     /// As this command of the proxy's for clients.
     Command(&'static str),
@@ -2029,9 +2030,11 @@ impl<W: Write> Proxy<W> {
         (Pending { name, kept }, fresh)
     }
 
-    /// A request of the client: routed by `route`; without a server,
-    /// `initialize` is answered here, and any other forwarded request fails,
-    /// with why when dbt lsp is lost for good.
+    /// A request of the client: refused under the id of the proxy's listing
+    /// in flight; `on_elsewhere`'s on a document of another project; else
+    /// remembered, and handled where `route` sends it: `answer`, its answer
+    /// sent, `on_command`, or `forward`, which asks for the index itself;
+    /// then the index, when it asks for a fresh one.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         // The server would get two requests under one id.
         let listing = self.backend.running().and_then(|running| running.listings.listing.as_ref());
@@ -2042,31 +2045,12 @@ impl<W: Write> Proxy<W> {
             return self.on_elsewhere(method, id, body, why);
         }
         let (pending, fresh) = self.remember(method, id, params);
-        match (self.route(method, params), self.backend.running().is_some(), method) {
-            (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
-            (Route::Answer(answer), ..) => self.send_client(&answer.frame(id, method)),
-            (Route::Command(command), ..) => self.on_command(command, id, params, pending),
-            (Route::Forward, true, _) => self.forward(id, method, pending, body),
-            (Route::Forward, false, "initialize") => {
-                self.initialize = None;
-                self.initialize_alone(id);
-            }
-            // A merged request gets the proxy's answer alone, any other the failure: for good, or for now.  Nothing is
-            // forwarded: the index is asked for first, so that a reason is that of the parse it may start.
-            (Route::Forward, false, _) => {
-                if fresh {
-                    self.want_index();
-                }
-                let why = if let Life::Lost(why) = &self.backend.life {
-                    Reason::Lost(why.clone())
-                } else {
-                    Reason::NotRunning
-                };
-                let answer = pending.unserved(self.markdown, Some(why), &self.parsing);
-                return self.send_client(&answer.frame(id, &pending.name));
-            }
+        match self.route(method, params) {
+            Route::Here(owned) => self.answer(owned, id, params, &pending),
+            Route::Answer(answer) => self.send_client(&answer.frame(id, method)),
+            Route::Command(command) => self.on_command(command, id, params, pending),
+            Route::Forward => return self.forward(id, method, pending, body, fresh),
         }
-        // Once the request is forwarded, so that a listing takes no id of the client's.
         if fresh {
             self.want_index();
         }
@@ -2074,12 +2058,34 @@ impl<W: Write> Proxy<W> {
 
     /// Forwards the client's request METHOD of ID, its BODY as it came, and
     /// keeps PENDING for dbt lsp's answer, which adds to the proxy's part,
-    /// or replaces its nothing, but never holds it up.
-    fn forward(&mut self, id: &Value, method: &str, pending: Pending, body: &[u8]) {
+    /// or replaces its nothing, but never holds it up; then, when FRESH,
+    /// asks for the index, once the request is forwarded, so that a listing
+    /// takes no id of the client's.  With no dbt lsp running, nothing is
+    /// forwarded: `initialize` is answered alone, and any other request gets
+    /// what `Pending::unserved` gives for why none runs, for good or for
+    /// now, the index asked for first when FRESH, so that a reason is that
+    /// of the parse it may start.
+    fn forward(&mut self, id: &Value, method: &str, pending: Pending, body: &[u8], fresh: bool) {
+        if self.backend.running().is_none() {
+            if method == "initialize" {
+                self.initialize = None;
+                return self.initialize_alone(id);
+            }
+            if fresh {
+                self.want_index();
+            }
+            let why =
+                if let Life::Lost(why) = &self.backend.life { Reason::Lost(why.clone()) } else { Reason::NotRunning };
+            let answer = pending.unserved(self.markdown, Some(why), &self.parsing);
+            return self.send_client(&answer.frame(id, &pending.name));
+        }
         let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
         self.deadlines.extend(late.map(|late| (key(id), late)));
         self.forwarded.insert(key(id), (id.clone(), pending));
         self.send_server(body);
+        if fresh {
+            self.want_index();
+        }
     }
 
     /// Why the request METHOD at PARAMS is not the session's project's: its
@@ -2108,7 +2114,7 @@ impl<W: Write> Proxy<W> {
         let merged = self.table.mode(method) == Mode::Merge && !self.owned.contains(method);
         if merged && self.backend.running().is_some() {
             let part = if hints { Part::Empty } else { Part::Unanswered(vec![why]) };
-            return self.forward(id, method, Pending { name: method.to_owned(), kept: Kept::Part(part) }, body);
+            return self.forward(id, method, Pending { name: method.to_owned(), kept: Kept::Part(part) }, body, false);
         }
         let answer = if hints { Answer::Empty } else { Answer::Unanswered(vec![why]) };
         self.send_client(&answer.frame(id, method));
