@@ -2,6 +2,7 @@
 //! The resources of a dbt project and of its installed packages, read from
 //! their files: what dbt itself would parse, without dbt.
 
+use crate::node;
 use crate::packages;
 use crate::properties::{self, Entry, Test};
 use crate::reference;
@@ -201,7 +202,7 @@ impl Entity {
 impl From<&SourceTable> for Entity {
     fn from(table: &SourceTable) -> Entity {
         Entity {
-            id: format!("source.{}.{}.{}", table.package, table.source, table.table),
+            id: node::table_id(&table.package, &table.source, &table.table),
             name: format!("{}.{}", table.source, table.table),
             resource_type: "source",
             package: table.package.clone(),
@@ -253,7 +254,7 @@ pub fn versions_of(entity: Entity, declared: &[&Versioned]) -> Vec<Entity> {
                         || is_latest && !named && entity.name == model.name
                 }
             };
-            let id = format!("model.{}.{}.v{version}", entity.package, model.name);
+            let id = node::version_id(&entity.package, &model.name, version);
             let version = Some(version.clone());
             found.extend(names.then(|| Entity {
                 id,
@@ -274,36 +275,41 @@ pub fn versions_of(entity: Entity, declared: &[&Versioned]) -> Vec<Entity> {
 struct Layout {
     key: &'static str,
     default: &'static str,
-    files: &'static [(&'static str, &'static str)],
-    blocks: &'static [(Kind, &'static str, &'static str, &'static str)],
+    files: &'static [(&'static str, &'static node::Type)],
+    blocks: &'static [(Kind, &'static str, &'static node::Type, &'static str)],
 }
 
-const DOCS: (Kind, &str, &str, &str) = (Kind::Docs, "md", "doc", "");
-const GENERIC_TEST: (Kind, &str, &str, &str) = (Kind::Test, "sql", "macro", "test_");
+const DOCS: (Kind, &str, &node::Type, &str) = (Kind::Docs, "md", &node::DOC, "");
+const GENERIC_TEST: (Kind, &str, &node::Type, &str) = (Kind::Test, "sql", &node::MACRO, "test_");
 
 const LAYOUT: [Layout; 7] = [
-    Layout { key: "model-paths", default: "models", files: &[("sql", "model"), ("py", "model")], blocks: &[DOCS] },
-    Layout { key: "seed-paths", default: "seeds", files: &[("csv", "seed")], blocks: &[DOCS] },
+    Layout {
+        key: "model-paths",
+        default: "models",
+        files: &[("sql", &node::MODEL), ("py", &node::MODEL)],
+        blocks: &[DOCS],
+    },
+    Layout { key: "seed-paths", default: "seeds", files: &[("csv", &node::SEED)], blocks: &[DOCS] },
     Layout {
         key: "snapshot-paths",
         default: "snapshots",
         files: &[],
-        blocks: &[(Kind::Snapshot, "sql", "snapshot", ""), DOCS],
+        blocks: &[(Kind::Snapshot, "sql", &node::SNAPSHOT, ""), DOCS],
     },
-    Layout { key: "analysis-paths", default: "analyses", files: &[("sql", "analysis")], blocks: &[DOCS] },
+    Layout { key: "analysis-paths", default: "analyses", files: &[("sql", &node::ANALYSIS)], blocks: &[DOCS] },
     // A file of generic tests is no singular test: see `file_entities`.
-    Layout { key: "test-paths", default: "tests", files: &[("sql", "test")], blocks: &[GENERIC_TEST, DOCS] },
+    Layout { key: "test-paths", default: "tests", files: &[("sql", &node::TEST)], blocks: &[GENERIC_TEST, DOCS] },
     Layout {
         key: "macro-paths",
         default: "macros",
         files: &[],
-        blocks: &[(Kind::Macro, "sql", "macro", ""), GENERIC_TEST, DOCS],
+        blocks: &[(Kind::Macro, "sql", &node::MACRO, ""), GENERIC_TEST, DOCS],
     },
     // Each file is a function, with or without its `functions:` entry.
     Layout {
         key: "function-paths",
         default: "functions",
-        files: &[("sql", "function"), ("py", "function")],
+        files: &[("sql", &node::FUNCTION), ("py", &node::FUNCTION)],
         blocks: &[],
     },
 ];
@@ -334,15 +340,15 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
     for block in &scanned.blocks {
         let layout_block = layout.blocks.iter().find(|(kind, ext, ..)| *kind == block.kind && *ext == extension);
         if let Some((_, _, resource_type, prefix)) = layout_block {
-            let id = format!("{resource_type}.{package}.{prefix}{}", block.name);
-            found.push(entity(resource_type, id, &block.name, block.range.clone(), block.name_range.clone()));
+            let id = node::id(resource_type, package, &format!("{prefix}{}", block.name));
+            found.push(entity(resource_type.name, id, &block.name, block.range.clone(), block.name_range.clone()));
         }
     }
     if let Some((_, resource_type)) = layout.files.iter().find(|(ext, _)| *ext == extension)
         && found.iter().all(|e| e.resource_type == "doc")
     {
         let whole = 0..scanned.text.len();
-        found.push(entity(resource_type, format!("{resource_type}.{package}.{stem}"), stem, whole, 0..0));
+        found.push(entity(resource_type.name, node::id(resource_type, package, stem), stem, whole, 0..0));
     }
     found
 }
@@ -550,7 +556,7 @@ pub fn assemble(inventory: &Inventory, read: &mut Read) -> Project {
                     calls.cloned().collect()
                 };
                 let snapshot = |(entry, relation): &(Entry, Range<usize>)| Entity {
-                    id: format!("snapshot.{name}.{}", entry.name),
+                    id: node::id(&node::SNAPSHOT, name, &entry.name),
                     name: entry.name.clone(),
                     resource_type: "snapshot",
                     package: name.clone(),
