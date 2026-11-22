@@ -2729,7 +2729,6 @@ mod tests {
             completion(background, Value::Null, &[&e]),
             completion(foreground, Value::Null, &[&f]),
             completion(foreground, Value::Null, &[&w]),
-            completion(foreground, Value::Null, &[&w]),
         ];
         let mut bodies: Vec<Vec<u8>> = fed.iter().map(|frame| frame.body.clone()).collect();
         fed.into_iter().for_each(|frame| proxy.on_server(frame));
