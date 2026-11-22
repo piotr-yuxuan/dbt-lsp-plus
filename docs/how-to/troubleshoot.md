@@ -137,7 +137,12 @@ seconds, 10 by default.
   `env_var` the editor's environment lacks (a GUI editor on macOS may
   not get the shell's); a hook (`on-run-start`) that fails; a package
   that is not installed; the warehouse's connection or authentication.
-  Fix it and save a file: `dbt lsp` compiles again.  An error in one
+  Once a file is fixed (`profiles.yml`, `dbt_project.yml`, a hook, a
+  package), save it: `dbt lsp` compiles again.  Once an environment
+  variable is set where the editor gets its environment, restart the
+  editor's language server: `dbt lsp` and the proxy keep the environment
+  they started with, and the proxy restarts a lost `dbt lsp` with its
+  own.  An error in one
   model is no such case: the other models compile, and the diagnostic on
   that model says it; nor is a first compilation that a save cuts short,
   which reports no count and no error, says nothing, and is followed by
