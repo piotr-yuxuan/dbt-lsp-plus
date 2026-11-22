@@ -92,6 +92,14 @@ fn in_front_of_the_real_dbt_lsp() {
     facts_in_the_hover(&mut session, &project);
     commands(&mut session, &project);
     rename_a_source_table_and_compile(&mut session, &project);
+    // The fixture's compilations compile, its standing warning aside, and end within a second.
+    let compiling = |m: &&Value| {
+        let text = m["params"]["message"].as_str().unwrap_or_default();
+        m["method"] == "window/showMessage"
+            && (text.starts_with("dbt lsp compiled nothing") || text.starts_with("dbt lsp has been compiling"))
+    };
+    let said: Vec<&Value> = session.received.iter().filter(compiling).collect();
+    assert!(said.is_empty(), "{said:?}");
     restart(&mut session, &project);
     assert!(session.finish().success());
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
@@ -143,6 +151,57 @@ fn the_shadow_in_front_of_the_real_dbt_lsp() {
     let references = lines.iter().find(|line| line["method"] == "references").unwrap();
     assert_eq!(references["oursOnly"][0]["path"], "snapshots/orders_snapshot.sql", "{references}");
     assert_eq!(lines.last().unwrap()["counts"], counts);
+}
+
+/// A compilation that compiled nothing, as dbt lsp 2.0.9's is when the
+/// profile names a missing `env_var`: said once, with dbt's error and dbt
+/// lsp's log, and not again after a save and its compilation.
+#[test]
+#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
+fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
+    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
+    let project = copy_fixture("live-compiled-nothing");
+    let home = project.with_file_name("home");
+    std::fs::create_dir_all(&home).unwrap();
+    if !has_lsp(&dbt, &home, true, "a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp") {
+        return;
+    }
+    let profile = std::fs::read_to_string(project.join("profiles.yml")).unwrap();
+    let missing = profile.replace("'target/shop.duckdb'", "\"{{ env_var('DBT_LSP_PLUS_TEST_MISSING') }}\"");
+    assert_ne!(missing, profile, "the fixture's profile names its database");
+    std::fs::write(project.join("profiles.yml"), missing).unwrap();
+    let project_arg = project.to_string_lossy().into_owned();
+    let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
+    let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
+    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
+    let mut session = Session::start(&server, &env, Some(&project));
+    session.timeout = Duration::from_secs(180);
+    session.initialize(&project);
+    let orders = project.join("models/marts/orders.sql");
+    // dbt lsp 2.0.9 compiles nothing on this didOpen, but the proxy's listing does.
+    session.open(&orders, None);
+    let compiled_nothing = |m: &Value| {
+        let text = m["params"]["message"].as_str().unwrap_or_default();
+        m["method"] == "window/showMessage" && text.starts_with("dbt lsp compiled nothing")
+    };
+    let shown = session.wait_for(compiled_nothing);
+    let text = shown["params"]["message"].as_str().unwrap();
+    let quoted = text.starts_with("dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error");
+    assert!(quoted && text.contains("DBT_LSP_PLUS_TEST_MISSING") && text.contains("logs/dbt-lsp.log"), "{text}");
+    assert_eq!(shown["params"]["type"], 1, "{shown}");
+    let completed =
+        |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+    let before = completed(&session);
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
+    let waited = Instant::now() + Duration::from_secs(60);
+    while completed(&session) == before && Instant::now() < waited {
+        session.request("workspace/symbol", json!({"query": "orders"}));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(completed(&session) > before, "no compilation after a save");
+    let said = session.received.iter().filter(|m| compiled_nothing(m)).count();
+    assert_eq!(said, 1, "said once");
+    assert!(session.finish().success());
 }
 
 /// The union in front of the real dbt lsp, by what dbt lsp received: in
