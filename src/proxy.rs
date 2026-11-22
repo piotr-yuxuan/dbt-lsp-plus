@@ -1365,11 +1365,14 @@ impl<W: Write> Proxy<W> {
         file: bool,
     ) -> Option<Option<&'a Value>> {
         let (path, scanned, offset) = self.scan_at(params, None)?;
-        let inside =
-            |call: &&scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
-        if let Some(call) = scanned.calls.iter().find(inside) {
-            let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
-            return named.then(|| index.and_then(|index| index.named(&call.name)));
+        // A `ref` or a `source` names a node at its arguments; a function, which a YAML file's scan holds too,
+        // names none.
+        let naming = |call: &&scan::Call| {
+            matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. })
+                && call.arguments.iter().any(|range| range.start <= offset && offset <= range.end)
+        };
+        if let Some(call) = scanned.calls.iter().find(naming) {
+            return Some(index.and_then(|index| index.named(&call.name)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
         let entry = navigation::reference_at(&path, &scanned, offset).filter(|name| {
