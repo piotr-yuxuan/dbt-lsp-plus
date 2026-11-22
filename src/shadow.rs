@@ -70,10 +70,10 @@ impl Relation {
     }
 }
 
-/// dbt lsp's answer as the shadow reads it: its locations, or why it is
+/// dbt lsp's response as the shadow reads it: its locations, or why it is
 /// not compared.
 #[derive(Debug, PartialEq)]
-pub enum Answer {
+pub enum Response {
     Locations(Vec<Location>),
     Apart(Relation),
 }
@@ -115,18 +115,18 @@ pub fn read(
     changed: bool,
     path_of: &dyn Fn(&str) -> Option<PathBuf>,
     exists: &dyn Fn(&Path) -> bool,
-) -> Answer {
+) -> Response {
     if message.get("error").is_some() {
-        return Answer::Apart(Relation::DbtError);
+        return Response::Apart(Relation::DbtError);
     }
     if changed {
-        return Answer::Apart(Relation::Changed);
+        return Response::Apart(Relation::Changed);
     }
     let result = &message["result"];
     let on_disk = |entry: &&Value| location(entry, path_of).is_some_and(|location| exists(&location.path));
     match entries(result).iter().all(on_disk) {
-        true => Answer::Locations(locations(result, path_of)),
-        false => Answer::Apart(Relation::DbtMissingFile),
+        true => Response::Locations(locations(result, path_of)),
+        false => Response::Apart(Relation::DbtMissingFile),
     }
 }
 
@@ -520,16 +520,16 @@ mod tests {
         let on_disk = |path: &Path| path != Path::new("/p/gone.sql");
         let read = |message: &Value, changed: bool| super::read(message, changed, &path_of, &on_disk);
         let error = json!({"id": 1, "error": {"code": -32603, "message": "no"}});
-        assert_eq!(read(&error, true), Answer::Apart(Relation::DbtError), "an error first");
+        assert_eq!(read(&error, true), Response::Apart(Relation::DbtError), "an error first");
         let found = json!({"id": 1, "result": lsp("/p/a.sql", (0, 0), (0, 0))});
-        assert_eq!(read(&found, true), Answer::Apart(Relation::Changed));
-        assert_eq!(read(&found, false), Answer::Locations(vec![at("/p/a.sql", (0, 0), (0, 0))]));
+        assert_eq!(read(&found, true), Response::Apart(Relation::Changed));
+        assert_eq!(read(&found, false), Response::Locations(vec![at("/p/a.sql", (0, 0), (0, 0))]));
         let gone = json!({"id": 1, "result": [lsp("/p/a.sql", (0, 0), (0, 0)), lsp("/p/gone.sql", (0, 0), (0, 0))]});
-        assert_eq!(read(&gone, false), Answer::Apart(Relation::DbtMissingFile));
-        assert_eq!(read(&gone, true), Answer::Apart(Relation::Changed), "a change before a missing file");
+        assert_eq!(read(&gone, false), Response::Apart(Relation::DbtMissingFile));
+        assert_eq!(read(&gone, true), Response::Apart(Relation::Changed), "a change before a missing file");
         let elsewhere = json!({"id": 1, "result": {"uri": "untitled:1", "range": {}}});
-        assert_eq!(read(&elsewhere, false), Answer::Apart(Relation::DbtMissingFile), "no file at all");
-        assert_eq!(read(&json!({"id": 1, "result": null}), false), Answer::Locations(vec![]));
+        assert_eq!(read(&elsewhere, false), Response::Apart(Relation::DbtMissingFile), "no file at all");
+        assert_eq!(read(&json!({"id": 1, "result": null}), false), Response::Locations(vec![]));
     }
 
     fn index() -> Index {

@@ -1922,10 +1922,10 @@ impl<W: Write> Proxy<W> {
             let file = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
             let inside = file.as_deref().is_some_and(|file| file.starts_with(root));
             let compared = match shadow::read(message, self.changes != changes, &path_of, &|path| path.is_file()) {
-                shadow::Answer::Apart(relation) => {
+                shadow::Response::Apart(relation) => {
                     shadow::Compared { relation, ours_only: Vec::new(), dbt_only: Vec::new(), both: 0 }
                 }
-                shadow::Answer::Locations(dbt) => {
+                shadow::Response::Locations(dbt) => {
                     let ours = match method {
                         "textDocument/references" if inside => self.on_references(params),
                         "textDocument/references" => None,
