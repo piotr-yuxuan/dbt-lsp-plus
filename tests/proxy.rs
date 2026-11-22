@@ -2482,12 +2482,13 @@ fn a_hover_on_a_ref_gets_the_summary_first_and_any_other_passes_byte_for_byte() 
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap();
-    assert_eq!(value, "model view, \"shop\".\"main\".\"stg_orders\"  \n`model.shop.stg_orders`\n\n---\n\nServer text");
+    let server = "\n\n---\n\n**dbt lsp**\n\nServer text";
+    assert_eq!(value, format!("model view, \"shop\".\"main\".\"stg_orders\"  \n`model.shop.stg_orders`{server}"));
     // Line 1, column 1 stands for the file's own model.
     let start = json!({"textDocument": {"uri": orders}, "position": {"line": 0, "character": 0}});
     let own = session.request("textDocument/hover", start);
     let value = own["result"]["contents"]["value"].as_str().unwrap();
-    assert_eq!(value, "model table, \"shop\".\"main\".\"orders\"  \n`model.shop.orders`\n\n---\n\nServer text");
+    assert_eq!(value, format!("model table, \"shop\".\"main\".\"orders\"  \n`model.shop.orders`{server}"));
     let elsewhere = json!({"textDocument": {"uri": orders}, "position": {"line": 3, "character": 0}});
     let plain = session.request("textDocument/hover", elsewhere);
     let expected = answer.replace("$ID", &plain["id"].to_string());

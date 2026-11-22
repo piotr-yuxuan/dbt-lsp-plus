@@ -220,12 +220,18 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
     Value::Array(answer.collect())
 }
 
-/// The server's answer to a hover, MESSAGE, with SUMMARY put first: before
-/// a rule in markdown, above a blank line in plain text, as the first item
-/// of an array of marked strings.  A null result becomes the summary alone,
-/// in markdown when MARKDOWN; an error, or contents of a shape LSP does not
-/// define, gives none, so that the answer passes as it came.  In markdown,
-/// the summary's line breaks are hard when HARD, else as written.
+/// The line that names the server's part of a merged hover, in markdown.
+const SERVER_PART: &str = "**dbt lsp**";
+
+/// The server's answer to a hover, MESSAGE, with SUMMARY put first and the
+/// server's text after it under a line that names it: before a rule and
+/// `SERVER_PART` in markdown, above a blank line and `dbt lsp:` in plain
+/// text, as the first item of an array of marked strings, `SERVER_PART`
+/// the second.  A null result, or a server's text that is empty or blank,
+/// becomes the summary alone, in markdown when MARKDOWN for a null result;
+/// an error, or contents of a shape LSP does not define, gives none, so
+/// that the answer passes as it came.  In markdown, the summary's line
+/// breaks are hard when HARD, else as written.
 pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -> Option<Value> {
     let mut merged = message.clone();
     let result = merged.get_mut("result")?;
@@ -234,15 +240,25 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
     let kind = result.pointer("/contents/kind").and_then(Value::as_str).map(str::to_owned);
     let kind = kind.or_else(|| result.is_null().then(|| if markdown { "markdown" } else { "plaintext" }.to_owned()));
     let contents = result.get("contents").cloned().unwrap_or(Value::Null);
+    let blank =
+        |item: &Value| item.as_str().or_else(|| item["value"].as_str()).is_some_and(|text| text.trim().is_empty());
     let joined = match (kind.as_deref(), contents) {
         (Some(kind), contents) => {
-            let (first, rule) = if kind == "markdown" { (marked, "---\n\n") } else { (summary.to_owned(), "") };
-            let rest = contents["value"].as_str().map_or_else(String::new, |value| format!("\n\n{rule}{value}"));
+            let (first, heading) = match kind {
+                "markdown" => (marked, format!("---\n\n{SERVER_PART}\n\n")),
+                _ => (summary.to_owned(), "dbt lsp:\n".to_owned()),
+            };
+            let text = contents["value"].as_str().filter(|value| !value.trim().is_empty());
+            let rest = text.map_or_else(String::new, |value| format!("\n\n{heading}{value}"));
             json!({"kind": kind, "value": format!("{first}{rest}")})
         }
-        (None, Value::Array(items)) => json!(std::iter::once(json!(marked)).chain(items).collect::<Vec<_>>()),
-        (None, Value::String(text)) => json!(format!("{marked}\n\n---\n\n{text}")),
-        (None, item @ Value::Object(_)) => json!([marked, item]),
+        (None, Value::Array(items)) if items.iter().all(blank) => json!([marked]),
+        (None, Value::Array(items)) => {
+            json!([json!(marked), json!(SERVER_PART)].into_iter().chain(items).collect::<Vec<_>>())
+        }
+        (None, item) if blank(&item) => json!(marked),
+        (None, Value::String(text)) => json!(format!("{marked}\n\n---\n\n{SERVER_PART}\n\n{text}")),
+        (None, item @ Value::Object(_)) => json!([marked, SERVER_PART, item]),
         _ => return None,
     };
     if result.is_null() {
@@ -593,22 +609,37 @@ mod tests {
     #[test]
     fn puts_the_summary_first_in_every_shape_of_hover() {
         let summary = "model table, x\ntags a";
+        let marked = "model table, x  \ntags a";
+        let headed = format!("{marked}\n\n---\n\n**dbt lsp**\n\nServer");
         let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let contents = |merged: Option<Value>| merged.unwrap()["result"]["contents"].clone();
-        let markdown = answer(json!({"contents": {"kind": "markdown", "value": "Server"}, "range": "kept"}));
-        let merged = merge_hover(&markdown, summary, true, true).unwrap();
-        assert_eq!(merged["result"]["contents"]["value"], "model table, x  \ntags a\n\n---\n\nServer");
-        assert_eq!(merged["result"]["range"], "kept");
-        let plain = answer(json!({"contents": {"kind": "plaintext", "value": "Server"}}));
-        assert_eq!(contents(merge_hover(&plain, summary, true, true))["value"], "model table, x\ntags a\n\nServer");
-        let string = answer(json!({"contents": "Server"}));
-        assert_eq!(contents(merge_hover(&string, summary, true, true)), "model table, x  \ntags a\n\n---\n\nServer");
-        let code = answer(json!({"contents": {"language": "sql", "value": "select 1"}}));
-        assert_eq!(contents(merge_hover(&code, summary, true, true))[1]["language"], "sql");
-        let array = answer(json!({"contents": ["a", "b"]}));
-        assert_eq!(contents(merge_hover(&array, summary, true, true)), json!(["model table, x  \ntags a", "a", "b"]));
-        let null = answer(Value::Null);
-        assert_eq!(contents(merge_hover(&null, summary, true, false)), json!({"kind": "plaintext", "value": summary}));
+        let markdown = json!({"contents": {"kind": "markdown", "value": "Server"}, "range": "kept"});
+        let code = json!({"language": "sql", "value": "select 1"});
+        // Each shape, whether the client reads markdown, and the contents merged.
+        let shapes = [
+            (markdown, true, json!({"kind": "markdown", "value": headed})),
+            (
+                json!({"contents": {"kind": "plaintext", "value": "Server"}}),
+                true,
+                json!({"kind": "plaintext", "value": "model table, x\ntags a\n\ndbt lsp:\nServer"}),
+            ),
+            (json!({"contents": "Server"}), true, json!(headed)),
+            (json!({"contents": code}), true, json!([marked, "**dbt lsp**", code])),
+            (json!({"contents": ["a", "b"]}), true, json!([marked, "**dbt lsp**", "a", "b"])),
+            (Value::Null, false, json!({"kind": "plaintext", "value": summary})),
+            // A server's blank text is no section: the summary by itself.
+            (
+                json!({"contents": {"kind": "markdown", "value": " \n"}}),
+                true,
+                json!({"kind": "markdown", "value": marked}),
+            ),
+            (json!({"contents": ""}), true, json!(marked)),
+            (json!({"contents": [" "]}), true, json!([marked])),
+        ];
+        for (result, markdown, expected) in shapes {
+            let merged = merge_hover(&answer(result.clone()), summary, true, markdown).unwrap();
+            assert_eq!(merged["result"]["contents"], expected, "{result}");
+            assert_eq!(merged["result"].get("range"), result.get("range"), "kept: {result}");
+        }
         let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
         assert_eq!(merge_hover(&error, summary, true, true), None);
         assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
