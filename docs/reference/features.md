@@ -118,8 +118,8 @@ then `dbt lsp`'s.
 With a `dbt lsp` that cannot start, its parse runs the same dbt and
 fails, and `nodeInfo` and a hover on a node give its failure.
 
-Once a session has a project, a hover, a definition, references, a
-rename or a call hierarchy on a file of another dbt project fails with
+Once a session has a project, a hover, a definition, references or a
+call hierarchy on a file of another dbt project fails with
 `<file> lies in the dbt project at <other>, and this session serves only
 the one at <root>`; in `merge` in front of `dbt lsp`, only when `dbt
 lsp` gives no answer.

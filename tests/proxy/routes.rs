@@ -191,7 +191,8 @@ fn a_document_of_another_project_is_told_where_it_lies() {
     fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
     fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
     session.open(&m, None);
-    let on_ref = json!({"textDocument": {"uri": uri(&m)}, "position": {"line": 0, "character": 24}});
+    let on_ref = json!({"textDocument": {"uri": uri(&m)}, "position": {"line": 0, "character": 24},
+                        "context": {"includeDeclaration": false}});
     let message = format!(
         "{} lies in the dbt project at {}, and this session serves only the one at {}",
         m.display(),
@@ -199,18 +200,35 @@ fn a_document_of_another_project_is_told_where_it_lies() {
         project.display()
     );
     let elsewhere = json!({"code": -32803, "message": message});
-    for method in ["textDocument/hover", "textDocument/definition"] {
+    let reading = [
+        "textDocument/hover",
+        "textDocument/definition",
+        "textDocument/references",
+        "textDocument/prepareCallHierarchy",
+    ];
+    for method in reading {
         let answer = session.request(method, on_ref.clone());
         assert_eq!((answer.get("result"), &answer["error"]), (None, &elsewhere), "{method}: {answer}");
     }
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}});
     let hints = session.request("textDocument/inlayHint", json!({"textDocument": {"uri": uri(&m)}, "range": range}));
     assert_eq!((hints.get("error"), &hints["result"]), (None, &json!([])), "{hints}");
-    // The methods of the document's own text, a document in no project, and the project's own, as before.
+    // The methods of the document's own text, a CTE's rename among them, a document in no project, and the
+    // project's own, as before.
     for path in [&m, &repo.join("ci.yml")] {
         let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(path)}}));
         assert!(outline.get("error").is_none() && outline["result"].is_array(), "{outline}");
     }
+    let cte = other.join("models/c.sql");
+    fs::write(&cte, "with a as (select 1) select * from a\n").unwrap();
+    session.open(&cte, None);
+    let on_a = json!({"textDocument": {"uri": uri(&cte)}, "position": {"line": 0, "character": 35}, "newName": "b"});
+    let rename = session.request("textDocument/rename", on_a);
+    let edits = rename["result"]["changes"][uri(&cte)].as_array().map_or(0, Vec::len);
+    assert_eq!((rename.get("error"), edits), (None, 2), "the CTE and its use: {rename}");
+    let at_start = json!({"textDocument": {"uri": uri(&repo.join("ci.yml"))}, "position": {"line": 0, "character": 0}});
+    let hover = session.request("textDocument/hover", at_start);
+    assert!(hover.get("error").is_none(), "{hover}");
     let orders = project.join("models/marts/orders.sql");
     let on_orders = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     let hover = session.request("textDocument/hover", on_orders);

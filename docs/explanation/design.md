@@ -609,16 +609,16 @@ in one of its packages, installed or local, as spelt or links resolved,
 and in another project when the walk up from it finds one
 (`locate::elsewhere`).  A request on a document of another project, of a
 method that reads the project and names its document by
-`textDocument.uri` (a hover, a definition, references, a rename,
+`textDocument.uri` (a hover, a definition, references,
 `prepareCallHierarchy`), fails with `<document> lies in the dbt project
 at <project>, and this session serves only the one at <root>`, alone and
 in `plus`; in `merge` in front of dbt lsp, dbt lsp's answer stands, and
 when it gives none that reason comes first.  Inlay hints there are `[]`,
 and a method set to `dbt` goes to dbt lsp.  The rest is answered as
-before: the methods of the document's own text, a document in no
-project, every request while the root's `dbt_project.yml` does not read,
-and a project nested under the root, which is the root's: one session
-serves one project (plan 049).
+before: the methods of the document's own text, a rename, which there
+is a CTE's alone, a document in no project, every request while the
+root's `dbt_project.yml` does not read, and a project nested under the
+root, which is the root's: one session serves one project (plan 049).
 
 On the folder's route and a document's, when the server command's first
 word is `dbt` (the default `dbt lsp` included), the dbt is the project's

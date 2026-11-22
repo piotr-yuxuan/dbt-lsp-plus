@@ -79,8 +79,10 @@ pub struct Capability {
     /// lsp is asked too, and its locations that match none of the proxy's
     /// follow them.  Empty for a method the proxy answers whole.
     pub kinds: &'static [(&'static str, &'static [&'static str])],
-    /// Its answer reads the project, its scan or its index, beyond the
-    /// document's text.
+    /// Whether a request on a document of another project, which it names
+    /// by `textDocument.uri`, gets `Elsewhere` (`Proxy::outside`): its
+    /// answer there would read the session's project, its scan or its
+    /// index, beyond the document's text.
     pub reads_project: bool,
 }
 
@@ -173,7 +175,6 @@ pub static CAPABILITIES: [Capability; 18] = [
         name: "textDocument/rename",
         key: Some("renameProvider"),
         kinds: &[("source", &["sql", "yaml", "python"]), ("cte", &["sql"])],
-        reads_project: true,
         ..DEFAULT
     },
     Capability { name: "textDocument/publishDiagnostics", combine: Combine::PerFile, ..DEFAULT },
