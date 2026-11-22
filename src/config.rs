@@ -432,6 +432,8 @@ pub struct Outcome {
     pub problems: Option<Vec<parse_log::Problem>>,
 }
 
+/// Where a parse's outcome goes, once, from the parse's thread: the front
+/// end hands it to `Workspace::parsed`.
 pub type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 
 /// Runs RUN, a `dbt parse`, as `run::start` runs it, and hands REPORT the

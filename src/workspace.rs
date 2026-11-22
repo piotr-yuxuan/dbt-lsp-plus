@@ -25,7 +25,12 @@ type Filled = Vec<(PathBuf, cache::Key, Arc<project::Scanned>)>;
 /// graph was made of, and whether it took the index's edges, alone.
 type MadeOf = (u64, u64, u64, bool);
 
-/// The core's state of the session's project.
+/// The core's state of the session's project.  A front end owes it: `epoch`
+/// bumped at each of its events, `fresh` set false at a change told,
+/// `notice` called before the parse a request asks for, each outcome a parse
+/// reports handed to `parsed`, and `stop` called last, once the runs that
+/// write in its cache have stopped.  Only the Workspace writes `index`,
+/// `failure` and `running`.
 #[derive(Default)]
 pub struct Workspace {
     /// The project directory: the server command's `--project-dir`, spelt
@@ -40,11 +45,15 @@ pub struct Workspace {
     pub cut: bool,
     /// The front end's count of its events: the scan looks at the files once an epoch.
     pub epoch: u64,
+    /// The last parse's index: `parsed` alone writes it, as it moves the
+    /// graph's generation with it.
     pub index: Option<config::ParseIndex>,
     /// Whether no change was told, nor found on disk by `notice`, since the last parse started.
     pub fresh: bool,
     /// Why the last parse failed, or none could start, as logged.
     pub failure: Option<String>,
+    /// The parse under way: `parse` alone starts it, and `parsed` or `stop`
+    /// ends it; dropped instead, dbt would run on to its deadline.
     pub running: Option<run::Running>,
     /// The scan of the project, kept between requests, and refreshed once
     /// an epoch: one a request or event.
