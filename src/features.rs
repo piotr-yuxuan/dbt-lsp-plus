@@ -576,6 +576,49 @@ mod tests {
     }
 
     #[test]
+    fn each_scanned_type_has_its_kind_in_workspace_symbols() {
+        let files = [
+            ("dbt_project.yml", "name: r\n"),
+            ("models/m.sql", "select 1"),
+            ("models/_sources.yml", "sources:\n  - name: raw\n    tables:\n      - name: t\n"),
+            ("models/d.md", "{% docs d %}text{% enddocs %}\n"),
+            ("seeds/s.csv", "a\n1\n"),
+            ("snapshots/snap.sql", "{% snapshot snap %}select 1{% endsnapshot %}\n"),
+            ("analyses/a.sql", "select 1"),
+            ("tests/t.sql", "select 1"),
+            ("macros/mac.sql", "{% macro mac() %}1{% endmacro %}\n"),
+            ("macros/positive.sql", "{% test positive(model, column_name) %}select 1{% endtest %}\n"),
+            ("functions/f.sql", "x * 2"),
+        ];
+        let root = crate::project::scratch_project("features-each-type-s-kind", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        let symbols = workspace_symbols(&project, "", Encoding::Utf16);
+        let mut kinds: Vec<(&str, u64)> = symbols
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["data"]["resourceType"].as_str().unwrap(), s["kind"].as_u64().unwrap()))
+            .collect();
+        kinds.sort();
+        // LSP's Class 5, Struct 23, Event 24, Function 12, String 15, Interface 11; a generic test's block is a
+        // macro, dbt's resource type `source` a source table.
+        let expected = [
+            ("analysis", 5),
+            ("doc", 15),
+            ("function", 12),
+            ("macro", 12),
+            ("macro", 12),
+            ("model", 5),
+            ("seed", 23),
+            ("snapshot", 5),
+            ("source", 11),
+            ("test", 24),
+        ];
+        assert_eq!(kinds, expected, "each resource's type and kind, a generic test's block a macro");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn call_hierarchy_goes_both_ways_from_a_call_site_or_a_definition() {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
         let graph = Graph::scanned(&project);
