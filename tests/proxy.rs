@@ -541,6 +541,18 @@ fn alone_the_proxy_s_own_features_answer() {
 }
 
 #[test]
+fn a_request_the_proxy_answers_without_its_parameters_is_invalid() {
+    let (mut session, _) = Session::fake("standalone-invalid", json!({"no_lsp": true}));
+    session.initialize(&fixture());
+    let invalid = json!({"code": -32602, "message": "invalid parameters"});
+    for method in ["workspace/symbol", "textDocument/documentSymbol", "textDocument/foldingRange"] {
+        let answer = session.request(method, json!({}));
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &invalid), "{method}: {answer}");
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
     let mut manifest = manifest();
     let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
@@ -566,6 +578,30 @@ fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
     let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
     let outgoing = session.request("callHierarchy/outgoingCalls", orders);
     assert_eq!(details(&outgoing["result"], "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_call_hierarchy_asks_for_a_parse_alone_and_none_in_front() {
+    let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    // Alone, the graph is the last parse's: a follower asks for one, with no document opened.
+    let (mut session, log) = Session::fake("hierarchy-parse-alone", json!({"no_lsp": true, "manifest": manifest()}));
+    session.initialize(&fixture());
+    session.request("callHierarchy/outgoingCalls", orders.clone());
+    until_logged(&log, "the parse", |_| parses(&log).len() == 1);
+    assert!(session.finish().success());
+    // In front, once dbt lsp compiled, the graph is its listing's: none.
+    let (mut session, log) = Session::fake("hierarchy-parse-in-front", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    let path = fixture().join("models/marts/orders.sql");
+    session.open(&path, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
+    let prepared = session.request("textDocument/prepareCallHierarchy", on_with);
+    assert!(prepared.get("result").is_some(), "{prepared}");
+    let outgoing = session.request("callHierarchy/outgoingCalls", orders);
+    assert!(outgoing.get("result").is_some(), "{outgoing}");
+    parses_stay(&log, 0);
     assert!(session.finish().success());
 }
 
@@ -1792,6 +1828,22 @@ fn the_proxy_never_reuses_the_id_of_a_pending_request_of_the_client_s() {
     session.notify("test/release", json!({}));
     let answer = session.wait_for(|m| m["id"] == "dbt-lsp-plus/1");
     assert_eq!(answer["result"]["echo"], "textDocument/definition");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn the_listing_a_hover_starts_never_takes_the_hover_s_id() {
+    let (mut session, log) = Session::fake("hover-id-skip", json!({}));
+    session.initialize(&fixture());
+    // No document opened: the merged hover's listing is the proxy's first request.
+    let orders = fixture().join("models/marts/orders.sql");
+    let hover = json!({"jsonrpc": "2.0", "id": "dbt-lsp-plus/1", "method": "textDocument/hover",
+                       "params": position_in(&orders, "select", 1)});
+    session.send(&hover);
+    until_logged(&log, "the listing", |_| listings(&log, "*") == 1);
+    assert_ne!(listing_id(&log), "dbt-lsp-plus/1");
+    let answer = session.wait_for(|m| m["id"] == "dbt-lsp-plus/1");
+    assert_eq!(answer["result"]["echo"], "textDocument/hover");
     assert!(session.finish().success());
 }
 
