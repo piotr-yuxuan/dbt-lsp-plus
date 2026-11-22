@@ -9,11 +9,12 @@ use crate::commands;
 use crate::graph::{self, Graph, ServerNode};
 use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
-use crate::project::{self, Project};
+use crate::project::{self, Project, Scanned};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
 use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, shadow, sources,
+    cache, config, document, features, navigation, packages, parse_log, properties, reference, runs, scan, shadow,
+    sources,
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -1156,16 +1157,26 @@ impl<W: Write> Proxy<W> {
         Some((path, text, offset))
     }
 
+    /// The document of a request, its scan and the offset of the request's
+    /// position in it: PROJECT's scan of the file where PROJECT holds it
+    /// with the same text, else a scan of its text, open or on disk.
+    fn scan_at(&self, params: &Value, project: Option<&Project>) -> Option<(PathBuf, Arc<Scanned>, usize)> {
+        let (path, text, offset) = self.document_at(params)?;
+        let held = project.and_then(|project| project.files.get(&path)).filter(|held| held.text == text);
+        let scanned = held.cloned().unwrap_or_else(|| Arc::new(Scanned::of(&path, text)));
+        Some((path, scanned, offset))
+    }
+
     /// The source named at the position of a request on a document, with
     /// the project scanned.  Only the scan holds every occurrence: on a
     /// document it does not hold, such as a file not saved yet or one
     /// outside the resource paths, there is none, and the request goes to
     /// the server.
-    fn source_at(&self, params: &Value) -> Option<(Rc<Project>, sources::Target)> {
-        let (path, text, offset) = self.document_at(params)?;
-        let target = sources::target_at(&path, &text, offset)?;
+    fn source_at(&self, params: &Value) -> Option<(Rc<Project>, reference::Name)> {
+        let (path, scanned, offset) = self.scan_at(params, None)?;
+        let name = sources::name_at(&scanned, offset)?;
         let project = self.project().filter(|project| project.files.contains_key(&path))?;
-        Some((project, target))
+        Some((project, name))
     }
 
     /// How the proxy answers the client's request METHOD: itself, as an owned
@@ -1214,18 +1225,18 @@ impl<W: Write> Proxy<W> {
     /// target of `navigation`.
     fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
         let method = capability::of(method).filter(|capability| !capability.kinds.is_empty())?.name;
-        let (path, text, offset) = self.document_at(params)?;
+        let (path, scanned, offset) = self.scan_at(params, None)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
         let answered = match method {
             "textDocument/definition" => {
-                navigation::target_at(&path, &text, offset).is_some_and(|target| self.claims(method, &target, &path))
+                navigation::reference_at(&path, &scanned, offset).is_some_and(|name| self.claims(method, &name, &path))
             }
             // A CTE lives in its file; a source only the scan sees whole, and so its references.
-            "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            "textDocument/rename" if sql && document::cte_at(&scanned.text, offset).is_some() => true,
             // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
             "textDocument/references" => {
-                let claimed = navigation::target_at(&path, &text, offset)
-                    .is_some_and(|target| self.claims(method, &target, &path));
+                let claimed = navigation::reference_at(&path, &scanned, offset)
+                    .is_some_and(|name| self.claims(method, &name, &path));
                 claimed && self.root.as_ref().is_some_and(|root| path.starts_with(root))
             }
             _ => self.source_at(params).is_some(),
@@ -1233,12 +1244,12 @@ impl<W: Write> Proxy<W> {
         answered.then_some(method)
     }
 
-    /// Whether the proxy answers METHOD itself on TARGET in the file at
+    /// Whether the proxy answers METHOD itself on NAME in the file at
     /// PATH, as its capability's kinds say, when the table lists it.
-    fn claims(&self, method: &str, target: &navigation::Target, path: &Path) -> bool {
+    fn claims(&self, method: &str, name: &reference::Name, path: &Path) -> bool {
         let Some(place) = place(path) else { return false };
         let kinds = capability::of(method).map_or(&[][..], |capability| capability.kinds);
-        let listed = |(kind, places): &&(&str, &[&str])| *kind == target.kind() && places.contains(&place);
+        let listed = |(kind, places): &&(&str, &[&str])| *kind == name.kind.flag() && places.contains(&place);
         self.table.lists(method) && kinds.iter().any(|kind| listed(&kind))
     }
 
@@ -1246,11 +1257,12 @@ impl<W: Write> Proxy<W> {
     /// 2.0.9's lookup: its location, several, or null, found; none where
     /// the position names no target.
     fn on_definition(&self, params: &Value) -> Option<Answer> {
-        let (path, text, offset) = self.document_at(params)?;
-        let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
-        let Some(project) = self.project() else { return Some(self.unreadable()) };
+        let project = self.project();
+        let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
+        let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
+        let Some(project) = project else { return Some(self.unreadable()) };
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
-        let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
+        let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &name));
         Some(match &locations[..] {
             [] => Answer::Found(Value::Null),
             [location] => Answer::Found(location.clone()),
@@ -1261,16 +1273,17 @@ impl<W: Write> Proxy<W> {
     /// The references of the source, the node or the macro at the request's
     /// position, with their declaration when the client asks.
     fn on_references(&self, params: &Value) -> Option<Answer> {
-        let (path, text, offset) = self.document_at(params)?;
-        let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
-        let Some(project) = self.project() else { return Some(self.unreadable()) };
+        let project = self.project();
+        let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
+        let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
+        let Some(project) = project else { return Some(self.unreadable()) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
-        if let navigation::Target::Source(source) = &target {
+        if name.source_table().is_some() {
             let uri_of = |path: &Path| self.uri_of(path);
-            return Some(Answer::Found(sources::references(&project, source, declaration, self.encoding, &uri_of)));
+            return Some(Answer::Found(sources::references(&project, &name, declaration, self.encoding, &uri_of)));
         }
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
-        let found = navigation::references(&lookup, &path, &target, declaration);
+        let found = navigation::references(&lookup, &path, &name, declaration);
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
     }
 
@@ -1300,10 +1313,10 @@ impl<W: Write> Proxy<W> {
     /// The rename of the source at the request's position, in a file the scan
     /// holds: a rename that left the asking file as it is would be wrong.
     fn on_source(&self, params: &Value) -> Option<Answer> {
-        let Some((project, target)) = self.source_at(params) else { return Some(Answer::Empty) };
+        let Some((project, name)) = self.source_at(params) else { return Some(Answer::Empty) };
         let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
-        Some(Answer::of_rename(sources::rename(&project, &target, new, self.encoding, &uri_of)))
+        Some(Answer::of_rename(sources::rename(&project, &name, new, self.encoding, &uri_of)))
     }
 
     /// The rename of the source, else of the CTE, at the request's position.
@@ -1351,28 +1364,30 @@ impl<W: Write> Proxy<W> {
         params: &Value,
         file: bool,
     ) -> Option<Option<&'a Value>> {
-        let (path, text, offset) = self.document_at(params)?;
-        let inside =
-            |call: &scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
-        // YAML and a Python model call outside Jinja, as plan 002 reads them.
-        let plain =
-            path.extension().is_some_and(|extension| ["yml", "yaml", "py"].contains(&&*extension.to_string_lossy()));
-        let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
-        if let Some(call) = calls.into_iter().find(inside) {
-            let named = matches!(call.target, scan::Target::Ref { .. } | scan::Target::Source { .. });
-            return named.then(|| index.and_then(|index| index.named(&call.target)));
+        let (path, scanned, offset) = self.scan_at(params, None)?;
+        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
+        // The calls of `sources::file_calls`, which leave out the function calls that a YAML file's scan holds too.
+        let inside = |call: &&scan::Call| {
+            call.arguments.iter().any(|range| range.start <= offset && offset <= range.end)
+                && !(yaml && call.name.kind == reference::Kind::Function)
+        };
+        if let Some(call) = scanned.calls.iter().find(inside) {
+            let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
+            return named.then(|| index.and_then(|index| index.named(&call.name)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
-        let entry = navigation::target_at(&path, &text, offset).filter(|target| {
-            matches!(target, navigation::Target::Named { kind: "model" | "seed" | "snapshot" | "analysis", .. })
-                || matches!(target, navigation::Target::Source(sources::Target::Table { .. }))
+        let entry = navigation::reference_at(&path, &scanned, offset).filter(|name| {
+            matches!(
+                name.kind,
+                reference::Kind::Entry { label: "model" | "seed" | "snapshot" | "analysis" }
+                    | reference::Kind::Table { .. }
+            )
         });
-        if let Some(target) = entry {
+        if let Some(name) = entry {
             let project = self.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
+            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
             return Some(index.zip(found.first()).and_then(|(index, found)| index.node(&found.id)));
         }
-        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
         if let Some(index) = index {
             return index.of_file(&relative.to_string_lossy()).map(Some);
@@ -1899,12 +1914,12 @@ impl<W: Write> Proxy<W> {
         // A doc's or a generic test's block, from the project's scan, which the cache keeps between requests, as
         // for `node_at`'s entry and file's start.
         let block = || {
-            let (path, text, offset) = self.document_at(params)?;
-            let target = navigation::target_at(&path, &text, offset)
-                .filter(|target| matches!(target, navigation::Target::Named { kind: "doc" | "test", .. }))?;
+            let (path, scanned, offset) = self.scan_at(params, None)?;
+            let name = navigation::reference_at(&path, &scanned, offset)
+                .filter(|name| matches!(name.kind, reference::Kind::Doc | reference::Kind::Test))?;
             let project = self.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &target);
-            navigation::hover(&project, &target, found.first()?, self.markdown).map(|text| (text, false))
+            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
+            navigation::hover(&project, &name, found.first()?, self.markdown).map(|text| (text, false))
         };
         let nothing = if named.is_some() && index.is_none() { Part::Unindexed } else { Part::Nothing };
         summary.or_else(block).map_or(nothing, |(text, hard)| Part::Hover(text, hard))
@@ -2210,21 +2225,22 @@ impl<W: Write> Proxy<W> {
                     shadow::compare(&shadow::locations(&ours, &path_of), &dbt)
                 }
             };
-            let read = self.document_at(params);
-            let target = read.and_then(|(path, text, offset)| navigation::target_at(&path, &text, offset));
+            let project = self.project();
+            let read = self.scan_at(params, project.as_deref());
+            let name = read.and_then(|(path, scanned, offset)| navigation::reference_at(&path, &scanned, offset));
             let relative = file.as_deref().and_then(|file| file.strip_prefix(root).ok());
-            let known = self.parsing.index.as_ref().zip(self.project()).zip(relative.zip(target.as_ref()));
-            let oracle = known.and_then(|((index, project), (relative, target))| {
-                shadow::oracle(index, &project, &relative.to_string_lossy(), target)
+            let known = self.parsing.index.as_ref().zip(project).zip(relative.zip(name.as_ref()));
+            let oracle = known.and_then(|((index, project), (relative, name))| {
+                shadow::oracle(index, &project, &relative.to_string_lossy(), name)
             });
             let parsing = &self.parsing;
             let index = json!({"present": parsing.index.is_some(), "fresh": parsing.fresh,
                                "running": parsing.running.is_some()});
             shadow::Record {
                 method: method.trim_start_matches("textDocument/").to_owned(),
-                kind: target.as_ref().map_or("none", navigation::Target::kind),
+                kind: name.as_ref().map_or("none", |name| name.kind.flag()),
                 place: file.as_deref().and_then(place).unwrap_or("other"),
-                target: target.as_ref().map_or(Value::Null, shadow::target),
+                target: name.as_ref().map_or(Value::Null, shadow::target),
                 file,
                 compared,
                 index,
@@ -3271,6 +3287,40 @@ mod tests {
         assert_eq!(late(None, false), plain, "no compilation");
         assert_eq!(late(Some(Instant::now()), false), format!("{plain}: it is compiling the project"));
         assert_eq!(late(Some(Instant::now() - COMPILE_STALL), true), plain, "a stall told");
+    }
+
+    #[test]
+    fn a_request_reads_the_held_scan_until_the_open_text_differs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let path = root.join("models/marts/orders.sql");
+        let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
+        let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
+        let project = proxy.project().unwrap();
+        let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
+        assert!(Arc::ptr_eq(&scanned, &project.files[&path]), "the project's scan of the file");
+        let open = "select 1";
+        proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": features::uri(&path), "text": open}}));
+        let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
+        assert!(!Arc::ptr_eq(&scanned, &project.files[&path]), "a scan of its own");
+        assert_eq!(scanned.text, open);
+    }
+
+    #[test]
+    fn a_node_s_information_at_a_function_s_argument_in_sql_is_empty_and_at_its_start_the_file_s() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let path = root.join("models/marts/uses_f.sql");
+        let text = "select {{ function('f') }}(1) as v";
+        let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
+        proxy.documents.insert(path.clone(), text.to_owned());
+        let node = json!({"unique_id": "model.shop.uses_f", "name": "uses_f", "resource_type": "model",
+                          "package_name": "shop", "original_file_path": "models/marts/uses_f.sql", "config": {}});
+        let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_f": node}});
+        proxy.parsing.index = Some(config::ParseIndex::of(&manifest));
+        let at = |character: usize| json!({"arguments": [{"uri": features::uri(&path), "position": {"line": 0, "character": character}}]});
+        // A call whose argument holds the position names its node, or none, as a function's does.
+        assert_eq!(proxy.node_info(&at(text.find("'f'").unwrap() + 1)), Some(Answer::Empty));
+        let Some(Answer::Found(start)) = proxy.node_info(&at(0)) else { panic!("no node at the file's start") };
+        assert_eq!(start["unique_id"], "model.shop.uses_f");
     }
 
     #[test]

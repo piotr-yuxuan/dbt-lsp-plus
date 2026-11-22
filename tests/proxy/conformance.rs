@@ -12,6 +12,7 @@
 use crate::support::scratch;
 use dbt_lsp_plus::graph::{Edge, Graph};
 use dbt_lsp_plus::project::{self, Project};
+use dbt_lsp_plus::reference::{Kind, Name};
 use dbt_lsp_plus::{config, navigation, properties, scan, sources};
 use regex::Regex;
 use serde_json::Value;
@@ -265,28 +266,29 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         }
     };
     // A call as written, and what navigation looks up for it.
-    let written = |target: &scan::Target| match target {
-        scan::Target::Ref { package, name, version } => {
+    let written = |target: &Name| match target {
+        Name { kind: Kind::Ref, package, name, version } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
             let version = version.as_ref().map_or_else(String::new, |version| format!(", v={version}"));
-            (format!("ref({}{version})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+            (format!("ref({}{version})", quoted.join(", ")), Some(target.clone()))
         }
-        scan::Target::Source { source, table } => {
-            let table_target = sources::Target::Table { source: source.clone(), table: table.clone() };
-            (format!("source('{source}', '{table}')"), Some(navigation::Target::Source(table_target)))
+        Name { kind: Kind::Table { source }, name: table, .. } => {
+            let table_target = Name::new(Kind::Table { source: source.clone() }, None, table);
+            (format!("source('{source}', '{table}')"), Some(table_target))
         }
-        scan::Target::Macro { package, name } => {
+        Name { kind: Kind::Macro, package, name, .. } => {
             let written = format!("{}{name}()", package.iter().map(|p| format!("{p}.")).collect::<String>());
-            (written, Some(navigation::Target::Call(target.clone())))
+            (written, Some(target.clone()))
         }
-        scan::Target::Dispatch { package, name } => (
+        Name { kind: Kind::Dispatch, package, name, .. } => (
             format!("adapter.dispatch('{name}'{})", package.iter().map(|p| format!(", '{p}'")).collect::<String>()),
             None,
         ),
-        scan::Target::Function { package, name } => {
+        Name { kind: Kind::Function, package, name, .. } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
-            (format!("function({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
+            (format!("function({})", quoted.join(", ")), Some(target.clone()))
         }
+        _ => unreachable!("no call names {target:?}"),
     };
     // ID, then each macro that it reaches through the graph's edges: through
     // plain calls only, unless DISPATCHED, since dbt renders only the
@@ -297,9 +299,7 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         while let Some(from) = reached.get(next).cloned() {
             let calls = entities.get(from.as_str()).map_or(&[][..], |holder| holder.calls.as_slice());
             let plain = |edge: &Edge| {
-                calls
-                    .iter()
-                    .any(|call| matches!(call.target, scan::Target::Macro { .. }) && edge.sites.contains(&call.range))
+                calls.iter().any(|call| matches!(call.name.kind, Kind::Macro) && edge.sites.contains(&call.range))
             };
             let edges = graph.edges.iter().filter(|edge| edge.from == from && edge.to.starts_with("macro."));
             for edge in edges.filter(|edge| dispatched || plain(edge)) {
@@ -312,7 +312,7 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         reached
     };
     // What the graph and navigation answer for CALL, in the file of HOLDER.
-    let answers = |holder: &project::Entity, call: &scan::Call, target: Option<navigation::Target>| {
+    let answers = |holder: &project::Entity, call: &scan::Call, target: Option<Name>| {
         let edges = graph.edges.iter().filter(|edge| edge.from == holder.id && edge.sites.contains(&call.range));
         let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
         let navigated = target.map(|target| {
@@ -338,14 +338,11 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         let rendered = reached(&entity.id, false);
         for holder in reached(&entity.id, true).iter().filter_map(|id| entities.get(id.as_str())) {
             for call in &holder.calls {
-                let (written, target) = written(&call.target);
+                let (written, target) = written(&call.name);
                 let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
                 let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
                 named.extend(dbt.iter().cloned());
-                let reference = matches!(
-                    call.target,
-                    scan::Target::Ref { .. } | scan::Target::Source { .. } | scan::Target::Function { .. }
-                );
+                let reference = matches!(call.name.kind, Kind::Ref | Kind::Table { .. } | Kind::Function);
                 let in_rendering = target.is_some() && rendered.contains(&holder.id);
                 let Some(subject) = subject(entity, holder, reference, in_rendering) else { continue };
                 for (lookup, ours) in answers(holder, call, target) {
@@ -368,27 +365,27 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
 /// references.
 fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<String> {
     let leads_back = |found: &navigation::Found| {
-        let text = project.text(&found.path).unwrap_or_default();
-        let back = navigation::target_at(&found.path, text, found.range.start);
+        let file = project.files.get(&found.path);
+        let back = file.and_then(|file| navigation::reference_at(&found.path, file, found.range.start));
         back.is_some_and(|target| navigation::resolve(lookup, &found.path, &target).iter().any(|to| to.id == found.id))
     };
     let mut missed = Vec::new();
     for (path, file) in &project.files {
         for call in &file.calls {
-            let at = match &call.target {
-                scan::Target::Ref { .. } | scan::Target::Function { .. } => {
+            let at = match &call.name {
+                Name { kind: Kind::Ref | Kind::Function, .. } => {
                     call.arguments.last().cloned().unwrap_or(call.range.clone())
                 }
-                scan::Target::Macro { name, .. } => call.range.end - name.len()..call.range.end,
+                Name { kind: Kind::Macro, name, .. } => call.range.end - name.len()..call.range.end,
                 _ => continue,
             };
-            let target = navigation::Target::Call(call.target.clone());
+            let target = call.name.clone();
             if navigation::resolve(lookup, path, &target).is_empty() {
                 continue;
             }
             let references = navigation::references(lookup, path, &target, false);
             if !references.iter().any(|found| found.path == *path && found.range == at) {
-                missed.push(format!("{} {:?}", path.display(), call.target));
+                missed.push(format!("{} {:?}", path.display(), call.name));
             }
             for found in references.iter().filter(|found| !leads_back(found)) {
                 missed.push(format!("{}:{:?} leads elsewhere than {}", found.path.display(), found.range, found.id));
@@ -408,7 +405,7 @@ static DOC_CALL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bdoc\s*\(\s*(
 /// rendered in the description that holds the call, a column's or the
 /// node's own.
 fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lookup) -> Vec<Divergence> {
-    let resolved = |path: &Path, target: &navigation::Target| -> BTreeSet<String> {
+    let resolved = |path: &Path, target: &Name| -> BTreeSet<String> {
         navigation::resolve(lookup, path, target).into_iter().map(|found| found.id).collect()
     };
     let ids = |section: &str, keep: &dyn Fn(&Value) -> bool| -> BTreeSet<String> {
@@ -429,9 +426,9 @@ fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lo
             let description = description.as_str().unwrap_or_default();
             let name_on = text[offset..].trim_start_matches(['\'', '"', '\\']);
             let literal: String = name_on.chars().take_while(|c| !matches!(c, '\'' | '"' | '\\')).collect();
-            let (name, ours) = match navigation::target_at(path, text, offset) {
-                Some(navigation::Target::Named { kind: "doc", package, name }) => {
-                    let ours = resolved(path, &navigation::Target::Named { kind: "doc", package, name: name.clone() });
+            let (name, ours) = match navigation::reference_at(path, &project.files[path], offset) {
+                Some(Name { kind: Kind::Doc, package, name, .. }) => {
+                    let ours = resolved(path, &Name::new(Kind::Doc, package.as_deref(), &name));
                     (name, ours)
                 }
                 _ => (literal, BTreeSet::new()),
@@ -456,7 +453,7 @@ fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lo
         let file = format!("{package}://{}", path.strip_prefix(dir).unwrap().to_string_lossy());
         let entries = properties::entries(text);
         for entry in entries.iter().filter(|entry| PATCHED.contains(&entry.label)) {
-            let target = navigation::target_at(path, text, entry.name_range.start);
+            let target = navigation::reference_at(path, &project.files[path], entry.name_range.start);
             let ours = target.map_or_else(BTreeSet::new, |target| resolved(path, &target));
             let patched = |e: &Value| e["patch_path"] == file.as_str() && e["name"] == entry.name.as_str();
             let dbt: BTreeSet<String> =

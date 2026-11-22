@@ -265,10 +265,12 @@ By what the agent reads:
 - `no dbt project at <root>: its dbt_project.yml is missing, is not
   YAML, or names no project`: the project's file no longer reads, as
   mid-edit; fix it, and the next request reads it again.  In front of
-  `dbt lsp`, a definition or references at a kind listed below gives it
-  only when `dbt lsp` gave no answer either, followed by `; ` and why;
-  workspace symbols and the call hierarchy give it alone; at a kind not
-  listed, the request is `dbt lsp`'s and never gives it.
+  `dbt lsp`, a definition or references at a kind listed in [Where
+  dbt-lsp-plus answers definitions and
+  references](#where-dbt-lsp-plus-answers-definitions-and-references)
+  gives it only when `dbt lsp` gave no answer either, followed by `; `
+  and why; workspace symbols and the call hierarchy give it alone; at a
+  kind not listed, the request is `dbt lsp`'s and never gives it.
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not

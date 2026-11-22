@@ -110,7 +110,7 @@ impl Graph {
         let mut sites: BTreeMap<(String, String), Vec<Range<usize>>> = BTreeMap::new();
         for entity in &project.entities {
             for call in &entity.calls {
-                for to in lookup.call(&entity.package, &call.target).iter().filter(|to| to.id != entity.id) {
+                for to in lookup.call(&entity.package, &call.name).iter().filter(|to| to.id != entity.id) {
                     sites.entry((entity.id.clone(), to.id.clone())).or_default().push(call.range.clone());
                 }
             }

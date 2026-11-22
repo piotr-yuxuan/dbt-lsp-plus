@@ -40,8 +40,9 @@ fails there (its dbt lsp, else the proxy's parse).
   when `dbt lsp` fails, exits or is not running, the proxy answers with
   its part, else its empty where it claims the position and for hints,
   else error -32803 with why (`dbt lsp did not answer within 2 s`,
-  `dbt lsp failed: ...`), and logs once per method and deadline that
-  `dbt lsp` was late (`window/logMessage`, type 4).
+  `dbt lsp failed: ...`), and logs that `dbt lsp` was late
+  once per method, deadline and what the client got
+  (`window/logMessage`, type 4).
   Set a method to `dbt` (`--mode textDocument/hover=dbt`) to wait for
   `dbt lsp` however long it takes.  Any other slow answer is the
   server's.

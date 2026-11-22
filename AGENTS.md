@@ -37,6 +37,7 @@ release adds a commit to `origin/main`, so a clone pulls (`git pull
 ```
 src/rpc.rs                    framing; frames keep their bytes
 src/text.rs                   LSP positions, encodings, incremental changes
+src/reference.rs              what a place of a document names: its Name, and the flag's word for its kind
 src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
@@ -44,7 +45,7 @@ src/project.rs                the resources of a project and its packages
 src/cache.rs                  the scan kept between requests, each file by its metadata
 src/graph.rs                  the dependency graph: scanned, then the server's or the manifest's
 src/sources.rs                references and renames of sources
-src/navigation.rs             the targets of definitions and references, dbt's one lookup
+src/navigation.rs             the Name at a position, from the document's scan, and where it leads: dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/answer.rs                 what a request gets: found, empty, or unanswered with its reasons, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary

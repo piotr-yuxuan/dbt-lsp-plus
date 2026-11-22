@@ -4,7 +4,8 @@
 //! Jinja tags and in YAML without them, and declared under `sources:` in a
 //! properties file.  Every function here is pure.
 
-use crate::project::{self, Insertion, Project, SourceTable};
+use crate::project::{self, Insertion, Project, Scanned, SourceTable};
+use crate::reference::{self, Name};
 use crate::scan::{self, Call};
 use crate::text::{Encoding, LineStarts};
 use crate::yaml;
@@ -14,13 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-
-/// What a position names: a source table, or a whole source.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Target {
-    Table { source: String, table: String },
-    Source { source: String },
-}
 
 /// A place where a source or a table is named, and whether it declares it.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,54 +37,55 @@ pub fn file_calls(path: &Path, text: &str) -> Vec<Call> {
     }
 }
 
-/// The argument of CALL that names TARGET, if CALL is a `source()` naming it.
-fn argument_naming<'a>(call: &'a Call, target: &Target) -> Option<&'a Range<usize>> {
-    let scan::Target::Source { source, table } = &call.target else { return None };
-    match target {
-        Target::Table { source: s, table: t } if s == source && t == table => call.arguments.get(1),
-        Target::Source { source: s } if s == source => call.arguments.first(),
+/// The argument of CALL that names NAME, if CALL is a `source()` naming it.
+fn argument_naming<'a>(call: &'a Call, name: &Name) -> Option<&'a Range<usize>> {
+    let Name { kind: reference::Kind::Table { source }, name: table, .. } = &call.name else { return None };
+    match name.source_table()? {
+        (s, Some(t)) if s == source && t == table => call.arguments.get(1),
+        (s, None) if s == source => call.arguments.first(),
         _ => None,
     }
 }
 
-/// The source target at OFFSET of TEXT, the file at PATH: an argument of a
-/// `source()` call, or a source's or table's `name:` under `sources:`.
-pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
+/// The source or table named at OFFSET of the file whose scan is SCANNED:
+/// an argument of a `source()` call, or a source's or table's `name:` under
+/// `sources:`.
+pub fn name_at(scanned: &Scanned, offset: usize) -> Option<Name> {
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
-    for call in file_calls(path, text) {
-        let scan::Target::Source { source, table } = call.target else { continue };
+    for call in &scanned.calls {
+        let Name { kind: reference::Kind::Table { source }, .. } = &call.name else { continue };
         match (call.arguments.first().is_some_and(inside), call.arguments.get(1).is_some_and(inside)) {
-            (true, _) => return Some(Target::Source { source }),
-            (_, true) => return Some(Target::Table { source, table }),
+            (true, _) => return Some(Name::new(reference::Kind::Source, None, source)),
+            (_, true) => return Some(call.name.clone()),
             _ => {}
         }
     }
-    let tables = if is_yaml(path) { crate::project::source_tables("", path, text) } else { Vec::new() };
-    tables.into_iter().find_map(|declared| match (inside(&declared.source_range), inside(&declared.table_range)) {
-        (true, _) => Some(Target::Source { source: declared.source }),
-        (_, true) => Some(Target::Table { source: declared.source, table: declared.table }),
+    scanned.tables.iter().find_map(|declared| match (inside(&declared.source_range), inside(&declared.table_range)) {
+        (true, _) => Some(Name::new(reference::Kind::Source, None, &declared.source)),
+        (_, true) => Some(Name::new(reference::Kind::Table { source: declared.source.clone() }, None, &declared.table)),
         _ => None,
     })
 }
 
-/// Whether DECLARED declares TARGET.
-pub fn declares(declared: &SourceTable, target: &Target) -> bool {
-    match target {
-        Target::Table { source, table } => declared.source == *source && declared.table == *table,
-        Target::Source { source } => declared.source == *source,
+/// Whether DECLARED declares NAME.
+pub fn declares(declared: &SourceTable, name: &Name) -> bool {
+    match name.source_table() {
+        Some((source, Some(table))) => declared.source == source && declared.table == table,
+        Some((source, None)) => declared.source == source,
+        None => false,
     }
 }
 
-/// The key that configures TARGET under `sources:` in the root
+/// The key that configures NAME under `sources:` in the root
 /// `dbt_project.yml`, by package, source and table, which a rename must
 /// carry for the configuration to keep applying.
-fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
+fn config_key(project: &Project, name: &Name) -> Option<Occurrence> {
     let path = project.packages.get(&project.root_package)?.join("dbt_project.yml");
     let text = project.text(&path)?;
     let config = yaml::parse(text)?;
-    let (parents, key): (&[&str], &str) = match target {
-        Target::Source { source } => (&[&project.root_package], source),
-        Target::Table { source, table } => (&[&project.root_package, source], table),
+    let (parents, key): (&[&str], &str) = match name.source_table()? {
+        (source, None) => (&[&project.root_package], source),
+        (source, Some(table)) => (&[&project.root_package, source], table),
     };
     let parent = parents.iter().try_fold(config.get("sources")?, |tree, name| tree.get(name))?;
     let (key, _) = parent.entry(key)?;
@@ -98,21 +93,21 @@ fn config_key(project: &Project, target: &Target) -> Option<Occurrence> {
     Some(Occurrence { path, range, declaration: false })
 }
 
-/// Every place of PROJECT that names TARGET, ordered by file and offset.
-pub fn occurrences(project: &Project, target: &Target) -> Vec<Occurrence> {
+/// Every place of PROJECT that names NAME, ordered by file and offset.
+pub fn occurrences(project: &Project, name: &Name) -> Vec<Occurrence> {
     let mut found = Vec::new();
     for (path, file) in &project.files {
-        let named = file.calls.iter().filter_map(|call| argument_naming(call, target));
+        let named = file.calls.iter().filter_map(|call| argument_naming(call, name));
         found.extend(named.map(|range| Occurrence { path: path.clone(), range: range.clone(), declaration: false }));
     }
-    for declared in project.sources.iter().filter(|declared| declares(declared, target)) {
-        let range = match target {
-            Target::Table { .. } => declared.table_range.clone(),
-            Target::Source { .. } => declared.source_range.clone(),
+    for declared in project.sources.iter().filter(|declared| declares(declared, name)) {
+        let range = match name.kind {
+            reference::Kind::Table { .. } => declared.table_range.clone(),
+            _ => declared.source_range.clone(),
         };
         found.push(Occurrence { path: declared.path.clone(), range, declaration: true });
     }
-    found.extend(config_key(project, target));
+    found.extend(config_key(project, name));
     found.sort_by(|a, b| (&a.path, a.range.start).cmp(&(&b.path, b.range.start)));
     found.dedup();
     found
@@ -123,16 +118,16 @@ fn lsp_range(text: &str, range: &Range<usize>, encoding: Encoding) -> Value {
     LineStarts::new(text).range(range.start, range.end, encoding)
 }
 
-/// The references of TARGET, as `Location`s; its declarations too when
+/// The references of NAME, as `Location`s; its declarations too when
 /// DECLARATIONS.  URI_OF names each file as the client does.
 pub fn references(
     project: &Project,
-    target: &Target,
+    name: &Name,
     declarations: bool,
     encoding: Encoding,
     uri_of: &dyn Fn(&Path) -> String,
 ) -> Value {
-    let found = occurrences(project, target).into_iter().filter(|o| declarations || !o.declaration);
+    let found = occurrences(project, name).into_iter().filter(|o| declarations || !o.declaration);
     let locations = found.map(|o| {
         let text = project.text(&o.path).unwrap_or_default();
         json!({"uri": uri_of(&o.path), "range": lsp_range(text, &o.range, encoding)})
@@ -173,16 +168,18 @@ fn replacement(text: &str, range: &Range<usize>, new: &str, in_yaml_value: bool)
     }
 }
 
-/// The lines that keep the relation of TARGET once renamed: `identifier:
+/// The lines that keep the relation of NAME once renamed: `identifier:
 /// <old>` under a table without one, `schema: <old>` under a source without
 /// one, as (file, offset, text).  A flow-style entry, where no line can go,
 /// refuses the rename.
-fn kept_relation(target: &Target, declared: &[&SourceTable]) -> Result<BTreeSet<(PathBuf, usize, String)>, String> {
+fn kept_relation(name: &Name, declared: &[&SourceTable]) -> Result<BTreeSet<(PathBuf, usize, String)>, String> {
     let mut lines = BTreeSet::new();
     for table in declared {
-        let (missing, insertion, key, old): (bool, &Insertion, &str, &str) = match target {
-            Target::Table { .. } => (!table.has_identifier, &table.table_insertion, "identifier", &table.table),
-            Target::Source { .. } => (!table.has_schema, &table.source_insertion, "schema", &table.source),
+        let (missing, insertion, key, old): (bool, &Insertion, &str, &str) = match name.kind {
+            reference::Kind::Table { .. } => {
+                (!table.has_identifier, &table.table_insertion, "identifier", &table.table)
+            }
+            _ => (!table.has_schema, &table.source_insertion, "schema", &table.source),
         };
         match (missing, insertion.block) {
             (false, _) => {}
@@ -198,13 +195,13 @@ fn kept_relation(target: &Target, declared: &[&SourceTable]) -> Result<BTreeSet<
     Ok(lines)
 }
 
-/// Why a rename of TARGET to NEW could not be applied whole, if so:
+/// Why a rename of NAME to NEW could not be applied whole, if so:
 /// DECLARED are its declarations and FOUND its occurrences.  `dbt deps`
 /// overwrites an installed package's files, and a root `overrides:` would
 /// keep the old name, so nothing there is renamed.
 fn refusal(
     project: &Project,
-    target: &Target,
+    name: &Name,
     new: &str,
     declared: &[&SourceTable],
     found: &[Occurrence],
@@ -214,10 +211,7 @@ fn refusal(
         let mut others = project.packages.iter().filter(|(name, _)| **name != project.root_package);
         others.find(|(_, dir)| path.starts_with(dir)).map(|(name, _)| name)
     };
-    let renamed = match target {
-        Target::Table { source, .. } => Target::Table { source: source.clone(), table: new.to_owned() },
-        Target::Source { .. } => Target::Source { source: new.to_owned() },
-    };
+    let renamed = Name { name: new.to_owned(), ..name.clone() };
     if packages.is_empty() {
         return Some("this source is declared nowhere in the project".into());
     }
@@ -233,26 +227,26 @@ fn refusal(
     if let Some((path, package)) = found.iter().find_map(|o| installed(&o.path).map(|package| (&o.path, package))) {
         return Some(format!("{} names it in the installed package {package}: rename it there", path.display()));
     }
-    if renamed != *target && project.sources.iter().any(|declared| declares(declared, &renamed)) {
+    if renamed != *name && project.sources.iter().any(|declared| declares(declared, &renamed)) {
         return Some(format!("{new} is declared already"));
     }
     None
 }
 
-/// The `WorkspaceEdit` that renames TARGET to NEW everywhere in PROJECT and
+/// The `WorkspaceEdit` that renames NAME to NEW everywhere in PROJECT and
 /// keeps the warehouse relation it names, or the reason it cannot.  URI_OF
 /// names each file as the client does: the ranges are those of the text it
 /// has open under that name.
 pub fn rename(
     project: &Project,
-    target: &Target,
+    name: &Name,
     new: &str,
     encoding: Encoding,
     uri_of: &dyn Fn(&Path) -> String,
 ) -> Result<Value, String> {
-    let declared: Vec<&SourceTable> = project.sources.iter().filter(|declared| declares(declared, target)).collect();
-    let found = occurrences(project, target);
-    if let Some(reason) = refusal(project, target, new, &declared, &found) {
+    let declared: Vec<&SourceTable> = project.sources.iter().filter(|declared| declares(declared, name)).collect();
+    let found = occurrences(project, name);
+    if let Some(reason) = refusal(project, name, new, &declared, &found) {
         return Err(reason);
     }
     // Every declaration is an occurrence, so `replacement` judges NEW at least once.
@@ -262,7 +256,7 @@ pub fn rename(
         let new_text = replacement(text, &found.range, new, is_yaml(&found.path) && !found.declaration)?;
         edits.entry(found.path).or_default().push((found.range, new_text));
     }
-    for (path, at, line) in kept_relation(target, &declared)? {
+    for (path, at, line) in kept_relation(name, &declared)? {
         edits.entry(path).or_default().push((at..at, line));
     }
     // A flow collection may span lines that look like blocks: a YAML file must
@@ -370,32 +364,41 @@ models:
     fn finds_the_target_on_a_call_argument_or_a_declared_name() {
         let model = Path::new("m.sql");
         let at = |needle: &str| MODEL.find(needle).unwrap() + 1;
-        assert_eq!(target_at(model, MODEL, at("raw")), Some(Target::Source { source: "raw".into() }));
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
-        assert_eq!(target_at(model, MODEL, at("customers")), Some(customers.clone()));
-        assert_eq!(target_at(model, MODEL, at("join")), None);
+        assert_eq!(
+            name_at(&Scanned::of(model, MODEL.to_owned()), at("raw")),
+            Some(Name::new(reference::Kind::Source, None, "raw"))
+        );
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
+        assert_eq!(name_at(&Scanned::of(model, MODEL.to_owned()), at("customers")), Some(customers.clone()));
+        assert_eq!(name_at(&Scanned::of(model, MODEL.to_owned()), at("join")), None);
         // Both ends of a name count, as editors put the cursor after a word.
         let start = MODEL.find("customers").unwrap();
         for offset in [start, start + "customers".len()] {
-            assert_eq!(target_at(model, MODEL, offset), Some(customers.clone()), "{offset}");
+            assert_eq!(name_at(&Scanned::of(model, MODEL.to_owned()), offset), Some(customers.clone()), "{offset}");
         }
         let yaml = Path::new("_sources.yml");
-        assert_eq!(target_at(yaml, SOURCES, SOURCES.find("customers").unwrap()), Some(customers.clone()));
-        assert_eq!(target_at(Path::new("_sources.yaml"), SOURCES, SOURCES.find("customers").unwrap()), Some(customers));
         assert_eq!(
-            target_at(yaml, SOURCES, SOURCES.find("events").unwrap()),
-            Some(Target::Source { source: "events".into() })
+            name_at(&Scanned::of(yaml, SOURCES.to_owned()), SOURCES.find("customers").unwrap()),
+            Some(customers.clone())
         );
         assert_eq!(
-            target_at(Path::new("_models.yml"), TESTS, TESTS.find("raw").unwrap()),
-            Some(Target::Source { source: "raw".into() })
+            name_at(&Scanned::of(Path::new("_sources.yaml"), SOURCES.to_owned()), SOURCES.find("customers").unwrap()),
+            Some(customers)
+        );
+        assert_eq!(
+            name_at(&Scanned::of(yaml, SOURCES.to_owned()), SOURCES.find("events").unwrap()),
+            Some(Name::new(reference::Kind::Source, None, "events"))
+        );
+        assert_eq!(
+            name_at(&Scanned::of(Path::new("_models.yml"), TESTS.to_owned()), TESTS.find("raw").unwrap()),
+            Some(Name::new(reference::Kind::Source, None, "raw"))
         );
     }
 
     #[test]
     fn references_cover_sql_yaml_and_the_declaration() {
         let (dir, project) = shop("references");
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let found = references(&project, &customers, true, Encoding::Utf16, &uri);
         let mut files: Vec<String> = found
             .as_array()
@@ -418,7 +421,7 @@ models:
     #[test]
     fn renaming_a_table_keeps_its_identifier() {
         let (dir, project) = shop("rename-table");
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let edit = rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap();
         let texts = apply(&project, &edit);
         assert!(texts["m.sql"].starts_with("select * from {{ source('raw', 'clients') }}"));
@@ -428,7 +431,7 @@ models:
                 .contains("      - name: clients\n        identifier: customers\n        description: It's")
         );
         // orders has an identifier: renaming it adds none.
-        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let orders = Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders");
         let texts = apply(&project, &rename(&project, &orders, "sales", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: sales\n        identifier: raw_orders\n"));
         assert!(texts["m.sql"].contains("source(\"raw\", \"sales\")"));
@@ -440,7 +443,8 @@ models:
         let (dir, project) = shop("rename-source");
         let texts = apply(
             &project,
-            &rename(&project, &Target::Source { source: "raw".into() }, "landing", Encoding::Utf16, &uri).unwrap(),
+            &rename(&project, &Name::new(reference::Kind::Source, None, "raw"), "landing", Encoding::Utf16, &uri)
+                .unwrap(),
         );
         assert!(texts["_sources.yml"].contains("  - name: landing\n    schema: raw\n    tables:"));
         assert_eq!(
@@ -455,7 +459,8 @@ models:
         // events has a schema, and a quoted name that stays quoted.
         let texts = apply(
             &project,
-            &rename(&project, &Target::Source { source: "events".into() }, "web", Encoding::Utf16, &uri).unwrap(),
+            &rename(&project, &Name::new(reference::Kind::Source, None, "events"), "web", Encoding::Utf16, &uri)
+                .unwrap(),
         );
         assert!(texts["_sources.yml"].contains("  - name: \"web\"\n    schema: analytics\n"));
         fs::remove_dir_all(&dir).unwrap();
@@ -464,12 +469,12 @@ models:
     #[test]
     fn writes_yaml_values_plain_or_quoted() {
         let (dir, project) = shop("yaml-values");
-        let views = Target::Table { source: "events".into(), table: "page views".into() };
+        let views = Name::new(reference::Kind::Table { source: "events".into() }, None, "page views");
         let texts = apply(&project, &rename(&project, &views, "visits", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: 'visits'\n        identifier: \"page views\"\n"));
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         // orders is named in SQL and in its declaration only.
-        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let orders = Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders");
         let texts = apply(&project, &rename(&project, &orders, "my table", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: \"my table\"\n        identifier: raw_orders\n"));
         // customers is also called in the plain value `to: source('raw', 'customers')`, where
@@ -490,7 +495,7 @@ models:
         let config = "name: p\nvars:\n  segment:\n    pages: \"{{ source('raw', 'customers') }}\"\n";
         let files = [("dbt_project.yml", config), ("models/_sources.yml", SOURCES)];
         let (dir, project) = scratch_project("project-calls", &files);
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["dbt_project.yml"].contains("pages: \"{{ source('raw', 'clients') }}\""), "{texts:?}");
         fs::remove_dir_all(&dir).unwrap();
@@ -500,7 +505,7 @@ models:
     fn an_inserted_line_ends_as_the_file_s_lines_do() {
         let crlf = SOURCES.replace('\n', "\r\n");
         let (dir, project) = scratch_project("crlf", &[("dbt_project.yml", PROJECT), ("models/_sources.yml", &crlf)]);
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("- name: clients\r\n        identifier: customers\r\n"), "{texts:?}");
         assert!(!texts["_sources.yml"].replace("\r\n", "").contains('\n'), "a bare line feed");
@@ -513,10 +518,10 @@ models:
             "name: p\nsources:\n  p:\n    raw:\n      +enabled: true\n      customers:\n        +enabled: false\n";
         let files = [("dbt_project.yml", config), ("models/_sources.yml", SOURCES)];
         let (dir, project) = scratch_project("project-configs", &files);
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["dbt_project.yml"].contains("\n      clients:\n        +enabled: false"), "{texts:?}");
-        let raw = Target::Source { source: "raw".into() };
+        let raw = Name::new(reference::Kind::Source, None, "raw");
         let texts = apply(&project, &rename(&project, &raw, "landing", Encoding::Utf16, &uri).unwrap());
         assert!(texts["dbt_project.yml"].contains("\n    landing:\n      +enabled: true"), "{texts:?}");
         fs::remove_dir_all(&dir).unwrap();
@@ -527,10 +532,10 @@ models:
         let model = "def model(dbt, session):\n    # dbt.source('raw', 'orders')\n    return dbt.source(\"raw\", \"customers\")\n";
         let files = [("dbt_project.yml", PROJECT), ("models/_sources.yml", SOURCES), ("models/py_model.py", model)];
         let (dir, project) = scratch_project("python-calls", &files);
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["py_model.py"].contains("return dbt.source(\"raw\", \"clients\")"), "{texts:?}");
-        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let orders = Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders");
         let found = occurrences(&project, &orders);
         assert!(!found.iter().any(|o| o.path.ends_with("py_model.py")), "a comment is no call");
         fs::remove_dir_all(&dir).unwrap();
@@ -539,11 +544,11 @@ models:
     #[test]
     fn refuses_what_would_break_a_relation_or_a_quote() {
         let (dir, project) = shop("refusals");
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         // Its SQL call quotes with ', and its call in YAML is a plain value: either refuses.
         assert!(rename(&project, &customers, "it's", Encoding::Utf16, &uri).unwrap_err().contains("cannot hold"));
         assert!(rename(&project, &customers, "", Encoding::Utf16, &uri).unwrap_err().contains("empty"));
-        let missing = Target::Table { source: "raw".into(), table: "nowhere".into() };
+        let missing = Name::new(reference::Kind::Table { source: "raw".into() }, None, "nowhere");
         assert!(rename(&project, &missing, "x", Encoding::Utf16, &uri).unwrap_err().contains("declared nowhere"));
         let flow = [
             ("dbt_project.yml", PROJECT),
@@ -554,9 +559,9 @@ models:
             ),
         ];
         let (flow_dir, project) = scratch_project("flow", &flow);
-        let t = Target::Table { source: "s".into(), table: "t".into() };
+        let t = Name::new(reference::Kind::Table { source: "s".into() }, None, "t");
         assert!(rename(&project, &t, "u", Encoding::Utf16, &uri).unwrap_err().contains("flow style"));
-        let k = Target::Table { source: "j".into(), table: "k".into() };
+        let k = Name::new(reference::Kind::Table { source: "j".into() }, None, "k");
         assert!(rename(&project, &k, "u", Encoding::Utf16, &uri).unwrap_err().contains("flow style"), "JSON");
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&flow_dir).unwrap();
@@ -566,7 +571,7 @@ models:
     fn refuses_a_name_that_breaks_the_quotes_it_goes_in() {
         let (dir, project) = shop("quotes");
         // orders is called as source("raw", "orders"), and named plain in YAML.
-        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let orders = Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders");
         for new in ["a\"b", "a\\b"] {
             let error = rename(&project, &orders, new, Encoding::Utf16, &uri).unwrap_err();
             assert!(error.contains("cannot hold \""), "{new}: {error}");
@@ -583,17 +588,17 @@ models:
             (
                 "flow-tables",
                 "sources:\n  - name: s\n    tables: [\n      {\n        name: t,\n        description: x\n      }\n    ]\n",
-                Target::Table { source: "s".into(), table: "t".into() },
+                Name::new(reference::Kind::Table { source: "s".into() }, None, "t"),
             ),
             (
                 "flow-last",
                 "sources:\n  - name: s\n    tables: [\n      {\n        description: x,\n        name: t\n      }\n    ]\n",
-                Target::Table { source: "s".into(), table: "t".into() },
+                Name::new(reference::Kind::Table { source: "s".into() }, None, "t"),
             ),
             (
                 "flow-source",
                 "sources:\n  - {\n    name: raw,\n    tables: [{name: t, identifier: t}]}\n",
-                Target::Source { source: "raw".into() },
+                Name::new(reference::Kind::Source, None, "raw"),
             ),
         ];
         for (name, yaml, target) in cases {
@@ -613,7 +618,7 @@ models:
             ("dbt_packages/q/models/s.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
         ];
         let (dir, project) = scratch_project("two-packages", &files);
-        let t = Target::Table { source: "s".into(), table: "t".into() };
+        let t = Name::new(reference::Kind::Table { source: "s".into() }, None, "t");
         assert!(rename(&project, &t, "u", Encoding::Utf16, &uri).unwrap_err().contains("several packages"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -627,7 +632,7 @@ models:
             ("dbt_packages/q/models/m.sql", "select * from {{ source('raw', 'customers') }}"),
         ];
         let (dir, project) = scratch_project("refusals-of-packages", &files);
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let error = rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap_err();
         assert!(error.contains("m.sql names it in the installed package q"), "{error}");
         fs::remove_dir_all(&dir).unwrap();
@@ -642,10 +647,10 @@ models:
         let schema = "sources:\n  - name: &n raw\n    schema: *n\n    tables:\n      - name: t\n";
         let identifier = "sources:\n  - name: s\n    tables:\n      - name: &t t\n        identifier: *t\n";
         for (name, yaml, target) in [
-            ("merged", merged, Target::Source { source: "crm".into() }),
-            ("aliased", aliased, Target::Table { source: "eu".into(), table: "charges".into() }),
-            ("scalar-schema", schema, Target::Source { source: "raw".into() }),
-            ("scalar-identifier", identifier, Target::Table { source: "s".into(), table: "t".into() }),
+            ("merged", merged, Name::new(reference::Kind::Source, None, "crm")),
+            ("aliased", aliased, Name::new(reference::Kind::Table { source: "eu".into() }, None, "charges")),
+            ("scalar-schema", schema, Name::new(reference::Kind::Source, None, "raw")),
+            ("scalar-identifier", identifier, Name::new(reference::Kind::Table { source: "s".into() }, None, "t")),
         ] {
             let (dir, project) = scratch_project(name, &[("dbt_project.yml", PROJECT), ("models/s.yml", yaml)]);
             let error = rename(&project, &target, "renamed", Encoding::Utf16, &uri).unwrap_err();
@@ -657,11 +662,11 @@ models:
     #[test]
     fn refuses_to_take_a_declared_name() {
         let (dir, project) = shop("refusals-of-names");
-        let orders = Target::Table { source: "raw".into(), table: "orders".into() };
+        let orders = Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders");
         assert!(
             rename(&project, &orders, "customers", Encoding::Utf16, &uri).unwrap_err().contains("declared already")
         );
-        let raw = Target::Source { source: "raw".into() };
+        let raw = Name::new(reference::Kind::Source, None, "raw");
         assert!(rename(&project, &raw, "events", Encoding::Utf16, &uri).unwrap_err().contains("declared already"));
         assert!(rename(&project, &orders, "orders", Encoding::Utf16, &uri).is_ok(), "the same name is no clash");
         fs::remove_dir_all(&dir).unwrap();
@@ -677,7 +682,7 @@ models:
             ("dbt_packages/q/models/s.yml", "sources:\n  - name: s\n    tables:\n      - name: t\n"),
         ];
         let (dir, project) = scratch_project("installed-package", &files);
-        let t = Target::Table { source: "s".into(), table: "t".into() };
+        let t = Name::new(reference::Kind::Table { source: "s".into() }, None, "t");
         assert!(rename(&project, &t, "u", Encoding::Utf16, &uri).unwrap_err().contains("installed package q"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -685,12 +690,12 @@ models:
     #[test]
     fn the_fixture_s_sources_rename_cleanly() {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
-        let views = Target::Table { source: "events".into(), table: "page_views".into() };
+        let views = Name::new(reference::Kind::Table { source: "events".into() }, None, "page_views");
         let texts = apply(&project, &rename(&project, &views, "visits", Encoding::Utf16, &uri).unwrap());
         assert_eq!(texts["stg_page_views.sql"], "select * from {{ source('events', 'visits') }}\n");
         assert!(texts["_sources.yml"].contains("      - name: \"visits\"\n        identifier: page_views\n"));
         // customers has an identifier already.
-        let customers = Target::Table { source: "raw".into(), table: "customers".into() };
+        let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
         let texts = apply(&project, &rename(&project, &customers, "clients", Encoding::Utf16, &uri).unwrap());
         assert!(texts["_sources.yml"].contains("      - name: clients\n        identifier: raw_customers\n"));
     }

@@ -6,6 +6,7 @@ use crate::config::ParseIndex;
 use crate::graph::{Edge, Graph, Item};
 use crate::project::Project;
 use crate::properties;
+use crate::reference;
 use crate::scan::{self, Kind, Symbol};
 use crate::shadow;
 use crate::text::{Encoding, LineStarts};
@@ -315,9 +316,9 @@ pub fn inlay_hints(
     let lines = LineStarts::new(text);
     let hint = |call: scan::Call| {
         // A source's match ends after its parenthesis, a ref's before it.
-        let after = match call.target {
-            scan::Target::Source { .. } => call.range.end,
-            scan::Target::Ref { .. } => {
+        let after = match call.name.kind {
+            reference::Kind::Table { .. } => call.range.end,
+            reference::Kind::Ref => {
                 let rest = &text[call.range.end..];
                 let skipped = rest.len() - rest.trim_start().len();
                 rest[skipped..].starts_with(')').then_some(call.range.end + skipped + 1)?
@@ -329,7 +330,7 @@ pub fn inlay_hints(
             return None;
         }
         let built = |node: &&Value| node["disabled"] != true && node["resource_type"] != "analysis";
-        let node = index.named(&call.target).filter(built)?;
+        let node = index.named(&call.name).filter(built)?;
         let label = match node["config"]["materialized"].as_str() {
             Some("ephemeral") => "ephemeral",
             _ => node["relation"].as_str()?,
