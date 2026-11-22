@@ -3158,6 +3158,15 @@ fn a_hover_and_node_information_on_a_project_that_no_longer_reads_say_so() {
     let by_id =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), by_id, |result| result["unique_id"] == "model.shop.orders");
+    // While the project reads, a `ref` that leads nowhere names no node: null, no reason.
+    let scratch = project.join("models/marts/scratch.sql");
+    std::fs::write(&scratch, "select * from {{ ref('nowhere') }}\n").unwrap();
+    session.open(&scratch, None);
+    let nowhere = position_in(&scratch, "ref('nowhere')", 6);
+    let hover = session.request("textDocument/hover", nowhere.clone());
+    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    let info = node_info(&mut session, json!({"uri": nowhere["textDocument"]["uri"], "position": nowhere["position"]}));
+    assert_eq!((info.get("error"), &info["result"]), (None, &Value::Null), "{info}");
     let configuration = project.join("dbt_project.yml");
     let written = std::fs::read_to_string(&configuration).unwrap();
     std::fs::write(&configuration, "name: [").unwrap();
