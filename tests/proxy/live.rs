@@ -189,16 +189,20 @@ fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
     let quoted = text.starts_with("dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error");
     assert!(quoted && text.contains("DBT_LSP_PLUS_TEST_MISSING") && text.contains("logs/dbt-lsp.log"), "{text}");
     assert_eq!(shown["params"]["type"], 1, "{shown}");
-    let completed =
-        |session: &Session| session.received.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+    // A foreground completion, then its background one, which says the same failure.
+    let completed = |session: &Session| {
+        let count = |method: &str| session.received.iter().filter(|m| m["method"] == method).count();
+        (count("dbt/lspCompileComplete"), count("dbt/lspBackgroundCompileComplete"))
+    };
     let before = completed(&session);
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
     let waited = Instant::now() + Duration::from_secs(60);
-    while completed(&session) == before && Instant::now() < waited {
+    let both = |(foreground, background): (usize, usize)| foreground > before.0 && background > before.1;
+    while !both(completed(&session)) && Instant::now() < waited {
         session.request("workspace/symbol", json!({"query": "orders"}));
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(completed(&session) > before, "no compilation after a save");
+    assert!(both(completed(&session)), "no compilation after a save, or not both completions");
     let said = session.received.iter().filter(|m| compiled_nothing(m)).count();
     assert_eq!(said, 1, "said once");
     assert!(session.finish().success());
