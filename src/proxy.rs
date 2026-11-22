@@ -135,6 +135,12 @@ struct Backend {
     progress: HashMap<String, Value>,
     /// The commands it listed in its answer to the client's `initialize`.
     commands: HashSet<String>,
+    /// How many times its nodes changed or went: the graph holds while this stays.
+    nodes_generation: u64,
+    /// The failures said this session, each by its first error's key.
+    said: HashSet<String>,
+    /// Whether a compilation with no end was said: once a session.
+    stalled: bool,
 }
 
 /// Where the Backend is in its life.
@@ -169,12 +175,28 @@ impl Default for Life {
 /// timed, which end with it.
 struct Running {
     server: Server,
+    listings: Listings,
+    compiling: Compiling,
 }
 
 impl Running {
     fn new(server: Server) -> Running {
-        Running { server }
+        Running { server, listings: Listings::default(), compiling: Compiling::default() }
     }
+}
+
+/// The proxy's listings of one process, and the nodes they gave: a new
+/// process's are the default.
+#[derive(Default)]
+struct Listings {
+    /// The proxy's `dbt.listNodes` in flight: its id, its selector's slot, when it was sent.
+    listing: Option<(String, usize, Instant)>,
+    /// The nodes of the first selector, while the second is listed.
+    listed: Vec<ServerNode>,
+    attempts: u32,
+    /// The graph may have changed while it could not be listed: list it later.
+    relist: bool,
+    nodes: Option<Vec<ServerNode>>,
 }
 
 impl Backend {
@@ -200,12 +222,17 @@ impl Backend {
     }
 
     /// The next instant at which the life needs the loop: a restart's
-    /// due, a restarted process's deadline.
+    /// due, a restarted process's deadline, a running one's listing's
+    /// deadline or its compilation's.
     fn due(&self) -> Option<Instant> {
         match &self.life {
             Life::Waiting(due) => Some(*due),
             Life::Starting(.., deadline) => Some(*deadline),
-            _ => None,
+            Life::Running(running) => {
+                let listing = running.listings.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
+                [listing, running.compiling.due()].into_iter().flatten().min()
+            }
+            Life::NotStarted(_) | Life::Lost(_) => None,
         }
     }
 }
@@ -399,17 +426,13 @@ struct Parsing {
     generation: u64,
 }
 
-/// What dbt lsp said of its compilations.
+/// What a dbt lsp process said of its compilations: whether one runs.
 #[derive(Default)]
 struct Compiling {
     /// Since when it has compiled, from its last start, with no end since.
     since: Option<Instant>,
     /// Whether that compilation's deadline has passed, said or not.
     told: bool,
-    /// Whether a compilation with no end was said: once a session.
-    stalled: bool,
-    /// The failures said this session, each by its first error's key.
-    said: HashSet<String>,
 }
 
 impl Compiling {
@@ -471,16 +494,6 @@ struct Proxy<W: Write> {
     /// Whether the client opened a document, the first of which prompts a listing.
     opened: bool,
     next_id: u64,
-    /// The proxy's `dbt.listNodes` in flight: its id, its selector's slot, when it was sent.
-    listing: Option<(String, usize, Instant)>,
-    /// The nodes of the first selector, while the second is listed.
-    listed: Vec<ServerNode>,
-    attempts: u32,
-    /// The graph may have changed while it could not be listed: list it later.
-    relist: bool,
-    nodes: Option<Vec<ServerNode>>,
-    /// How many times the server's nodes changed: the graph holds while this stays.
-    nodes_generation: u64,
     shutdown: bool,
     /// Whether the client reads markdown in a hover.
     markdown: bool,
@@ -493,7 +506,6 @@ struct Proxy<W: Write> {
     diagnostics: Diagnostics,
     replay: Replay,
     parsing: Parsing,
-    compiling: Compiling,
     /// The scan of the project, kept between requests, and refreshed once
     /// an epoch: one a request or event.
     cache: RefCell<cache::Cache>,
@@ -641,12 +653,6 @@ impl<W: Write> Proxy<W> {
             uris: HashMap::new(),
             opened: false,
             next_id: 0,
-            listing: None,
-            listed: Vec::new(),
-            attempts: 0,
-            relist: false,
-            nodes: None,
-            nodes_generation: 0,
             shutdown: false,
             markdown: false,
             hint_refresh: false,
@@ -655,7 +661,6 @@ impl<W: Write> Proxy<W> {
             diagnostics: Diagnostics::default(),
             replay: Replay::default(),
             parsing: Parsing::default(),
-            compiling: Compiling::default(),
             cache: RefCell::default(),
             filling: RefCell::default(),
             epoch: 0,
@@ -1013,13 +1018,14 @@ impl<W: Write> Proxy<W> {
     /// the last parse's: made again only when the project, the nodes or the
     /// index changed, as the call hierarchy asks for it at each step.
     fn graph(&self, project: &Project) -> Rc<Graph> {
-        let made_of = (self.cache.borrow().generation, self.nodes_generation, self.parsing.generation);
+        let made_of = (self.cache.borrow().generation, self.backend.nodes_generation, self.parsing.generation);
         if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
             return graph.clone();
         }
         let scanned = Graph::scanned(project);
         let parsed = self.parsing.index.as_ref().filter(|_| self.backend.alone()).map(config::ParseIndex::listed);
-        let graph = Rc::new(match parsed.as_ref().or(self.nodes.as_ref()) {
+        let nodes = self.backend.running().and_then(|running| running.listings.nodes.as_ref());
+        let graph = Rc::new(match parsed.as_ref().or(nodes) {
             Some(nodes) => scanned.with_server(nodes, project),
             None => scanned,
         });
@@ -1328,7 +1334,8 @@ impl<W: Write> Proxy<W> {
     /// shutdown, a server command with `lsp`.
     fn want_index(&mut self) {
         // A listing makes dbt lsp compile, as the first document opened does.
-        if !self.parsing.compiled && self.listing.is_none() && !self.shutdown {
+        let listing = self.backend.running().is_some_and(|running| running.listings.listing.is_some());
+        if !self.parsing.compiled && !listing && !self.shutdown {
             self.list_nodes();
         }
         self.parsing.wanted |= !self.parsing.compiled;
@@ -1641,9 +1648,11 @@ impl<W: Write> Proxy<W> {
     /// Asks the server for the graph, unless a listing is under way, the
     /// proxy's own or the client's, or there is no server.
     fn list_nodes(&mut self) {
-        if self.listing.is_some() || self.client_listing() {
-            self.relist = true;
-        } else if self.backend.running().is_some() {
+        let client = self.client_listing();
+        let Some(running) = self.backend.running_mut() else { return };
+        if running.listings.listing.is_some() || client {
+            running.listings.relist = true;
+        } else {
             self.send_list(0);
         }
     }
@@ -1664,23 +1673,25 @@ impl<W: Write> Proxy<W> {
         };
         let params = json!({"command": "dbt.listNodes", "arguments": [SELECTORS[slot]]});
         let request = json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params});
-        self.listing = Some((id, slot, Instant::now()));
+        let Some(running) = self.backend.running_mut() else { return };
+        running.listings.listing = Some((id, slot, Instant::now()));
         self.send_server(&serde_json::to_vec(&request).unwrap_or_default());
     }
 
     /// Lists the graph if a change came while it could not be.
     fn resume(&mut self) {
-        if std::mem::take(&mut self.relist) {
+        if self.backend.running_mut().is_some_and(|running| std::mem::take(&mut running.listings.relist)) {
             self.list_nodes();
         }
     }
 
     /// Abandons a listing unanswered for LIST_TIMEOUT; the graph stays.
     fn expire_listing(&mut self) {
-        if self.listing.as_ref().is_some_and(|(_, _, sent)| sent.elapsed() >= LIST_TIMEOUT) {
-            self.listing = None;
-            self.listed.clear();
-            self.attempts = 0;
+        let Some(listings) = self.backend.running_mut().map(|running| &mut running.listings) else { return };
+        if listings.listing.as_ref().is_some_and(|(_, _, sent)| sent.elapsed() >= LIST_TIMEOUT) {
+            listings.listing = None;
+            listings.listed.clear();
+            listings.attempts = 0;
             self.resume();
         }
     }
@@ -1691,32 +1702,35 @@ impl<W: Write> Proxy<W> {
         if matches!(&self.backend.life, Life::Starting(_, own, _) if own == id) {
             return self.on_restarted(message);
         }
-        let Some((_, slot, _)) = self.listing.take_if(|(own, ..)| own == id) else { return };
+        let client = self.client_listing();
+        // The process's listings beside the Backend's count of their nodes.
+        let Life::Running(Running { listings, .. }) = &mut self.backend.life else { return };
+        let Some((_, slot, _)) = listings.listing.take_if(|(own, ..)| own == id) else { return };
         let result = message.get("result").unwrap_or(&Value::Null);
-        if result.get("error") == Some(&json!("Operation cancelled")) && self.attempts < MAX_ATTEMPTS {
-            self.attempts += 1;
-            self.listed.clear();
-            self.relist = true;
+        if result.get("error") == Some(&json!("Operation cancelled")) && listings.attempts < MAX_ATTEMPTS {
+            listings.attempts += 1;
+            listings.listed.clear();
+            listings.relist = true;
             return self.resume();
         }
         // `*` lists nothing only when the project failed to compile: the scan found resources.
         let listed = graph::parse_list_nodes(result).into_nodes().filter(|nodes| slot == 1 || !nodes.is_empty());
         match (slot, listed) {
-            (0, Some(nodes)) if !self.client_listing() => {
-                self.listed = nodes;
+            (0, Some(nodes)) if !client => {
+                listings.listed = nodes;
                 return self.send_list(1);
             }
             // The client's own listing would cancel the second selector: start again after it.
-            (0, Some(_)) => self.relist = true,
+            (0, Some(_)) => listings.relist = true,
             (_, Some(sources)) => {
-                let mut nodes = std::mem::take(&mut self.listed);
+                let mut nodes = std::mem::take(&mut listings.listed);
                 nodes.extend(sources);
-                self.nodes = Some(nodes);
-                self.nodes_generation += 1;
+                listings.nodes = Some(nodes);
+                self.backend.nodes_generation += 1;
             }
-            (_, None) => self.listed.clear(),
+            (_, None) => listings.listed.clear(),
         }
-        self.attempts = 0;
+        listings.attempts = 0;
         self.resume();
     }
 
@@ -1907,7 +1921,8 @@ impl<W: Write> Proxy<W> {
     /// `initialize` is answered here, and any other forwarded request fails.
     fn on_request(&mut self, method: &str, id: &Value, params: &Value, body: &[u8]) {
         // The server would get two requests under one id.
-        if self.listing.as_ref().is_some_and(|(own, ..)| id.as_str() == Some(own)) {
+        let listing = self.backend.running().and_then(|running| running.listings.listing.as_ref());
+        if listing.is_some_and(|(own, ..)| id.as_str() == Some(own)) {
             return self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id");
         }
         let (pending, fresh) = self.remember(method, id, params);
@@ -1946,7 +1961,9 @@ impl<W: Write> Proxy<W> {
             (None, Some(id)) => self.on_server_response(id, message, &frame.body),
             // Two compilations that overlap are timed from the last start.
             (Some("dbt/lspCompileStart" | "dbt/lspBackgroundCompileStart"), _) => {
-                (self.compiling.since, self.compiling.told) = (Some(Instant::now()), false);
+                if let Some(running) = self.backend.running_mut() {
+                    running.compiling = Compiling { since: Some(Instant::now()), told: false };
+                }
                 self.send_client_body(&frame.body);
             }
             (Some(method @ ("dbt/lspCompileComplete" | "dbt/lspBackgroundCompileComplete")), _) => {
@@ -1972,10 +1989,12 @@ impl<W: Write> Proxy<W> {
                 self.want_index();
             }
         }
-        self.compiling.since = None;
+        if let Some(running) = self.backend.running_mut() {
+            running.compiling.since = None;
+        }
         self.send_client_body(body);
         let Some((text, key)) = compile_failure(&message["params"]) else { return };
-        if self.shutdown || !self.compiling.said.insert(key) {
+        if self.shutdown || !self.backend.said.insert(key) {
             return;
         }
         let text = format!("dbt lsp compiled nothing: {text} (its log: {})", self.server_log().display());
@@ -1986,11 +2005,12 @@ impl<W: Write> Proxy<W> {
     /// A compilation past its deadline, `told` from now on: said once a
     /// session, with dbt lsp's log, but after `shutdown`.
     fn tell_stalled(&mut self) {
-        self.compiling.told = true;
-        if self.compiling.stalled || self.shutdown {
+        let Some(running) = self.backend.running_mut() else { return };
+        running.compiling.told = true;
+        if self.backend.stalled || self.shutdown {
             return;
         }
-        self.compiling.stalled = true;
+        self.backend.stalled = true;
         let (stall, log) = (COMPILE_STALL.as_secs(), self.server_log());
         let text = format!("dbt lsp has been compiling for {stall} s with no end yet (its log: {})", log.display());
         self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
@@ -2321,13 +2341,7 @@ impl<W: Write> Proxy<W> {
                 _ => self.reply_error(&id, REQUEST_FAILED, &why),
             }
         }
-        self.listing = None;
-        self.attempts = 0;
-        self.listed.clear();
-        self.relist = false;
-        self.compiling.since = None;
-        self.nodes = None;
-        self.nodes_generation += 1;
+        self.backend.nodes_generation += 1;
         if let Some(id) = self.initialize.take() {
             return self.initialize_alone(&id);
         }
@@ -2444,7 +2458,7 @@ impl<W: Write> Proxy<W> {
                                          "params": {"type": 4, "message": text}}));
             }
         }
-        if self.compiling.due().is_some_and(|due| due <= now) {
+        if self.backend.running().and_then(|running| running.compiling.due()).is_some_and(|due| due <= now) {
             self.tell_stalled();
         }
         match &self.backend.life {
@@ -2463,9 +2477,8 @@ impl<W: Write> Proxy<W> {
     /// its output; a listing past its deadline is abandoned on time.
     fn serve(&mut self, inbox: Receiver<Event>) {
         loop {
-            let listing = self.listing.as_ref().map(|(_, _, sent)| *sent + LIST_TIMEOUT);
             let merge = self.deadlines.values().map(|(at, _)| *at).min();
-            let next = [listing, self.backend.due(), merge, self.compiling.due()].into_iter().flatten().min();
+            let next = [self.backend.due(), merge].into_iter().flatten().min();
             let wait = next.map_or(Duration::MAX, |at| at.saturating_duration_since(Instant::now()));
             let event = match inbox.recv_timeout(wait) {
                 Ok(event) => event,
@@ -2778,6 +2791,14 @@ mod tests {
         std::iter::from_fn(|| rpc::read_frame(&mut client).unwrap()).collect()
     }
 
+    /// A running life, its process a shell that reads what it is sent,
+    /// until `stop_server` or `on_server_closed` reaps it.
+    fn a_running_life() -> Life {
+        let mut child = Command::new("sh").args(["-c", "cat > /dev/null"]).stdin(Stdio::piped()).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        Life::Running(Running::new(Server { child, stdin, generation: 0 }))
+    }
+
     #[test]
     fn reads_what_a_compilation_that_compiled_nothing_reports() {
         let [e, _, f, w, h] = reported();
@@ -2877,16 +2898,17 @@ mod tests {
             ("its completion", compiling("dbt/lspCompileComplete"), false, (false, true)),
             ("a start after one told", compiling("dbt/lspCompileStart"), true, (true, true)),
         ];
-        let mut proxy = Proxy::new(Vec::new(), Life::Lost("dbt lsp is not running".into()), Some(PathBuf::from("/p")));
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         for (name, message, told, expected) in steps {
-            proxy.compiling.told = told;
+            proxy.backend.running_mut().unwrap().compiling.told = told;
             let before = Instant::now();
             proxy.on_server(frame_of(&message));
-            let due = proxy.compiling.due();
+            let due = proxy.backend.running().unwrap().compiling.due();
             let after = Instant::now();
             assert!(due.is_none_or(|due| before + COMPILE_STALL <= due && due <= after + COMPILE_STALL), "{name}");
             assert_eq!((due.is_some(), proxy.parsing.compiled), expected, "{name}");
         }
+        proxy.stop_server();
     }
 
     #[test]
@@ -2898,12 +2920,13 @@ mod tests {
         // A start AGO, as dbt lsp sends it.
         let started = |proxy: &mut Proxy<Vec<u8>>, ago: Duration| {
             proxy.on_server(frame_of(&json!({"method": "dbt/lspCompileStart", "params": {}})));
-            proxy.compiling.since = Some(Instant::now() - ago);
+            proxy.backend.running_mut().unwrap().compiling.since = Some(Instant::now() - ago);
         };
-        let mut proxy = Proxy::new(Vec::new(), Life::Lost("dbt lsp is not running".into()), Some(PathBuf::from("/p")));
+        let due = |proxy: &Proxy<Vec<u8>>| proxy.backend.running().unwrap().compiling.due();
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         started(&mut proxy, Duration::ZERO);
         proxy.on_time();
-        assert!(said(&proxy).is_empty() && proxy.compiling.due().is_some(), "started just now");
+        assert!(said(&proxy).is_empty() && due(&proxy).is_some(), "started just now");
         started(&mut proxy, COMPILE_STALL);
         proxy.on_time();
         let text = "dbt lsp has been compiling for 60 s with no end yet (its log: /p/logs/dbt-lsp.log)";
@@ -2913,12 +2936,14 @@ mod tests {
         assert_eq!(said(&proxy), std::slice::from_ref(&told), "told once");
         started(&mut proxy, COMPILE_STALL);
         proxy.on_time();
-        assert_eq!((said(&proxy), proxy.compiling.due()), (vec![told.clone()], None), "once a session");
-        let mut after = Proxy::new(Vec::new(), Life::Lost("dbt lsp is not running".into()), Some(PathBuf::from("/p")));
+        assert_eq!((said(&proxy), due(&proxy)), (vec![told.clone()], None), "once a session");
+        proxy.stop_server();
+        let mut after = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         after.shutdown = true;
         started(&mut after, COMPILE_STALL);
         after.on_time();
-        assert_eq!((said(&after), after.compiling.due()), (Vec::new(), None), "nothing after shutdown");
+        assert_eq!((said(&after), due(&after)), (Vec::new(), None), "nothing after shutdown");
+        after.stop_server();
         // `serve` wakes for that deadline when nothing else comes, here a client that closes once written to.
         struct Closing(Vec<u8>, Sender<Event>);
         impl Write for Closing {
@@ -2937,23 +2962,17 @@ mod tests {
             thread::sleep(Duration::from_secs(10));
             let _ = watchdog.send(Event::ClientClosed);
         });
-        let mut serving = Proxy::new(
-            Closing(Vec::new(), events),
-            Life::Lost("dbt lsp is not running".into()),
-            Some(PathBuf::from("/p")),
-        );
-        serving.compiling.since = Some(Instant::now() - COMPILE_STALL);
+        let mut serving = Proxy::new(Closing(Vec::new(), events), a_running_life(), Some(PathBuf::from("/p")));
+        serving.backend.running_mut().unwrap().compiling.since = Some(Instant::now() - COMPILE_STALL);
         serving.serve(inbox);
+        serving.stop_server();
         let frames: Vec<Value> = written(&serving.client.0).into_iter().filter_map(|frame| frame.value).collect();
         assert_eq!(frames, [told], "told through serve");
     }
 
     #[test]
     fn a_lost_server_keeps_the_failures_said_and_clears_its_deadline() {
-        let mut child = Command::new("sh").args(["-c", "cat > /dev/null"]).stdin(Stdio::piped()).spawn().unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let server = Server { child, stdin, generation: 0 };
-        let mut proxy = Proxy::new(Vec::new(), Life::Running(Running::new(server)), Some(PathBuf::from("/p")));
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), Some(PathBuf::from("/p")));
         let [e, ..] = reported();
         let failed = json!({"method": "dbt/lspCompileComplete", "params": {"models_count": null, "errors": [e]}});
         let shown = |proxy: &Proxy<Vec<u8>>| {
@@ -2963,9 +2982,9 @@ mod tests {
         proxy.on_server(frame_of(&failed));
         assert_eq!(shown(&proxy), 1);
         proxy.on_server(frame_of(&json!({"method": "dbt/lspCompileStart", "params": {}})));
-        assert!(proxy.compiling.due().is_some());
+        assert!(proxy.backend.running().unwrap().compiling.due().is_some());
         proxy.on_server_closed();
-        assert!(proxy.backend.running().is_none() && proxy.compiling.due().is_none(), "no deadline of a lost server");
+        assert!(proxy.backend.running().is_none() && proxy.backend.due().is_none(), "no deadline of a lost server");
         // The next server's first failure, the same.
         proxy.on_server(frame_of(&failed));
         assert_eq!(shown(&proxy), 1);
@@ -3017,10 +3036,11 @@ mod tests {
 
     #[test]
     fn a_listing_past_its_deadline_is_abandoned_and_the_graph_kept() {
-        let mut proxy = Proxy::new(Vec::new(), Life::Lost("dbt lsp is not running".into()), None);
-        proxy.nodes = Some(Vec::new());
-        proxy.listing = Some(("dbt-lsp-plus/1".into(), 1, Instant::now() - LIST_TIMEOUT));
-        proxy.listed = vec![ServerNode {
+        let mut proxy = Proxy::new(Vec::new(), a_running_life(), None);
+        let listings = &mut proxy.backend.running_mut().unwrap().listings;
+        listings.nodes = Some(Vec::new());
+        listings.listing = Some(("dbt-lsp-plus/1".into(), 1, Instant::now() - LIST_TIMEOUT));
+        listings.listed = vec![ServerNode {
             id: "model.shop.a".into(),
             name: "a".into(),
             resource_type: "model".into(),
@@ -3029,11 +3049,13 @@ mod tests {
             depends_on: Vec::new(),
         }];
         proxy.expire_listing();
-        assert!(proxy.listing.is_none() && proxy.listed.is_empty());
-        assert_eq!(proxy.nodes, Some(Vec::new()));
+        let listings = &proxy.backend.running().unwrap().listings;
+        assert!(listings.listing.is_none() && listings.listed.is_empty());
+        assert_eq!(listings.nodes, Some(Vec::new()));
         // A listing within its deadline stays.
-        proxy.listing = Some(("dbt-lsp-plus/2".into(), 0, Instant::now()));
+        proxy.backend.running_mut().unwrap().listings.listing = Some(("dbt-lsp-plus/2".into(), 0, Instant::now()));
         proxy.expire_listing();
-        assert!(proxy.listing.is_some());
+        assert!(proxy.backend.running().unwrap().listings.listing.is_some());
+        proxy.stop_server();
     }
 }
