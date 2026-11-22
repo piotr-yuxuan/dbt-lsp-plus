@@ -1065,6 +1065,37 @@ fn a_compilation_that_compiled_nothing_is_said_once() {
 }
 
 #[test]
+fn the_failures_said_stay_said_across_a_restart() {
+    let error = json!({"code": "1005", "severity": "Error",
+                       "message": "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found\n(in :1:1)"});
+    // Both lives fail alike; the first exits on a hover.
+    let failed = json!({"errors": [error], "models_count": null});
+    let script = json!({"exit_on": "textDocument/hover", "exit_life": 1, "compile_complete": failed});
+    let (mut session, log) = Session::fake("compiled-nothing-restart", script);
+    session.initialize(&fixture());
+    let orders = fixture().join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let shown = |m: &Value, start: &str, end: &str| {
+        let text = m["params"]["message"].as_str().unwrap_or_default();
+        m["method"] == "window/showMessage" && text.starts_with(start) && text.ends_with(end)
+    };
+    session.wait_for(|m| shown(m, "dbt lsp compiled nothing", ""));
+    session.request("textDocument/hover", hover_at_start(&orders));
+    session.wait_for(|m| shown(m, "dbt lsp exited", "restarting it in 1 s."));
+    let restarted = session.received.len();
+    // The second life's compilations, of its replayed didOpen and its listing, before its listing's answer.
+    until_logged(&log, "the second life's listing", |_| {
+        life(&log, 2).iter().any(|m| m["params"]["arguments"][0] == "*")
+    });
+    barrier(&mut session);
+    let compiled = session.received[restarted..].iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
+    assert!(compiled >= 1, "no compilation of the second life");
+    let said = session.received.iter().filter(|m| shown(m, "dbt lsp compiled nothing", "")).count();
+    assert_eq!(said, 1, "said again after the restart");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn lists_on_the_client_s_changes_and_never_on_its_own_compilations() {
     let all = json!({"error": null, "nodes": [node("model.shop.orders", "models/marts/orders.sql", &[])]});
     let (mut session, log) = Session::fake("no-feedback", json!({"answers": {ALL: all}}));

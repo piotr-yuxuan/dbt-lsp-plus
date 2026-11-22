@@ -1950,12 +1950,13 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   - the compilations: the fake's as 2.0.9's, on a model's watched change,
     on none of dbt's output alone, once for a save and its watched event,
     each with O4's keys and followed by its background pair; one that
-    compiled nothing said once across several, with dbt's first error and
-    never a warning, its completions forwarded as they came; and, by unit
-    tests, the reading of a completion, one message per first error,
-    restarts included, the deadline that a start sets and a completion or
-    a lost server clears, and one with no end said once a session, never
-    after `shutdown`;
+    compiled nothing said once across several, and across a restart whose
+    server fails alike, with dbt's first error and never a warning, its
+    completions forwarded as they came; and, by unit tests, the reading of
+    a completion, one message per first error, a lost server's included,
+    the deadline that a start sets and a completion or a lost server
+    clears, and one with no end said once a session, never after
+    `shutdown`;
   - no server, warned once; a server that exits at once, a crash with
     several requests pending, the scanned graph after a crash, a crash
     before `initialize` and during `shutdown`, a server killed when it
