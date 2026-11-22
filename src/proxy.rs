@@ -827,7 +827,7 @@ impl<W: Write> Proxy<W> {
             Life::Lost(why) => why.clone(),
             _ => "dbt lsp is not running".to_owned(),
         };
-        let text = format!("{why}: dbt-lsp-plus serves only its own features: symbols, lineage, folding, renames.");
+        let text = format!("{why}: dbt-lsp-plus answers alone.");
         self.send_client(
             &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 2, "message": text}}),
         );
@@ -2372,7 +2372,7 @@ impl<W: Write> Proxy<W> {
         let delay = restart_delay(&self.backend.restarts, now);
         let text = match delay {
             Some(delay) => format!("{why}: restarting it in {} s.", delay.as_secs()),
-            None => format!("{why}: dbt-lsp-plus keeps its own features: symbols, lineage, folding, renames."),
+            None => format!("{why}: dbt-lsp-plus answers alone."),
         };
         self.send_client(
             &json!({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": text}}),

@@ -440,7 +440,8 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
     assert_eq!(result["capabilities"]["documentSymbolProvider"], json!(true));
     assert_eq!(result["capabilities"]["textDocumentSync"], json!({"openClose": true, "change": 2, "save": {}}));
     let warning = session.wait_for(|m| m["method"] == "window/showMessage");
-    assert!(warning["params"]["message"].as_str().unwrap().contains("could not start"), "{warning}");
+    let text = warning["params"]["message"].as_str().unwrap();
+    assert!(text.contains("could not start") && text.ends_with(": dbt-lsp-plus answers alone."), "{warning}");
     let path = fixture().join("models/marts/orders.sql");
     let position = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 4, "character": 25}});
     // No dbt lsp to ask: the proxy's nothing, not a failure.
@@ -777,7 +778,7 @@ fn three_crashes_restart_after_one_two_then_three_seconds_and_a_fourth_leaves_th
     session.received.clear();
     session.request("textDocument/hover", hover_at_start(&summary));
     let shown = session.wait_for(|m| m["method"] == "window/showMessage");
-    assert!(shown["params"]["message"].as_str().unwrap().contains("keeps its own features"), "{shown}");
+    assert!(shown["params"]["message"].as_str().unwrap().ends_with(": dbt-lsp-plus answers alone."), "{shown}");
     std::thread::sleep(Duration::from_millis(1500));
     assert_eq!(lives(&log).len(), 4);
     // One message on giving up: everything sent before this answer is read.
@@ -910,11 +911,7 @@ fn a_restart_that_cannot_start_counts_as_a_crash() {
     assert_eq!(details(&outgoing["result"], "to"), ["macro.shop_utils.is_positive", "model.shop.stg_orders"]);
     let messages: Vec<&str> = session.received.iter().filter_map(|m| m["params"]["message"].as_str()).collect();
     assert!(messages[1].starts_with("dbt lsp could not start") && messages[1].ends_with("in 2 s."), "{messages:?}");
-    assert!(
-        messages[2].ends_with("in 3 s.")
-            && messages[3].ends_with("keeps its own features: symbols, lineage, folding, renames."),
-        "{messages:?}"
-    );
+    assert!(messages[2].ends_with("in 3 s.") && messages[3].ends_with(": dbt-lsp-plus answers alone."), "{messages:?}");
     assert!(session.finish().success());
 }
 
