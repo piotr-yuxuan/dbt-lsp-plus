@@ -2651,16 +2651,19 @@ mod tests {
 
     /// The errors of a compilation, as dbt lsp 2.0.9 reports them: E, a
     /// missing `env_var` placed by `(in`; E2, the same at another place; F,
-    /// an error placed only by `-->`; W, a warning.
-    fn reported() -> [Value; 4] {
+    /// an error placed only by `-->`; W, a warning; H, a hook's error placed
+    /// both ways, as S2's.
+    fn reported() -> [Value; 5] {
         let e = "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found";
         let f = "[DependencyNotFound (dbt1048)]: Ref 'no_such_model' not found\n  --> models/x.sql:3:10";
         let w = "[InvalidConfig (dbt1005)]: doc macro reference 'no_such_doc' not found\n  --> models/y.yml:7:22";
+        let h = "[DbDriverFailed (dbt1308)]: Catalog Error: Table with name no_such_table does not exist!\nDid you mean \"pg_tables\"?\n\nLINE 4: select * from no_such_table\n                      ^\n(in <RUN_OPERATION>:1:9)\n  --> <RUN_OPERATION>:1:9";
         [
             json!({"code": "1005", "message": format!("{e}\n(in :1:1)"), "severity": "Error"}),
             json!({"code": "1005", "message": format!("{e}\n(in :2:1)"), "severity": "Error"}),
             json!({"code": "1048", "message": f, "severity": "Error"}),
             json!({"code": "1005", "message": w, "severity": "Warning"}),
+            json!({"code": "1308", "message": h, "severity": "Error"}),
         ]
     }
 
@@ -2678,17 +2681,24 @@ mod tests {
 
     #[test]
     fn reads_what_a_compilation_that_compiled_nothing_reports() {
-        let [e, _, f, w] = reported();
+        let [e, _, f, w, h] = reported();
         let e_text = "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found (in :1:1)";
         let e_key = "[InvalidConfig (dbt1005)]: Jinja render error: invalid operation: 'env_var': environment variable 'X' not found";
         let f_text = "[DependencyNotFound (dbt1048)]: Ref 'no_such_model' not found --> models/x.sql:3:10";
         let f_key = "[DependencyNotFound (dbt1048)]: Ref 'no_such_model' not found";
+        let h_key = "[DbDriverFailed (dbt1308)]: Catalog Error: Table with name no_such_table does not exist! Did you mean \"pg_tables\"? LINE 4: select * from no_such_table ^";
+        let h_text = format!("{h_key} (in <RUN_OPERATION>:1:9) --> <RUN_OPERATION>:1:9");
         let said = |text: &str, key: &str| Some((text.to_owned(), key.to_owned()));
         let cases = [
             ("some models compiled", json!({"models_count": 6, "errors": [e]}), None),
             ("no count", json!({"errors": [e]}), None),
             ("a warning, then an error", json!({"models_count": null, "errors": [w, e]}), said(e_text, e_key)),
             ("an error placed by -->", json!({"models_count": null, "errors": [f]}), said(f_text, f_key)),
+            (
+                "an error placed both ways, cut at the first",
+                json!({"models_count": null, "errors": [h]}),
+                said(&h_text, h_key),
+            ),
             ("a warning alone", json!({"models_count": null, "errors": [w]}), None),
             ("no error", json!({"models_count": null, "errors": []}), None),
             ("errors that are no list", json!({"models_count": null, "errors": 2}), None),
@@ -2706,7 +2716,7 @@ mod tests {
 
     #[test]
     fn a_failure_is_said_once_per_first_error() {
-        let [e, e2, f, w] = reported();
+        let [e, e2, f, w, _] = reported();
         let mut proxy = Proxy::new(Vec::new(), None, None, Some(PathBuf::from("/p")));
         let completion = |method: &str, count: Value, errors: &[&Value]| {
             frame_of(&json!({"method": method, "params": {"models_count": count, "errors": errors}}))
