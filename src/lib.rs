@@ -13,6 +13,7 @@ pub mod graph;
 pub mod locate;
 pub mod modes;
 pub mod navigation;
+pub mod node;
 pub mod packages;
 pub mod parse_log;
 pub mod project;
