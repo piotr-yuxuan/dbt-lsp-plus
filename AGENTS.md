@@ -46,6 +46,7 @@ src/graph.rs                  the dependency graph: scanned, then the server's o
 src/sources.rs                references and renames of sources
 src/navigation.rs             the targets of definitions and references, dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
+src/answer.rs                 what a request gets: found, empty, or unanswered with its reasons, as LSP JSON
 src/config.rs                 the user's dbt parse: its command, run, index, summary
 src/capability.rs             what a session offers: one descriptor per method or command
 src/modes.rs                  who answers each method: the user's settings and the session's table
