@@ -3030,6 +3030,11 @@ mod tests {
         let Life::Waiting(due) = proxy.backend.life else { panic!("no restart awaited") };
         let second = Duration::from_secs(1);
         assert!(before + second <= due && due <= after + second && !proxy.backend.alone(), "{due:?}");
+        // Nor is a restart under way, its process reaped once checked.
+        let Life::Running(Running { server, .. }) = a_running_life() else { panic!("a running life") };
+        proxy.backend.life = Life::Starting(server, "dbt-lsp-plus/1".into(), Instant::now() + REPLAY_TIMEOUT);
+        assert!(!proxy.backend.alone(), "starting again");
+        proxy.stop_server();
         // Three restarts in the window: none is left.
         let ago = |seconds| Instant::now().checked_sub(Duration::from_secs(seconds)).unwrap();
         proxy.backend.restarts = vec![ago(30), ago(20), ago(10)];
