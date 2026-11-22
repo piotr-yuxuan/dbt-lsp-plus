@@ -110,8 +110,6 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     process, each a resource's start or end;
   - `restart_delay`: the decision on a lost server, free of the clock,
     with tests of its own;
-  - `Backend::due`: the next instant at which the Backend's life needs
-    the loop, apart from what is due then, so that `serve` stays a wait;
   - `changes_graph`: the decision whether a client's notification may
     change the graph, free of the file system, with tests of its own;
   - `compile_failure`: what a compilation that compiled nothing reports,
