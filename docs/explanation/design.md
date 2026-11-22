@@ -194,8 +194,10 @@ holding the other's, and one whose path cannot be read matches only
 itself.  When dbt lsp
 adds nothing, the client gets the proxy's answer as it is, one
 `Location` staying one.  Its cost: every definition and references at a
-claimed position waits for dbt lsp, up to 300 ms, where `plus` answers
-at once, and each one does during a long compilation; dbt lsp 2.0.9
+claimed position waits for dbt lsp, at most 300 ms where the proxy finds
+a target and 2 s where it finds nothing (`ref('nowhere')`, `- unique`),
+where `plus` answers at once, and each one does during a long
+compilation; dbt lsp 2.0.9
 took 1.2 s over a session's first references on the fixture, once
 compiled (see "Shadow"), past which the proxy answers alone.  Where dbt
 lsp's answer was seen it equals the proxy's or lies within it, but for
@@ -1846,7 +1848,8 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     from a hint request, none more once an index exists; the refresh asked
     of a client that can, its answer kept from the server;
   - navigation: each kind of target and its location, dbt's own test
-    null, the server never asked; a column's name and `dbt_project.yml`
+    null, the server asked too in `merge`, never in `plus`; a column's
+    name and `dbt_project.yml`
     forwarded; with a server, a SQL `ref`, a macro call, a function call
     and a Python model's `ref`, and their references, the proxy's as alone,
     in front of the feedback's null and `[]` too, and dbt lsp's in `dbt`; a
@@ -1859,7 +1862,11 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     a `functions:` entry's name the proxy's in both modes;
     hover on a doc, a test and an entry's name; nodeInfo on an entry's
     name; without a server;
-  - the merges: a hover's summary or hints alone past a late dbt lsp's
+  - the merges: the union of a definition and references, dbt lsp's
+    other locations after the proxy's, its matching ones (a
+    `LocationLink` among them) adding nothing, the proxy's locations
+    alone past 300 ms, and a claimed position with nothing waiting 2 s;
+    a hover's summary or hints alone past a late dbt lsp's
     deadline of 300 ms and its late answer dropped; a definition,
     references, a hover and hints with no part answered null or `[]` past
     2 s, not before, logged once each with that deadline, and awaited in
