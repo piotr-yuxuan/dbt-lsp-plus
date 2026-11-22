@@ -5,6 +5,7 @@
 
 use crate::config::ParseIndex;
 use crate::project::{self, Entity, Project};
+use crate::reference::{Kind, Name};
 use crate::sources;
 use crate::yaml::{self, Tree};
 use crate::{properties, scan};
@@ -22,7 +23,7 @@ pub enum Target {
     /// A `source()` argument, or a source's or table's `name:`.
     Source(sources::Target),
     /// A call that dbt resolves, as `Lookup::call` does.
-    Call(scan::Target),
+    Call(Name),
     /// A name that dbt looks up among the resources, as the row KIND of
     /// `LOOKUP` says, in the package it gives, if any.
     Named { kind: &'static str, package: Option<String>, name: String },
@@ -35,9 +36,8 @@ impl Target {
     pub fn kind(&self) -> &'static str {
         match self {
             Target::Source(_) => "source",
-            Target::Call(scan::Target::Macro { .. }) => "macro",
-            Target::Call(scan::Target::Function { .. }) => "function",
-            Target::Call(_) | Target::Named { kind: "unit test model", .. } => "ref",
+            Target::Call(name) => name.kind.flag(),
+            Target::Named { kind: "unit test model", .. } => "ref",
             Target::Named { kind: kind @ ("doc" | "test"), .. } => kind,
             Target::Named { .. } => "entry",
         }
@@ -123,14 +123,14 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         };
         let blocks = scan::blocks(text).into_iter().filter(|block| inside(&block.name_range));
         if let Some(name) = blocks.filter_map(|block| macro_named(&block)).next() {
-            return Some(Target::Call(scan::Target::Macro { package: None, name }));
+            return Some(Target::Call(Name::new(Kind::Macro, None, &name)));
         }
-        let named = |call: &scan::Call| match call.target {
-            scan::Target::Ref { .. } | scan::Target::Function { .. } => call.arguments.iter().any(inside),
-            scan::Target::Macro { .. } => inside(&call.range),
+        let named = |call: &scan::Call| match call.name.kind {
+            Kind::Ref | Kind::Function => call.arguments.iter().any(inside),
+            Kind::Macro => inside(&call.range),
             _ => false,
         };
-        return sources::file_calls(path, text).into_iter().find(named).map(|call| Target::Call(call.target));
+        return sources::file_calls(path, text).into_iter().find(named).map(|call| Target::Call(call.name));
     }
     let named = |kind: &'static str, package: Option<&str>, name: &str| Target::Named {
         kind,
@@ -139,8 +139,8 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     };
     let reference = scan::yaml_calls(text)
         .into_iter()
-        .find(|call| matches!(call.target, scan::Target::Ref { .. }) && call.arguments.iter().any(inside))
-        .map(|call| Target::Call(call.target));
+        .find(|call| matches!(call.name.kind, Kind::Ref) && call.arguments.iter().any(inside))
+        .map(|call| Target::Call(call.name));
     let doc = || {
         let call = DOC
             .captures_iter(text)
@@ -167,12 +167,12 @@ pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
         Some(named("unit test model", None, &name))
     };
     let macro_call = || {
-        let called = |call: &scan::Call| match call.target {
-            scan::Target::Macro { .. } => inside(&call.range),
-            scan::Target::Function { .. } => call.arguments.iter().any(inside),
+        let called = |call: &scan::Call| match call.name.kind {
+            Kind::Macro => inside(&call.range),
+            Kind::Function => call.arguments.iter().any(inside),
             _ => false,
         };
-        scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| Target::Call(call.target))
+        scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| Target::Call(call.name))
     };
     reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
 }
@@ -226,7 +226,7 @@ impl<'a> Lookup<'a> {
         deepest.map_or(self.project.root_package.as_str(), |(name, _)| name.as_str())
     }
 
-    /// Where a call of TARGET from the package OWN leads, by dbt 2.0.9's
+    /// Where a call of NAME from the package OWN leads, by dbt 2.0.9's
     /// lookup: in the package the call names; else a `ref`, a `source`, a
     /// function or a dispatch in OWN and the root, in the flag's order, then in any
     /// package; an unqualified macro in OWN, then the root only, since dbt
@@ -236,15 +236,12 @@ impl<'a> Lookup<'a> {
     /// (dbt1005), and a dispatch's every implementation (`*__name`).  A
     /// `ref` leads to its file's start, as dbt lsp answers, a macro to its
     /// whole block, as dbt lsp answers too.
-    pub fn call(&self, own: &str, target: &scan::Target) -> Vec<Found> {
+    pub fn call(&self, own: &str, name: &Name) -> Vec<Found> {
         let root = self.project.root_package.as_str();
         let (first, second) = if self.root_first { (root, own) } else { (own, root) };
-        let steps = match target {
-            scan::Target::Ref { package: Some(package), .. }
-            | scan::Target::Macro { package: Some(package), .. }
-            | scan::Target::Dispatch { package: Some(package), .. }
-            | scan::Target::Function { package: Some(package), .. } => vec![Some(package.as_str())],
-            scan::Target::Macro { package: None, .. } => vec![Some(own), Some(root)],
+        let steps = match (&name.kind, &name.package) {
+            (Kind::Ref | Kind::Macro | Kind::Dispatch | Kind::Function, Some(package)) => vec![Some(package.as_str())],
+            (Kind::Macro, None) => vec![Some(own), Some(root)],
             _ => vec![Some(first), Some(second), None],
         };
         let get = |id: String| self.by_id.get(id.as_str()).map_or(&[][..], Vec::as_slice);
@@ -270,20 +267,21 @@ impl<'a> Lookup<'a> {
             index.resources(package, name).into_iter().filter(named).filter_map(|node| self.parsed_at(node)).collect()
         };
         let in_package = |package: &str| -> Vec<Found> {
-            match target {
-                scan::Target::Ref { name, version, .. } => {
+            let Name { kind, name: called, version, .. } = name;
+            match kind {
+                Kind::Ref => {
                     // Once a parse knows the name in PACKAGE, its nodes decide: they know versions, Python
                     // models, snapshots defined in YAML, and which of two files of one name dbt keeps.
-                    if self.index.is_some_and(|index| !index.resources(package, name).is_empty()) {
-                        return parsed(package, name, version.as_deref());
+                    if self.index.is_some_and(|index| !index.resources(package, called).is_empty()) {
+                        return parsed(package, called, version.as_deref());
                     }
                     // Else the scan's: a version by its name and version, the latest when none is named, which may
                     // have no file; a model, seed or snapshot when the name has no versions and the call names none.
-                    let prefix = format!("model.{package}.{name}.v");
+                    let prefix = format!("model.{package}.{called}.v");
                     let ids = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let versions: Vec<&Entity> = ids
                         .flat_map(|(_, entities)| entities.iter().copied())
-                        .filter(|entity| entity.version.is_some() && entity.name == *name)
+                        .filter(|entity| entity.version.is_some() && entity.name == *called)
                         .collect();
                     let chosen = |entity: &&Entity| match version {
                         Some(version) => entity.version.as_ref() == Some(version),
@@ -291,24 +289,23 @@ impl<'a> Lookup<'a> {
                     };
                     let plain = versions.is_empty() && version.is_none();
                     let kinds = ["model", "seed", "snapshot"].into_iter().filter(|_| plain);
-                    let unversioned = kinds.flat_map(|kind| get(format!("{kind}.{package}.{name}")).iter().copied());
+                    let unversioned = kinds.flat_map(|kind| get(format!("{kind}.{package}.{called}")).iter().copied());
                     versions.into_iter().filter(chosen).chain(unversioned).map(found).collect()
                 }
-                scan::Target::Source { source, table } => {
-                    get(format!("source.{package}.{source}.{table}")).iter().map(|entity| found(entity)).collect()
+                Kind::Table { source } => {
+                    get(format!("source.{package}.{source}.{called}")).iter().map(|entity| found(entity)).collect()
                 }
-                scan::Target::Macro { name, .. } => {
-                    get(format!("macro.{package}.{name}")).iter().map(|entity| found(entity)).collect()
+                Kind::Macro => get(format!("macro.{package}.{called}")).iter().map(|entity| found(entity)).collect(),
+                Kind::Function => {
+                    get(format!("function.{package}.{called}")).iter().map(|entity| found(entity)).collect()
                 }
-                scan::Target::Function { name, .. } => {
-                    get(format!("function.{package}.{name}")).iter().map(|entity| found(entity)).collect()
-                }
-                scan::Target::Dispatch { name, .. } => {
-                    let (prefix, suffix) = (format!("macro.{package}."), format!("__{name}"));
+                Kind::Dispatch => {
+                    let (prefix, suffix) = (format!("macro.{package}."), format!("__{called}"));
                     let in_package = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let implementations = in_package.filter(|(id, _)| id.ends_with(&suffix));
                     implementations.flat_map(|(_, entities)| entities.iter().map(|entity| found(entity))).collect()
                 }
+                _ => Vec::new(),
             }
         };
         let disabled = |found: &Found| self.index.is_some_and(|index| index.disabled(&found.id));
@@ -373,7 +370,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, target: &Target) -> Vec<Found> {
             });
             return first_step(found.collect(), &packages(CALLS), true);
         }
-        Target::Call(call) => return lookup.call(own, call),
+        Target::Call(name) => return lookup.call(own, name),
         Target::Named { kind, package, name } => (kind, package, name),
     };
     let Some((_, types, prefix, steps)) = LOOKUP.iter().find(|(row, ..)| row == kind) else { return Vec::new() };
@@ -418,9 +415,7 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
     let declared = resolve(lookup, path, target);
     let ids: HashSet<&str> = declared.iter().map(|found| found.id.as_str()).collect();
     let name = match target {
-        Target::Call(
-            scan::Target::Ref { name, .. } | scan::Target::Macro { name, .. } | scan::Target::Function { name, .. },
-        )
+        Target::Call(Name { kind: Kind::Ref | Kind::Macro | Kind::Function, name, .. })
         | Target::Named { name, .. } => name,
         _ => return Vec::new(),
     };
@@ -430,23 +425,19 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
         Some(Found { id, path: file.to_owned(), range })
     };
     // Calls alike from one package lead alike: each is looked up once.
-    let resolved: RefCell<HashMap<(&str, &scan::Target), Option<String>>> = RefCell::default();
-    let lead = |own: &'a str, target: &'a scan::Target| {
+    let resolved: RefCell<HashMap<(&str, &Name), Option<String>>> = RefCell::default();
+    let lead = |own: &'a str, called: &'a Name| {
         let found =
-            || lookup.call(own, target).into_iter().find(|found| ids.contains(found.id.as_str())).map(|found| found.id);
-        resolved.borrow_mut().entry((own, target)).or_insert_with(found).clone()
+            || lookup.call(own, called).into_iter().find(|found| ids.contains(found.id.as_str())).map(|found| found.id);
+        resolved.borrow_mut().entry((own, called)).or_insert_with(found).clone()
     };
     let calls = |file: &Path, scanned: &'a project::Scanned| -> Vec<Found> {
-        let called = |call: &&scan::Call| match &call.target {
-            scan::Target::Ref { name: called, .. }
-            | scan::Target::Macro { name: called, .. }
-            | scan::Target::Function { name: called, .. } => called == name,
+        let called = |call: &&scan::Call| match &call.name {
+            Name { kind: Kind::Ref | Kind::Macro | Kind::Function, name: called, .. } => called == name,
             _ => false,
         };
-        let at = |call: &scan::Call| match &call.target {
-            scan::Target::Ref { .. } | scan::Target::Function { .. } => {
-                call.arguments.last().cloned().unwrap_or(call.range.clone())
-            }
+        let at = |call: &scan::Call| match &call.name.kind {
+            Kind::Ref | Kind::Function => call.arguments.last().cloned().unwrap_or(call.range.clone()),
             _ => call.range.end - name.len()..call.range.end,
         };
         let own = lookup.package_of(file);
@@ -454,7 +445,7 @@ pub fn references<'a>(lookup: &Lookup<'a>, path: &Path, target: &Target, declara
             .calls
             .iter()
             .filter(called)
-            .filter_map(|call| Some(Found { id: lead(own, &call.target)?, path: file.to_owned(), range: at(call) }))
+            .filter_map(|call| Some(Found { id: lead(own, &call.name)?, path: file.to_owned(), range: at(call) }))
             .collect()
     };
     // A unit test's `model:`, a generic test, the macro `test_<name>`, and with DECLARATION an entry's
@@ -637,7 +628,7 @@ models:
 
     fn called(package: Option<&str>, name: &str) -> Option<Target> {
         let (package, name) = (package.map(str::to_owned), name.to_owned());
-        Some(Target::Call(scan::Target::Ref { package, name, version: None }))
+        Some(Target::Call(Name { kind: Kind::Ref, package, name, version: None }))
     }
 
     fn named(kind: &'static str, package: Option<&str>, name: &str) -> Option<Target> {
@@ -658,7 +649,7 @@ models:
         let table = sources::Target::Table { source: "raw".into(), table: "orders".into() };
         assert_eq!(at(yml, MODELS, "'raw', 'orders'", 9), Some(Target::Source(table)));
         // A ref naming a version, which the last parse resolves.
-        let versioned = scan::Target::Ref { package: None, name: "orders".into(), version: Some("2".into()) };
+        let versioned = Name { kind: Kind::Ref, package: None, name: "orders".into(), version: Some("2".into()) };
         assert_eq!(at(yml, MODELS, "ref('orders', v=2)", 6), Some(Target::Call(versioned)));
     }
 
@@ -666,7 +657,7 @@ models:
     fn a_macro_call_in_a_yaml_comment_is_no_target() {
         let path = Path::new("/p/dbt_project.yml");
         let hooks = "name: shop\non-run-start: \"{{ log_start() }}\"\n# on-run-end: \"{{ log_end() }}\"\n";
-        let macro_named = |name: &str| Some(Target::Call(scan::Target::Macro { package: None, name: name.into() }));
+        let macro_named = |name: &str| Some(Target::Call(Name::new(Kind::Macro, None, name)));
         assert_eq!(at(path, hooks, "log_start", 1), macro_named("log_start"), "a hook's macro");
         assert_eq!(at(path, hooks, "log_end", 1), None, "dbt renders no comment");
     }
@@ -698,13 +689,13 @@ models:
         let text = "select * from {{ source('raw', 'orders') }} join {{ ref('orders') }} -- {{ doc('order_status') }}";
         let table = sources::Target::Table { source: "raw".into(), table: "orders".into() };
         assert_eq!(at(sql, text, "'orders') }} join", 2), Some(Target::Source(table)));
-        let orders = scan::Target::Ref { package: None, name: "orders".into(), version: None };
+        let orders = Name { kind: Kind::Ref, package: None, name: "orders".into(), version: None };
         assert_eq!(at(sql, text, "ref('orders')", 6), Some(Target::Call(orders)));
         // The keyword: a macro call, as a project may override `ref`.
-        let keyword = scan::Target::Macro { package: None, name: "ref".into() };
+        let keyword = Name::new(Kind::Macro, None, "ref");
         assert_eq!(at(sql, text, "ref('orders')", 1), Some(Target::Call(keyword)));
         // dbt has no doc in SQL: a call of a macro, which none defines.
-        let doc = scan::Target::Macro { package: None, name: "doc".into() };
+        let doc = Name::new(Kind::Macro, None, "doc");
         assert_eq!(at(sql, text, "doc(", 1), Some(Target::Call(doc)));
         assert_eq!(at(sql, text, "order_status", 2), None);
     }
@@ -761,9 +752,7 @@ models:
                 ("dbt_packages/pb/functions/k.sql", "x + 3".into()),
             ]
         };
-        let function = |package: Option<&str>, name: &str| {
-            Some(Target::Call(scan::Target::Function { package: package.map(str::to_owned), name: name.into() }))
-        };
+        let function = |package: Option<&str>, name: &str| Some(Target::Call(Name::new(Kind::Function, package, name)));
         let ids = |root: &Path, rel: &str, target| -> Vec<String> {
             leads(root, rel, target).into_iter().map(|(id, ..)| id).collect()
         };
@@ -800,7 +789,8 @@ models:
         ];
         let root = scratch_project("navigation-yaml-snapshot", &files);
         let project = project::scan(&root, &HashMap::new()).unwrap();
-        let named = |name: &str| Target::Call(scan::Target::Ref { package: None, name: name.into(), version: None });
+        let named =
+            |name: &str| Target::Call(Name { kind: Kind::Ref, package: None, name: name.into(), version: None });
         let at = |lookup: &Lookup, name: &str| -> Vec<(String, String)> {
             let found = resolve(lookup, &root.join("models/c.sql"), &named(name));
             found.iter().map(|f| (f.id.clone(), project.text(&f.path).unwrap()[f.range.clone()].to_owned())).collect()
@@ -834,7 +824,8 @@ models:
         ];
         let root = scratch_project("navigation-versions-scanned", &files);
         let reference = |name: &str, version: Option<&str>| {
-            Some(Target::Call(scan::Target::Ref {
+            Some(Target::Call(Name {
+                kind: Kind::Ref,
                 package: None,
                 name: name.into(),
                 version: version.map(str::to_owned),
@@ -896,10 +887,10 @@ models:
             found.iter().map(|found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned()).collect()
         };
         let reference =
-            |name: &str| Target::Call(scan::Target::Ref { package: None, name: name.into(), version: None });
+            |name: &str| Target::Call(Name { kind: Kind::Ref, package: None, name: name.into(), version: None });
         let parsed = Lookup::new(&project, Some(&index));
         assert_eq!(files_of(&parsed, reference("fact")), ["models/fact_v2.sql"], "the latest alone");
-        let v1 = Target::Call(scan::Target::Ref { package: None, name: "fact".into(), version: Some("1".into()) });
+        let v1 = Target::Call(Name { kind: Kind::Ref, package: None, name: "fact".into(), version: Some("1".into()) });
         assert_eq!(files_of(&parsed, v1), ["models/fact.sql"], "the version its file holds");
         assert_eq!(files_of(&parsed, reference("twin")), ["models/a/twin.sql"], "the one dbt keeps");
         let unit = Target::Named { kind: "unit test model", package: None, name: "fact".into() };
@@ -962,7 +953,8 @@ models:
         });
         let index = ParseIndex::of(&manifest);
         let leads = |lookup: &Lookup, rel: &str, name: &str, version: Option<&str>| -> Vec<(String, String)> {
-            let target = scan::Target::Ref { package: None, name: name.into(), version: version.map(str::to_owned) };
+            let target =
+                Name { kind: Kind::Ref, package: None, name: name.into(), version: version.map(str::to_owned) };
             let relative = |found: &Found| found.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
             lookup
                 .call(lookup.package_of(&root.join(rel)), &target)
@@ -1077,12 +1069,10 @@ models:
         let root = scratch_project("navigation-function-references", &files);
         let sql = Path::new("/p/models/a.sql");
         let text = files[3].1;
-        let function = |package: Option<&str>| {
-            Some(Target::Call(scan::Target::Function { package: package.map(str::to_owned), name: "f".into() }))
-        };
+        let function = |package: Option<&str>| Some(Target::Call(Name::new(Kind::Function, package, "f")));
         assert_eq!(at(sql, text, "function('f')", 10), function(None), "at its name");
         assert_eq!(at(sql, text, "'r', 'f'", 1), function(Some("r")), "at its package");
-        let keyword = Some(Target::Call(scan::Target::Macro { package: None, name: "function".into() }));
+        let keyword = Some(Target::Call(Name::new(Kind::Macro, None, "function")));
         assert_eq!(at(sql, text, "function('f')", 2), keyword, "its keyword a macro call, which a project may define");
         assert_eq!(at(sql, text, "function('f')", 2).unwrap().kind(), "macro");
         assert_eq!(function(None).unwrap().kind(), "function");

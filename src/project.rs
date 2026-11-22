@@ -4,6 +4,7 @@
 
 use crate::packages;
 use crate::properties::{self, Entry, Test};
+use crate::reference;
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
 use crate::text::{self, Encoding, LineStarts};
@@ -92,10 +93,7 @@ impl Scanned {
         }
         // Its macro and function calls too, inside the Jinja of its values, such as hooks, but in its comments.
         let macros = |call: &Call| {
-            matches!(
-                call.target,
-                scan::Target::Macro { .. } | scan::Target::Dispatch { .. } | scan::Target::Function { .. }
-            )
+            matches!(call.name.kind, reference::Kind::Macro | reference::Kind::Dispatch | reference::Kind::Function)
         };
         calls.extend(scan::calls(&scan::without_yaml_comments(&text)).into_iter().filter(macros));
         calls.sort_by_key(|call| call.range.start);
@@ -621,6 +619,7 @@ pub(crate) fn scratch_project(name: &str, files: &[(&str, &str)]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reference::Name;
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop")
@@ -638,7 +637,9 @@ mod tests {
             scanned.models.iter().map(|(name, range)| (name.as_str(), &text[range.clone()])).collect();
         assert_eq!(models, [("orders", "orders")]);
         let macro_named = |calls: &[Call], wanted: &str| {
-            calls.iter().any(|call| matches!(&call.target, scan::Target::Macro { name, .. } if name == wanted))
+            calls
+                .iter()
+                .any(|call| matches!(&call.name, Name { kind: reference::Kind::Macro, name, .. } if name == wanted))
         };
         assert!(macro_named(&scanned.calls, "my_macro"));
         let hooks = "name: shop\non-run-start: \"{{ log_start() }}\"\n# on-run-end: \"{{ log_end() }}\"\n";
@@ -648,8 +649,8 @@ mod tests {
         // A hook's function too, as both builds count it for the model.
         let hook = "models:\n  - name: a\n    config:\n      post_hook: \"select {{ function('f') }}(1)\"\n";
         let hook = Scanned::of(Path::new("/p/models/_a.yml"), hook.into());
-        let function = scan::Target::Function { package: None, name: "f".into() };
-        assert!(hook.calls.iter().any(|call| call.target == function), "{:?}", hook.calls);
+        let function = Name::new(reference::Kind::Function, None, "f");
+        assert!(hook.calls.iter().any(|call| call.name == function), "{:?}", hook.calls);
     }
 
     #[test]
@@ -792,9 +793,9 @@ mod tests {
         let expected = ["function.pa.pf", "function.shop.f", "function.shop.g", "model.shop.py_m", "model.shop.x"];
         assert_eq!(shop, expected);
         let python_model = project.entities.iter().find(|e| e.id == "model.shop.py_m").unwrap();
-        let targets: Vec<&scan::Target> = python_model.calls.iter().map(|call| &call.target).collect();
-        let reference = scan::Target::Ref { package: None, name: "x".into(), version: None };
-        let source = scan::Target::Source { source: "s".into(), table: "t".into() };
+        let targets: Vec<&Name> = python_model.calls.iter().map(|call| &call.name).collect();
+        let reference = Name { kind: reference::Kind::Ref, package: None, name: "x".into(), version: None };
+        let source = Name::new(reference::Kind::Table { source: "s".into() }, None, "t");
         assert_eq!(targets, [&reference, &source]);
         assert_eq!(ids("udfs").0, ["function.u.d"], "the configured paths only");
         fs::remove_dir_all(dir).unwrap();
@@ -834,15 +835,15 @@ mod tests {
         ];
         assert_eq!(found, expected);
         let ys = snapshot("snapshot.shop.ys");
-        let targets: Vec<&scan::Target> = ys.calls.iter().map(|call| &call.target).collect();
-        let x = scan::Target::Ref { package: None, name: "x".into(), version: None };
+        let targets: Vec<&Name> = ys.calls.iter().map(|call| &call.name).collect();
+        let x = Name { kind: reference::Kind::Ref, package: None, name: "x".into(), version: None };
         assert_eq!(targets, [&x], "its relation's, not its column test's");
         assert_eq!(&snapshots[ys.name_range.clone()], "ys");
         assert!(snapshots[ys.range.clone()].starts_with("  - name: ys\n"), "from its first line's start");
         assert!(snapshots[ys.range.clone()].trim_end().ends_with("field: id"));
         let in_models = snapshot("snapshot.shop.in_models");
-        let source = scan::Target::Source { source: "s".into(), table: "t".into() };
-        assert_eq!(in_models.calls.iter().map(|call| &call.target).collect::<Vec<_>>(), [&source]);
+        let source = Name::new(reference::Kind::Table { source: "s".into() }, None, "t");
+        assert_eq!(in_models.calls.iter().map(|call| &call.name).collect::<Vec<_>>(), [&source]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -983,12 +984,12 @@ mod tests {
         let open = HashMap::from([(path.clone(), "select * from {{ ref('customers') }}".to_owned())]);
         let project = scan(&fixture(), &open).unwrap();
         let orders = project.entities.iter().find(|e| e.id == "model.shop.orders").unwrap();
-        let targets: Vec<_> = orders.calls.iter().map(|call| &call.target).collect();
+        let targets: Vec<_> = orders.calls.iter().map(|call| &call.name).collect();
         assert_eq!(
             targets,
             [
-                &scan::Target::Ref { package: None, name: "customers".into(), version: None },
-                &scan::Target::Macro { package: None, name: "ref".into() }
+                &Name { kind: reference::Kind::Ref, package: None, name: "customers".into(), version: None },
+                &Name::new(reference::Kind::Macro, None, "ref")
             ]
         );
     }

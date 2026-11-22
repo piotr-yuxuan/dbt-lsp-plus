@@ -5,6 +5,7 @@
 //! properties file.  Every function here is pure.
 
 use crate::project::{self, Insertion, Project, SourceTable};
+use crate::reference::{self, Name};
 use crate::scan::{self, Call};
 use crate::text::{Encoding, LineStarts};
 use crate::yaml;
@@ -45,7 +46,7 @@ pub fn file_calls(path: &Path, text: &str) -> Vec<Call> {
 
 /// The argument of CALL that names TARGET, if CALL is a `source()` naming it.
 fn argument_naming<'a>(call: &'a Call, target: &Target) -> Option<&'a Range<usize>> {
-    let scan::Target::Source { source, table } = &call.target else { return None };
+    let Name { kind: reference::Kind::Table { source }, name: table, .. } = &call.name else { return None };
     match target {
         Target::Table { source: s, table: t } if s == source && t == table => call.arguments.get(1),
         Target::Source { source: s } if s == source => call.arguments.first(),
@@ -58,7 +59,7 @@ fn argument_naming<'a>(call: &'a Call, target: &Target) -> Option<&'a Range<usiz
 pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Target> {
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
     for call in file_calls(path, text) {
-        let scan::Target::Source { source, table } = call.target else { continue };
+        let Name { kind: reference::Kind::Table { source }, name: table, .. } = call.name else { continue };
         match (call.arguments.first().is_some_and(inside), call.arguments.get(1).is_some_and(inside)) {
             (true, _) => return Some(Target::Source { source }),
             (_, true) => return Some(Target::Table { source, table }),

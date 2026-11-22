@@ -13,7 +13,8 @@ use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
 use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, shadow, sources,
+    cache, config, document, features, navigation, packages, parse_log, properties, reference, runs, scan, shadow,
+    sources,
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -1359,8 +1360,8 @@ impl<W: Write> Proxy<W> {
             path.extension().is_some_and(|extension| ["yml", "yaml", "py"].contains(&&*extension.to_string_lossy()));
         let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
         if let Some(call) = calls.into_iter().find(inside) {
-            let named = matches!(call.target, scan::Target::Ref { .. } | scan::Target::Source { .. });
-            return named.then(|| index.and_then(|index| index.named(&call.target)));
+            let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
+            return named.then(|| index.and_then(|index| index.named(&call.name)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
         let entry = navigation::target_at(&path, &text, offset).filter(|target| {

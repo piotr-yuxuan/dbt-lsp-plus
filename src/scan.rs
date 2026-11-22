@@ -2,6 +2,7 @@
 //! What one file of SQL and Jinja holds: its blocks, its CTEs and its calls.
 //! Offsets are bytes into the file's text.  Every function here is pure.
 
+use crate::reference::{self, Name};
 use regex::Regex;
 use std::ops::Range;
 use std::sync::LazyLock;
@@ -32,39 +33,9 @@ pub struct Symbol {
     pub inner: Range<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Target {
-    Ref {
-        package: Option<String>,
-        name: String,
-        /// The version that `v=` or `version=` names, as written; empty
-        /// when it is no literal, such as `v=var('x')`.
-        version: Option<String>,
-    },
-    Source {
-        source: String,
-        table: String,
-    },
-    Macro {
-        package: Option<String>,
-        name: String,
-    },
-    /// `adapter.dispatch('name', 'package')`: the macros `*__name` of the package.
-    Dispatch {
-        package: Option<String>,
-        name: String,
-    },
-    /// `function('name')` or `function('package', 'name')`: a function of
-    /// `function-paths`.
-    Function {
-        package: Option<String>,
-        name: String,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
-    pub target: Target,
+    pub name: Name,
     pub range: Range<usize>,
     /// The content of each string argument of a `ref` or a `source`, quotes excluded.
     pub arguments: Vec<Range<usize>>,
@@ -198,7 +169,9 @@ pub fn tags(text: &str) -> Vec<Range<usize>> {
 pub fn jinja_strings(text: &str) -> Vec<Range<usize>> {
     let named: Vec<Range<usize>> = calls(text)
         .into_iter()
-        .filter(|call| matches!(call.target, Target::Ref { .. } | Target::Source { .. } | Target::Function { .. }))
+        .filter(|call| {
+            matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. } | reference::Kind::Function)
+        })
         .flat_map(|call| call.arguments)
         .collect();
     let mut found = Vec::new();
@@ -473,13 +446,13 @@ fn refs_and_sources(text: &str, at: usize) -> Vec<Call> {
         };
         let version = matches!(call.get(4).map(|keyword| keyword.as_str()), Some("v" | "version"))
             .then(|| call.get(5).map_or_else(String::new, |version| version.as_str().to_owned()));
-        let target = Target::Ref { package, name, version };
-        found.push(Call { target, range: shift(call.get(1).unwrap()), arguments });
+        let name = Name { kind: reference::Kind::Ref, package, name, version };
+        found.push(Call { name, range: shift(call.get(1).unwrap()), arguments });
     }
     for call in SOURCE.captures_iter(text) {
-        let target = Target::Source { source: call[1].to_owned(), table: call[2].to_owned() };
+        let name = Name::new(reference::Kind::Table { source: call[1].to_owned() }, None, &call[2]);
         let arguments = vec![shift(call.get(1).unwrap()), shift(call.get(2).unwrap())];
-        found.push(Call { target, range: shift(call.get(0).unwrap()), arguments });
+        found.push(Call { name, range: shift(call.get(0).unwrap()), arguments });
     }
     found
 }
@@ -496,10 +469,9 @@ pub fn calls(text: &str) -> Vec<Call> {
         let (tag, at) = (&masked[range.clone()], range.start);
         found.extend(refs_and_sources(tag, at));
         for call in DISPATCH.captures_iter(tag) {
-            let target =
-                Target::Dispatch { package: call.get(2).map(|p| p.as_str().to_owned()), name: call[1].to_owned() };
+            let name = Name::new(reference::Kind::Dispatch, call.get(2).map(|p| p.as_str()), &call[1]);
             let range = at + call.get(0).unwrap().start()..at + call.get(0).unwrap().end();
-            found.push(Call { target, range, arguments: Vec::new() });
+            found.push(Call { name, range, arguments: Vec::new() });
         }
         for call in FUNCTION.captures_iter(tag) {
             let shift = |found: regex::Match| at + found.start()..at + found.end();
@@ -509,7 +481,7 @@ pub fn calls(text: &str) -> Vec<Call> {
             };
             let arguments = [call.get(1), call.get(2)].into_iter().flatten().map(shift).collect();
             found.push(Call {
-                target: Target::Function { package, name },
+                name: Name { kind: reference::Kind::Function, package, name, version: None },
                 range: shift(call.get(0).unwrap()),
                 arguments,
             });
@@ -521,9 +493,8 @@ pub fn calls(text: &str) -> Vec<Call> {
             if code[..start].trim_end().ends_with(['.', '|']) {
                 continue;
             }
-            let target =
-                Target::Macro { package: call.get(2).map(|p| p.as_str().to_owned()), name: name.as_str().to_owned() };
-            found.push(Call { target, range: at + start..at + name.end(), arguments: Vec::new() });
+            let called = Name::new(reference::Kind::Macro, call.get(2).map(|p| p.as_str()), name.as_str());
+            found.push(Call { name: called, range: at + start..at + name.end(), arguments: Vec::new() });
         }
     }
     found.sort_by_key(|call| call.range.start);
@@ -554,16 +525,16 @@ mod tests {
     fn a_function_call_names_its_function_and_its_package() {
         let text = "select {{ function('f') }}(1), {{ function( \"pa\" , 'g' ) }}(2), {{ function(var('x')) }}(3)";
         let found = calls(text);
-        let functions: Vec<(&Target, Vec<&str>)> = found
+        let functions: Vec<(&Name, Vec<&str>)> = found
             .iter()
-            .filter(|call| matches!(call.target, Target::Function { .. }))
-            .map(|call| (&call.target, call.arguments.iter().map(|range| &text[range.clone()]).collect()))
+            .filter(|call| matches!(call.name, Name { kind: reference::Kind::Function, .. }))
+            .map(|call| (&call.name, call.arguments.iter().map(|range| &text[range.clone()]).collect()))
             .collect();
-        let f = Target::Function { package: None, name: "f".into() };
-        let g = Target::Function { package: Some("pa".into()), name: "g".into() };
+        let f = Name::new(reference::Kind::Function, None, "f");
+        let g = Name::new(reference::Kind::Function, Some("pa"), "g");
         assert_eq!(functions, [(&f, vec!["f"]), (&g, vec!["pa", "g"])], "no literal, no function");
         // The keyword is a macro call too, as `ref`'s is: a project's macro `function` replaces it.
-        assert!(found.iter().any(|call| call.target == Target::Macro { package: None, name: "function".into() }));
+        assert!(found.iter().any(|call| call.name == Name::new(reference::Kind::Macro, None, "function")));
         assert!(jinja_strings(text).iter().all(|range| !["'f'", "'g'"].contains(&&text[range.clone()])));
     }
 
@@ -571,9 +542,13 @@ mod tests {
     fn a_ref_with_an_expression_for_argument_names_no_model() {
         let text =
             "{{ ref('orders' ~ var('sfx')) }} {{ ref('dim', v=2) }} {{ ref('pkg', 'm') }} {{ ref('pkg', 'n' ~ x) }}";
-        let refs: Vec<Target> =
-            calls(text).into_iter().map(|call| call.target).filter(|t| matches!(t, Target::Ref { .. })).collect();
-        let named = |package: Option<&str>, name: &str, version: Option<&str>| Target::Ref {
+        let refs: Vec<Name> = calls(text)
+            .into_iter()
+            .map(|call| call.name)
+            .filter(|t| matches!(t, Name { kind: reference::Kind::Ref, .. }))
+            .collect();
+        let named = |package: Option<&str>, name: &str, version: Option<&str>| Name {
+            kind: reference::Kind::Ref,
             package: package.map(str::to_owned),
             name: name.into(),
             version: version.map(str::to_owned),
@@ -587,8 +562,8 @@ mod tests {
                     {{ ref('d', v=var('x')) }} {{ ref('e') }}";
         let versions: Vec<Option<String>> = calls(text)
             .into_iter()
-            .filter_map(|call| match call.target {
-                Target::Ref { version, .. } => Some(version),
+            .filter_map(|call| match call.name {
+                Name { kind: reference::Kind::Ref, version, .. } => Some(version),
                 _ => None,
             })
             .collect();
@@ -599,10 +574,15 @@ mod tests {
     #[test]
     fn a_source_with_an_expression_for_argument_names_no_table() {
         let text = "{{ source('raw', 'events' ~ var('suffix')) }} {{ source( 'raw' , \"orders\" ) }}";
-        let targets: Vec<Target> = calls(text).into_iter().map(|call| call.target).collect();
-        let orders = Target::Source { source: "raw".into(), table: "orders".into() };
+        let targets: Vec<Name> = calls(text).into_iter().map(|call| call.name).collect();
+        let orders = Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders");
         assert!(targets.contains(&orders), "{targets:?}");
-        assert!(!targets.iter().any(|t| matches!(t, Target::Source { table, .. } if table == "events")), "{targets:?}");
+        assert!(
+            !targets
+                .iter()
+                .any(|t| matches!(t, Name { kind: reference::Kind::Table { .. }, name, .. } if name == "events")),
+            "{targets:?}"
+        );
     }
 
     fn names(symbols: &[Symbol]) -> Vec<(Kind, &str)> {
@@ -747,29 +727,28 @@ select * from final
         let text = "-- prose ref('prose') and {{ ref('live') }}\n{{ ref(\"pkg\", 'b') }} {{ source('raw', 'orders') }}\n\
                     {% macro m() %}{{ shop_utils.is_positive(x) }}{{ 'a,b'.split(',') }}{{ x | upper() }}{% endmacro %}\n\
                     {{ return(adapter.dispatch('safe_add', macro_namespace='shop')(a, b)) }}";
-        let targets: Vec<Target> = calls(text).into_iter().map(|call| call.target).collect();
-        let named = |package: Option<&str>, name: &str| Target::Macro {
-            package: package.map(str::to_owned),
-            name: name.to_owned(),
-        };
+        let targets: Vec<Name> = calls(text).into_iter().map(|call| call.name).collect();
+        let named = |package: Option<&str>, name: &str| Name::new(reference::Kind::Macro, package, name);
         assert_eq!(
             targets,
             [
-                Target::Ref { package: None, name: "live".into(), version: None },
+                Name { kind: reference::Kind::Ref, package: None, name: "live".into(), version: None },
                 named(None, "ref"),
-                Target::Ref { package: Some("pkg".into()), name: "b".into(), version: None },
+                Name { kind: reference::Kind::Ref, package: Some("pkg".into()), name: "b".into(), version: None },
                 named(None, "ref"),
-                Target::Source { source: "raw".into(), table: "orders".into() },
+                Name::new(reference::Kind::Table { source: "raw".into() }, None, "orders"),
                 named(None, "source"),
                 named(Some("shop_utils"), "is_positive"),
                 named(None, "return"),
-                Target::Dispatch { package: Some("shop".into()), name: "safe_add".into() },
+                Name::new(reference::Kind::Dispatch, Some("shop"), "safe_add"),
                 named(Some("adapter"), "dispatch"),
             ]
         );
         let package_call = calls(text)
             .into_iter()
-            .find(|c| matches!(&c.target, Target::Macro { package: Some(p), .. } if p == "shop_utils"))
+            .find(
+                |c| matches!(&c.name, Name { kind: reference::Kind::Macro, package: Some(p), .. } if p == "shop_utils"),
+            )
             .unwrap();
         assert_eq!(&text[package_call.range], "shop_utils.is_positive");
     }
@@ -789,7 +768,7 @@ select * from final
             "      - relationships:\n          to: source('raw', 'customers')  # not ref('x')\n          field: id\n";
         let found = yaml_calls(text);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].target, Target::Source { source: "raw".into(), table: "customers".into() });
+        assert_eq!(found[0].name, Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers"));
         assert_eq!(&text[found[0].arguments[1].clone()], "customers");
     }
 

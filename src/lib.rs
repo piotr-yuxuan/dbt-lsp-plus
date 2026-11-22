@@ -18,6 +18,7 @@ pub mod parse_log;
 pub mod project;
 pub mod properties;
 pub mod proxy;
+pub mod reference;
 pub mod rpc;
 pub mod runs;
 pub mod scan;

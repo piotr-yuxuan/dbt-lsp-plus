@@ -12,6 +12,7 @@
 use crate::support::scratch;
 use dbt_lsp_plus::graph::{Edge, Graph};
 use dbt_lsp_plus::project::{self, Project};
+use dbt_lsp_plus::reference::{Kind, Name};
 use dbt_lsp_plus::{config, navigation, properties, scan, sources};
 use regex::Regex;
 use serde_json::Value;
@@ -265,28 +266,29 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         }
     };
     // A call as written, and what navigation looks up for it.
-    let written = |target: &scan::Target| match target {
-        scan::Target::Ref { package, name, version } => {
+    let written = |target: &Name| match target {
+        Name { kind: Kind::Ref, package, name, version } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
             let version = version.as_ref().map_or_else(String::new, |version| format!(", v={version}"));
             (format!("ref({}{version})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
         }
-        scan::Target::Source { source, table } => {
+        Name { kind: Kind::Table { source }, name: table, .. } => {
             let table_target = sources::Target::Table { source: source.clone(), table: table.clone() };
             (format!("source('{source}', '{table}')"), Some(navigation::Target::Source(table_target)))
         }
-        scan::Target::Macro { package, name } => {
+        Name { kind: Kind::Macro, package, name, .. } => {
             let written = format!("{}{name}()", package.iter().map(|p| format!("{p}.")).collect::<String>());
             (written, Some(navigation::Target::Call(target.clone())))
         }
-        scan::Target::Dispatch { package, name } => (
+        Name { kind: Kind::Dispatch, package, name, .. } => (
             format!("adapter.dispatch('{name}'{})", package.iter().map(|p| format!(", '{p}'")).collect::<String>()),
             None,
         ),
-        scan::Target::Function { package, name } => {
+        Name { kind: Kind::Function, package, name, .. } => {
             let quoted = package.iter().chain([name]).map(|word| format!("'{word}'")).collect::<Vec<_>>();
             (format!("function({})", quoted.join(", ")), Some(navigation::Target::Call(target.clone())))
         }
+        _ => unreachable!("no call names {target:?}"),
     };
     // ID, then each macro that it reaches through the graph's edges: through
     // plain calls only, unless DISPATCHED, since dbt renders only the
@@ -297,9 +299,7 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         while let Some(from) = reached.get(next).cloned() {
             let calls = entities.get(from.as_str()).map_or(&[][..], |holder| holder.calls.as_slice());
             let plain = |edge: &Edge| {
-                calls
-                    .iter()
-                    .any(|call| matches!(call.target, scan::Target::Macro { .. }) && edge.sites.contains(&call.range))
+                calls.iter().any(|call| matches!(call.name.kind, Kind::Macro) && edge.sites.contains(&call.range))
             };
             let edges = graph.edges.iter().filter(|edge| edge.from == from && edge.to.starts_with("macro."));
             for edge in edges.filter(|edge| dispatched || plain(edge)) {
@@ -338,14 +338,11 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
         let rendered = reached(&entity.id, false);
         for holder in reached(&entity.id, true).iter().filter_map(|id| entities.get(id.as_str())) {
             for call in &holder.calls {
-                let (written, target) = written(&call.target);
+                let (written, target) = written(&call.name);
                 let naming = dependencies.iter().filter(|(callers, _)| callers.contains(&written));
                 let dbt: BTreeSet<String> = naming.map(|(_, dependency)| dependency.clone()).collect();
                 named.extend(dbt.iter().cloned());
-                let reference = matches!(
-                    call.target,
-                    scan::Target::Ref { .. } | scan::Target::Source { .. } | scan::Target::Function { .. }
-                );
+                let reference = matches!(call.name.kind, Kind::Ref | Kind::Table { .. } | Kind::Function);
                 let in_rendering = target.is_some() && rendered.contains(&holder.id);
                 let Some(subject) = subject(entity, holder, reference, in_rendering) else { continue };
                 for (lookup, ours) in answers(holder, call, target) {
@@ -375,20 +372,20 @@ fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<Stri
     let mut missed = Vec::new();
     for (path, file) in &project.files {
         for call in &file.calls {
-            let at = match &call.target {
-                scan::Target::Ref { .. } | scan::Target::Function { .. } => {
+            let at = match &call.name {
+                Name { kind: Kind::Ref | Kind::Function, .. } => {
                     call.arguments.last().cloned().unwrap_or(call.range.clone())
                 }
-                scan::Target::Macro { name, .. } => call.range.end - name.len()..call.range.end,
+                Name { kind: Kind::Macro, name, .. } => call.range.end - name.len()..call.range.end,
                 _ => continue,
             };
-            let target = navigation::Target::Call(call.target.clone());
+            let target = navigation::Target::Call(call.name.clone());
             if navigation::resolve(lookup, path, &target).is_empty() {
                 continue;
             }
             let references = navigation::references(lookup, path, &target, false);
             if !references.iter().any(|found| found.path == *path && found.range == at) {
-                missed.push(format!("{} {:?}", path.display(), call.target));
+                missed.push(format!("{} {:?}", path.display(), call.name));
             }
             for found in references.iter().filter(|found| !leads_back(found)) {
                 missed.push(format!("{}:{:?} leads elsewhere than {}", found.path.display(), found.range, found.id));
