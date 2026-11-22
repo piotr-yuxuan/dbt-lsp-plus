@@ -384,46 +384,62 @@ mod tests {
 
     #[test]
     fn once_a_parse_has_run_a_call_leads_where_its_definition_does_and_keeps_its_site() {
-        const REPORT: &str = "select * from {{ ref('customers') }} join {{ ref('ghost') }}";
+        const REPORT: &str =
+            "select * from {{ ref('customers') }} join {{ ref('ghost') }} join {{ source('raw', 'payments') }}";
+        const SOURCES: &str = "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: payments\n";
         let files = [
             ("dbt_project.yml", "name: shop\n"),
             ("models/customers.sql", "select 1"),
             ("models/report.sql", REPORT),
+            ("models/_sources.yml", SOURCES),
             ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
             ("dbt_packages/pkg/models/customers.sql", "select 2"),
+            ("dbt_packages/pkg/models/_sources.yml", SOURCES),
         ];
         let root = project::scratch_project("graph-parsed", &files);
         let project = project::scan(&root, &HashMap::new()).unwrap();
-        // The root disables its own `customers`; no file holds `ghost`.
+        // The root disables its own `customers` and `raw.payments`, which `pkg` has too; no file holds `ghost`.
         let model = |id: &str, file: &str, depends_on: &[&str]| {
             let parts: Vec<&str> = id.split('.').collect();
             json!({"unique_id": id, "name": parts[2], "resource_type": "model", "package_name": parts[1],
                    "original_file_path": file, "depends_on": {"nodes": depends_on}})
         };
+        let payments = |package: &str| {
+            json!({"unique_id": format!("source.{package}.raw.payments"), "name": "payments", "source_name": "raw",
+                   "resource_type": "source", "package_name": package, "original_file_path": "models/_sources.yml"})
+        };
+        let dependencies = ["model.pkg.customers", "source.pkg.raw.payments"];
         let manifest = json!({"metadata": {"project_name": "shop"},
             "nodes": {"model.pkg.customers": model("model.pkg.customers", "models/customers.sql", &[]),
                       "model.shop.ghost": model("model.shop.ghost", "models/ghost.sql", &[]),
-                      "model.shop.report": model("model.shop.report", "models/report.sql", &["model.pkg.customers"])},
-            "disabled": {"model.shop.customers": [model("model.shop.customers", "models/customers.sql", &[])]}});
+                      "model.shop.report": model("model.shop.report", "models/report.sql", &dependencies)},
+            "sources": {"source.pkg.raw.payments": payments("pkg")},
+            "disabled": {"model.shop.customers": [model("model.shop.customers", "models/customers.sql", &[])],
+                         "source.shop.raw.payments": [payments("shop")]}});
         let index = ParseIndex::of(&manifest);
-        let call = REPORT.find("ref('customers'").unwrap();
-        let site = call..call + "ref('customers'".len();
-        let edge = |to: &str, sites: &[Range<usize>]| Edge {
-            from: "model.shop.report".into(),
-            to: to.into(),
-            sites: sites.to_vec(),
+        let site = |call: &str| {
+            let start = REPORT.find(call).unwrap();
+            start..start + call.len()
+        };
+        let (customers, source) = (site("ref('customers'"), site("source('raw', 'payments')"));
+        // The edges from `report` to a customers model and a payments source, at SITES, if any.
+        let edges = |model: &str, table: &str, sites: bool| {
+            let edge = |to: &str, at: &Range<usize>| Edge {
+                from: "model.shop.report".into(),
+                to: to.into(),
+                sites: if sites { vec![at.clone()] } else { Vec::new() },
+            };
+            vec![edge(model, &customers), edge(table, &source)]
         };
         let scanned = Graph::scanned(&project, None);
-        assert_eq!(scanned.edges, [edge("model.shop.customers", std::slice::from_ref(&site))], "before a parse");
+        assert_eq!(scanned.edges, edges("model.shop.customers", "source.shop.raw.payments", true), "before a parse");
         let parsed = Graph::scanned(&project, Some(&index));
-        assert_eq!(
-            parsed.edges,
-            [edge("model.pkg.customers", std::slice::from_ref(&site))],
-            "dbt's, and none to ghost"
-        );
+        let dbt_s = edges("model.pkg.customers", "source.pkg.raw.payments", true);
+        assert_eq!(parsed.edges, dbt_s, "dbt's, and none to ghost");
         let listed = index.listed();
-        assert_eq!(parsed.with_server(&listed, &project).edges, [edge("model.pkg.customers", &[site])]);
-        assert_eq!(scanned.with_server(&listed, &project).edges, [edge("model.pkg.customers", &[])], "no site");
+        assert_eq!(parsed.with_server(&listed, &project).edges, dbt_s);
+        let unsited = edges("model.pkg.customers", "source.pkg.raw.payments", false);
+        assert_eq!(scanned.with_server(&listed, &project).edges, unsited, "no site");
         fs::remove_dir_all(&root).unwrap();
     }
 

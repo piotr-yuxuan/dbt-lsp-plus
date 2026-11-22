@@ -3337,9 +3337,11 @@ mod tests {
 
     #[test]
     fn hover_node_information_and_hints_describe_the_node_a_ref_s_definition_leads_to() {
-        const USES: &str = "select * from {{ ref('dim', v=1) }} join {{ ref('dim') }} join {{ ref('stale') }}";
+        const USES: &str = "select * from {{ ref('dim', v=1) }} join {{ ref('dim') }} join {{ ref('stale') }} \
+                            join {{ source('raw', 'payments') }}";
         const DIM: &str =
             "version: 2\nmodels:\n  - name: dim\n    latest_version: 2\n    versions:\n      - v: 1\n      - v: 2\n";
+        const SOURCES: &str = "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: payments\n";
         let scratch = |name: &str, config: &str| {
             let files = [
                 ("dbt_project.yml", config),
@@ -3347,7 +3349,10 @@ mod tests {
                 ("models/dim_v2.sql", "select 2"),
                 ("models/stale.sql", "select 3"),
                 ("models/_dim.yml", DIM),
+                ("models/_sources.yml", SOURCES),
                 ("models/uses.sql", USES),
+                ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+                ("dbt_packages/pkg/models/_sources.yml", SOURCES),
             ];
             project::scratch_project(name, &files)
         };
@@ -3361,48 +3366,86 @@ mod tests {
         let stale = json!({"unique_id": "model.shop.stale", "name": "stale", "resource_type": "model",
                            "package_name": "shop", "original_file_path": "models/stale.sql",
                            "config": {"materialized": "ephemeral"}});
+        // The root disables its `raw.payments`, which `pkg` declares too, enabled.
+        let payments = |package: &str| {
+            json!({"unique_id": format!("source.{package}.raw.payments"), "name": "payments", "source_name": "raw",
+                   "resource_type": "source", "package_name": package, "original_file_path": "models/_sources.yml",
+                   "relation_name": format!("{package}_payments"), "config": {}})
+        };
+        let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
             let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root.to_owned()));
             proxy.table = modes::Table::new(&modes::Settings::default(), &|_| false);
             let shop = json!({"project_name": "shop"});
+            let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
-                &json!({"metadata": shop, "nodes": versions, "disabled": {"model.shop.stale": [stale]}}),
+                &json!({"metadata": shop, "nodes": versions, "sources": sources, "disabled": disabled}),
             );
-            index.overlay(config::ParseIndex::of(&json!({"metadata": shop, "nodes": versions})));
+            let disabled = json!({"source.shop.raw.payments": [payments("shop")]});
+            let last = json!({"metadata": shop, "nodes": versions, "sources": sources, "disabled": disabled});
+            index.overlay(config::ParseIndex::of(&last));
             proxy.parsing.index = Some(index);
             proxy
         };
-        // A hover and nodeInfo at `ref('dim', v=1)`'s argument, and hints over the whole of `uses.sql`.
-        let asked = |root: &Path| {
+        // A hover and nodeInfo inside NEEDLE, a call's argument, in `uses.sql`.
+        let at = |root: &Path, needle: &str| {
             let uri = features::uri(&root.join("models/uses.sql"));
-            let position = json!({"line": 0, "character": USES.find("'dim'").unwrap() + 1});
-            let end = json!({"line": 0, "character": USES.len()});
+            let position = json!({"line": 0, "character": USES.find(needle).unwrap() + 1});
             (
                 json!({"textDocument": {"uri": uri}, "position": position}),
                 json!({"arguments": [{"uri": uri, "position": position}]}),
-                json!({"textDocument": {"uri": uri}, "range": {"start": {"line": 0, "character": 0}, "end": end}}),
             )
         };
+        // Hints over the whole of `uses.sql`.
+        let hints = |root: &Path| {
+            let (uri, end) =
+                (features::uri(&root.join("models/uses.sql")), json!({"line": 0, "character": USES.len()}));
+            json!({"textDocument": {"uri": uri}, "range": {"start": {"line": 0, "character": 0}, "end": end}})
+        };
         let root = scratch("proxy-node-lookup", "name: shop\n");
-        let (at, info, hints) = asked(&root);
         let mut proxy = proxy_on(&root);
-        let Some(Answer::Found(node)) = proxy.node_info(&info) else { panic!("no node at ref('dim', v=1)") };
-        assert_eq!(node["unique_id"], "model.shop.dim.v1");
-        let Part::Hover(text, _) = proxy.hover_part(&at) else { panic!("no hover at ref('dim', v=1)") };
-        assert!(text.contains("`model.shop.dim.v1`"), "{text}");
-        let Kept::Part(Part::Hints(hints)) = proxy.remember("textDocument/inlayHint", &json!(1), &hints).0.kept else {
+        // NodeInfo and a hover inside each call's argument: the version named; the stale node, whose file remains,
+        // as the index holds it; the root's disabled source, as definition leads.
+        let calls = ["'dim', v=1", "'stale'", "'payments'"];
+        let nodes = calls.map(|needle| {
+            let Some(Answer::Found(node)) = proxy.node_info(&at(&root, needle).1) else {
+                panic!("no node at {needle}")
+            };
+            (node["unique_id"].as_str().unwrap().to_owned(), node["disabled"] == true)
+        });
+        let expected = [("model.shop.dim.v1", false), ("model.shop.stale", true), ("source.shop.raw.payments", true)];
+        assert_eq!(nodes, expected.map(|(id, disabled)| (id.to_owned(), disabled)));
+        let hovered = calls.map(|needle| match proxy.hover_part(&at(&root, needle).0) {
+            Part::Hover(text, _) => text,
+            _ => String::new(),
+        });
+        let described = hovered.iter().zip(expected).all(|(text, (id, _))| text.contains(&format!("`{id}`")));
+        assert!(described, "{hovered:?}");
+        let Kept::Part(Part::Hints(found)) = proxy.remember("textDocument/inlayHint", &json!(1), &hints(&root)).0.kept
+        else {
             panic!("no hints in uses.sql")
         };
-        let labels: Vec<&Value> = hints.iter().map(|hint| &hint["label"]).collect();
-        assert_eq!(labels, [&json!("v2")], "none after `v=1)`, none for the stale disabled node");
-        // Over a project that does not read, none, as its definition fails there.
+        let labels: Vec<&Value> = found.iter().map(|hint| &hint["label"]).collect();
+        assert_eq!(labels, [&json!("v2")], "none after `v=1)`, none for a disabled node, the stale one or the source");
+        // The call hierarchy looks its calls up with the index: the package's source, not the root's disabled one.
+        let item = json!({"item": {"data": {"uniqueId": "model.shop.uses"}}});
+        let Some(Answer::Found(calls)) = proxy.hierarchy("callHierarchy/outgoingCalls", &item) else {
+            panic!("no outgoing calls of uses")
+        };
+        let called: Vec<&Value> =
+            calls.as_array().unwrap().iter().map(|call| &call["to"]["data"]["uniqueId"]).collect();
+        let expected = ["model.shop.dim.v1", "model.shop.dim.v2", "model.shop.stale", "source.pkg.raw.payments"];
+        assert_eq!(called, expected.map(|id| json!(id)).iter().collect::<Vec<_>>());
+        // Over a project that does not read, none, as its definition fails there; without an index, why none.
         let broken = scratch("proxy-node-lookup-unreadable", "name: [");
-        let (at, info, hints) = asked(&broken);
+        let (dim, info) = at(&broken, "'dim', v=1");
         let mut proxy = proxy_on(&broken);
         assert_eq!(proxy.node_info(&info), Some(Answer::Empty));
-        assert!(proxy.hover_part(&at) == Part::Nothing, "a hover's part");
-        let kept = proxy.remember("textDocument/inlayHint", &json!(1), &hints).0.kept;
+        assert!(proxy.hover_part(&dim) == Part::Nothing, "a hover's part");
+        let kept = proxy.remember("textDocument/inlayHint", &json!(1), &hints(&broken)).0.kept;
         assert!(kept == Kept::Part(Part::Empty), "the hints' part");
+        proxy.parsing.index = None;
+        assert!(proxy.hover_part(&dim) == Part::Unindexed, "a hover's part before any index");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(broken).unwrap();
     }
