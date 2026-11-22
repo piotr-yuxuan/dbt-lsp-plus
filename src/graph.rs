@@ -4,9 +4,12 @@
 //! The edges between nodes come from `dbt.listNodes` when the server has
 //! answered, or, with no server, from the manifest of the user's `dbt
 //! parse`, since only dbt resolves a `ref(var('x'))`; otherwise from the
-//! scan of the files.  The server lists no macros, and a manifest's are
-//! transitive, so the edges to and from macros always come from the scan.
+//! scan of the files, each call looked up by `navigation::Lookup` with the
+//! last parse's index once there is one.  The server lists no macros, and
+//! a manifest's are transitive, so the edges to and from macros always
+//! come from the scan.
 
+use crate::config::ParseIndex;
 use crate::navigation::Lookup;
 use crate::project::Project;
 use serde_json::Value;
@@ -104,9 +107,11 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// The graph that the files of PROJECT give.
-    pub fn scanned(project: &Project) -> Graph {
-        let lookup = Lookup::new(project, None);
+    /// The graph that the files of PROJECT give, each call looked up with
+    /// INDEX, the last parse's, if any: an edge only to what a file holds,
+    /// since an edge's ends are items.
+    pub fn scanned(project: &Project, index: Option<&ParseIndex>) -> Graph {
+        let lookup = Lookup::new(project, index);
         let mut sites: BTreeMap<(String, String), Vec<Range<usize>>> = BTreeMap::new();
         for entity in &project.entities {
             for call in &entity.calls {
@@ -126,8 +131,10 @@ impl Graph {
             };
             (e.id.clone(), item)
         });
-        let edges = sites.into_iter().map(|((from, to), sites)| Edge { from, to, sites }).collect();
-        Graph { items: items.collect(), edges }
+        let items: HashMap<String, Item> = items.collect();
+        let held = sites.into_iter().filter(|((_, to), _)| items.contains_key(to));
+        let edges = held.map(|((from, to), sites)| Edge { from, to, sites }).collect();
+        Graph { items, edges }
     }
 
     /// This graph with the dependencies of each node listed in NODES as the
@@ -196,7 +203,7 @@ mod tests {
 
     #[test]
     fn scanned_edges_follow_refs_sources_and_macros_across_packages() {
-        let graph = Graph::scanned(&shop());
+        let graph = Graph::scanned(&shop(), None);
         let edges = pairs(&graph);
         for expected in [
             ("model.shop.orders", "model.shop.stg_orders"),
@@ -227,7 +234,7 @@ mod tests {
                 ("dbt_packages/utils/macros/helper.sql", "{% macro helper() %}1{% endmacro %}"),
             ],
         );
-        let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap());
+        let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap(), None);
         assert!(pairs(&graph).contains(&("macro.utils.date_spine", "macro.utils.helper")));
         // The unqualified date_spine() is dbt's own, not the package's: one site only.
         let spine = graph.edges.iter().find(|e| e.to == "macro.utils.date_spine").unwrap();
@@ -254,7 +261,7 @@ mod tests {
             let files = files(flags);
             let borrowed: Vec<(&str, &str)> = files.iter().map(|(path, text)| (path.as_str(), text.as_str())).collect();
             let dir = project::scratch_project(name, &borrowed);
-            let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap());
+            let graph = Graph::scanned(&project::scan(&dir, &HashMap::new()).unwrap(), None);
             fs::remove_dir_all(&dir).unwrap();
             graph
         };
@@ -286,7 +293,7 @@ mod tests {
             nodes
         };
         for depends_on in [&[][..], &["function.shop.f"]] {
-            let graph = Graph::scanned(&project).with_server(&listing(depends_on), &project);
+            let graph = Graph::scanned(&project, None).with_server(&listing(depends_on), &project);
             let edge = graph.edges.iter().filter(|e| e.from == "model.shop.a" && e.to == "function.shop.f");
             let sites: Vec<&str> = edge
                 .flat_map(|e| &e.sites)
@@ -316,7 +323,7 @@ mod tests {
         ]});
         let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
         assert_eq!(nodes.len(), 4);
-        let graph = Graph::scanned(&project).with_server(&nodes, &project);
+        let graph = Graph::scanned(&project, None).with_server(&nodes, &project);
         let edges = pairs(&graph);
         assert!(edges.contains(&("model.shop.order_summary", "model.shop.orders")));
         assert!(edges.contains(&("test.shop.not_null_orders_id.abc", "model.shop.orders")));
@@ -363,7 +370,7 @@ mod tests {
                     depends_on: Vec::new(),
                 })
                 .to_vec();
-        let graph = Graph::scanned(&project).with_server(&nodes, &project);
+        let graph = Graph::scanned(&project, None).with_server(&nodes, &project);
         let edges = pairs(&graph);
         for expected in [
             ("macro.shop.calendar", "model.shop.dates"),
@@ -373,6 +380,67 @@ mod tests {
             assert!(edges.contains(&expected), "{expected:?} missing from {edges:?}");
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn once_a_parse_has_run_a_call_leads_where_its_definition_does_and_keeps_its_site() {
+        const REPORT: &str =
+            "select * from {{ ref('customers') }} join {{ ref('ghost') }} join {{ source('raw', 'payments') }}";
+        const SOURCES: &str = "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: payments\n";
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/customers.sql", "select 1"),
+            ("models/report.sql", REPORT),
+            ("models/_sources.yml", SOURCES),
+            ("dbt_packages/pkg/dbt_project.yml", "name: pkg\n"),
+            ("dbt_packages/pkg/models/customers.sql", "select 2"),
+            ("dbt_packages/pkg/models/_sources.yml", SOURCES),
+        ];
+        let root = project::scratch_project("graph-parsed", &files);
+        let project = project::scan(&root, &HashMap::new()).unwrap();
+        // The root disables its own `customers` and `raw.payments`, which `pkg` has too; no file holds `ghost`.
+        let model = |id: &str, file: &str, depends_on: &[&str]| {
+            let parts: Vec<&str> = id.split('.').collect();
+            json!({"unique_id": id, "name": parts[2], "resource_type": "model", "package_name": parts[1],
+                   "original_file_path": file, "depends_on": {"nodes": depends_on}})
+        };
+        let payments = |package: &str| {
+            json!({"unique_id": format!("source.{package}.raw.payments"), "name": "payments", "source_name": "raw",
+                   "resource_type": "source", "package_name": package, "original_file_path": "models/_sources.yml"})
+        };
+        let dependencies = ["model.pkg.customers", "source.pkg.raw.payments"];
+        let manifest = json!({"metadata": {"project_name": "shop"},
+            "nodes": {"model.pkg.customers": model("model.pkg.customers", "models/customers.sql", &[]),
+                      "model.shop.ghost": model("model.shop.ghost", "models/ghost.sql", &[]),
+                      "model.shop.report": model("model.shop.report", "models/report.sql", &dependencies)},
+            "sources": {"source.pkg.raw.payments": payments("pkg")},
+            "disabled": {"model.shop.customers": [model("model.shop.customers", "models/customers.sql", &[])],
+                         "source.shop.raw.payments": [payments("shop")]}});
+        let index = ParseIndex::of(&manifest);
+        let site = |call: &str| {
+            let start = REPORT.find(call).unwrap();
+            start..start + call.len()
+        };
+        let (customers, source) = (site("ref('customers'"), site("source('raw', 'payments')"));
+        // The edges from `report` to a customers model and a payments source, at SITES, if any.
+        let edges = |model: &str, table: &str, sites: bool| {
+            let edge = |to: &str, at: &Range<usize>| Edge {
+                from: "model.shop.report".into(),
+                to: to.into(),
+                sites: if sites { vec![at.clone()] } else { Vec::new() },
+            };
+            vec![edge(model, &customers), edge(table, &source)]
+        };
+        let scanned = Graph::scanned(&project, None);
+        assert_eq!(scanned.edges, edges("model.shop.customers", "source.shop.raw.payments", true), "before a parse");
+        let parsed = Graph::scanned(&project, Some(&index));
+        let dbt_s = edges("model.pkg.customers", "source.pkg.raw.payments", true);
+        assert_eq!(parsed.edges, dbt_s, "dbt's, and none to ghost");
+        let listed = index.listed();
+        assert_eq!(parsed.with_server(&listed, &project).edges, dbt_s);
+        let unsited = edges("model.pkg.customers", "source.pkg.raw.payments", false);
+        assert_eq!(scanned.with_server(&listed, &project).edges, unsited, "no site");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

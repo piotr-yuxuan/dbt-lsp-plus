@@ -166,10 +166,14 @@ references on a target, workspace symbols and the call hierarchy, where
 no target stays empty; in `merge` in front of dbt lsp, such a
 definition or references goes to dbt lsp, whose answer stands, and
 when it gives none the proxy's reason comes first, then dbt lsp's:
-`no dbt project at <root>: ...; dbt lsp failed: <its message>`.  The
-hover and nodeInfo by an entry's position stay empty there (plan 047's
-one lookup).  The late log and a command's failure, a result with
-`error` set, keep their own forms.
+`no dbt project at <root>: ...; dbt lsp failed: <its message>`.  Once
+a parse has given an index, a hover and a nodeInfo at a `ref`, a
+`source` or an entry's `name:`, and inlay hints, stay empty there: their
+lookup reads the project.  Before it, as elsewhere, nodeInfo fails with
+the parse's reason (`dbt parse has not finished: ...`), and so does a
+hover at a `ref` or a `source` that dbt lsp leaves null, while one at an
+entry's `name:` gets dbt lsp's answer, or null alone.  The late log and a command's failure, a result with `error` set, keep their
+own forms.
 
 ## Modes
 
@@ -807,7 +811,11 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
   packages (dbt1005) (in a macro, dbt looks in the calling node's package:
   see "Known limitations"), and an unqualified macro in the caller's
   package and the root project only, as dbt does: another package's macros
-  need its name.
+  need its name.  Once a parse has given an index, the scan's calls are
+  looked up with it: a node or a source table that the last manifest
+  disables is no call's target, a name the parse knows leads to its
+  nodes, a call keeps its site on the edge that the listing or the
+  manifest gives, and a target no file holds is left out.
   A dispatch names every
   `*__name` implementation of its package.  A listing that fails keeps the
   graph it had.  An empty `*` listing counts as a failure, since the scan
@@ -1169,10 +1177,10 @@ flow"), and forwards every other one:
   to its test block; dbt's own tests have none, and get null.
 
 Lookup follows dbt 2.0.9, probed with `dbt parse`, by one rule for
-navigation, references and the call hierarchy (`navigation::Lookup`): a
-package the name gives is the only one searched; else a `ref` or a
-`source` tries the file's own package (the installed package whose
-directory holds it), then the root, then any, the root first when `flags:
+navigation, references, the call hierarchy, hover, nodeInfo and inlay
+hints (`navigation::Lookup`): a package the name gives is the only one
+searched; else a `ref` or a `source` tries the file's own package (the
+installed package whose directory holds it), then the root, then any, the root first when `flags:
 require_ref_searches_node_package_before_root` is a YAML 1.2 false, as dbt
 2.0.9 and dbt-oss 2.0.11 read it: a plain `false`, `False` or `FALSE`, not
 `fAlse`, `no` nor a quoted `'false'`, and no parse warns of a value it
@@ -1267,12 +1275,13 @@ rename of a CTE, which the server answers with null:
   lists it, the one its entry has here (`node::TYPES`): in workspace
   symbols and the call hierarchy too.  So a unit test is an Event and an
   exposure an Object in the call hierarchy as here, where only dbt lsp's
-  listing brings them; workspace symbols never list either.  A source
-  table is an Interface; a source, the group of its tables, which is no
-  node, a Module.  An entry runs from its first key to its last content:
-  the
-  blank lines and the comment lines less deep than its first key that end
-  it belong to what follows, while a key commented out and a block
+  listing brings them; workspace symbols never list either.  A doc,
+  which no entry declares, is a String (15) as its docs block is here,
+  and a type the table lacks a Class (5).  A source table is an
+  Interface; a source, the group of its tables, which is no node, a
+  Module.  An entry runs from its first key to its last content: the
+  blank lines and the comment lines less deep than its first key that
+  end it belong to what follows, while a key commented out and a block
   scalar's deeper lines stay in; in flow style it ends at its brace.  An
   entry without a name, such as one whose `name:` is being typed, is no
   symbol, and aliases are not followed.  Other YAML, such as
@@ -1500,12 +1509,13 @@ none of its own, `[]` in place of an error or of an answer later than
 2 s; see "Modes"): after each `ref` or `source`
 whose arguments are literals, right after its closing parenthesis, the
 relation dbt builds for its node, from the last parse's index, or
-`ephemeral` by the node's materialization; none for a disabled node, an
-analysis, an unknown node, or a `ref` that a keyword argument follows,
-whose version the index cannot tell.  Kind Type, padding on the left, the
-node's unique id as tooltip.  Computed from the document's text and the
-index when the request arrives, within `catch_unwind`, with no project
-scan, each call's node found by its name.  A hint request starts a parse
+`ephemeral` by the node's materialization; none for a node the lookup
+does not lead to, a disabled node, or a `ref` that a keyword argument
+follows, since its place is found only right after a literal argument.
+Kind Type, padding on the left, the node's unique id as tooltip.
+Computed from the document's text and the index when the request
+arrives, within `catch_unwind`, from the project's scan too, each call's
+node the one its definition leads to.  A hint request starts a parse
 only when there is no index yet, since clients ask on every edit and
 scroll, and one made before dbt lsp's first compilation starts it once
 that comes; after each parse that gives
@@ -1522,7 +1532,15 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   or the entry whose `name:` is there,
   else the one node its file defines, but in a YAML file (a properties
   file, or a YAML snapshot's), where the manifest also places the generic
-  tests it declares.  The result is the manifest's node,
+  tests it declares.  A `ref` or a `source` names the node its definition
+  leads to (`Lookup::node`), and so for a hover and an inlay hint: for a
+  `ref`, the version it names, from the calling file's package first,
+  none that the last manifest disables, and none it lacks whose file is
+  gone (one whose file remains keeps the node the index holds); for a
+  `source`, the table that its declaration in the scan gives, even one
+  that the last manifest disables, which is then described as disabled,
+  with no inlay hint (see "Known limitations").  The result is the
+  manifest's node,
   with `summary`, the text of the summary a hover shows first (its lines
   apart by a plain line break), null for no node, and error -32803 with the reason until a first parse
   has finished; after that, the last index answers, and a later failure is
@@ -1767,7 +1785,7 @@ checked against dbt; the profile and the target in doctor, which need
 | `dbt lsp` cannot start | The session is alone (see "Standalone mode"): the proxy answers `initialize` itself, alone in full, with `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`, warns once with `window/showMessage`, `WHY: dbt-lsp-plus answers alone.`, registers its watcher for a client that lets it, answers `shutdown`, null to a definition it finds no target for whatever its mode, a merged request as alone and a method in `dbt` with null or `[]`, tries the parse with the same dbt, whose failure `nodeInfo` and a hover on a node give, and fails every other request with -32803 `dbt lsp is lost for good: WHY` |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 `dbt lsp exited (STATUS)`, but the merged ones, which get the proxy's part or empty, else that failure, after nodeInfo's reason for a hover on a node before any index, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, answers alone.  While a restart is awaited or under way, the proxy answers the merged requests on the scanned graph, with its part, its empty, or `dbt lsp is not running`, and parses (see "How the proxy runs it"); after a fourth crash, the session is alone: its graph the last parse's, the parse's problems published, dbt lsp's last diagnostics gone (see "Restart"), a forwarded request failed with `dbt lsp is lost for good: WHY`, while a method set to `dbt` keeps its nothing, and a definition with no target and `shutdown` their null |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, alone in full, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer; a forwarded request then fails with `dbt lsp is lost for good: WHY` |
-| The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`, alone and in `plus`; in `merge` in front of dbt lsp, a definition or references goes to dbt lsp, whose answer stands, and when it gives none, that reason comes first, then dbt lsp's; with no target, a definition is null and references `[]` (see "What a request gets") |
+| The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`, alone and in `plus`; in `merge` in front of dbt lsp, a definition or references goes to dbt lsp, whose answer stands, and when it gives none, that reason comes first, then dbt lsp's; with no target, a definition is null and references `[]`; a hover, a nodeInfo at a position and inlay hints on a `ref` or a `source` give no node (see "What a request gets") |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null, an entry of severity `Error` in its `errors`) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line; never a warning, nothing after `shutdown`.  A completion with `models_count` null and no error, a first compilation cut short (S4), is forwarded and says nothing (see "What a compilation does, observed on 2.0.9") |
 | A compilation of `dbt lsp`'s has no end 60 s after its start, foreground or background | Once a session, a `window/showMessage` of type 2, `dbt lsp has been compiling for 60 s with no end yet (its log: ROOT/logs/dbt-lsp.log)`; nothing after `shutdown`.  A lost server's compilation has no deadline left.  One deadline, from the last start, which any completion ends: a foreground compilation that starts while a background one runs, and hangs once that one ends, is not said |
@@ -1846,9 +1864,6 @@ checked against dbt; the profile and the target in doctor, which need
   its line as a YAML comment would.
 - `selectors.yml` and selectors on the command line name a source as
   `source:s.t`; a rename leaves them on the old name.
-- A `ref` with no package names the root project's node first, then any,
-  and a versioned model's latest version; a `ref` that names a version
-  (`v=2`) still names the latest.
 - Killing a parse kills `dbt` itself, or the launcher before it (`uvx`,
   `nix run`), whose child may then run on until it ends.
 - A column or an alias spelt like a CTE counts as one of its uses, for its
@@ -1868,10 +1883,8 @@ checked against dbt; the profile and the target in doctor, which need
   blocks of one name puts the second block's stale tables at the first
   block's name.  A table whose freshness query failed under 2.0.9 shows
   nothing, and a stale warning shown before goes.
-- An inlay hint's node is looked up as the hover's, an enabled one first,
-  then the root project, not the calling file's package as dbt 2.0.9 does
-  for a `ref`.  In a Python model or YAML, a `#` comment between a `ref`'s
-  last argument and its `)` hides its hint.
+- In a Python model or YAML, a `#` comment between a `ref`'s last
+  argument and its `)` hides its hint.
 - Navigation reads that flag as written.  It reads no explicit tag:
   `!!str false` puts the root first, where dbt keeps the calling node's
   package first, and `!!bool "false"` does not, where dbt does.  It
@@ -1890,6 +1903,11 @@ checked against dbt; the profile and the target in doctor, which need
   `to:` aside) and a `config:` block lead nowhere.
 - Where one package has two files of a model's name, one of them disabled,
   a definition before the first parse leads to both.
+- A source table that the root disables leads a definition, a hover and
+  nodeInfo to its own declaration, described as disabled and with no
+  inlay hint, since navigation reads a source from the scan alone, while
+  the call hierarchy, once a parse exists, skips it for another package's
+  declaration of the same name.
 - A hook given in a string inside a tag, such as `{{ config(post_hook="{{
   m() }}") }}`, is not read: its macro calls are no references.
 - With a server, a `ref` or a macro call in SQL goes to dbt lsp, which
@@ -1955,13 +1973,15 @@ checked against dbt; the profile and the target in doctor, which need
 - The corpus's `divergences.txt` lists each divergence from dbt that it
   shows, with its reason (see "Conformance").  Beyond those above: a
   package's model that the root project disables (`+enabled: false`)
-  still resolves, ahead of the root's, in the call hierarchy, and in
-  navigation before the first parse; a `function()` inside a package's
+  still resolves, ahead of the root's, in navigation and the call
+  hierarchy before the first parse; a `function()` inside a package's
   macro resolves in the macro's package, as a `ref` there does, where dbt
   resolves it in the calling node's; the graph names every implementation
   of a dispatch, where dbt lists the adapter's alone from a macro, and
   nothing from a node; dbt 2 ignores a source's `overrides`, which the
-  scan follows.
+  scan follows, so a hover, nodeInfo and an inlay hint on such a source
+  describe the package's table and its relation, which dbt 2 does not
+  build there.
 - Alone, a problem that dbt places at a path both the root and a package
   hold goes to the root's file; dbt lsp 2.0.9 puts every package's file
   under the root.  With a client that honours the proxy's watcher, a save
@@ -2001,8 +2021,10 @@ library's answers, each named by a lookup:
   and the docs block of the doc's name whose text dbt rendered in the
   description that holds the call, a column's or the node's;
 - `graph`: each call of a node or a macro, by the edges whose sites hold
-  it, against the dependencies (nodes, and the project's macros) that bear
-  the call's name, a dispatch's being its `*__name` implementations.
+  it, in the graph built with the case's manifest as its index, as the
+  proxy builds it once a parse exists, against the dependencies (nodes,
+  and the project's macros) that bear the call's name, a dispatch's being
+  its `*__name` implementations.
 
 A node is compared on its own calls and on the `ref`, `source` and macro
 calls of each macro it reaches through the graph by plain calls, as
