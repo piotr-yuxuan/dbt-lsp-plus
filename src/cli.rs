@@ -240,7 +240,7 @@ fn select(selector: &str, command: &[String]) -> Value {
     // What a select or a proxy killed by a signal left, swept after a day, as `Proxy::cache` does.
     config::remove_stale(&cache);
     let job = commands::nodes_job(selector);
-    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), "run.log", true);
+    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), config::RUN_LOG, true);
     let Some(run) = run else {
         return commands::failure(commands::NODES, commands::NO_LSP_WORD);
     };

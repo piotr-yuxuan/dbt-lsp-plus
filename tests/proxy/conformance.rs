@@ -108,7 +108,7 @@ fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
     let server = [dbt.to_owned(), "lsp".into(), "--profiles-dir".into(), copy.to_string_lossy().into_owned()];
     let parse = config::PARSE.map(str::to_owned);
     let words = config::Dbt::new(server.to_vec(), None)
-        .run(&parse, &copy, dir.join("cache"), "parse.log", namespace)
+        .run(&parse, &copy, dir.join("cache"), config::PARSE_LOG, namespace)
         .expect("the proxy's parse")
         .line;
     let (home, log) = (dir.join("home"), dir.join("parse.log"));

@@ -53,6 +53,13 @@ const CUT: [&str; 5] = [
 /// The words of the proxy's `dbt parse`, as `Dbt::run` takes them.
 pub const PARSE: [&str; 3] = ["parse", "--log-format", "json"];
 
+/// The log of a parse, at its cache's root, as `remove_stale` reads it.
+pub const PARSE_LOG: &str = "parse.log";
+
+/// The log of a command's run, in its cache's `run/`, as `remove_stale`
+/// reads it.
+pub const RUN_LOG: &str = "run.log";
+
 /// The user's dbt as a project runs it: the server command, read once, and
 /// where dbt runs.
 #[derive(Debug, Default)]
@@ -191,8 +198,8 @@ pub fn remove_stale(cache: &Path) {
     let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
     for sibling in siblings.filter(|sibling| Some(sibling.file_name().as_os_str()) != own) {
         let path = sibling.path();
-        let parsed = modified(&path.join("parse.log")).or_else(|| modified(&path));
-        let written = parsed.max(modified(&path.join("run/run.log")));
+        let parsed = modified(&path.join(PARSE_LOG)).or_else(|| modified(&path));
+        let written = parsed.max(modified(&path.join("run").join(RUN_LOG)));
         let age = written.and_then(|written| written.elapsed().ok());
         if age.is_some_and(|age| age > STALE_AFTER) {
             let _ = fs::remove_dir_all(sibling.path());
@@ -465,13 +472,13 @@ mod tests {
 
     /// `start` with the Run's parts as it took them before the Run.
     fn start(line: Vec<String>, cwd: Option<PathBuf>, dir: PathBuf, deadline: Duration, report: ReportFn) -> Running {
-        super::start(Run { line, cwd, dir, log: "parse.log", deadline }, report)
+        super::start(Run { line, cwd, dir, log: PARSE_LOG, deadline }, report)
     }
 
     /// The command line of the Dbt of SERVER's run of WORDS, as it was made
     /// before the Dbt.
     fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, words: &[String]) -> Option<Vec<String>> {
-        Dbt::new(server.to_vec(), None).run(words, root, cache.to_owned(), "parse.log", cut).map(|run| run.line)
+        Dbt::new(server.to_vec(), None).run(words, root, cache.to_owned(), PARSE_LOG, cut).map(|run| run.line)
     }
 
     #[test]

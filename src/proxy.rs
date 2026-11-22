@@ -1449,7 +1449,7 @@ impl<W: Write> Proxy<W> {
         }
         let cache = self.cache(&root);
         let parse = config::PARSE.map(str::to_owned);
-        let Some(run) = self.parsing.dbt.run(&parse, &root, cache, "parse.log", self.parsing.cut) else {
+        let Some(run) = self.parsing.dbt.run(&parse, &root, cache, config::PARSE_LOG, self.parsing.cut) else {
             return self.log_parse("the server command has no lsp, so dbt-lsp-plus runs no dbt parse");
         };
         let Some(events) = self.parsing.events.clone() else { return };
@@ -1530,7 +1530,7 @@ impl<W: Write> Proxy<W> {
         };
         let refused = packages::refused(&root, self.parsing.dbt.command(), true, self.guards_packages());
         let dir = self.cache(&root).join("run");
-        let run = job.as_ref().ok().and_then(|job| self.parsing.dbt.run(&job.words, &root, dir, "run.log", true));
+        let run = job.as_ref().ok().and_then(|job| self.parsing.dbt.run(&job.words, &root, dir, config::RUN_LOG, true));
         let failure = match (job, refused, run) {
             (Ok(job), None, Some(run)) => {
                 self.runs.push_back((id.clone(), job, run));

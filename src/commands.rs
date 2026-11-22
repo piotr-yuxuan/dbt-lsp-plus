@@ -352,7 +352,7 @@ mod tests {
         deadline: Duration,
         report: Box<dyn FnOnce(Value) + Send>,
     ) -> Running {
-        super::start(job, Run { line, cwd, dir, log: "run.log", deadline }, report)
+        super::start(job, Run { line, cwd, dir, log: config::RUN_LOG, deadline }, report)
     }
 
     fn exited(code: i32) -> Option<ExitStatus> {
