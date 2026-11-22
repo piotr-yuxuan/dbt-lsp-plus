@@ -387,15 +387,9 @@ fn placed(text: &str, starts: &LineStarts, key: &Tree, value: &Tree) -> Option<(
     Some((value, range, Insertion { at: line_end, newline, indent: *key_column, block }))
 }
 
-/// The tables of the `sources:` of a properties file of PACKAGE.  A file
-/// that is not valid YAML has none, and a source that `overrides` a
-/// package's has none of its own: dbt patches the package's.
-pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable> {
-    yaml::parse(text).map_or_else(Vec::new, |root| source_tables_in(package, path, text, &root))
-}
-
 /// The tables of the `sources:` of the properties file TEXT of PACKAGE,
-/// whose tree is ROOT, as `source_tables` gives them.
+/// whose tree is ROOT.  A source that `overrides` a package's has none of
+/// its own: dbt patches the package's.
 pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Tree) -> Vec<SourceTable> {
     let starts = LineStarts::new(text);
     // An anchor anywhere in the file may hold a name, a schema or an identifier.
@@ -1009,7 +1003,7 @@ mod tests {
     #[test]
     fn a_quoted_table_name_is_placed_as_written_escapes_included() {
         let text = "sources:\n  - name: raw\n    tables:\n      - name: \"a\\tb\\\"é\"\n      - name: 'it''s'\n";
-        let tables = source_tables("shop", Path::new("s.yml"), text);
+        let tables = source_tables_in("shop", Path::new("s.yml"), text, &yaml::parse(text).unwrap());
         let written: Vec<&str> = tables.iter().map(|t| &text[t.table_range.clone()]).collect();
         assert_eq!(written, ["a\\tb\\\"é", "it''s"]);
         assert_eq!(Entity::from(&tables[0]).id, "source.shop.raw.a\tb\"é");
@@ -1116,7 +1110,8 @@ mod tests {
         assert!(text[..orders.table_insertion.at].ends_with("- name: orders"));
         assert!(orders.table_insertion.block);
         assert_eq!(views.source_insertion.indent, 4);
-        let flow = source_tables("p", Path::new("f.yml"), "sources:\n  - {name: s, tables: [{name: t}]}\n");
+        let flow = "sources:\n  - {name: s, tables: [{name: t}]}\n";
+        let flow = source_tables_in("p", Path::new("f.yml"), flow, &yaml::parse(flow).unwrap());
         assert!(!flow[0].table_insertion.block && !flow[0].source_insertion.block);
     }
 

@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! Where a name leads, for the definitions that dbt lsp 2.0.9 does not
-//! give: the target at a position, as its document alone shows it, and
-//! what it names in the project, by dbt 2.0.9's lookup.  Pure.
+//! The Name at a position, from the document's scan, and where it leads:
+//! dbt's one lookup, as dbt 2.0.9 does it, for the definitions and
+//! references that dbt lsp 2.0.9 does not give.  Pure.
 
 use crate::config::ParseIndex;
 use crate::project::{self, Entity, Project, Scanned};
 use crate::reference::{Kind, Name};
+use crate::scan;
 use crate::sources;
 use crate::yaml::{self, Tree};
-use crate::{properties, scan};
-use regex::Regex;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 /// Where a Name leads, the model's Target of a Node or a source group:
 /// dbt's unique id of what it names, or `source.<package>.<source>` for a
@@ -64,87 +62,6 @@ const LOOKUP: [(Kind, &[&str], &str, &[Step]); 9] = [
     (Kind::Entry { label: "macro" }, &["macro"], "", &[Step::Own]),
     (Kind::Entry { label: "function" }, &["function"], "", &[Step::Own]),
 ];
-
-/// One quote, as YAML writes it inside a quoted scalar too: `''` in single
-/// quotes, `\"` in double quotes.
-const QUOTE: &str = r#"(?:''|\\?["'])"#;
-
-/// `doc('name')` or `doc('package', 'name')`.
-static DOC: LazyLock<Regex> = LazyLock::new(|| {
-    let argument = format!(r#"{QUOTE}([^'"\\]*){QUOTE}"#);
-    Regex::new(&format!(r"\bdoc\s*\(\s*{argument}(?:\s*,\s*{argument})?\s*\)")).unwrap()
-});
-
-/// What the position OFFSET of TEXT, the file at PATH, names, from that
-/// text alone: a `source` anywhere; elsewhere than in YAML, a `ref`'s
-/// argument, a macro call's name or package, or the name in the tag of a
-/// macro or a generic test, which looks itself up; in YAML, a `ref`, a `doc`, a macro call in
-/// the Jinja of a value,
-/// the `name:` of a navigable entry, a generic test's name, or a unit
-/// test's `model:`.
-pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Name> {
-    let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
-    let source = sources::target_at(path, text, offset);
-    if source.is_some() {
-        return source;
-    }
-    if !sources::is_yaml(path) {
-        // A generic test is the macro `test_<name>`, as dbt names it.
-        let macro_named = |block: &scan::Symbol| match block.kind {
-            scan::Kind::Macro => Some(block.name.clone()),
-            scan::Kind::Test => Some(format!("test_{}", block.name)),
-            _ => None,
-        };
-        let blocks = scan::blocks(text).into_iter().filter(|block| inside(&block.name_range));
-        if let Some(name) = blocks.filter_map(|block| macro_named(&block)).next() {
-            return Some(Name::new(Kind::Macro, None, &name));
-        }
-        let named = |call: &scan::Call| match call.name.kind {
-            Kind::Ref | Kind::Function => call.arguments.iter().any(inside),
-            Kind::Macro => inside(&call.range),
-            _ => false,
-        };
-        return sources::file_calls(path, text).into_iter().find(named).map(|call| call.name);
-    }
-    let reference = scan::yaml_calls(text)
-        .into_iter()
-        .find(|call| matches!(call.name.kind, Kind::Ref) && call.arguments.iter().any(inside))
-        .map(|call| call.name);
-    let doc = || {
-        let call = DOC
-            .captures_iter(text)
-            .find(|call| [call.get(1), call.get(2)].into_iter().flatten().any(|m| inside(&m.range())))?;
-        Some(match call.get(2) {
-            Some(name) => Name::new(Kind::Doc, Some(&call[1]), name.as_str()),
-            None => Name::new(Kind::Doc, None, &call[1]),
-        })
-    };
-    let entry = || {
-        let entries = properties::entries(text).into_iter();
-        // An entry of its label, when that is one of `LOOKUP`'s.
-        let navigable = |label: &'static str| LOOKUP.iter().any(|(kind, ..)| *kind == Kind::Entry { label });
-        let found = entries.filter(|entry| navigable(entry.label)).find(|entry| inside(&entry.name_range))?;
-        Some(Name::new(Kind::Entry { label: found.label }, None, &found.name))
-    };
-    let test = || {
-        let found = properties::tests(text).into_iter().find(|test| inside(&test.range))?;
-        Some(Name::new(Kind::Test, found.package.as_deref(), &found.name))
-    };
-    let model = || {
-        let root = yaml::parse(text)?;
-        let (name, _) = project::unit_test_models(text, &root).into_iter().find(|(_, range)| inside(range))?;
-        Some(Name::new(Kind::UnitTestModel, None, &name))
-    };
-    let macro_call = || {
-        let called = |call: &scan::Call| match call.name.kind {
-            Kind::Macro => inside(&call.range),
-            Kind::Function => call.arguments.iter().any(inside),
-            _ => false,
-        };
-        scan::calls(&scan::without_yaml_comments(text)).into_iter().find(called).map(|call| call.name)
-    };
-    reference.or_else(doc).or_else(entry).or_else(test).or_else(model).or_else(macro_call)
-}
 
 /// What the position OFFSET of the file at PATH names, from SCANNED, its
 /// scan: a `source` anywhere; elsewhere than in YAML, a `ref`'s or a
@@ -645,7 +562,7 @@ models:
 
     /// The target at the first occurrence of NEEDLE in TEXT, DELTA bytes in.
     fn at(path: &Path, text: &str, needle: &str, delta: usize) -> Option<Name> {
-        target_at(path, text, text.find(needle).unwrap() + delta)
+        reference_at(path, &Scanned::of(path, text.to_owned()), text.find(needle).unwrap() + delta)
     }
 
     fn called(package: Option<&str>, name: &str) -> Option<Name> {
@@ -734,40 +651,6 @@ models:
         let scanned = Scanned::of(yml, text.to_owned());
         assert_eq!(reference_at(yml, &scanned, text.find("d')").unwrap()), named(Kind::Doc, None, "d"));
         assert_eq!(reference_at(yml, &scanned, text.find("x')").unwrap()), called(None, "x"));
-    }
-
-    #[test]
-    fn reference_at_names_what_target_at_did() {
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        let corpus = std::fs::read_dir(fixtures.join("conformance")).unwrap().map(|entry| entry.unwrap().path());
-        let mut roots: Vec<PathBuf> = corpus.filter(|path| path.is_dir()).collect();
-        roots.push(fixtures.join("shop"));
-        // Each offset of SCANNED, the file at PATH, from its start to its end, both included.
-        let compare = |path: &Path, scanned: &Scanned| {
-            for offset in 0..=scanned.text.len() {
-                let (scan, text) = (reference_at(path, scanned, offset), target_at(path, &scanned.text, offset));
-                assert_eq!(scan, text, "{} at {offset}", path.display());
-                let (scan, text) = (sources::name_at(scanned, offset), sources::target_at(path, &scanned.text, offset));
-                assert_eq!(scan, text, "a source in {} at {offset}", path.display());
-            }
-            scanned.text.len() + 1
-        };
-        let (mut files, mut offsets, mut broken) = (0, 0, 0);
-        for root in &roots {
-            let project = project::scan(root, &HashMap::new()).unwrap();
-            for (path, file) in &project.files {
-                (files, offsets) = (files + 1, offsets + compare(path, file));
-                if sources::is_yaml(path) {
-                    let text = format!("{}\n[", file.text);
-                    assert!(yaml::parse(&text).is_none(), "{} broken", path.display());
-                    (broken, offsets) = (broken + 1, offsets + compare(path, &Scanned::of(path, text)));
-                }
-            }
-        }
-        println!(
-            "{} projects, {files} files, {offsets} offsets, {broken} YAML files also compared broken",
-            roots.len()
-        );
     }
 
     /// Where TARGET, named in the file REL of the project at ROOT, leads:
@@ -1162,14 +1045,14 @@ models:
         let project = project::scan(root, &HashMap::new()).unwrap();
         let lookup = Lookup::new(&project, None);
         let path = root.join(rel);
-        let target =
-            target_at(&path, project.text(&path).unwrap(), project.text(&path).unwrap().find(needle).unwrap() + delta);
+        let file = &project.files[&path];
+        let target = reference_at(&path, file, file.text.find(needle).unwrap() + delta);
         let found = references(&lookup, &path, target.as_ref().unwrap(), declaration);
         // A declaration is no use: only the calls lead back.
         for use_ in found.iter().filter(|_| !declaration) {
-            let text = project.text(&use_.path).unwrap();
+            let file = &project.files[&use_.path];
             let back =
-                target_at(&use_.path, text, use_.range.start).map(|target| resolve(&lookup, &use_.path, &target));
+                reference_at(&use_.path, file, use_.range.start).map(|target| resolve(&lookup, &use_.path, &target));
             assert!(back.unwrap_or_default().iter().any(|found| found.id == use_.id), "{use_:?} leads elsewhere");
         }
         let relative = |found: &Found| found.path.strip_prefix(root).unwrap().to_string_lossy().into_owned();

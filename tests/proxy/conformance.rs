@@ -365,8 +365,8 @@ fn calls_compared(project: &Project, manifest: &Value, lookup: &navigation::Look
 /// references.
 fn references_missed(project: &Project, lookup: &navigation::Lookup) -> Vec<String> {
     let leads_back = |found: &navigation::Found| {
-        let text = project.text(&found.path).unwrap_or_default();
-        let back = navigation::target_at(&found.path, text, found.range.start);
+        let file = project.files.get(&found.path);
+        let back = file.and_then(|file| navigation::reference_at(&found.path, file, found.range.start));
         back.is_some_and(|target| navigation::resolve(lookup, &found.path, &target).iter().any(|to| to.id == found.id))
     };
     let mut missed = Vec::new();
@@ -426,7 +426,7 @@ fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lo
             let description = description.as_str().unwrap_or_default();
             let name_on = text[offset..].trim_start_matches(['\'', '"', '\\']);
             let literal: String = name_on.chars().take_while(|c| !matches!(c, '\'' | '"' | '\\')).collect();
-            let (name, ours) = match navigation::target_at(path, text, offset) {
+            let (name, ours) = match navigation::reference_at(path, &project.files[path], offset) {
                 Some(Name { kind: Kind::Doc, package, name, .. }) => {
                     let ours = resolved(path, &Name::new(Kind::Doc, package.as_deref(), &name));
                     (name, ours)
@@ -453,7 +453,7 @@ fn entries_compared(project: &Project, manifest: &Value, lookup: &navigation::Lo
         let file = format!("{package}://{}", path.strip_prefix(dir).unwrap().to_string_lossy());
         let entries = properties::entries(text);
         for entry in entries.iter().filter(|entry| PATCHED.contains(&entry.label)) {
-            let target = navigation::target_at(path, text, entry.name_range.start);
+            let target = navigation::reference_at(path, &project.files[path], entry.name_range.start);
             let ours = target.map_or_else(BTreeSet::new, |target| resolved(path, &target));
             let patched = |e: &Value| e["patch_path"] == file.as_str() && e["name"] == entry.name.as_str();
             let dbt: BTreeSet<String> =

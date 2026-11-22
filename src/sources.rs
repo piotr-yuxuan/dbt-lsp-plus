@@ -47,26 +47,6 @@ fn argument_naming<'a>(call: &'a Call, name: &Name) -> Option<&'a Range<usize>> 
     }
 }
 
-/// The source target at OFFSET of TEXT, the file at PATH: an argument of a
-/// `source()` call, or a source's or table's `name:` under `sources:`.
-pub fn target_at(path: &Path, text: &str, offset: usize) -> Option<Name> {
-    let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
-    for call in file_calls(path, text) {
-        let Name { kind: reference::Kind::Table { source }, name: table, .. } = call.name else { continue };
-        match (call.arguments.first().is_some_and(inside), call.arguments.get(1).is_some_and(inside)) {
-            (true, _) => return Some(Name::new(reference::Kind::Source, None, &source)),
-            (_, true) => return Some(Name::new(reference::Kind::Table { source }, None, &table)),
-            _ => {}
-        }
-    }
-    let tables = if is_yaml(path) { crate::project::source_tables("", path, text) } else { Vec::new() };
-    tables.into_iter().find_map(|declared| match (inside(&declared.source_range), inside(&declared.table_range)) {
-        (true, _) => Some(Name::new(reference::Kind::Source, None, &declared.source)),
-        (_, true) => Some(Name::new(reference::Kind::Table { source: declared.source }, None, &declared.table)),
-        _ => None,
-    })
-}
-
 /// The source or table named at OFFSET of the file whose scan is SCANNED:
 /// an argument of a `source()` call, or a source's or table's `name:` under
 /// `sources:`.
@@ -384,24 +364,33 @@ models:
     fn finds_the_target_on_a_call_argument_or_a_declared_name() {
         let model = Path::new("m.sql");
         let at = |needle: &str| MODEL.find(needle).unwrap() + 1;
-        assert_eq!(target_at(model, MODEL, at("raw")), Some(Name::new(reference::Kind::Source, None, "raw")));
+        assert_eq!(
+            name_at(&Scanned::of(model, MODEL.to_owned()), at("raw")),
+            Some(Name::new(reference::Kind::Source, None, "raw"))
+        );
         let customers = Name::new(reference::Kind::Table { source: "raw".into() }, None, "customers");
-        assert_eq!(target_at(model, MODEL, at("customers")), Some(customers.clone()));
-        assert_eq!(target_at(model, MODEL, at("join")), None);
+        assert_eq!(name_at(&Scanned::of(model, MODEL.to_owned()), at("customers")), Some(customers.clone()));
+        assert_eq!(name_at(&Scanned::of(model, MODEL.to_owned()), at("join")), None);
         // Both ends of a name count, as editors put the cursor after a word.
         let start = MODEL.find("customers").unwrap();
         for offset in [start, start + "customers".len()] {
-            assert_eq!(target_at(model, MODEL, offset), Some(customers.clone()), "{offset}");
+            assert_eq!(name_at(&Scanned::of(model, MODEL.to_owned()), offset), Some(customers.clone()), "{offset}");
         }
         let yaml = Path::new("_sources.yml");
-        assert_eq!(target_at(yaml, SOURCES, SOURCES.find("customers").unwrap()), Some(customers.clone()));
-        assert_eq!(target_at(Path::new("_sources.yaml"), SOURCES, SOURCES.find("customers").unwrap()), Some(customers));
         assert_eq!(
-            target_at(yaml, SOURCES, SOURCES.find("events").unwrap()),
+            name_at(&Scanned::of(yaml, SOURCES.to_owned()), SOURCES.find("customers").unwrap()),
+            Some(customers.clone())
+        );
+        assert_eq!(
+            name_at(&Scanned::of(Path::new("_sources.yaml"), SOURCES.to_owned()), SOURCES.find("customers").unwrap()),
+            Some(customers)
+        );
+        assert_eq!(
+            name_at(&Scanned::of(yaml, SOURCES.to_owned()), SOURCES.find("events").unwrap()),
             Some(Name::new(reference::Kind::Source, None, "events"))
         );
         assert_eq!(
-            target_at(Path::new("_models.yml"), TESTS, TESTS.find("raw").unwrap()),
+            name_at(&Scanned::of(Path::new("_models.yml"), TESTS.to_owned()), TESTS.find("raw").unwrap()),
             Some(Name::new(reference::Kind::Source, None, "raw"))
         );
     }

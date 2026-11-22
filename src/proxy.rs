@@ -9,7 +9,7 @@ use crate::commands;
 use crate::graph::{self, Graph, ServerNode};
 use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
-use crate::project::{self, Project};
+use crate::project::{self, Project, Scanned};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
 use crate::{
@@ -1157,14 +1157,24 @@ impl<W: Write> Proxy<W> {
         Some((path, text, offset))
     }
 
+    /// The document of a request, its scan and the offset of the request's
+    /// position in it: PROJECT's scan of the file where PROJECT holds it
+    /// with the same text, else a scan of its text, open or on disk.
+    fn scan_at(&self, params: &Value, project: Option<&Project>) -> Option<(PathBuf, Arc<Scanned>, usize)> {
+        let (path, text, offset) = self.document_at(params)?;
+        let held = project.and_then(|project| project.files.get(&path)).filter(|held| held.text == text);
+        let scanned = held.cloned().unwrap_or_else(|| Arc::new(Scanned::of(&path, text)));
+        Some((path, scanned, offset))
+    }
+
     /// The source named at the position of a request on a document, with
     /// the project scanned.  Only the scan holds every occurrence: on a
     /// document it does not hold, such as a file not saved yet or one
     /// outside the resource paths, there is none, and the request goes to
     /// the server.
     fn source_at(&self, params: &Value) -> Option<(Rc<Project>, reference::Name)> {
-        let (path, text, offset) = self.document_at(params)?;
-        let name = sources::target_at(&path, &text, offset)?;
+        let (path, scanned, offset) = self.scan_at(params, None)?;
+        let name = sources::name_at(&scanned, offset)?;
         let project = self.project().filter(|project| project.files.contains_key(&path))?;
         Some((project, name))
     }
@@ -1215,18 +1225,18 @@ impl<W: Write> Proxy<W> {
     /// target of `navigation`.
     fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
         let method = capability::of(method).filter(|capability| !capability.kinds.is_empty())?.name;
-        let (path, text, offset) = self.document_at(params)?;
+        let (path, scanned, offset) = self.scan_at(params, None)?;
         let sql = path.extension().is_some_and(|extension| extension == "sql");
         let answered = match method {
             "textDocument/definition" => {
-                navigation::target_at(&path, &text, offset).is_some_and(|name| self.claims(method, &name, &path))
+                navigation::reference_at(&path, &scanned, offset).is_some_and(|name| self.claims(method, &name, &path))
             }
             // A CTE lives in its file; a source only the scan sees whole, and so its references.
-            "textDocument/rename" if sql && document::cte_at(&text, offset).is_some() => true,
+            "textDocument/rename" if sql && document::cte_at(&scanned.text, offset).is_some() => true,
             // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
             "textDocument/references" => {
-                let claimed =
-                    navigation::target_at(&path, &text, offset).is_some_and(|name| self.claims(method, &name, &path));
+                let claimed = navigation::reference_at(&path, &scanned, offset)
+                    .is_some_and(|name| self.claims(method, &name, &path));
                 claimed && self.root.as_ref().is_some_and(|root| path.starts_with(root))
             }
             _ => self.source_at(params).is_some(),
@@ -1247,9 +1257,10 @@ impl<W: Write> Proxy<W> {
     /// 2.0.9's lookup: its location, several, or null, found; none where
     /// the position names no target.
     fn on_definition(&self, params: &Value) -> Option<Answer> {
-        let (path, text, offset) = self.document_at(params)?;
-        let Some(name) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
-        let Some(project) = self.project() else { return Some(self.unreadable()) };
+        let project = self.project();
+        let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
+        let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
+        let Some(project) = project else { return Some(self.unreadable()) };
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &name));
         Some(match &locations[..] {
@@ -1262,9 +1273,10 @@ impl<W: Write> Proxy<W> {
     /// The references of the source, the node or the macro at the request's
     /// position, with their declaration when the client asks.
     fn on_references(&self, params: &Value) -> Option<Answer> {
-        let (path, text, offset) = self.document_at(params)?;
-        let Some(name) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
-        let Some(project) = self.project() else { return Some(self.unreadable()) };
+        let project = self.project();
+        let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
+        let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
+        let Some(project) = project else { return Some(self.unreadable()) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
         if name.source_table().is_some() {
             let uri_of = |path: &Path| self.uri_of(path);
@@ -1352,19 +1364,15 @@ impl<W: Write> Proxy<W> {
         params: &Value,
         file: bool,
     ) -> Option<Option<&'a Value>> {
-        let (path, text, offset) = self.document_at(params)?;
+        let (path, scanned, offset) = self.scan_at(params, None)?;
         let inside =
-            |call: &scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
-        // YAML and a Python model call outside Jinja, as plan 002 reads them.
-        let plain =
-            path.extension().is_some_and(|extension| ["yml", "yaml", "py"].contains(&&*extension.to_string_lossy()));
-        let calls = if plain { scan::yaml_calls(&text) } else { scan::calls(&text) };
-        if let Some(call) = calls.into_iter().find(inside) {
+            |call: &&scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
+        if let Some(call) = scanned.calls.iter().find(inside) {
             let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
             return named.then(|| index.and_then(|index| index.named(&call.name)));
         }
         // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
-        let entry = navigation::target_at(&path, &text, offset).filter(|name| {
+        let entry = navigation::reference_at(&path, &scanned, offset).filter(|name| {
             matches!(
                 name.kind,
                 reference::Kind::Entry { label: "model" | "seed" | "snapshot" | "analysis" }
@@ -1903,8 +1911,8 @@ impl<W: Write> Proxy<W> {
         // A doc's or a generic test's block, from the project's scan, which the cache keeps between requests, as
         // for `node_at`'s entry and file's start.
         let block = || {
-            let (path, text, offset) = self.document_at(params)?;
-            let name = navigation::target_at(&path, &text, offset)
+            let (path, scanned, offset) = self.scan_at(params, None)?;
+            let name = navigation::reference_at(&path, &scanned, offset)
                 .filter(|name| matches!(name.kind, reference::Kind::Doc | reference::Kind::Test))?;
             let project = self.project()?;
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
@@ -2214,10 +2222,11 @@ impl<W: Write> Proxy<W> {
                     shadow::compare(&shadow::locations(&ours, &path_of), &dbt)
                 }
             };
-            let read = self.document_at(params);
-            let name = read.and_then(|(path, text, offset)| navigation::target_at(&path, &text, offset));
+            let project = self.project();
+            let read = self.scan_at(params, project.as_deref());
+            let name = read.and_then(|(path, scanned, offset)| navigation::reference_at(&path, &scanned, offset));
             let relative = file.as_deref().and_then(|file| file.strip_prefix(root).ok());
-            let known = self.parsing.index.as_ref().zip(self.project()).zip(relative.zip(name.as_ref()));
+            let known = self.parsing.index.as_ref().zip(project).zip(relative.zip(name.as_ref()));
             let oracle = known.and_then(|((index, project), (relative, name))| {
                 shadow::oracle(index, &project, &relative.to_string_lossy(), name)
             });
@@ -3275,6 +3284,22 @@ mod tests {
         assert_eq!(late(None, false), plain, "no compilation");
         assert_eq!(late(Some(Instant::now()), false), format!("{plain}: it is compiling the project"));
         assert_eq!(late(Some(Instant::now() - COMPILE_STALL), true), plain, "a stall told");
+    }
+
+    #[test]
+    fn a_request_reads_the_held_scan_until_the_open_text_differs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let path = root.join("models/marts/orders.sql");
+        let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
+        let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
+        let project = proxy.project().unwrap();
+        let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
+        assert!(Arc::ptr_eq(&scanned, &project.files[&path]), "the project's scan of the file");
+        let open = "select 1";
+        proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": features::uri(&path), "text": open}}));
+        let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
+        assert!(!Arc::ptr_eq(&scanned, &project.files[&path]), "a scan of its own");
+        assert_eq!(scanned.text, open);
     }
 
     #[test]
