@@ -158,9 +158,9 @@ fn project(path: &Path, command: &[String]) -> Result<(PathBuf, Route), Missing>
 /// server command COMMAND, and where its processes run: given, the command
 /// as written, in the current directory; else `locate::dbt`'s from COMMAND
 /// anchored in the current directory, in the project.
-fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Found, Option<PathBuf>) {
+fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Located, Option<PathBuf>) {
     if route == Route::Given {
-        return (locate::Found::written(command), None);
+        return (locate::Located::written(command), None);
     }
     let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
     let anchored = std::env::current_dir().map_or_else(|_| command.to_vec(), |cwd| config::anchored(command, &cwd));

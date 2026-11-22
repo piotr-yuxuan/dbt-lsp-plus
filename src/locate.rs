@@ -116,7 +116,7 @@ fn candidates(project: &Path, repository: Option<(PathBuf, Option<PathBuf>)>) ->
 
 /// The dbt that the server command of a project runs, as `dbt` found it.
 #[derive(Debug)]
-pub struct Found {
+pub struct Located {
     /// The server command, with the dbt found in place of its first word.
     pub command: Vec<String>,
     /// The dbt as a line names it: its path, or the words before `lsp`.
@@ -129,12 +129,18 @@ pub struct Found {
     pub skipped: Vec<(PathBuf, String)>,
 }
 
-impl Found {
+impl Located {
     /// The dbt of the server command COMMAND as written, unprobed: named by
     /// its words before `lsp`.
-    pub fn written(command: &[String]) -> Found {
+    pub fn written(command: &[String]) -> Located {
         let before = command.iter().take_while(|word| *word != "lsp").cloned().collect::<Vec<_>>().join(" ");
-        Found { command: command.to_vec(), named: before, source: "the server command", lsp: None, skipped: Vec::new() }
+        Located {
+            command: command.to_vec(),
+            named: before,
+            source: "the server command",
+            lsp: None,
+            skipped: Vec::new(),
+        }
     }
 }
 
@@ -145,8 +151,8 @@ impl Found {
 /// stays, for `PATH`, unprobed, named by the first file of that name
 /// there.  Any other first word is the user's choice, kept and unprobed.
 /// GIT runs once, to find the project's repository.
-pub fn dbt(project: &Path, command: &[String], git: &Git) -> Found {
-    let mut found = Found::written(command);
+pub fn dbt(project: &Path, command: &[String], git: &Git) -> Located {
+    let mut found = Located::written(command);
     if command.first().map(String::as_str) != Some("dbt") {
         return found;
     }
@@ -157,13 +163,13 @@ pub fn dbt(project: &Path, command: &[String], git: &Git) -> Found {
             Probe::Other(why) => found.skipped.push((path, why)),
             answer => {
                 let named = path.display().to_string();
-                return Found { command: words, named, source, lsp: Some(answer == Probe::Lsp), ..found };
+                return Located { command: words, named, source, lsp: Some(answer == Probe::Lsp), ..found };
             }
         }
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     let on_path = std::env::split_paths(&path).map(|dir| dir.join("dbt")).find(|dbt| dbt.is_file());
-    Found { named: on_path.map_or_else(|| "dbt".into(), |dbt| dbt.display().to_string()), source: "PATH", ..found }
+    Located { named: on_path.map_or_else(|| "dbt".into(), |dbt| dbt.display().to_string()), source: "PATH", ..found }
 }
 
 /// How a session found its project: the server command's `--project-dir`,
