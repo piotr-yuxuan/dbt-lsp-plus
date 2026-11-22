@@ -737,8 +737,9 @@ mod tests {
         let raw = json!({"unique_id": "source.shop.raw.orders", "name": "orders", "source_name": "raw",
                          "resource_type": "source", "package_name": "shop", "relation_name": "\"raw_orders\"",
                          "config": {}});
-        // Ephemeral, so that only their lookup keeps their hint away: a `ref` names no analysis, nor a node
-        // the last manifest disables.
+        // Ephemeral, so that their hint would show were they reached: only the lookup keeps the analysis's away,
+        // since a `ref` names no analysis; the lookup and the disabled filter both keep `off`'s, which the last
+        // manifest disables, each pinned by a test of its own (`Lookup::node`'s, the proxy's hints).
         let analysis = json!({"unique_id": "analysis.shop.counts", "name": "counts", "resource_type": "analysis",
                               "package_name": "shop", "original_file_path": "analyses/counts.sql",
                               "config": {"materialized": "ephemeral"}});

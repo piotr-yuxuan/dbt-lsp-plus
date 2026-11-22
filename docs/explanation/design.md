@@ -166,10 +166,13 @@ references on a target, workspace symbols and the call hierarchy, where
 no target stays empty; in `merge` in front of dbt lsp, such a
 definition or references goes to dbt lsp, whose answer stands, and
 when it gives none the proxy's reason comes first, then dbt lsp's:
-`no dbt project at <root>: ...; dbt lsp failed: <its message>`.  A
-hover and a nodeInfo at a `ref`, a `source` or an entry's `name:`, and
-inlay hints, stay empty there: their lookup reads the project.  The
-late log and a command's failure, a result with `error` set, keep their
+`no dbt project at <root>: ...; dbt lsp failed: <its message>`.  Once
+a parse has given an index, a hover and a nodeInfo at a `ref`, a
+`source` or an entry's `name:`, and inlay hints, stay empty there: their
+lookup reads the project.  Before it, as elsewhere, nodeInfo fails with
+the parse's reason (`dbt parse has not finished: ...`), and so does a
+hover at a `ref` or a `source` that dbt lsp leaves null, while one at an
+entry's `name:` gets dbt lsp's answer, or null alone.  The late log and a command's failure, a result with `error` set, keep their
 own forms.
 
 ## Modes
@@ -1530,10 +1533,13 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   else the one node its file defines, but in a YAML file (a properties
   file, or a YAML snapshot's), where the manifest also places the generic
   tests it declares.  A `ref` or a `source` names the node its definition
-  leads to (`Lookup::node`): the version it names, from the calling file's
-  package first, none that the last manifest disables, and none it lacks
-  whose file is gone (one whose file remains keeps the node the index
-  holds); so for a hover and an inlay hint.  The result is the
+  leads to (`Lookup::node`), and so for a hover and an inlay hint: for a
+  `ref`, the version it names, from the calling file's package first,
+  none that the last manifest disables, and none it lacks whose file is
+  gone (one whose file remains keeps the node the index holds); for a
+  `source`, the table that its declaration in the scan gives, even one
+  that the last manifest disables, which is then described as disabled,
+  with no inlay hint (see "Known limitations").  The result is the
   manifest's node,
   with `summary`, the text of the summary a hover shows first (its lines
   apart by a plain line break), null for no node, and error -32803 with the reason until a first parse
@@ -1897,10 +1903,11 @@ checked against dbt; the profile and the target in doctor, which need
   `to:` aside) and a `config:` block lead nowhere.
 - Where one package has two files of a model's name, one of them disabled,
   a definition before the first parse leads to both.
-- A source table that the root disables still leads a definition, a
-  hover and nodeInfo to its own declaration, which navigation reads from
-  the scan alone, while the call hierarchy, once a parse exists, skips it
-  for another package's declaration of the same name.
+- A source table that the root disables leads a definition, a hover and
+  nodeInfo to its own declaration, described as disabled and with no
+  inlay hint, since navigation reads a source from the scan alone, while
+  the call hierarchy, once a parse exists, skips it for another package's
+  declaration of the same name.
 - A hook given in a string inside a tag, such as `{{ config(post_hook="{{
   m() }}") }}`, is not read: its macro calls are no references.
 - With a server, a `ref` or a macro call in SQL goes to dbt lsp, which
@@ -1972,7 +1979,9 @@ checked against dbt; the profile and the target in doctor, which need
   resolves it in the calling node's; the graph names every implementation
   of a dispatch, where dbt lists the adapter's alone from a macro, and
   nothing from a node; dbt 2 ignores a source's `overrides`, which the
-  scan follows.
+  scan follows, so a hover, nodeInfo and an inlay hint on such a source
+  describe the package's table and its relation, which dbt 2 does not
+  build there.
 - Alone, a problem that dbt places at a path both the root and a package
   hold goes to the root's file; dbt lsp 2.0.9 puts every package's file
   under the root.  With a client that honours the proxy's watcher, a save
