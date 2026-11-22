@@ -4464,6 +4464,28 @@ fn a_late_server_is_logged_once_per_method_and_deadline() {
 }
 
 #[test]
+fn a_late_server_is_logged_once_per_method_deadline_and_what_the_client_got() {
+    let (mut session, _) = Session::fake("merge-late-both", json!({"hold": ["textDocument/definition"]}));
+    session.initialize(&fixture());
+    let scratch = fixture().join("models/marts/scratch.sql");
+    let text = "select id from {{ ref('nowhere') }}";
+    session.open(&scratch, Some(text));
+    // A ref that no file holds, the proxy's to answer, then a column, dbt lsp's alone: both held past 2 s.
+    let at = |needle: &str| json!({"textDocument": {"uri": uri(&scratch)}, "position": {"line": 0, "character": text.find(needle).unwrap() + 1}});
+    let claimed = session.request("textDocument/definition", at("nowhere"));
+    let column = session.request("textDocument/definition", at("id"));
+    let late = json!({"code": -32803, "message": "dbt lsp did not answer within 2 s"});
+    let answers = [(claimed.get("error"), &claimed["result"]), (column.get("result"), &column["error"])];
+    assert_eq!(answers, [(None, &Value::Null), (None, &late)], "{claimed}, {column}");
+    settle(&mut session);
+    let logged = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
+    let said: Vec<&str> = logged.map(|m| m["params"]["message"].as_str().unwrap()).collect();
+    let line = |got: &str| format!("dbt lsp did not answer textDocument/definition within 2000 ms: {got}");
+    assert_eq!(said, [line("dbt-lsp-plus answered alone"), line("dbt-lsp-plus answered with the reason")]);
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_refused_or_lost_hover_keeps_the_proxy_s_summary() {
     let (mut session, _) = parsed_session("merge-refused", json!({"refuse_on": "textDocument/hover"}));
     let kept = session.request("textDocument/hover", on_ref());

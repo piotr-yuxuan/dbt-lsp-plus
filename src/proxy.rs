@@ -565,8 +565,9 @@ struct Proxy<W: Write> {
     /// When each merged request is answered with the proxy's part or
     /// nothing alone, and its method.
     deadlines: HashMap<String, (Instant, String)>,
-    /// The methods whose late answer the proxy logged, each with the deadline that passed.
-    late: HashSet<(String, Duration)>,
+    /// The methods whose late answer the proxy logged, each with the deadline that passed and what the client
+    /// got, as the log says it.
+    late: HashSet<(String, Duration, &'static str)>,
     documents: HashMap<PathBuf, String>,
     /// The URI under which the client opened each of them, which an edit
     /// of it must name.
@@ -2563,7 +2564,7 @@ impl<W: Write> Proxy<W> {
             let answer = answer.frame(id, &pending.name);
             pending.kept = Kept::Answered;
             self.send_client(&answer);
-            if !self.shutdown && self.late.insert((method.clone(), waited)) {
+            if !self.shutdown && self.late.insert((method.clone(), waited, got)) {
                 let ms = waited.as_millis();
                 let text = format!("dbt lsp did not answer {method} within {ms} ms: {got}");
                 self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",

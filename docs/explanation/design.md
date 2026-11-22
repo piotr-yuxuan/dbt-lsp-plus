@@ -220,10 +220,10 @@ of the forwarding (`MERGE_DEADLINE`), and the empty, or why, within 2 s
 (`NOTHING_DEADLINE`, plan 037), both in `src/capability.rs`, whose
 `Capability::deadline` is the one place that a later plan with evidence
 of a difference between methods would change; dbt lsp's late answer
-is then dropped, logged once per method and deadline (`window/logMessage`,
-type 4, naming the deadline that passed and whether the client got the
-proxy's answer or the reason), so that a 2 s drop shows after a 300 ms
-one.  dbt lsp's error, its exit before it
+is then dropped, logged once per method, deadline and what the client
+got (`window/logMessage`, type 4, naming the deadline that passed and
+whether the client got the proxy's answer or the reason), so that a 2 s
+drop shows after a 300 ms one, and an error after an empty.  dbt lsp's error, its exit before it
 answers, and no dbt lsp running when the request comes, give the
 proxy's part or empty too; where the proxy has nothing, which only dbt
 lsp could answer, the client gets error -32803 and why (plan 044, see
