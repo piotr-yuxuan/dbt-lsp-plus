@@ -109,13 +109,20 @@ parse.  After a fourth crash, and when `dbt lsp` cannot start or exits
 before it answers `initialize`, the proxy answers alone, as with dbt-oss,
 and a request only `dbt lsp` answers fails with `dbt lsp is lost for
 good: ...`.  When the root's `dbt_project.yml` no longer reads, a
-definition or references on a target, workspace symbols and the call
-hierarchy fail with `no dbt project at ...`, alone and in `plus`; in
-`merge` in front of `dbt lsp`, a definition or references goes to `dbt
-lsp`, and when it gives no answer, that reason comes first, then `dbt
-lsp`'s.
+definition or references on a target, workspace symbols, the call
+hierarchy and, once a parse has run, a hover and a nodeInfo at a `ref`
+or a `source` fail with `no dbt project at ...`, alone and in `plus`; in
+`merge` in front of `dbt lsp`, a definition, references or such a hover
+goes to `dbt lsp`, and when it gives no answer, that reason comes first,
+then `dbt lsp`'s.
 With a `dbt lsp` that cannot start, its parse runs the same dbt and
 fails, and `nodeInfo` and a hover on a node give its failure.
+
+Once a session has a project, a hover, a definition, references or a
+call hierarchy on a file of another dbt project fails with
+`<file> lies in the dbt project at <other>, and this session serves only
+the one at <root>`; in `merge` in front of `dbt lsp`, a hover, a
+definition or references fails only when `dbt lsp` gives no answer.
 
 With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
 see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).
@@ -235,7 +242,8 @@ In Neovim that is `init_options`, not `settings`: the proxy reads no
 `workspace/didChangeConfiguration`, and a change applies when the client
 starts again.  A refused key is ignored and shown once in a warning.
 `dbt lsp` gets `initializationOptions` without `dbtLspPlus`.  With no
-`dbt lsp`, a method set to `dbt` gets nothing, and a warning says so.
+`dbt lsp`, a method set to `dbt` gets its nothing, null or `[]`, which
+does not say why, and a warning says so once.
 
 ### The shadow
 

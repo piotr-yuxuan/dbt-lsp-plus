@@ -3147,6 +3147,50 @@ fn a_project_that_no_longer_reads_says_so_where_no_symbol_is_empty() {
 }
 
 #[test]
+fn a_hover_and_node_information_on_a_project_that_no_longer_reads_say_so() {
+    let project = navigable("unreadable-hover");
+    let script = json!({"no_lsp": true, "manifest": manifest()});
+    let (mut session, _) =
+        Session::fake_with("unreadable-hover", script, &[Path::new("--project-dir"), &project], None);
+    session.initialize(&project);
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let by_id =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), by_id, |result| result["unique_id"] == "model.shop.orders");
+    // While the project reads, a `ref` that leads nowhere names no node: null, no reason.
+    let scratch = project.join("models/marts/scratch.sql");
+    std::fs::write(&scratch, "select * from {{ ref('nowhere') }}\n").unwrap();
+    session.open(&scratch, None);
+    let nowhere = position_in(&scratch, "ref('nowhere')", 6);
+    let hover = session.request("textDocument/hover", nowhere.clone());
+    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
+    let info = node_info(&mut session, json!({"uri": nowhere["textDocument"]["uri"], "position": nowhere["position"]}));
+    assert_eq!((info.get("error"), &info["result"]), (None, &Value::Null), "{info}");
+    let configuration = project.join("dbt_project.yml");
+    let written = std::fs::read_to_string(&configuration).unwrap();
+    std::fs::write(&configuration, "name: [").unwrap();
+    let on_ref = position_in(&orders, "ref('stg_orders')", 6);
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project",
+        project.display()
+    );
+    let unreadable = json!({"code": -32803, "message": message});
+    let hover = session.request("textDocument/hover", on_ref.clone());
+    assert_eq!((hover.get("result"), &hover["error"]), (None, &unreadable), "{hover}");
+    let info = node_info(&mut session, json!({"uri": on_ref["textDocument"]["uri"], "position": on_ref["position"]}));
+    assert_eq!((info.get("result"), &info["error"]), (None, &unreadable), "{info}");
+    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 20, "character": 0}});
+    let hints =
+        session.request("textDocument/inlayHint", json!({"textDocument": {"uri": uri(&orders)}, "range": range}));
+    assert_eq!((hints.get("error"), &hints["result"]), (None, &json!([])), "{hints}");
+    std::fs::write(&configuration, &written).unwrap();
+    let hover = session.request("textDocument/hover", on_ref);
+    assert!(hover.get("error").is_none() && hover["result"]["contents"].is_object(), "{hover}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn in_merge_a_project_that_no_longer_reads_leaves_a_claimed_definition_to_dbt_lsp_then_says_why() {
     // In front of dbt lsp, the definition goes to it, whose answer stands: its bytes, odd spacing included.
     let in_front = navigable("unreadable-merge");
@@ -3174,6 +3218,61 @@ fn in_merge_a_project_that_no_longer_reads_leaves_a_claimed_definition_to_dbt_ls
         "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project; \
          dbt lsp failed: refused by the script",
         refusing.display()
+    );
+    let why = json!({"code": -32803, "message": message});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why() {
+    let project = navigable("elsewhere-merge");
+    let other = project.with_file_name("other");
+    let m = other.join("models/m.sql");
+    std::fs::create_dir_all(m.parent().unwrap()).unwrap();
+    std::fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
+    std::fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
+    let script = json!({"refuse_on": "textDocument/hover", "manifest": manifest()});
+    // References in `plus`, and the call hierarchy, which the proxy owns, in `merge`.
+    let modes = ["--mode", "textDocument/references=plus", "--mode", "textDocument/prepareCallHierarchy=merge"];
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_options("elsewhere-merge", script, &modes, &flags, None);
+    session.initialize(&project);
+    session.open(&m, None);
+    let on_ref = position_in(&m, "ref('orders')", 6);
+    // dbt lsp gives no answer: the proxy's reason first, then dbt lsp's.
+    let refused = session.request("textDocument/hover", on_ref.clone());
+    let elsewhere = format!(
+        "{} lies in the dbt project at {}, and this session serves only the one at {}",
+        m.display(),
+        other.display(),
+        project.display()
+    );
+    let why = json!({"code": -32803, "message": format!("{elsewhere}; dbt lsp failed: refused by the script")});
+    assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");
+    // Where dbt lsp is not asked, the reason alone, at once.
+    let alone = json!({"code": -32803, "message": elsewhere});
+    for method in ["textDocument/references", "textDocument/prepareCallHierarchy"] {
+        let answer = session.request(method, without_declaration(on_ref.clone()));
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &alone), "{method}: {answer}");
+    }
+    // dbt lsp's answer stands; the requests before it reached dbt lsp first, if at all.
+    let definition = session.request("textDocument/definition", on_ref);
+    assert_eq!((definition.get("error"), &definition["result"]["echo"]), (None, &json!("textDocument/definition")));
+    let asked = |method: &str| logged(&log).iter().any(|message| message["method"] == method);
+    assert!(!asked("textDocument/references") && !asked("textDocument/prepareCallHierarchy"), "dbt lsp was asked");
+    // Over a project that no longer reads, once there is an index, a hover's reason first, then dbt lsp's.
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    let by_id =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), by_id, |result| result["unique_id"] == "model.shop.orders");
+    std::fs::write(project.join("dbt_project.yml"), "name: [").unwrap();
+    let refused = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
+    let message = format!(
+        "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project; \
+         dbt lsp failed: refused by the script",
+        project.display()
     );
     let why = json!({"code": -32803, "message": message});
     assert_eq!((refused.get("result"), &refused["error"]), (None, &why), "{refused}");

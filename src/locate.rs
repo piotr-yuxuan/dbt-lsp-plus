@@ -5,7 +5,7 @@
 //! `PATH`; and the probe that tells a dbt 2 with `lsp`, one without, and
 //! anything else apart.
 
-use crate::{config, packages, run};
+use crate::{config, packages, project, run};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
@@ -27,21 +27,41 @@ use std::time::Duration;
 /// next one above.  A project whose `dbt_project.yml` does not read has no
 /// packages.  No walk stops at git's top level.
 pub fn project_of(path: &Path, command: &[String]) -> Option<PathBuf> {
-    let resolved = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    let within = |inner: &Path, dir: &Path| inner.starts_with(dir) || resolved(inner).starts_with(resolved(dir));
-    let package_of = |inner: &Path, outer: &Path| {
-        let Ok(install) = packages::install_path(outer, command) else { return false };
-        within(inner, &install) || packages::local_dirs(outer).iter().any(|local| within(inner, local))
-    };
     let projects: Vec<&Path> = path.ancestors().filter(|dir| dir.join("dbt_project.yml").is_file()).collect();
     let mut found = *projects.first()?;
     for (at, outer) in projects.iter().enumerate().skip(1) {
-        if !projects[at..].iter().any(|above| package_of(found, above)) {
+        if !projects[at..].iter().any(|above| package_of(found, above, command)) {
             break;
         }
         found = outer;
     }
     Some(found.to_owned())
+}
+
+/// Whether INNER lies under DIR, as spelt or links resolved.
+fn within(inner: &Path, dir: &Path) -> bool {
+    let resolved = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    inner.starts_with(dir) || resolved(inner).starts_with(resolved(dir))
+}
+
+/// Whether INNER lies in a package of the project at OUTER: under its
+/// install path, as dbt takes it with the server command COMMAND, or in
+/// one of its local packages; never when OUTER's `dbt_project.yml` does
+/// not read.
+fn package_of(inner: &Path, outer: &Path, command: &[String]) -> bool {
+    let Ok(install) = packages::install_path(outer, command) else { return false };
+    within(inner, &install) || packages::local_dirs(outer).iter().any(|local| within(inner, local))
+}
+
+/// The root of the project that the document at PATH lies in, when it is
+/// not the session's project at ROOT: none when PATH lies under ROOT or
+/// in one of its packages (`package_of`), in no project, or while ROOT's
+/// `dbt_project.yml` does not read as a project, whose own reason stands.
+pub fn elsewhere(path: &Path, root: &Path, command: &[String]) -> Option<PathBuf> {
+    if within(path, root) || project::package_config(root).is_none() || package_of(path, root, command) {
+        return None;
+    }
+    project_of(path, command)
 }
 
 /// How git runs for the lookup: its program, and its whole environment,

@@ -57,7 +57,7 @@ src/modes.rs                  who answers each method: the user's settings and t
 src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
-src/locate.rs                 the project of a document, the dbt of a project, the probe of a dbt
+src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/proxy.rs                  the event loop; the Backend, dbt lsp's process: its life, its listings
@@ -146,6 +146,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Proxy::on_first_project`: the start of a project that a document
     names, apart from the notification that brings it, so that
     `on_notification` stays a sequence;
+  - `Proxy::outside` and `Proxy::on_elsewhere`: a request on a document of
+    another project, its reason and its answer, apart from `on_request`'s
+    dispatch; `locate::elsewhere`: whether a document lies in another
+    project, at the file system's boundary, with tests of its own;
   - `locate::repository`: the one run of git that finds a project's
     repository, at the boundary, its program and environment given;
     `locate::candidates`: the decision where a project's dbt may be, from
@@ -176,8 +180,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Log::open`, `Log::append` and `Shadow::write`: the start of the
     shadow's log and its writes, a resource's start and use;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
-    which `Running::stop` ends, a resource's start, as `Log::open`,
-    `Proxy::start_restart` and `Proxy::stop_server` are;
+    which `Running::stop` ends, a resource's start, as `Log::open` and
+    `Proxy::start_restart` are, where `Proxy::stop_server` is an end;
+  - `run::Output::error_line`: the list commands' reader of dbt's first
+    error, a text log's `[error]` line, kept apart from `error_event` so
+    that plan 048 changed no answer; plan 050 merges the two;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart

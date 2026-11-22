@@ -154,6 +154,7 @@ are one closed set, whose words live in one place, `Reason`'s
 | `Unreadable` | the proxy | `no dbt project at <root>: its dbt_project.yml is missing, is not YAML, or names no project` |
 | `Unindexed` | the proxy | `dbt parse has not finished: <why>`, why `it is running`, the parse's failure, or `waiting for dbt lsp to compile the project` |
 | `Refused` | the proxy | a rename's refusal, as written |
+| `Elsewhere` | the proxy | `<document> lies in the dbt project at <project>, and this session serves only the one at <root>` |
 | `NotRunning` | dbt lsp | `dbt lsp is not running` |
 | `Lost` | dbt lsp | `dbt lsp is lost for good: <why>`, as the give-up or the failed start said it |
 | `Late` | dbt lsp | `dbt lsp did not answer within 2 s`, then `: it is compiling the project` while a compilation it started has not ended, nor gone 60 s with no end, said or not |
@@ -167,9 +168,12 @@ no target stays empty; in `merge` in front of dbt lsp, such a
 definition or references goes to dbt lsp, whose answer stands, and
 when it gives none the proxy's reason comes first, then dbt lsp's:
 `no dbt project at <root>: ...; dbt lsp failed: <its message>`.  Once
-a parse has given an index, a hover and a nodeInfo at a `ref`, a
-`source` or an entry's `name:`, and inlay hints, stay empty there: their
-lookup reads the project.  Before it, as elsewhere, nodeInfo fails with
+a parse has given an index, a hover and a nodeInfo at a `ref` or a
+`source` are `Unreadable` there too, alone and in `plus`; in `merge` in
+front of dbt lsp, such a hover goes to dbt lsp, whose answer stands, and
+when it gives none that reason comes first.  At an entry's `name:` they
+stay empty, and inlay hints `[]`: their lookup reads the project.
+Before it, as elsewhere, nodeInfo fails with
 the parse's reason (`dbt parse has not finished: ...`), and so does a
 hover at a `ref` or a `source` that dbt lsp leaves null, while one at an
 entry's `name:` gets dbt lsp's answer, or null alone.  The late log and a command's failure, a result with `error` set, keep their
@@ -588,18 +592,37 @@ that applies:
   before any document comes (Claude Code opens the first one right after
   `initialized`), so such a session is alone for its life: its answer is
   the alone one, without the alone message, and `dbt lsp` never starts
-  (plan 049 may start it).  At that document, before it is tracked: the
-  root, the dbt, the cut's probe, the first scan, the watcher of runs,
-  the watcher of files when the client lets the proxy register it, and the
-  line; then the parse, as alone.
+  (no plan starts it: the proxy role goes with plan 075).  At that
+  document, before it is tracked: the root, the dbt, the cut's probe, the
+  first scan, the watcher of runs, the watcher of files when the client
+  lets the proxy register it, and the line; then the parse, as alone.
 
 The working directory no longer names the project.  Before a project, and
 for ever when no document lies in one, the proxy is quiet: no process (no
 probe, no `unshare`, no git, no dbt), no polling, no watcher, nothing on
 its standard error, no message but a refused setting's at `initialize`,
 and every request but `initialize` gets null, valid for each method the
-proxy announces and each one an agent was seen to send; a reason for a
-document outside every project is plan 049's.
+proxy announces and each one an agent was seen to send.
+
+Once there is a project, a document lies in it when under the root or
+in one of its packages, installed or local, as spelt or links resolved,
+and in another project when the walk up from it finds one
+(`locate::elsewhere`).  A request on a document of another project, of a
+method that reads the project and names its document by
+`textDocument.uri` (a hover, a definition, references,
+`prepareCallHierarchy`), fails with `<document> lies in the dbt project
+at <project>, and this session serves only the one at <root>`, alone and
+in `plus`; in `merge` in front of dbt lsp, a hover, a definition or
+references goes to dbt lsp, whose answer stands, and when it gives none
+that reason comes first, while `prepareCallHierarchy`, the proxy's own
+in `merge` too, fails at once.  Inlay hints there are `[]` alone and in
+`plus`, and dbt lsp's answer as it came in `merge` (null on a macro or
+properties file: see "Inlay hints"); a method set to `dbt` goes to dbt
+lsp.  The rest is answered as
+before: the methods of the document's own text, a rename, which there
+is a CTE's alone, a document in no project, every request while the
+root's `dbt_project.yml` does not read, and a project nested under the
+root, which is the root's: one session serves one project (plan 049).
 
 On the folder's route and a document's, when the server command's first
 word is `dbt` (the default `dbt lsp` included), the dbt is the project's
@@ -1803,7 +1826,7 @@ checked against dbt; the profile and the target in doctor, which need
 | `dbt lsp` cannot start | The session is alone (see "Standalone mode"): the proxy answers `initialize` itself, alone in full, with `textDocumentSync.save`, `hoverProvider` and `inlayHintProvider`, warns once with `window/showMessage`, `WHY: dbt-lsp-plus answers alone.`, registers its watcher for a client that lets it, answers `shutdown`, null to a definition it finds no target for whatever its mode, a merged request as alone and a method in `dbt` with null or `[]`, tries the parse with the same dbt, whose failure `nodeInfo` and a hover on a node give, and fails every other request with -32803 `dbt lsp is lost for good: WHY` |
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 `dbt lsp exited (STATUS)`, but the merged ones, which get the proxy's part or empty, else that failure, after nodeInfo's reason for a hover on a node before any index, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, answers alone.  While a restart is awaited or under way, the proxy answers the merged requests on the scanned graph, with its part, its empty, or `dbt lsp is not running`, and parses (see "How the proxy runs it"); after a fourth crash, the session is alone: its graph the last parse's, the parse's problems published, dbt lsp's last diagnostics gone (see "Restart"), a forwarded request failed with `dbt lsp is lost for good: WHY`, while a method set to `dbt` keeps its nothing, and a definition with no target and `shutdown` their null |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, alone in full, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer; a forwarded request then fails with `dbt lsp is lost for good: WHY` |
-| The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`, alone and in `plus`; in `merge` in front of dbt lsp, a definition or references goes to dbt lsp, whose answer stands, and when it gives none, that reason comes first, then dbt lsp's; with no target, a definition is null and references `[]`; a hover, a nodeInfo at a position and inlay hints on a `ref` or a `source` give no node (see "What a request gets") |
+| The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`, alone and in `plus`; in `merge` in front of dbt lsp, a definition or references goes to dbt lsp, whose answer stands, and when it gives none, that reason comes first, then dbt lsp's; with no target, a definition is null and references `[]`; once a parse has given an index, a hover and a nodeInfo at a `ref` or a `source` fail with that reason too, the hover in `merge` as a definition does, and inlay hints give none (see "What a request gets") |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
 | A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null, an entry of severity `Error` in its `errors`) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line; never a warning, nothing after `shutdown`.  A completion with `models_count` null and no error, a first compilation cut short (S4), is forwarded and says nothing (see "What a compilation does, observed on 2.0.9") |
 | A compilation of `dbt lsp`'s has no end 60 s after its start, foreground or background | Once a session, a `window/showMessage` of type 2, `dbt lsp has been compiling for 60 s with no end yet (its log: ROOT/logs/dbt-lsp.log)`; nothing after `shutdown`.  A lost server's compilation has no deadline left.  One deadline, from the last start, which any completion ends: a foreground compilation that starts while a background one runs, and hangs once that one ends, is not said |
@@ -1854,6 +1877,14 @@ checked against dbt; the profile and the target in doctor, which need
   function, while the scan still draws the edge to the function.
 - A file that the project reaches through a link, opened by its real path
   outside the project, is not matched to its resource.
+- A package of the root installed outside it through a `.env` in the
+  root that sets `DBT_PACKAGES_INSTALL_PATH`, or through `env_var` in its
+  `packages-install-path`, is taken for another project: a hover, a
+  definition, references or the call hierarchy on its files fails with
+  `<file> lies in the dbt project at <package>, ...`.
+  `locate::elsewhere` reads the install path from the flag, the variable
+  in the server command or the proxy's environment, and the key as
+  written (plan 056).
 - A client that reuses the id of a listing the proxy abandoned after two
   minutes gets the server's late answer to that listing.  Only a client
   whose ids start with `dbt-lsp-plus/` can.
@@ -1872,7 +1903,8 @@ checked against dbt; the profile and the target in doctor, which need
   between restarts only the merged ones get the proxy's part or empty
   (plan 037).  After the give-up, or with one that cannot start, the
   session is alone, and a method set to `dbt` gets its nothing, null or
-  `[]`, which does not say why (plan 049's).
+  `[]`, which does not say why (no plan gives a reason: the modes go
+  with plan 075).
 - Once the server has listed the graph, an unsaved edit of a `ref` in a node
   it listed shows in the call hierarchy only after the next save.
 - In YAML, an apostrophe in a plain scalar, as in `description: It's the

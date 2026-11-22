@@ -376,10 +376,13 @@ enum Part {
     /// proxy has no index yet, where dbt lsp's answer is null or none, and
     /// before why dbt lsp gave none.
     Unindexed,
-    /// A definition or references at a position the proxy claims and
-    /// cannot answer, for these reasons, as over a project that does not
-    /// read: dbt lsp's answer passes as it came; when it gives none, these
-    /// reasons, then why.
+    /// What the proxy cannot answer, for these reasons: a definition or
+    /// references at a position it claims, or a hover at a `ref` or a
+    /// `source` once there is an index, over a project that does not read;
+    /// a hover, a definition or references at any position of a document
+    /// of another project (`on_elsewhere`).  dbt lsp's answer passes as it
+    /// came; when it gives none, these reasons, then why.  Alone and in
+    /// `plus`, a hover's reasons are its answer.
     Unanswered(Vec<Reason>),
 }
 
@@ -1129,7 +1132,7 @@ impl<W: Write> Proxy<W> {
     /// The answer to the call hierarchy's METHOD, on the graph of the files
     /// with the server's nodes once listed, or, alone, the last parse's.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Answer> {
-        let Some(project) = self.project() else { return Some(self.unreadable()) };
+        let Some(project) = self.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let graph = self.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
@@ -1257,7 +1260,7 @@ impl<W: Write> Proxy<W> {
         let project = self.project();
         let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
         let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
-        let Some(project) = project else { return Some(self.unreadable()) };
+        let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &name));
         Some(match &locations[..] {
@@ -1273,7 +1276,7 @@ impl<W: Write> Proxy<W> {
         let project = self.project();
         let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
         let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
-        let Some(project) = project else { return Some(self.unreadable()) };
+        let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
         if name.source_table().is_some() {
             let uri_of = |path: &Path| self.uri_of(path);
@@ -1286,8 +1289,8 @@ impl<W: Write> Proxy<W> {
 
     /// Why the proxy cannot answer from the project: the root's
     /// `dbt_project.yml` does not read, which the scan needs.
-    fn unreadable(&self) -> Answer {
-        Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())])
+    fn unreadable(&self) -> Reason {
+        Reason::Unreadable(self.root.clone().unwrap_or_default())
     }
 
     /// The URI of the file at PATH, as the client spelt it if it opened it.
@@ -1407,7 +1410,9 @@ impl<W: Write> Proxy<W> {
 
     /// The information of a node, named by its id or by a position: the
     /// manifest's node with its relation and the summary a hover shows,
-    /// none for no node; why while no parse has finished.
+    /// none for no node; why while no parse has finished, and the reason of
+    /// a project that does not read for a node named by a `ref` or a
+    /// `source` there.
     fn node_info(&self, params: &Value) -> Option<Answer> {
         let Some(index) = &self.parsing.index else { return Some(Answer::Unanswered(vec![self.parsing.unindexed()])) };
         let argument = params.pointer("/arguments/0")?;
@@ -1415,7 +1420,10 @@ impl<W: Write> Proxy<W> {
             Some(id) => index.node(id),
             None => {
                 let position = json!({"textDocument": {"uri": argument["uri"]}, "position": argument["position"]});
-                self.node_at(Some(index), &position, true).flatten()
+                match self.node_at(Some(index), &position, true) {
+                    Some(None) if self.project().is_none() => return Some(Answer::Unanswered(vec![self.unreadable()])),
+                    named => named.flatten(),
+                }
             }
         };
         let summarised = |node: &Value| {
@@ -1713,7 +1721,7 @@ impl<W: Write> Proxy<W> {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
             "workspace/symbol" => params.get("query").and_then(Value::as_str).map(|query| {
                 self.project().map_or_else(
-                    || self.unreadable(),
+                    || Answer::Unanswered(vec![self.unreadable()]),
                     |project| Answer::Found(features::workspace_symbols(&project, query, self.encoding)),
                 )
             }),
@@ -1730,10 +1738,12 @@ impl<W: Write> Proxy<W> {
                 Some(Answer::Unanswered(vec![self.parsing.unindexed()]))
             }
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
-            // null for a hover, no hint: the proxy's part, else that.
-            "textDocument/hover" | "textDocument/inlayHint" => {
-                Some(pending.found(self.markdown).map_or(Answer::Empty, Answer::Found))
-            }
+            // null for a hover, no hint: the proxy's part, else that; why
+            // the proxy could not answer, as over a project that does not read.
+            "textDocument/hover" | "textDocument/inlayHint" => Some(match &pending.kept {
+                Kept::Part(Part::Unanswered(reasons)) => Answer::Unanswered(reasons.clone()),
+                _ => pending.found(self.markdown).map_or(Answer::Empty, Answer::Found),
+            }),
             _ => self.hierarchy(method, params),
         }));
         match computed {
@@ -1903,7 +1913,9 @@ impl<W: Write> Proxy<W> {
     /// What the answer to a hover at PARAMS gets first, outside `dbt`: the
     /// summary and facts of the node named there, else a doc's or a generic
     /// test's block; else nothing, null, which a node named before any index
-    /// turns into why the proxy has none.
+    /// turns into why the proxy has none, and a node named by a `ref` or a
+    /// `source` over a project that does not read, once there is an index,
+    /// into its reason.
     fn hover_part(&self, params: &Value) -> Part {
         let index = self.parsing.index.as_ref();
         // Line 1, column 1 of a file stands for the node it defines.
@@ -1922,7 +1934,11 @@ impl<W: Write> Proxy<W> {
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
             navigation::hover(&project, &name, found.first()?, self.markdown).map(|text| (text, false))
         };
-        let nothing = if named.is_some() && index.is_none() { Part::Unindexed } else { Part::Nothing };
+        let nothing = match (named, index) {
+            (Some(_), None) => Part::Unindexed,
+            (Some(None), Some(_)) if self.project().is_none() => Part::Unanswered(vec![self.unreadable()]),
+            _ => Part::Nothing,
+        };
         summary.or_else(block).map_or(nothing, |(text, hard)| Part::Hover(text, hard))
     }
 
@@ -2015,18 +2031,15 @@ impl<W: Write> Proxy<W> {
         if listing.is_some_and(|(own, ..)| id.as_str() == Some(own)) {
             return self.reply_error(id, INVALID_REQUEST, "dbt-lsp-plus has a request in flight under this id");
         }
+        if let Some(why) = self.outside(method, params) {
+            return self.on_elsewhere(method, id, body, why);
+        }
         let (pending, fresh) = self.remember(method, id, params);
         match (self.route(method, params), self.backend.running().is_some(), method) {
             (Route::Here(owned), ..) => self.answer(owned, id, params, &pending),
             (Route::Answer(answer), ..) => self.send_client(&answer.frame(id, method)),
             (Route::Command(command), ..) => self.on_command(command, id, params, pending),
-            (Route::Forward, true, _) => {
-                // dbt lsp adds to the proxy's part, or replaces its nothing, but never holds it up.
-                let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
-                self.deadlines.extend(late.map(|late| (key(id), late)));
-                self.forwarded.insert(key(id), (id.clone(), pending));
-                self.send_server(body);
-            }
+            (Route::Forward, true, _) => self.forward(id, method, pending, body),
             (Route::Forward, false, "initialize") => {
                 self.initialize = None;
                 self.initialize_alone(id);
@@ -2050,6 +2063,48 @@ impl<W: Write> Proxy<W> {
         if fresh {
             self.want_index();
         }
+    }
+
+    /// Forwards the client's request METHOD of ID, its BODY as it came, and
+    /// keeps PENDING for dbt lsp's answer, which adds to the proxy's part,
+    /// or replaces its nothing, but never holds it up.
+    fn forward(&mut self, id: &Value, method: &str, pending: Pending, body: &[u8]) {
+        let late = pending.deadline().map(|deadline| (Instant::now() + deadline, method.to_owned()));
+        self.deadlines.extend(late.map(|late| (key(id), late)));
+        self.forwarded.insert(key(id), (id.clone(), pending));
+        self.send_server(body);
+    }
+
+    /// Why the request METHOD at PARAMS is not the session's project's: its
+    /// document, named by `textDocument.uri`, lies in another project
+    /// (`locate::elsewhere`), for a method that reads the project; none
+    /// before a project, in `dbt`, where the request goes to dbt lsp as it
+    /// came, and for any other request.
+    fn outside(&self, method: &str, params: &Value) -> Option<Reason> {
+        let root = self.root.as_ref()?;
+        let reads = capability::of(method).is_some_and(|capability| capability.reads_project);
+        if !reads || self.table.mode(method) == Mode::Dbt {
+            return None;
+        }
+        let document = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
+        let project = locate::elsewhere(&document, root, self.parsing.dbt.command())?;
+        Some(Reason::Elsewhere { document, project, served: root.clone() })
+    }
+
+    /// Answers the request METHOD of ID, its BODY as it came, on a document
+    /// of another project, for WHY, computing nothing on it: in `merge` in
+    /// front of dbt lsp, a method the proxy does not own is forwarded, whose
+    /// answer stands, and when it gives none, WHY comes first; else WHY at
+    /// once.  Inlay hints, a decoration, get none of the proxy's.
+    fn on_elsewhere(&mut self, method: &str, id: &Value, body: &[u8], why: Reason) {
+        let hints = method == "textDocument/inlayHint";
+        let merged = self.table.mode(method) == Mode::Merge && !self.owned.contains(method);
+        if merged && self.backend.running().is_some() {
+            let part = if hints { Part::Empty } else { Part::Unanswered(vec![why]) };
+            return self.forward(id, method, Pending { name: method.to_owned(), kept: Kept::Part(part) }, body);
+        }
+        let answer = if hints { Answer::Empty } else { Answer::Unanswered(vec![why]) };
+        self.send_client(&answer.frame(id, method));
     }
 
     /// A message of the server.  A response is the proxy's own only when its
@@ -2862,6 +2917,10 @@ mod tests {
                 "`no dbt project at <root>: its dbt_project.yml is missing, is not YAML, or names no project`",
                 r#""no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project""#,
             ),
+            (
+                "lies in the dbt project at <other>, and this session serves only the one at <root>",
+                r#""{} lies in the dbt project at {}, and this session serves only the one at {}""#,
+            ),
         ];
         for (words, site) in quoted {
             assert!(page.contains(words), "the agent page says {words:?}");
@@ -3431,12 +3490,12 @@ mod tests {
             calls.as_array().unwrap().iter().map(|call| &call["to"]["data"]["uniqueId"]).collect();
         let expected = ["model.shop.dim.v1", "model.shop.dim.v2", "model.shop.stale", "source.pkg.raw.payments"];
         assert_eq!(called, expected.map(|id| json!(id)).iter().collect::<Vec<_>>());
-        // Over a project that does not read, none, as its definition fails there; without an index, why none.
+        // Over a project that does not read, its reason, as its definition gives; no hint; without an index, why none.
         let broken = scratch("proxy-node-lookup-unreadable", "name: [");
         let (dim, info) = at(&broken, "'dim', v=1");
         let mut proxy = proxy_on(&broken);
-        assert_eq!(proxy.node_info(&info), Some(Answer::Empty));
-        assert!(proxy.hover_part(&dim) == Part::Nothing, "a hover's part");
+        assert_eq!(proxy.node_info(&info), Some(Answer::Unanswered(vec![Reason::Unreadable(broken.clone())])));
+        assert!(proxy.hover_part(&dim) == Part::Unanswered(vec![Reason::Unreadable(broken.clone())]), "a hover's part");
         let kept = proxy.remember("textDocument/inlayHint", &json!(1), &hints(&broken)).0.kept;
         assert!(kept == Kept::Part(Part::Empty), "the hints' part");
         proxy.parsing.index = None;
