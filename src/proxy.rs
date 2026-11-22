@@ -2553,12 +2553,17 @@ impl<W: Write> Proxy<W> {
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
             let why = Reason::Late { waited, compiling };
-            let answer = pending.unserved(self.markdown, why, &self.parsing).frame(id, &pending.name);
+            let answer = pending.unserved(self.markdown, why, &self.parsing);
+            let got = match answer {
+                Answer::Unanswered(_) => "dbt-lsp-plus answered with the reason",
+                _ => "dbt-lsp-plus answered alone",
+            };
+            let answer = answer.frame(id, &pending.name);
             pending.kept = Kept::Answered;
             self.send_client(&answer);
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();
-                let text = format!("dbt lsp did not answer {method} within {ms} ms: dbt-lsp-plus answered alone");
+                let text = format!("dbt lsp did not answer {method} within {ms} ms: {got}");
                 self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
                                          "params": {"type": 4, "message": text}}));
             }

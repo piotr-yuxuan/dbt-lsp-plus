@@ -4230,9 +4230,17 @@ fn a_late_server_gives_its_reason_or_the_proxy_s_empty_at_2_s() {
     let late = session.received.iter().filter(|m| m["method"] == "window/logMessage" && m["params"]["type"] == 4);
     let mut said: Vec<&str> = late.map(|m| m["params"]["message"].as_str().unwrap()).collect();
     said.sort_unstable();
-    let methods = ["definition", "hover", "inlayHint", "references"];
-    assert_eq!(said.len(), 4, "{said:?}");
-    assert!(said.iter().zip(methods).all(|(said, method)| said.contains(&format!("{method} within 2000 ms"))));
+    // What the client got: the reason, but for the hints, the proxy's empty.
+    let logged =
+        |method: &str, got: &str| format!("dbt lsp did not answer textDocument/{method} within 2000 ms: {got}");
+    let reason = "dbt-lsp-plus answered with the reason";
+    let expected = [
+        logged("definition", reason),
+        logged("hover", reason),
+        logged("inlayHint", "dbt-lsp-plus answered alone"),
+        logged("references", reason),
+    ];
+    assert_eq!(said, expected);
     assert!(session.finish().success());
 }
 
