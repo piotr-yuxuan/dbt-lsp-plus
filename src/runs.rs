@@ -30,7 +30,7 @@ const SHOWN: [Shown; 4] = [
 
 /// Where a failure is written in its file.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Place {
+pub enum Locator {
     /// The file's first line.
     File,
     /// In a properties file, under the entries of CHAIN, each a label and a
@@ -45,7 +45,7 @@ pub struct Failure {
     pub package: String,
     /// Its file, relative to its package's directory.
     pub path: String,
-    pub place: Place,
+    pub locator: Locator,
     /// LSP's: 1 an error, 2 a warning.
     pub severity: u8,
     pub message: String,
@@ -79,7 +79,7 @@ pub fn failures(results: &Value, manifest: &Value) -> Option<Vec<Failure>> {
             id: id.to_owned(),
             package: node["package_name"].as_str()?.to_owned(),
             path: node["original_file_path"].as_str()?.to_owned(),
-            place: place(manifest, node, resource),
+            locator: locator(manifest, node, resource),
             severity: *severity,
             // Named after its command, as a run's result is.
             message: format!("dbt {command}: {}", message.unwrap_or_else(|| format!("{name} failed"))),
@@ -131,7 +131,10 @@ pub fn stale(sources: &Value, manifest: &Value) -> Vec<Failure> {
             id: id.to_owned(),
             package: name("package_name"),
             path: name("original_file_path"),
-            place: Place::Entry { chain: vec![("source", name("source_name")), ("table", name("name"))], test: None },
+            locator: Locator::Entry {
+                chain: vec![("source", name("source_name")), ("table", name("name"))],
+                test: None,
+            },
             severity,
             message: format!("dbt source freshness: {table}{detail}"),
             code: STALE_SOURCE,
@@ -144,12 +147,12 @@ pub fn stale(sources: &Value, manifest: &Value) -> Vec<Failure> {
 /// entry; a generic test under its node's entry, a model, seed or snapshot,
 /// or a source and its table for a test on a source, then its column's;
 /// any other at its file's first line.
-fn place(manifest: &Value, node: &Value, resource: &str) -> Place {
+fn locator(manifest: &Value, node: &Value, resource: &str) -> Locator {
     let name = |node: &Value, key: &str| node[key].as_str().unwrap_or_default().to_owned();
     if resource == "unit_test" {
-        return Place::Entry { chain: vec![("unit test", name(node, "name"))], test: None };
+        return Locator::Entry { chain: vec![("unit test", name(node, "name"))], test: None };
     }
-    let Some(test) = node.pointer("/test_metadata/name").and_then(Value::as_str) else { return Place::File };
+    let Some(test) = node.pointer("/test_metadata/name").and_then(Value::as_str) else { return Locator::File };
     // A test on a source is attached to nothing: it depends on the source,
     // after the nodes a relationships test refers to.
     let depends = node.pointer("/depends_on/nodes").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
@@ -170,17 +173,17 @@ fn place(manifest: &Value, node: &Value, resource: &str) -> Place {
     if let Some(column) = node["column_name"].as_str() {
         chain.push(("column", column.trim_matches(['"', '`']).to_owned()));
     }
-    Place::Entry { chain, test: Some(test.to_owned()) }
+    Locator::Entry { chain, test: Some(test.to_owned()) }
 }
 
-/// The range of PLACE in TEXT, a properties file's ENTRIES and TESTS read
-/// once for all its places: the first line; or the test named under the
+/// The range of LOCATOR in TEXT, a properties file's ENTRIES and TESTS read
+/// once for all its locators: the first line; or the test named under the
 /// deepest entry of the chain found, a test of that entry itself and not of
 /// one it holds, else that entry's name, else the first line.  Of entries
 /// of one name, a versioned model's columns, the one holding the test.
-pub fn locate(text: &str, entries: &[Entry], tests: &[Test], place: &Place) -> Range<usize> {
+pub fn locate(text: &str, entries: &[Entry], tests: &[Test], locator: &Locator) -> Range<usize> {
     let first_line = 0..text.find(['\n', '\r']).unwrap_or(text.len());
-    let Place::Entry { chain, test } = place else { return first_line };
+    let Locator::Entry { chain, test } = locator else { return first_line };
     let inside = |outer: &Range<usize>, inner: &Range<usize>| outer.start <= inner.start && inner.end <= outer.end;
     let holds =
         |entry: &&&Entry| tests.iter().any(|t| Some(&t.name) == test.as_ref() && inside(&entry.range, &t.range));
@@ -316,18 +319,18 @@ mod tests {
             ),
         ];
         assert_eq!(summary, expected);
-        let places: Vec<&Place> = found.iter().map(|f| &f.place).collect();
-        let column = |chain: Vec<(&'static str, &str)>| Place::Entry {
+        let locators: Vec<&Locator> = found.iter().map(|f| &f.locator).collect();
+        let column = |chain: Vec<(&'static str, &str)>| Locator::Entry {
             chain: chain.into_iter().map(|(label, name)| (label, name.to_owned())).collect(),
             test: Some("is_even".into()),
         };
-        assert_eq!(places[0], &Place::File);
-        assert_eq!(places[1], &column(vec![("model", "orders"), ("column", "order_id")]));
-        assert_eq!(places[2], &column(vec![("source", "raw"), ("table", "orders"), ("column", "id")]));
-        assert_eq!(places[3], &Place::File);
-        assert_eq!(places[4], &Place::Entry { chain: vec![("unit test", "ut".into())], test: None });
+        assert_eq!(locators[0], &Locator::File);
+        assert_eq!(locators[1], &column(vec![("model", "orders"), ("column", "order_id")]));
+        assert_eq!(locators[2], &column(vec![("source", "raw"), ("table", "orders"), ("column", "id")]));
+        assert_eq!(locators[3], &Locator::File);
+        assert_eq!(locators[4], &Locator::Entry { chain: vec![("unit test", "ut".into())], test: None });
         // A versioned model's name, not its version's.
-        assert_eq!(places[6], &column(vec![("model", "vmod"), ("column", "id")]));
+        assert_eq!(locators[6], &column(vec![("model", "vmod"), ("column", "id")]));
     }
 
     #[test]
@@ -350,15 +353,15 @@ models:
           - name: amount
             data_tests: [not_null]
 ";
-        let place = |chain: Vec<(&'static str, &str)>, test: &str| Place::Entry {
+        let locator = |chain: Vec<(&'static str, &str)>, test: &str| Locator::Entry {
             chain: chain.into_iter().map(|(label, name)| (label, name.to_owned())).collect(),
             test: Some(test.to_owned()),
         };
         let line = |range: Range<usize>| text[..range.start].matches('\n').count();
         // A model's own test, not its column's of the same name.
-        assert_eq!(line(located(text, &place(vec![("model", "orders")], "unique"))), 6);
+        assert_eq!(line(located(text, &locator(vec![("model", "orders")], "unique"))), 6);
         // The column of a version, by its name.
-        assert_eq!(line(located(text, &place(vec![("model", "vmod"), ("column", "amount")], "not_null"))), 15);
+        assert_eq!(line(located(text, &locator(vec![("model", "vmod"), ("column", "amount")], "not_null"))), 15);
     }
 
     #[test]
@@ -384,8 +387,8 @@ models:
         assert_eq!((found[0].message.as_str(), found[0].severity), ("dbt build: ut failed", 1));
         let chain =
             vec![("source", "raw".to_owned()), ("table", "orders".to_owned()), ("column", "Customer Id".to_owned())];
-        assert_eq!(found[1].place, Place::Entry { chain, test: Some("relationships".into()) });
-        assert_eq!((found[2].path.as_str(), &found[2].place), ("functions/f.sql", &Place::File));
+        assert_eq!(found[1].locator, Locator::Entry { chain, test: Some("relationships".into()) });
+        assert_eq!((found[2].path.as_str(), &found[2].locator), ("functions/f.sql", &Locator::File));
     }
 
     #[test]
@@ -442,8 +445,8 @@ models:
         ];
         assert_eq!(summary, expected);
         let table =
-            |name: &str| Place::Entry { chain: vec![("source", "raw".into()), ("table", name.into())], test: None };
-        assert_eq!(found[0].place, table("orders"));
+            |name: &str| Locator::Entry { chain: vec![("source", "raw".into()), ("table", name.into())], test: None };
+        assert_eq!(found[0].locator, table("orders"));
         assert_eq!(found[0].path, "models/staging/_sources.yml");
     }
 
@@ -473,9 +476,9 @@ models:
         assert_eq!(failures(&results("test", json!([])), &manifest()), Some(Vec::new()));
     }
 
-    /// The range of PLACE in TEXT, its entries and tests read here.
-    fn located(text: &str, place: &Place) -> Range<usize> {
-        locate(text, &crate::properties::entries(text), &crate::properties::tests(text), place)
+    /// The range of LOCATOR in TEXT, its entries and tests read here.
+    fn located(text: &str, locator: &Locator) -> Range<usize> {
+        locate(text, &crate::properties::entries(text), &crate::properties::tests(text), locator)
     }
 
     #[test]
@@ -499,20 +502,20 @@ models:
           - name: id
             data_tests: [is_even]
 ";
-        let place = |chain: Vec<(&'static str, &str)>, test: Option<&str>| Place::Entry {
+        let locator = |chain: Vec<(&'static str, &str)>, test: Option<&str>| Locator::Entry {
             chain: chain.into_iter().map(|(label, name)| (label, name.to_owned())).collect(),
             test: test.map(str::to_owned),
         };
         let line = |range: Range<usize>| text[..range.start].matches('\n').count();
-        let on_orders = located(text, &place(vec![("model", "orders"), ("column", "order_id")], Some("is_even")));
+        let on_orders = located(text, &locator(vec![("model", "orders"), ("column", "order_id")], Some("is_even")));
         assert_eq!((line(on_orders.clone()), &text[on_orders]), (10, "is_even"));
         // A versioned model's column is under `versions:`: the model's entry holds it.
-        let on_vmod = located(text, &place(vec![("model", "vmod"), ("column", "id")], Some("is_even")));
+        let on_vmod = located(text, &locator(vec![("model", "vmod"), ("column", "id")], Some("is_even")));
         assert_eq!(line(on_vmod), 16);
         // A test no longer there: the entry's name; no entry: the first line.
-        let gone = located(text, &place(vec![("model", "orders")], Some("accepted_values")));
+        let gone = located(text, &locator(vec![("model", "orders")], Some("accepted_values")));
         assert_eq!((line(gone.clone()), &text[gone]), (5, "orders"));
-        assert_eq!(located(text, &place(vec![("model", "nowhere")], None)), 0..7);
-        assert_eq!(located("select 1\nfrom x", &Place::File), 0..8);
+        assert_eq!(located(text, &locator(vec![("model", "nowhere")], None)), 0..7);
+        assert_eq!(located("select 1\nfrom x", &Locator::File), 0..8);
     }
 }

@@ -9,7 +9,7 @@ use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
 use crate::project::{self, Project};
 use crate::rpc::{self, Frame};
-use crate::text::{self, Encoding, LineIndex};
+use crate::text::{self, Encoding, LineStarts};
 use crate::{
     cache, config, document, features, navigation, packages, parse_log, properties, runs, scan, shadow, sources,
 };
@@ -274,7 +274,7 @@ impl Pending {
     /// An error to a request with a part of the proxy's gives that part.
     fn merged(&self, message: &Value, markdown: bool) -> Option<Value> {
         if message.get("error").is_some() {
-            return self.alone(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
+            return self.part(markdown).map(|part| json!({"jsonrpc": "2.0", "id": message["id"], "result": part}));
         }
         match self {
             Pending::Hover(text, hard) => features::merge_hover(message, text, *hard, markdown),
@@ -286,7 +286,7 @@ impl Pending {
     /// The proxy's part alone, as the answer when the server gives none: a
     /// hover's text, the hints, a merged request's nothing; none for a
     /// request that is not merged.
-    fn alone(&self, markdown: bool) -> Option<Value> {
+    fn part(&self, markdown: bool) -> Option<Value> {
         let nothing = match self {
             Pending::Hover(..) => json!({"result": null}),
             Pending::Hints(_) => json!({"result": []}),
@@ -317,7 +317,7 @@ struct Parsing {
     /// Where a parse reports; none in the unit tests, which parse nothing.
     events: Option<Sender<Event>>,
     running: Option<config::Running>,
-    index: Option<config::Index>,
+    index: Option<config::ParseIndex>,
     /// Whether no change came since the last parse started.
     fresh: bool,
     /// Whether the server compiled since the last change: dbt has then
@@ -369,7 +369,7 @@ struct Proxy<W: Write> {
     settings: modes::Settings,
     /// The mode of each method, fixed when `initialize` is answered.
     table: modes::Table,
-    /// Whether the backend is `never`, which the proxy says once alone.
+    /// Whether `--backend` is `never`, which the proxy says once alone.
     never: bool,
     /// The user's settings that `initializationOptions` held and the proxy
     /// refused, said once `initialize` is answered.
@@ -436,7 +436,7 @@ struct Proxy<W: Write> {
     graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
     /// The shadow, on from the server's answer to `initialize` when the user
     /// set it.
-    shadow: Option<shadow::Session>,
+    shadow: Option<shadow::Shadow>,
     /// The commands that the server listed in its answer to `initialize`.
     server_commands: HashSet<String>,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
@@ -918,7 +918,7 @@ impl<W: Write> Proxy<W> {
             return graph.clone();
         }
         let scanned = Graph::scanned(project);
-        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::Index::listed);
+        let parsed = self.parsing.index.as_ref().filter(|_| self.standalone).map(config::ParseIndex::listed);
         let graph = Rc::new(match parsed.as_ref().or(self.nodes.as_ref()) {
             Some(nodes) => scanned.with_server(nodes, project),
             None => scanned,
@@ -957,7 +957,7 @@ impl<W: Write> Proxy<W> {
             return Some(Value::Null);
         };
         let text = project.text(&path).unwrap_or_default();
-        let offset = LineIndex::new(text).offset_of(params.get("position")?, self.encoding)?;
+        let offset = LineStarts::new(text).offset_of(params.get("position")?, self.encoding)?;
         Some(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding))
     }
 
@@ -965,7 +965,7 @@ impl<W: Write> Proxy<W> {
     /// of the request's position in it.
     fn document_at(&self, params: &Value) -> Option<(PathBuf, String, usize)> {
         let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
-        let offset = LineIndex::new(&text).offset_of(params.get("position")?, self.encoding)?;
+        let offset = LineStarts::new(&text).offset_of(params.get("position")?, self.encoding)?;
         Some((path, text, offset))
     }
 
@@ -1091,8 +1091,8 @@ impl<W: Write> Proxy<W> {
         let location = |found: &navigation::Found| {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
-            let index = LineIndex::new(text.get(..found.range.end).unwrap_or(text));
-            let range = index.range(found.range.start, found.range.end, self.encoding);
+            let starts = LineStarts::new(text.get(..found.range.end).unwrap_or(text));
+            let range = starts.range(found.range.start, found.range.end, self.encoding);
             json!({"uri": self.uri_of(&found.path), "range": range})
         };
         found.iter().map(location).collect()
@@ -1133,8 +1133,8 @@ impl<W: Write> Proxy<W> {
         if method == "textDocument/foldingRange" {
             return Some(document::folding_ranges(&text, sql));
         }
-        let index = LineIndex::new(&text);
-        let positions = params.get("positions")?.as_array()?.iter().map(|p| index.offset_of(p, self.encoding));
+        let starts = LineStarts::new(&text);
+        let positions = params.get("positions")?.as_array()?.iter().map(|p| starts.offset_of(p, self.encoding));
         Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
     }
 
@@ -1146,7 +1146,12 @@ impl<W: Write> Proxy<W> {
     /// scan nor `of_file` can name one node.  None when it names nothing;
     /// `Some(None)` when it names a node that INDEX lacks, or that, without
     /// an index, the scan tells is named but cannot give.
-    fn node_at<'a>(&self, index: Option<&'a config::Index>, params: &Value, file: bool) -> Option<Option<&'a Value>> {
+    fn node_at<'a>(
+        &self,
+        index: Option<&'a config::ParseIndex>,
+        params: &Value,
+        file: bool,
+    ) -> Option<Option<&'a Value>> {
         let (path, text, offset) = self.document_at(params)?;
         let inside =
             |call: &scan::Call| call.arguments.iter().any(|range| range.start <= offset && offset <= range.end);
@@ -1173,7 +1178,7 @@ impl<W: Write> Proxy<W> {
         if let Some(index) = index {
             return index.of_file(&relative.to_string_lossy()).map(Some);
         }
-        // As `Index::of_file` reads the manifest: the kinds of resources it holds as nodes.
+        // As `ParseIndex::of_file` reads the manifest: the kinds of resources it holds as nodes.
         let project = self.project()?;
         let defines = |entity: &&project::Entity| {
             entity.path == path
@@ -1405,9 +1410,9 @@ impl<W: Write> Proxy<W> {
         let cwd = self.dbt_dir();
         let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
         for problem in problems {
-            let path = problem.place.as_ref().and_then(|place| {
+            let path = problem.spot.as_ref().and_then(|spot| {
                 // dbt names a file from a sibling directory with `..`.
-                let file = |dir: &Path| Some(lexical(&dir.join(&place.path))).filter(|path| path.is_file());
+                let file = |dir: &Path| Some(lexical(&dir.join(&spot.path))).filter(|path| path.is_file());
                 let in_cwd =
                     || cwd.as_deref().and_then(file).and_then(|path| self.local_path(Some(&features::uri(&path))));
                 let mut held = packages.iter().filter_map(|dir| file(dir));
@@ -1510,7 +1515,7 @@ impl<W: Write> Proxy<W> {
             // As dbt lsp 2.0.9's answer with nothing of its own gets them,
             // null for a hover, no hint: the proxy's part, else that.
             "textDocument/hover" | "textDocument/inlayHint" => {
-                Some(Ok(pending.alone(self.markdown).unwrap_or_else(|| modes::empty(method))))
+                Some(Ok(pending.part(self.markdown).unwrap_or_else(|| modes::empty(method))))
             }
             _ => self.hierarchy(method, params).map(Ok),
         }));
@@ -1749,7 +1754,7 @@ impl<W: Write> Proxy<W> {
                 let hints = panic::catch_unwind(AssertUnwindSafe(|| {
                     let index = self.parsing.index.as_ref()?;
                     let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
-                    let lines = LineIndex::new(&text);
+                    let lines = LineStarts::new(&text);
                     let start = lines.offset_of(params.pointer("/range/start")?, self.encoding)?;
                     let end = lines.offset_of(params.pointer("/range/end")?, self.encoding)?;
                     let calls = sources::file_calls(&path, &text);
@@ -1799,7 +1804,7 @@ impl<W: Write> Proxy<W> {
                 self.initialize_alone(id);
             }
             // A merged request gets the proxy's answer alone, any other the failure.
-            (Route::Forward, None, _) => match pending.alone(self.markdown) {
+            (Route::Forward, None, _) => match pending.part(self.markdown) {
                 Some(part) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part})),
                 None => self.reply_error(id, REQUEST_FAILED, "dbt lsp is not running"),
             },
@@ -1889,7 +1894,7 @@ impl<W: Write> Proxy<W> {
             self.shadow = self.settings.shadow.then(|| {
                 let log =
                     config::cache_base().zip(self.root.as_ref()).map(|(base, root)| shadow::Log::open(&base, root));
-                shadow::Session::new(log)
+                shadow::Shadow::new(log)
             });
             if let Some(capabilities) = message.pointer_mut("/result/capabilities").and_then(Value::as_object_mut) {
                 self.add_capabilities(capabilities);
@@ -1922,10 +1927,10 @@ impl<W: Write> Proxy<W> {
             let file = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
             let inside = file.as_deref().is_some_and(|file| file.starts_with(root));
             let compared = match shadow::read(message, self.changes != changes, &path_of, &|path| path.is_file()) {
-                shadow::Answer::Apart(relation) => {
+                shadow::Response::Apart(relation) => {
                     shadow::Compared { relation, ours_only: Vec::new(), dbt_only: Vec::new(), both: 0 }
                 }
-                shadow::Answer::Locations(dbt) => {
+                shadow::Response::Locations(dbt) => {
                     let ours = match method {
                         "textDocument/references" if inside => self.on_references(params),
                         "textDocument/references" => None,
@@ -2092,10 +2097,10 @@ impl<W: Write> Proxy<W> {
         // The failures, placed in the text as it stands.
         let failures = self.diagnostics.failures.get(path).map_or(&[][..], Vec::as_slice);
         let text = self.documents.get(path).cloned().or_else(|| text::read(path)).unwrap_or_default();
-        let lines = LineIndex::new(&text);
+        let lines = LineStarts::new(&text);
         let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
-            let range = runs::locate(&text, &entries, &tests, &failure.place);
+            let range = runs::locate(&text, &entries, &tests, &failure.locator);
             json!({"range": lines.range(range.start, range.end, self.encoding), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
         }));
@@ -2103,7 +2108,7 @@ impl<W: Write> Proxy<W> {
         // when dbt gives none.
         let problems = self.diagnostics.parsed.get(path).map_or(&[][..], Vec::as_slice);
         diagnostics.extend(problems.iter().map(|problem| {
-            let (line, column) = problem.place.as_ref().and_then(|place| place.at).unwrap_or((1, 1));
+            let (line, column) = problem.spot.as_ref().and_then(|spot| spot.at).unwrap_or((1, 1));
             let at = lines.offset(line.saturating_sub(1), column.saturating_sub(1), Encoding::Utf32);
             json!({"range": lines.range(at, at, self.encoding), "severity": problem.severity,
                    "source": "dbt parse", "code": problem.code, "message": problem.message})
@@ -2135,7 +2140,7 @@ impl<W: Write> Proxy<W> {
         }
         self.deadlines.clear();
         for (_, (id, pending)) in std::mem::take(&mut self.forwarded) {
-            let part = pending.alone(self.markdown);
+            let part = pending.part(self.markdown);
             match (pending, part) {
                 (Pending::Shutdown, _) => self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": null})),
                 (Pending::Answered, _) => {}
@@ -2243,7 +2248,7 @@ impl<W: Write> Proxy<W> {
             self.deadlines.remove(&late);
             let Some((id, pending)) = self.forwarded.get_mut(&late) else { continue };
             let Some(waited) = pending.deadline() else { continue };
-            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).alone(self.markdown));
+            let (id, part) = (id.clone(), std::mem::replace(pending, Pending::Answered).part(self.markdown));
             self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": part}));
             if !self.shutdown && self.late.insert((method.clone(), waited)) {
                 let ms = waited.as_millis();
@@ -2380,10 +2385,10 @@ fn spawn_server(
 /// probe, the server and the cut start now, in the proxy's working
 /// directory; else nothing runs before the client's folder or a document
 /// names the project.
-pub fn run(command: &[String], settings: modes::Settings, backend: modes::Backend) -> ExitCode {
+pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch) -> ExitCode {
     let (events, inbox) = mpsc::channel();
     // With `never`, nothing of the user's dbt runs but its parse.
-    let never = backend == modes::Backend::Never;
+    let never = launch == modes::Launch::Never;
     let given = project_dir(command);
     // Without a project yet, `take_project` decides once one is named.
     let standalone = match given {

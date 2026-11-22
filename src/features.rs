@@ -2,12 +2,12 @@
 //! The answers of the features the proxy adds, as LSP JSON.  Pure: the
 //! texts, the project and the graph are inputs.
 
-use crate::config::Index;
+use crate::config::ParseIndex;
 use crate::graph::{Edge, Graph, Item};
 use crate::project::Project;
 use crate::properties;
 use crate::scan::{self, Kind, Symbol};
-use crate::text::{Encoding, LineIndex};
+use crate::text::{Encoding, LineStarts};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -76,14 +76,14 @@ pub fn uri(path: &Path) -> String {
 }
 
 /// Closes the innermost open symbol of STACK into its parent, or into ROOTS.
-fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, index: &LineIndex, encoding: Encoding) {
+fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, starts: &LineStarts, encoding: Encoding) {
     let Some((symbol, children)) = stack.pop() else { return };
     let value = json!({
         "name": symbol.name,
         "detail": symbol.detail,
         "kind": symbol.kind,
-        "range": index.range(symbol.range.start, symbol.range.end, encoding),
-        "selectionRange": index.range(symbol.name_range.start, symbol.name_range.end, encoding),
+        "range": starts.range(symbol.range.start, symbol.range.end, encoding),
+        "selectionRange": starts.range(symbol.name_range.start, symbol.name_range.end, encoding),
         "children": children,
     });
     match stack.last_mut() {
@@ -96,7 +96,7 @@ fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, index:
 /// its blocks and CTEs; `DocumentSymbol`s nested by extent, or, for a
 /// client without hierarchical support, `SymbolInformation`s at URI.
 pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri: &str) -> Value {
-    let index = LineIndex::new(text);
+    let starts = LineStarts::new(text);
     let contains = |outer: &Outlined, inner: &Outlined| {
         outer.range.start <= inner.range.start && inner.range.end <= outer.range.end
     };
@@ -121,10 +121,10 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
     let mut flat = Vec::new();
     for symbol in symbols {
         while stack.last().is_some_and(|(open, _)| !contains(open, &symbol)) {
-            close(&mut stack, &mut roots, &index, encoding);
+            close(&mut stack, &mut roots, &starts, encoding);
         }
         let container = stack.last().map(|(open, _)| open.name.clone());
-        let location = json!({"uri": uri, "range": index.range(symbol.range.start, symbol.range.end, encoding)});
+        let location = json!({"uri": uri, "range": starts.range(symbol.range.start, symbol.range.end, encoding)});
         let mut information = json!({"name": symbol.name, "kind": symbol.kind, "location": location});
         if let Some(container) = container {
             information["containerName"] = json!(container);
@@ -133,7 +133,7 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
         stack.push((symbol, Vec::new()));
     }
     while !stack.is_empty() {
-        close(&mut stack, &mut roots, &index, encoding);
+        close(&mut stack, &mut roots, &starts, encoding);
     }
     Value::Array(if hierarchical { roots } else { flat })
 }
@@ -149,15 +149,15 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
         let mut chars = name.chars().flat_map(char::to_lowercase);
         query.chars().all(|q| chars.any(|c| c == q))
     };
-    let mut indexes: HashMap<&Path, LineIndex> = HashMap::new();
+    let mut by_file: HashMap<&Path, LineStarts> = HashMap::new();
     let mut symbols = Vec::new();
     for entity in project.entities.iter().filter(|entity| matches(&entity.shown())).take(MAX_WORKSPACE_SYMBOLS) {
         let text = project.text(&entity.path).unwrap_or_default();
-        let index = indexes.entry(&entity.path).or_insert_with(|| LineIndex::new(text));
+        let starts = by_file.entry(&entity.path).or_insert_with(|| LineStarts::new(text));
         symbols.push(json!({
             "name": entity.shown(),
             "kind": resource_kind(entity.resource_type),
-            "location": {"uri": uri(&entity.path), "range": index.range(entity.name_range.start, entity.name_range.end, encoding)},
+            "location": {"uri": uri(&entity.path), "range": starts.range(entity.name_range.start, entity.name_range.end, encoding)},
             "containerName": entity.id,
             "data": {"uniqueId": entity.id, "resourceType": entity.resource_type},
         }));
@@ -167,14 +167,14 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
 
 /// The `CallHierarchyItem` of ITEM.
 fn hierarchy_item(item: &Item, project: &Project, encoding: Encoding) -> Value {
-    let index = LineIndex::new(project.text(&item.path).unwrap_or_default());
+    let starts = LineStarts::new(project.text(&item.path).unwrap_or_default());
     json!({
         "name": item.name,
         "kind": resource_kind(&item.resource_type),
         "detail": item.id,
         "uri": uri(&item.path),
-        "range": index.range(item.range.start, item.range.end, encoding),
-        "selectionRange": index.range(item.name_range.start, item.name_range.end, encoding),
+        "range": starts.range(item.range.start, item.range.end, encoding),
+        "selectionRange": starts.range(item.name_range.start, item.name_range.end, encoding),
         "data": {"uniqueId": item.id, "resourceType": item.resource_type},
     })
 }
@@ -212,8 +212,8 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
     let answer = edges.map(|edge: &Edge| {
         let (other, key) = if incoming { (&edge.from, "from") } else { (&edge.to, "to") };
         let caller = &graph.items[&edge.from];
-        let index = LineIndex::new(project.text(&caller.path).unwrap_or_default());
-        let ranges: Vec<Value> = edge.sites.iter().map(|site| index.range(site.start, site.end, encoding)).collect();
+        let starts = LineStarts::new(project.text(&caller.path).unwrap_or_default());
+        let ranges: Vec<Value> = edge.sites.iter().map(|site| starts.range(site.start, site.end, encoding)).collect();
         json!({key: hierarchy_item(&graph.items[other], project, encoding), "fromRanges": ranges})
     });
     Value::Array(answer.collect())
@@ -259,11 +259,11 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
 pub fn inlay_hints(
     text: &str,
     calls: Vec<scan::Call>,
-    index: &Index,
+    index: &ParseIndex,
     range: Range<usize>,
     encoding: Encoding,
 ) -> Vec<Value> {
-    let lines = LineIndex::new(text);
+    let lines = LineStarts::new(text);
     let hint = |call: scan::Call| {
         // A source's match ends after its parenthesis, a ref's before it.
         let after = match call.target {
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
     }
 
-    fn index() -> Index {
+    fn index() -> ParseIndex {
         let model = |name: &str, materialized: &str, relation: Value| {
             json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
                    "package_name": "shop", "relation_name": relation, "config": {"materialized": materialized}})
@@ -594,7 +594,7 @@ mod tests {
                               "package_name": "shop", "config": {"materialized": "ephemeral"}});
         let off = json!({"unique_id": "model.shop.off", "name": "off", "resource_type": "model",
                          "package_name": "shop", "config": {"materialized": "ephemeral"}});
-        Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
+        ParseIndex::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
             "model.shop.orders": model("orders", "table", json!("\"shop\".\"main\".\"orders\"")),
             "model.shop.eph": model("eph", "ephemeral", Value::Null),
             "analysis.shop.counts": analysis},
@@ -605,7 +605,7 @@ mod tests {
     /// The labels of TEXT's hints with the text up to each, all of TEXT asked.
     fn hinted(text: &str) -> Vec<(String, String)> {
         let hints = inlay_hints(text, scan::calls(text), &index(), 0..text.len(), Encoding::Utf16);
-        let lines = LineIndex::new(text);
+        let lines = LineStarts::new(text);
         let before = |hint: &Value| text[..lines.offset_of(&hint["position"], Encoding::Utf16).unwrap()].to_owned();
         hints.iter().map(|hint| (hint["label"].as_str().unwrap().to_owned(), before(hint))).collect()
     }

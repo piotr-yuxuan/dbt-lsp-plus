@@ -216,9 +216,9 @@ pub fn listed(text: &str) -> Value {
 
 /// Hands a run's answer over once: the one the thread sends, else a failure
 /// of the command, should the thread end without one, as on a panic.
-struct Answer(Option<Box<dyn FnOnce(Value) + Send>>, &'static str);
+struct Report(Option<Box<dyn FnOnce(Value) + Send>>, &'static str);
 
-impl Drop for Answer {
+impl Drop for Report {
     fn drop(&mut self) {
         if let Some(report) = self.0.take() {
             report(failure(self.1, "the run ended without an answer"));
@@ -240,7 +240,7 @@ pub fn start(
     report: Box<dyn FnOnce(Value) + Send>,
 ) -> Running {
     Running::spawn(move |stopped| {
-        let mut answer = Answer(Some(report), job.command);
+        let mut report = Report(Some(report), job.command);
         let _ = fs::remove_file(dir.join("target/manifest.json"));
         let _ = fs::create_dir_all(&dir);
         let log = dir.join("run.log");
@@ -251,7 +251,7 @@ pub fn start(
         let manifest = manifest.and_then(|text| serde_json::from_str(&text).ok());
         let output = Output { status, log: fs::read_to_string(&log).unwrap_or_default(), manifest };
         let read = (job.read)(&output);
-        if let Some(report) = answer.0.take() {
+        if let Some(report) = report.0.take() {
             report(read);
         }
     })

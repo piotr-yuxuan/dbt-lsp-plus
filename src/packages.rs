@@ -6,7 +6,7 @@
 //! included, and reach the network for a package from it.  The cut makes
 //! that fail harmlessly; where there is none, this guard alone stops it.
 
-use crate::yaml::{self, Node};
+use crate::yaml::{self, Tree};
 use crate::{config, project, text};
 use std::collections::HashSet;
 use std::fs;
@@ -16,18 +16,18 @@ use std::path::{Component, Path, PathBuf};
 const FILES: [&str; 2] = ["packages.yml", "dependencies.yml"];
 
 /// The packages that DOC names.
-fn items(doc: &Node) -> &[Node] {
-    doc.get("packages").map_or(&[][..], Node::items)
+fn items(doc: &Tree) -> &[Tree] {
+    doc.get("packages").map_or(&[][..], Tree::items)
 }
 
 /// The directory of each `local:` package that DOCS name, as written,
 /// from the root.
-fn locals(docs: &[Node]) -> impl Iterator<Item = &str> {
+fn locals(docs: &[Tree]) -> impl Iterator<Item = &str> {
     docs.iter().flat_map(items).filter_map(|package| package.get("local")?.as_str())
 }
 
 /// The source of a package from the network, by which a lock names it too.
-fn source(package: &Node) -> Option<(&'static str, String)> {
+fn source(package: &Tree) -> Option<(&'static str, String)> {
     let keys = ["package", "git", "tarball", "private"];
     keys.into_iter().find_map(|key| Some((key, package.get(key)?.as_str()?.to_owned())))
 }
@@ -41,7 +41,7 @@ pub fn install_path(root: &Path, server: &[String]) -> Result<PathBuf, String> {
     let before = server.iter().take_while(|word| *word != "lsp");
     let assigned = before.filter_map(|word| word.strip_prefix("DBT_PACKAGES_INSTALL_PATH=")).last().map(str::to_owned);
     let variable = assigned.or_else(|| std::env::var("DBT_PACKAGES_INSTALL_PATH").ok()).filter(|path| !path.is_empty());
-    let key = |config: Node| Some(config.get("packages-install-path")?.as_str()?.to_owned());
+    let key = |config: Tree| Some(config.get("packages-install-path")?.as_str()?.to_owned());
     let configured = read(&root.join("dbt_project.yml"))?.and_then(key);
     let flagged = config::flag(server, "--packages-install-path").map(str::to_owned);
     Ok(root.join(flagged.or(variable).or(configured).unwrap_or_else(|| "dbt_packages".into())))
@@ -55,7 +55,7 @@ fn installed(install: &Path, name: &str) -> bool {
 
 /// The YAML document at PATH, none for a file absent, empty or of comments
 /// only; a file that does not read is a refusal, since dbt may read it.
-fn read(path: &Path) -> Result<Option<Node>, String> {
+fn read(path: &Path) -> Result<Option<Tree>, String> {
     let Some(text) = text::read(path) else { return Ok(None) };
     let empty = text.lines().map(str::trim).all(|line| line.is_empty() || line.starts_with('#'));
     match yaml::parse(&text) {
@@ -72,10 +72,10 @@ fn read(path: &Path) -> Result<Option<Node>, String> {
 /// then those of its local packages, in turn, each `local:` from the root,
 /// as dbt resolves them.  One that repeats a key, or holds an alias or a
 /// merge key, is a refusal: dbt reads the last value, and through them.
-fn named(root: &Path) -> Result<Vec<Node>, String> {
+fn named(root: &Path) -> Result<Vec<Tree>, String> {
     let (mut docs, mut pending, mut seen) = (Vec::new(), vec![root.to_owned()], HashSet::new());
     while let Some(dir) = pending.pop() {
-        let found: Vec<Node> = FILES
+        let found: Vec<Tree> = FILES
             .iter()
             .map(|name| read(&dir.join(name)))
             .collect::<Result<Vec<_>, _>>()?
@@ -143,7 +143,7 @@ pub fn refused(root: &Path, server: &[String], cut: bool, alone: bool) -> Option
     if sources.any(|known| !fresh || !entries.iter().any(|entry| source(entry).as_ref() == Some(&known))) {
         return Some(format!("a package from the network is not in a lock as recent as the files naming it: {why}"));
     }
-    let name = |entry: &Node| entry.get("name").and_then(Node::as_str).map(str::to_owned);
+    let name = |entry: &Tree| entry.get("name").and_then(Tree::as_str).map(str::to_owned);
     if entries.iter().any(|entry| name(entry).is_none()) {
         return Some("package-lock.yml names no packages, as an older dbt wrote it: run dbt deps".into());
     }

@@ -50,8 +50,8 @@ fn main() -> ExitCode {
     match modes::arguments(&words) {
         Ok(Arguments::Help) => println!("{USAGE}"),
         Ok(Arguments::Version) => println!("dbt-lsp-plus {}", env!("CARGO_PKG_VERSION")),
-        Ok(Arguments::Run { settings, backend, command }) => {
-            return dbt_lsp_plus::proxy::run(&command, settings, backend);
+        Ok(Arguments::Run { settings, launch, command }) => {
+            return dbt_lsp_plus::proxy::run(&command, settings, launch);
         }
         Err(why) => {
             eprintln!("dbt-lsp-plus: {why}\n\n{USAGE}");

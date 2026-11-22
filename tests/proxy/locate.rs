@@ -4,7 +4,7 @@
 //! `.venv`s of a scratch repository, with stub dbts.
 
 use crate::support::{fixture, scratch, script};
-use dbt_lsp_plus::locate::{self, Found, Git};
+use dbt_lsp_plus::locate::{self, Git, Located};
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -169,7 +169,7 @@ const COMMAND: [&str; 3] = ["dbt", "lsp", "--no-send-anonymous-usage-stats"];
 
 /// The dbt that FOUND runs, its links resolved, where it was found, and
 /// whether it has `lsp`.
-fn taken(found: &Found) -> (PathBuf, &'static str, Option<bool>) {
+fn taken(found: &Located) -> (PathBuf, &'static str, Option<bool>) {
     (fs::canonicalize(&found.command[0]).unwrap(), found.source, found.lsp)
 }
 

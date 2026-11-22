@@ -6,8 +6,8 @@ use crate::packages;
 use crate::properties::{self, Entry, Test};
 use crate::scan::{self, Call, Kind, Symbol};
 use crate::sources;
-use crate::text::{self, Encoding, LineIndex};
-use crate::yaml::{self, Node};
+use crate::text::{self, Encoding, LineStarts};
+use crate::yaml::{self, Tree};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -103,30 +103,30 @@ impl Scanned {
         let resource =
             |entry: &Entry| ["model", "seed", "snapshot", "analysis", "macro", "function"].contains(&entry.label);
         let entries: Vec<Entry> = properties::entries_in(&text, &root, false).into_iter().filter(resource).collect();
-        let index = LineIndex::new(&text);
-        let relation = |item: &Node| {
-            Some((written(&text, &index, item.get("name")?)?.1, written(&text, &index, item.get("relation")?)?.1))
+        let starts = LineStarts::new(&text);
+        let relation = |item: &Tree| {
+            Some((written(&text, &starts, item.get("name")?)?.1, written(&text, &starts, item.get("relation")?)?.1))
         };
         let relations: Vec<_> =
-            root.get("snapshots").map_or(&[][..], Node::items).iter().filter_map(relation).collect();
+            root.get("snapshots").map_or(&[][..], Tree::items).iter().filter_map(relation).collect();
         let declared = |entry: &Entry| {
             let (_, relation) =
                 relations.iter().find(|(name, _)| entry.label == "snapshot" && *name == entry.name_range)?;
             Some((entry.clone(), relation.clone()))
         };
-        let version = |item: &Node| {
-            let defined_in = item.get("defined_in").and_then(Node::as_str).map(str::to_owned);
+        let version = |item: &Tree| {
+            let defined_in = item.get("defined_in").and_then(Tree::as_str).map(str::to_owned);
             Some((item.get("v")?.as_str()?.to_owned(), defined_in))
         };
-        let versioned = |model: &Node| {
+        let versioned = |model: &Tree| {
             let versions: Vec<_> = model.get("versions")?.items().iter().filter_map(version).collect();
-            let latest = model.get("latest_version").and_then(Node::as_str).map(str::to_owned);
+            let latest = model.get("latest_version").and_then(Tree::as_str).map(str::to_owned);
             let name = model.get("name")?.as_str()?.to_owned();
             (!versions.is_empty()).then_some(Versioned { name, latest, versions })
         };
         Scanned {
             tables: source_tables_in("", path, &text, &root),
-            versions: root.get("models").map_or(&[][..], Node::items).iter().filter_map(versioned).collect(),
+            versions: root.get("models").map_or(&[][..], Tree::items).iter().filter_map(versioned).collect(),
             snapshots: entries.iter().filter_map(declared).collect(),
             entries,
             models: unit_test_models(&text, &root),
@@ -346,18 +346,18 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
 
 /// The models of the unit tests of the properties file TEXT, whose tree is
 /// ROOT: each `model:` as written.
-pub fn unit_test_models(text: &str, root: &Node) -> Vec<(String, Range<usize>)> {
-    let index = LineIndex::new(text);
-    let models = root.get("unit_tests").map_or(&[][..], Node::items).iter().filter_map(|unit| unit.get("model"));
-    models.filter_map(|model| written(text, &index, model)).collect()
+pub fn unit_test_models(text: &str, root: &Tree) -> Vec<(String, Range<usize>)> {
+    let starts = LineStarts::new(text);
+    let models = root.get("unit_tests").map_or(&[][..], Tree::items).iter().filter_map(|unit| unit.get("model"));
+    models.filter_map(|model| written(text, &starts, model)).collect()
 }
 
-/// The value of the scalar NODE of TEXT and its range as written: inside
+/// The value of the scalar TREE of TEXT and its range as written: inside
 /// its quotes, escapes included, else as long as its value, else to the end
 /// of its line.
-pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Range<usize>)> {
-    let Node::Scalar { value, line, column, .. } = node else { return None };
-    let at = index.offset(*line as u64, *column as u64, Encoding::Utf32);
+pub fn written(text: &str, starts: &LineStarts, tree: &Tree) -> Option<(String, Range<usize>)> {
+    let Tree::Scalar { value, line, column, .. } = tree else { return None };
+    let at = starts.offset(*line as u64, *column as u64, Encoding::Utf32);
     let quoted = [&*DOUBLE_QUOTED, &*SINGLE_QUOTED].into_iter().find_map(|quote| quote.find(&text[at..]));
     let line_end = text[at..].find(['\n', '\r']).map_or(text.len(), |end| at + end);
     let range = match quoted {
@@ -370,13 +370,13 @@ pub fn written(text: &str, index: &LineIndex, node: &Node) -> Option<(String, Ra
 
 /// The value of a `name:` entry, KEY and VALUE, as written in TEXT: its
 /// range, and where a line goes after it.
-fn placed(text: &str, index: &LineIndex, key: &Node, value: &Node) -> Option<(String, Range<usize>, Insertion)> {
-    let Node::Scalar { line: key_line, column: key_column, .. } = key else { return None };
-    let (value, range) = written(text, index, value)?;
+fn placed(text: &str, starts: &LineStarts, key: &Tree, value: &Tree) -> Option<(String, Range<usize>, Insertion)> {
+    let Tree::Scalar { line: key_line, column: key_column, .. } = key else { return None };
+    let (value, range) = written(text, starts, value)?;
     let line_end = text[range.end..].find(['\n', '\r']).map_or(text.len(), |end| range.end + end);
-    let key_line_start = index.offset(*key_line as u64, 0, Encoding::Utf32);
+    let key_line_start = starts.offset(*key_line as u64, 0, Encoding::Utf32);
     let before_key =
-        text[key_line_start..index.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
+        text[key_line_start..starts.offset(*key_line as u64, *key_column as u64, Encoding::Utf32)].trim_start();
     // A document in flow style, such as JSON, spans lines that look like blocks.
     let flow_document = text.trim_start().starts_with(['{', '[']);
     let block = !flow_document && before_key.strip_prefix('-').unwrap_or(before_key).trim().is_empty();
@@ -393,18 +393,18 @@ pub fn source_tables(package: &str, path: &Path, text: &str) -> Vec<SourceTable>
 
 /// The tables of the `sources:` of the properties file TEXT of PACKAGE,
 /// whose tree is ROOT, as `source_tables` gives them.
-pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Node) -> Vec<SourceTable> {
-    let index = LineIndex::new(text);
+pub fn source_tables_in(package: &str, path: &Path, text: &str, root: &Tree) -> Vec<SourceTable> {
+    let starts = LineStarts::new(text);
     // An anchor anywhere in the file may hold a name, a schema or an identifier.
     let anchored = root.shares();
     let mut found = Vec::new();
-    for source in root.get("sources").map_or(&[][..], Node::items) {
+    for source in root.get("sources").map_or(&[][..], Tree::items) {
         let own = source.entry("name").filter(|_| source.get("overrides").is_none());
         let Some((key, value)) = own else { continue };
-        let Some((source_name, source_range, source_insertion)) = placed(text, &index, key, value) else { continue };
-        for table in source.get("tables").map_or(&[][..], Node::items) {
+        let Some((source_name, source_range, source_insertion)) = placed(text, &starts, key, value) else { continue };
+        for table in source.get("tables").map_or(&[][..], Tree::items) {
             let Some((key, value)) = table.entry("name") else { continue };
-            let Some((table_name, table_range, table_insertion)) = placed(text, &index, key, value) else { continue };
+            let Some((table_name, table_range, table_insertion)) = placed(text, &starts, key, value) else { continue };
             found.push(SourceTable {
                 package: package.to_owned(),
                 path: path.to_owned(),
@@ -453,17 +453,18 @@ fn files(dir: &Path) -> Vec<(PathBuf, fs::Metadata)> {
 }
 
 /// The name and configuration in a package's `dbt_project.yml`.
-pub fn package_config(dir: &Path) -> Option<(String, Node)> {
+pub fn package_config(dir: &Path) -> Option<(String, Tree)> {
     let config = yaml::parse(&text::read(&dir.join("dbt_project.yml"))?)?;
     let name = config.get("name")?.as_str()?.to_owned();
     Some((name, config))
 }
 
 /// A file of a project as a scan finds it: its path, its metadata, read
-/// before its content, its package's index, and the layout of the directory
-/// it was found in, none for a package's `dbt_project.yml`.
+/// before its content, its package's position among the inventory's
+/// packages, and the layout of the directory it was found in, none for a
+/// package's `dbt_project.yml`.
 #[derive(Debug)]
-pub struct Found {
+pub struct File {
     pub path: PathBuf,
     pub metadata: Option<fs::Metadata>,
     pub package: usize,
@@ -473,9 +474,9 @@ pub struct Found {
 /// What a scan finds of a project: its packages, its own first, by name and
 /// directory, and their files in the order of the scan.
 #[derive(Debug)]
-pub struct Listing {
+pub struct Inventory {
     pub packages: Vec<(String, PathBuf)>,
-    pub found: Vec<Found>,
+    pub files: Vec<File>,
 }
 
 /// What a scan finds of the project at ROOT: each package's resource paths,
@@ -483,14 +484,14 @@ pub struct Listing {
 /// calls too.  Its packages are those installed, then the local packages
 /// that its packages files name and that are not.  None when ROOT has no
 /// named `dbt_project.yml`.
-pub fn find(root: &Path) -> Option<Listing> {
+pub fn find(root: &Path) -> Option<Inventory> {
     let (root_package, root_config) = package_config(root)?;
-    let install = root_config.get("packages-install-path").and_then(Node::as_str).unwrap_or("dbt_packages");
+    let install = root_config.get("packages-install-path").and_then(Tree::as_str).unwrap_or("dbt_packages");
     let mut installed: Vec<PathBuf> =
         fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
     installed.sort();
     let others = installed.into_iter().filter_map(|dir| package_config(&dir).map(|(name, config)| (name, dir, config)));
-    let mut packages: Vec<(String, PathBuf, Node)> =
+    let mut packages: Vec<(String, PathBuf, Tree)> =
         std::iter::once((root_package, root.to_owned(), root_config)).chain(others).collect();
     // A local package not installed yet, as in a fresh clone, where its packages file names it.
     for dir in packages::local_dirs(root) {
@@ -505,10 +506,10 @@ pub fn find(root: &Path) -> Option<Listing> {
         for (at, layout) in LAYOUT.iter().enumerate() {
             let configured: Vec<&str> = config
                 .get(layout.key)
-                .map_or(Vec::new(), |paths| paths.items().iter().filter_map(Node::as_str).collect());
+                .map_or(Vec::new(), |paths| paths.items().iter().filter_map(Tree::as_str).collect());
             let dirs = if configured.is_empty() { vec![layout.default] } else { configured };
             let listed = dirs.iter().flat_map(|sub| files(&dir.join(sub)));
-            found.extend(listed.map(|(path, metadata)| Found {
+            found.extend(listed.map(|(path, metadata)| File {
                 path,
                 metadata: Some(metadata),
                 package,
@@ -516,17 +517,17 @@ pub fn find(root: &Path) -> Option<Listing> {
             }));
         }
         let path = dir.join("dbt_project.yml");
-        found.push(Found { metadata: fs::metadata(&path).ok(), path, package, layout: None });
+        found.push(File { metadata: fs::metadata(&path).ok(), path, package, layout: None });
     }
-    Some(Listing { packages: packages.into_iter().map(|(name, dir, _)| (name, dir)).collect(), found })
+    Some(Inventory { packages: packages.into_iter().map(|(name, dir, _)| (name, dir)).collect(), files: found })
 }
 
 /// How a scan reads a file it found: its text and what the text gives.
-pub type Read<'a> = dyn FnMut(&Found) -> Arc<Scanned> + 'a;
+pub type Read<'a> = dyn FnMut(&File) -> Arc<Scanned> + 'a;
 
-/// The project that LISTING finds, each file as READ gives it.
-pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
-    let packages = &listing.packages;
+/// The project that INVENTORY finds, each file as READ gives it.
+pub fn assemble(inventory: &Inventory, read: &mut Read) -> Project {
+    let packages = &inventory.packages;
     let mut project = Project {
         root_package: packages.first().map(|(name, _)| name.clone()).unwrap_or_default(),
         packages: HashMap::new(),
@@ -534,7 +535,7 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
         sources: Vec::new(),
         files: HashMap::new(),
     };
-    for file in &listing.found {
+    for file in &inventory.files {
         let scanned = read(file);
         let name = &packages[file.package].0;
         let yaml = file.path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
@@ -574,7 +575,7 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
     // The versions of each package, once all its properties files are read; a model that two files
     // declare, which dbt rejects, by the first.
     let mut declared: HashMap<&str, Vec<&Versioned>> = HashMap::new();
-    for file in &listing.found {
+    for file in &inventory.files {
         let versions = project.files.get(&file.path).map_or(&[][..], |scanned| scanned.versions.as_slice());
         let known = declared.entry(packages[file.package].0.as_str()).or_default();
         for versioned in versions {
@@ -597,11 +598,10 @@ pub fn assemble(listing: &Listing, read: &mut Read) -> Project {
 /// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
 /// editor has open, which wins over the file on disk.
 pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
-    let listing = find(root)?;
-    let mut read = |file: &Found| {
-        Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default())
-    };
-    Some(assemble(&listing, &mut read))
+    let inventory = find(root)?;
+    let mut read =
+        |file: &File| Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default());
+    Some(assemble(&inventory, &mut read))
 }
 
 /// A project of FILES, each a path under it and its text, in a fresh
@@ -1007,8 +1007,8 @@ mod tests {
         let written: Vec<&str> = tables.iter().map(|t| &text[t.table_range.clone()]).collect();
         assert_eq!(written, ["a\\tb\\\"é", "it''s"]);
         assert_eq!(Entity::from(&tables[0]).id, "source.shop.raw.a\tb\"é");
-        let index = LineIndex::new(text);
-        let end = index.position(tables[0].table_range.end, Encoding::Utf16);
+        let starts = LineStarts::new(text);
+        let end = starts.position(tables[0].table_range.end, Encoding::Utf16);
         assert_eq!(end, serde_json::json!({"line": 3, "character": 22}));
     }
 

@@ -4,7 +4,7 @@
 //! session and logged on the user's disk, never sent anywhere: the evidence
 //! on which a method's shipped mode may change.
 
-use crate::config::{self, Index};
+use crate::config::{self, ParseIndex};
 use crate::modes::Table;
 use crate::navigation::Target;
 use crate::project::Project;
@@ -70,10 +70,10 @@ impl Relation {
     }
 }
 
-/// dbt lsp's answer as the shadow reads it: its locations, or why it is
+/// dbt lsp's response as the shadow reads it: its locations, or why it is
 /// not compared.
 #[derive(Debug, PartialEq)]
-pub enum Answer {
+pub enum Response {
     Locations(Vec<Location>),
     Apart(Relation),
 }
@@ -115,18 +115,18 @@ pub fn read(
     changed: bool,
     path_of: &dyn Fn(&str) -> Option<PathBuf>,
     exists: &dyn Fn(&Path) -> bool,
-) -> Answer {
+) -> Response {
     if message.get("error").is_some() {
-        return Answer::Apart(Relation::DbtError);
+        return Response::Apart(Relation::DbtError);
     }
     if changed {
-        return Answer::Apart(Relation::Changed);
+        return Response::Apart(Relation::Changed);
     }
     let result = &message["result"];
     let on_disk = |entry: &&Value| location(entry, path_of).is_some_and(|location| exists(&location.path));
     match entries(result).iter().all(on_disk) {
-        true => Answer::Locations(locations(result, path_of)),
-        false => Answer::Apart(Relation::DbtMissingFile),
+        true => Response::Locations(locations(result, path_of)),
+        false => Response::Apart(Relation::DbtMissingFile),
     }
 }
 
@@ -199,7 +199,7 @@ pub type Oracle = Vec<(String, Option<PathBuf>)>;
 /// node's own in its package, else, for a function, which the index does
 /// not hold, its id read and the scan's file.  None for any other target,
 /// or for a file with no one node.
-pub fn oracle(index: &Index, project: &Project, relative: &str, target: &Target) -> Option<Oracle> {
+pub fn oracle(index: &ParseIndex, project: &Project, relative: &str, target: &Target) -> Option<Oracle> {
     let (kinds, package, name, version): (&[&str], _, _, _) = match target {
         Target::Call(scan::Target::Ref { package, name, version }) => {
             (&["model", "seed", "snapshot"], package, name, version.as_deref().filter(|v| !v.is_empty()))
@@ -373,15 +373,15 @@ impl Log {
 /// A session's shadow: its counts, and its log where there is a place for
 /// it, the first failure of which is said.
 #[derive(Debug, Default)]
-pub struct Session {
+pub struct Shadow {
     pub counts: Counts,
     log: Option<Log>,
     failed: bool,
 }
 
-impl Session {
-    pub fn new(log: Option<Log>) -> Session {
-        Session { log, ..Session::default() }
+impl Shadow {
+    pub fn new(log: Option<Log>) -> Shadow {
+        Shadow { log, ..Shadow::default() }
     }
 
     /// Appends LINE to the log; what to say of the session's first failure,
@@ -520,19 +520,19 @@ mod tests {
         let on_disk = |path: &Path| path != Path::new("/p/gone.sql");
         let read = |message: &Value, changed: bool| super::read(message, changed, &path_of, &on_disk);
         let error = json!({"id": 1, "error": {"code": -32603, "message": "no"}});
-        assert_eq!(read(&error, true), Answer::Apart(Relation::DbtError), "an error first");
+        assert_eq!(read(&error, true), Response::Apart(Relation::DbtError), "an error first");
         let found = json!({"id": 1, "result": lsp("/p/a.sql", (0, 0), (0, 0))});
-        assert_eq!(read(&found, true), Answer::Apart(Relation::Changed));
-        assert_eq!(read(&found, false), Answer::Locations(vec![at("/p/a.sql", (0, 0), (0, 0))]));
+        assert_eq!(read(&found, true), Response::Apart(Relation::Changed));
+        assert_eq!(read(&found, false), Response::Locations(vec![at("/p/a.sql", (0, 0), (0, 0))]));
         let gone = json!({"id": 1, "result": [lsp("/p/a.sql", (0, 0), (0, 0)), lsp("/p/gone.sql", (0, 0), (0, 0))]});
-        assert_eq!(read(&gone, false), Answer::Apart(Relation::DbtMissingFile));
-        assert_eq!(read(&gone, true), Answer::Apart(Relation::Changed), "a change before a missing file");
+        assert_eq!(read(&gone, false), Response::Apart(Relation::DbtMissingFile));
+        assert_eq!(read(&gone, true), Response::Apart(Relation::Changed), "a change before a missing file");
         let elsewhere = json!({"id": 1, "result": {"uri": "untitled:1", "range": {}}});
-        assert_eq!(read(&elsewhere, false), Answer::Apart(Relation::DbtMissingFile), "no file at all");
-        assert_eq!(read(&json!({"id": 1, "result": null}), false), Answer::Locations(vec![]));
+        assert_eq!(read(&elsewhere, false), Response::Apart(Relation::DbtMissingFile), "no file at all");
+        assert_eq!(read(&json!({"id": 1, "result": null}), false), Response::Locations(vec![]));
     }
 
-    fn index() -> Index {
+    fn index() -> ParseIndex {
         let node = |id: &str, name: &str, path: &str, depends_on: &[&str]| {
             let mut parts = id.split('.');
             json!({"unique_id": id, "name": name, "resource_type": parts.next(), "package_name": parts.next(),
@@ -553,7 +553,7 @@ mod tests {
             "model.shop.other",
             "function.shop.f",
         ];
-        Index::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
+        ParseIndex::of(&json!({"metadata": {"project_name": "shop"}, "nodes": {
             "model.shop.orders": node("model.shop.orders", "orders", "models/orders.sql", &orders),
             "model.shop.stg_orders": node("model.shop.stg_orders", "stg_orders", "models/stg_orders.sql", &[]),
             "model.utils.stg_orders": node("model.utils.stg_orders", "stg_orders", "models/stg.sql", &[]),
@@ -731,10 +731,10 @@ mod tests {
     fn a_log_that_cannot_be_written_or_has_no_place_is_said_once() {
         let base = scratch_project("shadow-unwritable", &[]);
         let log = Log { path: base.join("missing/dir/x.jsonl") };
-        let mut session = Session::new(Some(log));
-        assert!(session.write("{}").is_some_and(|said| said.contains("cannot be written")));
-        assert_eq!(session.write("{}"), None, "said once");
-        let mut nowhere = Session::new(None);
+        let mut shadow = Shadow::new(Some(log));
+        assert!(shadow.write("{}").is_some_and(|said| said.contains("cannot be written")));
+        assert_eq!(shadow.write("{}"), None, "said once");
+        let mut nowhere = Shadow::new(None);
         assert!(nowhere.write("{}").is_some_and(|said| said.contains("no place")), "no place, said");
         assert_eq!(nowhere.write("{}"), None, "once");
         assert!(!base.exists(), "nothing made");

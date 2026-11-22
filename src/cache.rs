@@ -4,7 +4,7 @@
 //! the same; the project built again only when a file or a package changed,
 //! else shared.
 
-use crate::project::{self, Found, Listing, Project, Scanned};
+use crate::project::{self, File, Inventory, Project, Scanned};
 use std::collections::HashMap;
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
@@ -93,18 +93,19 @@ impl Cache {
         if self.epoch == Some(epoch) && self.root.as_deref() == Some(root) {
             return self.project.clone();
         }
-        let Some(listing) = project::find(root) else {
+        let Some(inventory) = project::find(root) else {
             self.project = None;
             return None;
         };
-        let key = |found: &Found| open.get(&found.path).map(|(key, _)| key).or(found.metadata.as_ref().map(Key::of));
-        let place = |found: &Found| (found.path.clone(), found.package, found.layout, key(found));
-        let mut seen = Seen { packages: listing.packages.clone(), files: listing.found.iter().map(place).collect() };
+        let key = |found: &File| open.get(&found.path).map(|(key, _)| key).or(found.metadata.as_ref().map(Key::of));
+        let place = |found: &File| (found.path.clone(), found.package, found.layout, key(found));
+        let mut seen =
+            Seen { packages: inventory.packages.clone(), files: inventory.files.iter().map(place).collect() };
         if self.project.is_some() && self.root.as_deref() == Some(root) && unchanged(&self.seen, &seen) {
             self.epoch = Some(epoch);
             return self.project.clone();
         }
-        let (project, files) = self.build(&listing, &seen, open);
+        let (project, files) = self.build(&inventory, &seen, open);
         // A file that could not be read is tried again at the next request.
         for (path, .., key) in &mut seen.files {
             *key = key.filter(|_| files.contains_key(path.as_path()));
@@ -115,14 +116,19 @@ impl Cache {
         Some(project)
     }
 
-    /// The project LISTING finds, its files as SEEN: each kept file whose
+    /// The project INVENTORY finds, its files as SEEN: each kept file whose
     /// key is the same reused, any other read; and the files to keep, those
     /// read under a known key.
-    fn build(&self, listing: &Listing, seen: &Seen, open: &Open) -> (Project, HashMap<PathBuf, (Key, Arc<Scanned>)>) {
+    fn build(
+        &self,
+        inventory: &Inventory,
+        seen: &Seen,
+        open: &Open,
+    ) -> (Project, HashMap<PathBuf, (Key, Arc<Scanned>)>) {
         let mut files = HashMap::new();
         let keyed: HashMap<&Path, Key> =
             seen.files.iter().filter_map(|(path, .., key)| Some((path.as_path(), (*key)?))).collect();
-        let mut read = |found: &Found| {
+        let mut read = |found: &File| {
             let key = keyed.get(found.path.as_path()).copied();
             let kept = self.files.get(&found.path).filter(|(was, _)| key == Some(*was)).map(|(_, kept)| kept.clone());
             let text = open.get(&found.path).map(|(_, text)| text);
@@ -132,7 +138,7 @@ impl Cache {
             }
             scanned.unwrap_or_default()
         };
-        let project = project::assemble(listing, &mut read);
+        let project = project::assemble(inventory, &mut read);
         (project, files)
     }
 
@@ -148,12 +154,12 @@ impl Cache {
 /// Every file of the project at ROOT that reads from disk, with the key it
 /// was read under: what a thread does before the first request needs it.
 pub fn fill(root: &Path) -> Vec<(PathBuf, Key, Arc<Scanned>)> {
-    let listing = project::find(root).map_or_else(Vec::new, |listing| listing.found);
-    let read = |found: Found| {
+    let files = project::find(root).map_or_else(Vec::new, |inventory| inventory.files);
+    let read = |found: File| {
         let key = Key::of(found.metadata.as_ref()?);
         Some((Arc::new(Scanned::read(&found.path, None)?), key, found.path))
     };
-    listing.into_iter().filter_map(read).map(|(scanned, key, path)| (path, key, scanned)).collect()
+    files.into_iter().filter_map(read).map(|(scanned, key, path)| (path, key, scanned)).collect()
 }
 
 #[cfg(test)]

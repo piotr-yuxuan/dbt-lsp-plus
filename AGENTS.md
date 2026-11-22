@@ -121,7 +121,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     server's answer, so that `on_server` stays a dispatch;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
     hints, apart from the outcome of the parse that changes them;
-  - `runs::place`: where a failed node is written, apart from how it
+  - `runs::locator`: where a failed node is written, apart from how it
     failed;
   - `Proxy::on_server_response`, `Proxy::on_server_diagnostics`,
     `Proxy::on_registration`, `Proxy::on_progress`, `Proxy::on_runs`,
@@ -162,7 +162,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `shadow::target`, `shadow::oracle`, `shadow::start`, `Record::line`
     and `Counts::end`: the log's lines in one place, apart from where the
     proxy reads what they hold;
-  - `Log::open`, `Log::append` and `Session::write`: the start of the
+  - `Log::open`, `Log::append` and `Shadow::write`: the start of the
     shadow's log and its writes, a resource's start and use;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
@@ -185,7 +185,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     refused; where `dbt_project.yml` configures a source), with tests of
     its own;
   - `sources::argument_naming`: which argument of a call names a target;
-  - `yaml::Node::shares` and `yaml::Node::repeats`: walks of the tree,
+  - `yaml::Tree::shares` and `yaml::Tree::repeats`: walks of the tree,
     which need a function of their own to recurse;
   - `Proxy::node_info`, `Proxy::remember` and `Proxy::handle`: the answer of
     the proxy's command; what the proxy keeps of a forwarded request apart

@@ -185,7 +185,7 @@ pub fn flag<'a>(command: &'a [String], flag: &str) -> Option<&'a str> {
 /// included, each with `relation` and `tests`, and `disabled` where so; and
 /// the manifest's groups.
 #[derive(Debug, Default)]
-pub struct Index {
+pub struct ParseIndex {
     root_package: String,
     nodes: HashMap<String, Value>,
     groups: HashMap<String, Value>,
@@ -205,10 +205,10 @@ fn by_name(nodes: &HashMap<String, Value>) -> HashMap<String, Vec<String>> {
     named
 }
 
-impl Index {
+impl ParseIndex {
     /// The index of MANIFEST.  dbt gives no relation to an ephemeral model or
     /// a test, and builds no analysis, though it writes one for it.
-    pub fn of(manifest: &Value) -> Index {
+    pub fn of(manifest: &Value) -> ParseIndex {
         let listed = ["nodes", "sources"].into_iter().filter_map(|key| manifest[key].as_object()).flatten();
         let mut nodes: HashMap<String, Value> = listed.map(|(id, node)| (id.clone(), node.clone())).collect();
         // A disabled node is only under `disabled`, as the list of its versions.
@@ -241,12 +241,12 @@ impl Index {
         let root_package = manifest.pointer("/metadata/project_name").and_then(Value::as_str).unwrap_or_default();
         let named = by_name(&nodes);
         let latest = nodes.keys().cloned().collect();
-        Index { root_package: root_package.to_owned(), nodes, groups, named, latest }
+        ParseIndex { root_package: root_package.to_owned(), nodes, groups, named, latest }
     }
 
     /// This index with the entries of NEWER laid over it: what a parse that
     /// failed part of the way still found.
-    pub fn overlay(&mut self, newer: Index) {
+    pub fn overlay(&mut self, newer: ParseIndex) {
         self.latest = newer.latest;
         self.nodes.extend(newer.nodes);
         self.groups.extend(newer.groups);
@@ -423,7 +423,7 @@ impl Index {
 /// ran to its end.
 #[derive(Debug)]
 pub struct Outcome {
-    pub index: Option<Index>,
+    pub index: Option<ParseIndex>,
     pub failure: Option<String>,
     pub problems: Option<Vec<parse_log::Problem>>,
 }
@@ -504,7 +504,7 @@ pub fn start(
         let manifest = fs::read_to_string(&manifest).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
         if let Some(report) = report.0.take() {
             let problems = read.completed.then_some(read.problems);
-            report(Outcome { index: manifest.as_ref().map(Index::of), failure, problems });
+            report(Outcome { index: manifest.as_ref().map(ParseIndex::of), failure, problems });
         }
     })
 }
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn indexes_relations_tests_and_disabled_nodes_as_dbt_gives_them() {
-        let index = Index::of(&manifest());
+        let index = ParseIndex::of(&manifest());
         let orders = index.node("model.shop.orders").unwrap();
         assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
         assert_eq!(orders["tests"], json!(["test.shop.not_null_orders_id.1"]));
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn finds_a_named_node_as_dbt_looks_it_up_and_the_node_of_a_file() {
-        let index = Index::of(&manifest());
+        let index = ParseIndex::of(&manifest());
         let id = |node: Option<&Value>| node.map(|node| node["unique_id"].as_str().unwrap().to_owned());
         let orders = Target::Ref { package: None, name: "orders".into(), version: None };
         assert_eq!(id(index.named(&orders)).as_deref(), Some("model.shop.orders"), "the root project first");
@@ -767,14 +767,14 @@ mod tests {
                       "operation.shop.hook": node("operation.shop.hook", &[])},
             "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])},
             "disabled": {"model.shop.off": [node("model.shop.off", &[])]}});
-        let listed = Index::of(&manifest).listed();
+        let listed = ParseIndex::of(&manifest).listed();
         let ids: Vec<&str> = listed.iter().map(|node| node.id.as_str()).collect();
         assert_eq!(ids, ["model.shop.a", "source.shop.raw.b", "test.shop.t"], "no disabled node, no hook");
         assert_eq!(listed[0].depends_on, ["source.shop.raw.b"]);
         // A failed parse's manifest, laid over, lacks the model deleted since.
-        let mut index = Index::of(&manifest);
+        let mut index = ParseIndex::of(&manifest);
         let newer = json!({"metadata": {"project_name": "shop"}, "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])}});
-        index.overlay(Index::of(&newer));
+        index.overlay(ParseIndex::of(&newer));
         let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
         assert_eq!(ids, ["source.shop.raw.b"]);
         assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
@@ -789,31 +789,31 @@ mod tests {
         let manifest = json!({"metadata": {"project_name": "shop"},
             "nodes": {"model.utils.customers": model("model.utils.customers", "utils")},
             "disabled": {"model.shop.customers": [model("model.shop.customers", "shop")]}});
-        let mut index = Index::of(&manifest);
+        let mut index = ParseIndex::of(&manifest);
         let customers = Target::Ref { package: None, name: "customers".into(), version: None };
         assert_eq!(index.named(&customers).unwrap()["unique_id"], "model.utils.customers");
         // A newer manifest's names are found too.
         let newer = json!({"metadata": {"project_name": "shop"},
             "nodes": {"model.shop.fresh": {"unique_id": "model.shop.fresh", "name": "fresh", "resource_type": "model",
                                            "package_name": "shop", "config": {}}}});
-        index.overlay(Index::of(&newer));
+        index.overlay(ParseIndex::of(&newer));
         let fresh = Target::Ref { package: None, name: "fresh".into(), version: None };
         assert_eq!(index.named(&fresh).unwrap()["unique_id"], "model.shop.fresh");
     }
 
     #[test]
     fn a_failed_parse_s_manifest_lays_over_the_last_index() {
-        let mut index = Index::of(&manifest());
+        let mut index = ParseIndex::of(&manifest());
         let newer = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.orders": {
             "unique_id": "model.shop.orders", "resource_type": "model", "relation_name": "x", "config": {}}}});
-        index.overlay(Index::of(&newer));
+        index.overlay(ParseIndex::of(&newer));
         assert_eq!(index.node("model.shop.orders").unwrap()["relation"], "x");
         assert!(index.node("model.shop.eph").is_some(), "what the newer manifest lacks stays");
     }
 
     #[test]
     fn summarises_what_dbt_builds_then_what_is_set() {
-        let index = Index::of(&manifest());
+        let index = ParseIndex::of(&manifest());
         let orders = index.summary(index.node("model.shop.orders").unwrap());
         assert_eq!(
             orders,
@@ -856,7 +856,7 @@ mod tests {
               "source.utils.raw.days": {"unique_id": "source.utils.raw.days", "resource_type": "source",
                 "name": "days", "source_name": "raw", "package_name": "utils",
                 "original_file_path": "models/_sources.yml"}}});
-        let index = Index::of(&manifest);
+        let index = ParseIndex::of(&manifest);
         let facts = |id: &str| index.facts(index.node(id).unwrap());
         assert_eq!(
             facts("model.shop.orders"),

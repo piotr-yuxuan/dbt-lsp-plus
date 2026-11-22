@@ -49,18 +49,18 @@ impl Encoding {
 }
 
 /// The start of each line of a text.
-pub struct LineIndex<'a> {
+pub struct LineStarts<'a> {
     text: &'a str,
     starts: Vec<usize>,
 }
 
-impl<'a> LineIndex<'a> {
+impl<'a> LineStarts<'a> {
     /// A line ends at `\n`, `\r\n` or a lone `\r`, as LSP says.
     pub fn new(text: &'a str) -> Self {
         let bytes = text.as_bytes();
         let ends = |&(at, &byte): &(usize, &u8)| byte == b'\n' || (byte == b'\r' && bytes.get(at + 1) != Some(&b'\n'));
         let breaks = bytes.iter().enumerate().filter(ends).map(|(at, _)| at + 1);
-        LineIndex { text, starts: std::iter::once(0).chain(breaks).collect() }
+        LineStarts { text, starts: std::iter::once(0).chain(breaks).collect() }
     }
 
     /// The line, from 0, of a byte OFFSET.
@@ -125,9 +125,9 @@ pub fn apply_change(text: &mut String, change: &Value, encoding: Encoding) {
         *text = new_text.to_owned();
         return;
     };
-    let index = LineIndex::new(text);
-    let start = range.get("start").and_then(|p| index.offset_of(p, encoding));
-    let end = range.get("end").and_then(|p| index.offset_of(p, encoding));
+    let starts = LineStarts::new(text);
+    let start = range.get("start").and_then(|p| starts.offset_of(p, encoding));
+    let end = range.get("end").and_then(|p| starts.offset_of(p, encoding));
     if let (Some(start), Some(end)) = (start, end) {
         text.replace_range(start..end.max(start), new_text);
     }
@@ -142,30 +142,30 @@ mod tests {
 
     #[test]
     fn counts_characters_in_the_announced_unit() {
-        let index = LineIndex::new(TEXT);
+        let starts = LineStarts::new(TEXT);
         let x = TEXT.find(" as").unwrap();
-        assert_eq!(index.position(x, Encoding::Utf16), json!({"line": 0, "character": 12}));
-        assert_eq!(index.position(x, Encoding::Utf8), json!({"line": 0, "character": 15}));
-        assert_eq!(index.position(x, Encoding::Utf32), json!({"line": 0, "character": 11}));
-        assert_eq!(index.offset(0, 12, Encoding::Utf16), x);
+        assert_eq!(starts.position(x, Encoding::Utf16), json!({"line": 0, "character": 12}));
+        assert_eq!(starts.position(x, Encoding::Utf8), json!({"line": 0, "character": 15}));
+        assert_eq!(starts.position(x, Encoding::Utf32), json!({"line": 0, "character": 11}));
+        assert_eq!(starts.offset(0, 12, Encoding::Utf16), x);
     }
 
     #[test]
     fn clamps_positions_past_a_line_or_the_text() {
-        let index = LineIndex::new(TEXT);
-        assert_eq!(index.offset(0, 99, Encoding::Utf16), TEXT.find('\r').unwrap());
-        assert_eq!(index.offset(1, 4, Encoding::Utf16), TEXT.find(" t").unwrap());
-        assert_eq!(index.offset(9, 0, Encoding::Utf16), TEXT.len());
-        assert_eq!(index.position(TEXT.len(), Encoding::Utf16), json!({"line": 2, "character": 0}));
+        let starts = LineStarts::new(TEXT);
+        assert_eq!(starts.offset(0, 99, Encoding::Utf16), TEXT.find('\r').unwrap());
+        assert_eq!(starts.offset(1, 4, Encoding::Utf16), TEXT.find(" t").unwrap());
+        assert_eq!(starts.offset(9, 0, Encoding::Utf16), TEXT.len());
+        assert_eq!(starts.position(TEXT.len(), Encoding::Utf16), json!({"line": 2, "character": 0}));
     }
 
     #[test]
     fn a_lone_carriage_return_ends_a_line() {
         let text = "a\rb\r\nc\nd";
-        let index = LineIndex::new(text);
-        assert_eq!(index.position(2, Encoding::Utf16), json!({"line": 1, "character": 0}));
-        assert_eq!(index.position(5, Encoding::Utf16), json!({"line": 2, "character": 0}));
-        assert_eq!(index.offset(3, 0, Encoding::Utf16), 7);
+        let starts = LineStarts::new(text);
+        assert_eq!(starts.position(2, Encoding::Utf16), json!({"line": 1, "character": 0}));
+        assert_eq!(starts.position(5, Encoding::Utf16), json!({"line": 2, "character": 0}));
+        assert_eq!(starts.offset(3, 0, Encoding::Utf16), 7);
     }
 
     #[test]
