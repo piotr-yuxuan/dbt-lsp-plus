@@ -455,7 +455,11 @@ fn without_dbt_lsp_it_serves_its_own_features_alone() {
     let untitled = json!({"textDocument": {"uri": "untitled:Untitled-1"}, "position": {"line": 0, "character": 0}});
     let prepared = session.request("textDocument/prepareCallHierarchy", untitled);
     assert_eq!(prepared.get("result"), Some(&Value::Null), "{prepared}");
-    assert_eq!(show_messages(&session), 1, "the proxy warns once");
+    // A request that only dbt lsp answers says why none will; one assertion with the warning's, as clippy counts.
+    let completion = session.request("textDocument/completion", json!({}));
+    let message = completion["error"]["message"].as_str().unwrap_or_default();
+    let lost = message.starts_with("dbt lsp is lost for good: dbt lsp could not start (");
+    assert_eq!((show_messages(&session), lost), (1, true), "the proxy warns once: {completion}");
     assert!(session.finish().success());
 }
 
@@ -509,6 +513,10 @@ fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
     assert!(!registered, "a watcher, for a client that does not let a server register one");
     assert_eq!(session.received.iter().filter(|m| m["method"] == "window/logMessage").count(), 1);
     assert!(lives(&log).is_empty(), "a server started");
+    // A request that only dbt lsp answers: none was started, none is lost.
+    let completion = session.request("textDocument/completion", json!({}));
+    let not_running = json!({"code": -32803, "message": "dbt lsp is not running"});
+    assert_eq!((completion.get("result"), &completion["error"]), (None, &not_running), "{completion}");
     assert!(session.finish().success());
 }
 
