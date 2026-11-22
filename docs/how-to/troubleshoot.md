@@ -60,9 +60,13 @@ seconds, 10 by default.
    2 s; in `plus`, `dbt lsp` is not asked for these methods at all.
 2. `dbt lsp` answers once it has compiled the project.  A large project
    may take longer than the client's timeout to compile, after the server
-   starts or the project changes; the server reports its progress, then
-   sends `dbt/lspCompileComplete`.  Ask again after it, or raise the
-   client's timeout.
+   starts or the project changes; the server reports its progress, in
+   percent, then sends `dbt/lspCompileComplete`.  Ask again after it, or
+   raise the client's timeout.  A compilation with no end 60 s after it
+   started is said once a session, `dbt lsp has been compiling for 60 s
+   with no end yet (its log: …)`, and one that compiled nothing once for
+   each first error, `dbt lsp compiled nothing: …`: see "Common
+   problems".
 3. Read the client's log of messages: whether the request went out,
    whether an answer came back, and when.
 4. Start `dbt lsp` directly in place of the proxy, and ask again.  A
@@ -80,6 +84,11 @@ seconds, 10 by default.
   `dbt-lsp-plus:`: that the dbt has no `lsp` and the proxy answers alone;
   that `dbt lsp` ended and restarts in so many seconds, at most three
   times in ten minutes; why its `dbt parse` failed or was refused.
+- **`window/showMessage`**, which an editor shows at once and Claude
+  Code does not show at all: that a compilation of `dbt lsp`'s compiled
+  nothing, with dbt's first error, once for each first error, and that
+  one has no end 60 s after it started, once a session; each names `dbt
+  lsp`'s own log, `logs/dbt-lsp.log` under the project.
 
 ## Common problems
 
@@ -119,6 +128,25 @@ seconds, 10 by default.
   previews do not (see [Use it with dbt-oss alone](use-with-dbt-oss.md)).
 - **The server restarts, then the proxy stays alone.**  `dbt lsp` ended
   four times in ten minutes; its standard error says why.
+- **"dbt lsp compiled nothing: …".**  `dbt lsp` compiled none of the
+  project, so it has nothing to answer from (a listing answers
+  `Compilation failed`); the text after the colon is dbt's first error,
+  also published as a diagnostic, often on `dbt_project.yml` or on
+  `<RUN_OPERATION>`, a file that does not exist.  Read
+  `logs/dbt-lsp.log`, which the message names: a profile's field, or an
+  `env_var` the editor's environment lacks (a GUI editor on macOS may
+  not get the shell's); a hook (`on-run-start`) that fails; a package
+  that is not installed; the warehouse's connection or authentication.
+  Fix it and save a file: `dbt lsp` compiles again.  An error in one
+  model is no such case: the other models compile, and the diagnostic on
+  that model says it.
+- **"dbt lsp has been compiling for 60 s with no end yet".**  `dbt lsp`
+  started a compilation and has not finished it; a merged request gets
+  the proxy's answer alone at its deadline (see "Who answers a request").
+  Read `logs/dbt-lsp.log`: a first compilation of a large project on a
+  warehouse can take that long, and its progress, in percent, keeps
+  moving; a connection or an authentication that hangs does not.  The
+  message comes once a session.
 
 ## Run it by hand
 

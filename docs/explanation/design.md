@@ -1501,6 +1501,9 @@ decides (`restart_delay`).  Past that, the proxy stays alone and says so.
   of are dropped.  A process it killed may end its output late, when a
   launcher's child holds it, and that end must not stop the server
   started since.
+- The failures of compilations that the proxy said are kept, so that a
+  restarted server failing as before says nothing again; the deadline of
+  a compilation under way is not.
 
 ## Standalone mode
 
@@ -1627,6 +1630,8 @@ checked against dbt; the profile and the target in doctor, which need
 | `dbt lsp` exits during the session | Its pending requests fail once each with -32803 and its exit status, but the merged ones, which get the proxy's part or nothing, and those already answered at their deadline, which get nothing more; a pending `shutdown` gets null.  Unless `shutdown` came first, an error message says when it restarts (see "Restart"), or that the proxy, after a fourth crash in ten minutes, goes on alone.  Meanwhile the proxy serves alone, as above, on the scanned graph, and parses (see "How the proxy runs it") |
 | `dbt lsp` exits before it answers `initialize` | The proxy answers `initialize` itself, once, as when the server cannot start; before the client's `initialize`, it sends nothing, and warns once after its answer |
 | `dbt.listNodes` errs, is cancelled too often, or never answers | The graph keeps its last listing, else the scan |
+| A compilation of `dbt lsp`'s compiles nothing (its completion's `models_count` null) | Its completion forwarded byte for byte, and once for each first error of the session, restarts included, a `window/showMessage` of type 1, `dbt lsp compiled nothing: ERROR (its log: ROOT/logs/dbt-lsp.log)`, dbt's message on one line, or without `: ERROR` when it reports none; never a warning, nothing after `shutdown` (see "What a compilation does, observed on 2.0.9") |
+| A compilation of `dbt lsp`'s has no end 60 s after its start, foreground or background | Once a session, a `window/showMessage` of type 2, `dbt lsp has been compiling for 60 s with no end yet (its log: ROOT/logs/dbt-lsp.log)`; nothing after `shutdown`.  A lost server's compilation has no deadline left |
 | A YAML file is not valid | Its sources are left out |
 | A body is not JSON | Forwarded unchanged |
 | A header is malformed, or a body is longer than 64 MiB | The stream stops: the frame boundary is lost |
@@ -1929,6 +1934,15 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     them, no loop, at most three retries, none while the client's is pending
     nor after `shutdown`, an empty `*` and failed or cancelled listings
     keeping the graph;
+  - the compilations: the fake's as 2.0.9's, on a model's watched change,
+    on none of dbt's output alone, once for a save and its watched event,
+    each with O4's keys and followed by its background pair; one that
+    compiled nothing said once across several, with dbt's first error and
+    never a warning, its completions forwarded as they came; and, by unit
+    tests, the reading of a completion, one message per first error,
+    restarts included, the deadline that a start sets and a completion or
+    a lost server clears, and one with no end said once a session, never
+    after `shutdown`;
   - no server, warned once; a server that exits at once, a crash with
     several requests pending, the scanned graph after a crash, a crash
     before `initialize` and during `shutdown`, a server killed when it
@@ -2043,10 +2057,14 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   what this note records of `dbt.listNodes` and of `positionEncoding`:
   `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
   As an editor that honours dbt lsp's watcher, whose glob it checks, it
-  makes the server compile once, then for five seconds sends an event a
-  round for the files written under the project: at most two
-  compilations, where the proxy without its filter of dbt's output gave
-  twelve.
+  sends a model's watched change, after which come dbt lsp's own
+  compilation, the proxy's two listings' and a full background one
+  (O3, O13), then for five seconds an event a round for the files written
+  under the project: at most two compilations, where the proxy without
+  its filter of dbt's output gave twelve.  It checks O4's keys and O8's
+  percentage, and that its session says no compilation compiled nothing
+  or had no end; a test of its own, on a profile that names a missing
+  `env_var` (S1), that such a compilation is said once.
   It checks the facts of a hover at a model's start, from its properties
   file, and a workspace symbol's id as its container.
   It ends by killing the server, which the proxy restarts: diagnostics
