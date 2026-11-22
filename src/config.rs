@@ -532,6 +532,14 @@ mod tests {
     }
 
     #[test]
+    fn a_dbt_s_run_runs_where_the_dbt_runs_within_the_parse_s_deadline() {
+        let dbt = Dbt::new(words(&["dbt", "lsp"]), Some(PathBuf::from("/root")));
+        let run = dbt.run(&words(&["list"]), Path::new("/root"), PathBuf::from("/cache/run"), RUN_LOG, true).unwrap();
+        let expected = (Some(PathBuf::from("/root")), PathBuf::from("/cache/run"), RUN_LOG, PARSE_DEADLINE);
+        assert_eq!((run.cwd, run.dir, run.log, run.deadline), expected, "a command's run as the parse");
+    }
+
+    #[test]
     fn under_the_cut_its_directory_is_read_only_from_within_too() {
         let cut = can_cut();
         assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
