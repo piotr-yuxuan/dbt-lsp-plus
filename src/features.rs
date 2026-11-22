@@ -181,14 +181,15 @@ fn hierarchy_item(item: &Item, project: &Project, encoding: Encoding) -> Value {
 }
 
 /// The item at OFFSET of the file at PATH: the resource that a call there
-/// names, else the innermost resource defined there.
+/// names, else the innermost resource defined there; none where the
+/// position names neither.
 pub fn prepare_call_hierarchy(
     project: &Project,
     graph: &Graph,
     path: &Path,
     offset: usize,
     encoding: Encoding,
-) -> Value {
+) -> Option<Value> {
     let in_file = |id: &str| graph.items.get(id).is_some_and(|item| item.path == path);
     let called = graph
         .edges
@@ -201,10 +202,8 @@ pub fn prepare_call_hierarchy(
             .filter(|item| item.path == path && item.range.start <= offset && offset <= item.range.end);
         around.min_by_key(|item| (item.range.len(), item.id.clone()))
     };
-    match called.map(|edge| &graph.items[&edge.to]).or_else(defined) {
-        Some(item) => json!([hierarchy_item(item, project, encoding)]),
-        None => Value::Null,
-    }
+    let item = called.map(|edge| &graph.items[&edge.to]).or_else(defined)?;
+    Some(json!([hierarchy_item(item, project, encoding)]))
 }
 
 /// The calls of an item: those that call ID when INCOMING, else those ID makes.
@@ -564,7 +563,7 @@ mod tests {
         // At column 0 of a YAML snapshot's `name:` line, where dbt-mode's lineage asks.
         let yml = root.join("snapshots/_s.yml");
         let line_start = project.text(&yml).unwrap().find("  - name: snap").unwrap();
-        let prepared = prepare_call_hierarchy(&project, &graph, &yml, line_start, Encoding::Utf16);
+        let prepared = prepare_call_hierarchy(&project, &graph, &yml, line_start, Encoding::Utf16).unwrap();
         assert_eq!(prepared[0]["data"]["uniqueId"], "snapshot.r.snap");
         let incoming = calls(&project, &graph, "function.r.f", true, Encoding::Utf16);
         assert_eq!(incoming[0]["from"]["data"]["uniqueId"], "model.r.m.v2");
@@ -579,10 +578,10 @@ mod tests {
         let orders = fixture().join("models/marts/orders.sql");
         let text = project.text(&orders).unwrap();
         let on_ref = text.find("stg_orders").unwrap();
-        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_ref, Encoding::Utf16);
+        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_ref, Encoding::Utf16).unwrap();
         assert_eq!(prepared[0]["data"]["uniqueId"], "model.shop.stg_orders");
         let on_select = text.rfind("select").unwrap();
-        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_select, Encoding::Utf16);
+        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_select, Encoding::Utf16).unwrap();
         assert_eq!(prepared[0]["data"]["uniqueId"], "model.shop.orders");
 
         let incoming = calls(&project, &graph, "model.shop.orders", true, Encoding::Utf16);
@@ -604,7 +603,7 @@ mod tests {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
         let graph = Graph::scanned(&project);
         let readme = fixture().join("packages.yml");
-        assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), Value::Null);
+        assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), None);
     }
 
     #[test]

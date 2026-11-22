@@ -128,9 +128,15 @@ owns all state and writes both outputs.
 
 Every request the proxy answers itself, or answers for `dbt lsp`, gets
 one value, the Answer (`src/answer.rs`, plan 044): found, a result as
-its provider built it, an empty list included; empty, the method's
-nothing, null or `[]` for a list, as its capability says; or
-unanswered, with each provider's reason, the proxy's first.  An
+its provider built it, an empty one included; empty, the method's
+nothing, null or `[]` for a list, as its capability says, where the
+request's position names nothing to look up; or unanswered, with each
+provider's reason, the proxy's first.  A target that resolves to
+nothing is found, a definition's null or references' `[]`; a position
+that names no target is empty, for a definition, references and the
+call hierarchy alike.  LSP renders found and empty alike; a rendering
+that tells them apart (plan 052) reads only empty as nothing to look
+up.  An
 unanswered request is error -32803 whose message is its reasons, joined
 by `; `, as nodeInfo's has been since plan 038.  The protocol's own
 errors (-32600, -32602, -32603) say that the request is wrong or that

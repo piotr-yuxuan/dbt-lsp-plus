@@ -12,13 +12,18 @@ use std::time::Duration;
 /// LSP's RequestFailed: a request that no provider could answer.
 const REQUEST_FAILED: i64 = -32803;
 
-/// What a session sends for one request: the model's Answer.
+/// What a session sends for one request: the model's Answer.  `Empty` is
+/// "nothing to look up": the request's position names no target.  What a
+/// lookup gave is `Found`, its nothing included: a target that resolves to
+/// nothing is a definition's null, references' `[]`.  LSP renders both
+/// alike; a rendering that tells them apart reads only `Empty` as nothing
+/// to look up.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Answer {
-    /// A result, as its provider built it, an empty list included.
+    /// A result, as its provider built it, an empty one included.
     Found(Value),
     /// The method's default nothing, `capability::empty`: null, or `[]` for
-    /// a list.
+    /// a list, where there is nothing to look up.
     Empty,
     /// No one could answer: each provider's reason, the proxy's first.
     Unanswered(Vec<Reason>),

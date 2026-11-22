@@ -1143,7 +1143,8 @@ impl<W: Write> Proxy<W> {
         };
         let text = project.text(&path).unwrap_or_default();
         let offset = LineStarts::new(text).offset_of(params.get("position")?, self.encoding)?;
-        Some(Answer::Found(features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding)))
+        let prepared = features::prepare_call_hierarchy(&project, &graph, &path, offset, self.encoding);
+        Some(prepared.map_or(Answer::Empty, Answer::Found))
     }
 
     /// The document of a request, its text, open or on disk, and the offset
@@ -1241,7 +1242,8 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The definition of the target at the request's position, by dbt
-    /// 2.0.9's lookup: its location, several, or none.
+    /// 2.0.9's lookup: its location, several, or null, found; none where
+    /// the position names no target.
     fn on_definition(&self, params: &Value) -> Option<Answer> {
         let (path, text, offset) = self.document_at(params)?;
         let Some(target) = navigation::target_at(&path, &text, offset) else { return Some(Answer::Empty) };
@@ -1249,7 +1251,7 @@ impl<W: Write> Proxy<W> {
         let lookup = navigation::Lookup::new(&project, self.parsing.index.as_ref());
         let locations = self.locations(&project, &navigation::resolve(&lookup, &path, &target));
         Some(match &locations[..] {
-            [] => Answer::Empty,
+            [] => Answer::Found(Value::Null),
             [location] => Answer::Found(location.clone()),
             _ => Answer::Found(Value::Array(locations)),
         })
@@ -3261,6 +3263,30 @@ mod tests {
         assert_eq!(late(None, false), plain, "no compilation");
         assert_eq!(late(Some(Instant::now()), false), format!("{plain}: it is compiling the project"));
         assert_eq!(late(Some(Instant::now() - COMPILE_STALL), true), plain, "a stall told");
+    }
+
+    #[test]
+    fn a_position_that_names_nothing_is_empty_and_a_target_found_nowhere_is_found() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let proxy_on = |text: &str, path: &Path| {
+            let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root.clone()));
+            proxy.documents.insert(path.to_owned(), text.to_owned());
+            proxy
+        };
+        let at = |path: &Path, character: usize| json!({"textDocument": {"uri": features::uri(path)}, "position": {"line": 0, "character": character}});
+        // An unsaved document's ref to a model that no file holds, and a keyword before it.
+        let scratch = root.join("models/marts/scratch.sql");
+        let text = "select * from {{ ref('nowhere') }}";
+        let proxy = proxy_on(text, &scratch);
+        let (keyword, nowhere) = (at(&scratch, 1), at(&scratch, text.find("nowhere").unwrap() + 2));
+        assert_eq!(
+            [proxy.on_definition(&keyword), proxy.on_references(&keyword)],
+            [Some(Answer::Empty), Some(Answer::Empty)]
+        );
+        let found = [Some(Answer::Found(Value::Null)), Some(Answer::Found(json!([])))];
+        assert_eq!([proxy.on_definition(&nowhere), proxy.on_references(&nowhere)], found);
+        let outside = at(&root.join("packages.yml"), 0);
+        assert_eq!(proxy.hierarchy("textDocument/prepareCallHierarchy", &outside), Some(Answer::Empty));
     }
 
     #[test]
