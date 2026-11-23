@@ -878,8 +878,8 @@ impl<W: Write> Proxy<W> {
     /// document when DOCUMENT, on which the proxy stays alone: dbt's
     /// processes run there, the server command's relative paths are taken
     /// from the proxy's directory, its `dbt` becomes the project's, the
-    /// server started unless alone, and the line that says so is written on the standard error and kept for
-    /// the client.
+    /// server started unless alone, and the line that says so is written on
+    /// the standard error and kept for the client.
     fn take_project(&mut self, root: PathBuf, document: bool) {
         let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
         // What the user wrote from the proxy's directory still names the same from the project.

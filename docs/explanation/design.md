@@ -500,7 +500,9 @@ else the project's), by directory, as dbt loads them once the guard lets
 it run, and names the first whose `on-run-start`, `on-run-end` or
 top-level merge key, which may bring one, holds anything but a null, `""`
 or `[]`, the forms seen harmless: `NAME has on-run hooks, which dbt
-compile would run against the warehouse`.  Its answer is the `compiled_path` of the node of the root package
+compile would run against the warehouse`.  A `dbt_project.yml` there that
+repeats a key, of which dbt reads the last, refuses too, and one that
+does not read refuses with the guard's words.  Its answer is the `compiled_path` of the node of the root package
 whose `original_file_path` is R, a test's never (as of a properties file),
 in the manifest the run wrote, resolved from the working directory; none
 answers dbt lsp's "Compiled file path not
@@ -1891,8 +1893,7 @@ over the manifest that node keeps, checked against dbt (plan 058);
   runs it: a compile of a model with `run_query` under `execute`, an
   introspective macro or a Python model may reach the warehouse, and dbt
   may download a driver.  A compile is refused where a package may have
-  on-run hooks, but an installed package whose `dbt_project.yml`
-  yaml-rust2 cannot read is not seen, so its hooks escape the refusal.  A file of a package, or whose path from the root
+  on-run hooks, or where a package's `dbt_project.yml` does not read.  A file of a package, or whose path from the root
   holds a space or a comma, does not compile; `show` needs dbt lsp.
 - `docs-paths` is ignored: docs blocks are read from every resource path.
 - JSON-RPC batches are forwarded as they are; a batched `exit` does not stop

@@ -53,7 +53,7 @@ fn installed(install: &Path, name: &str) -> bool {
 
 /// The YAML document at PATH, none for a file absent, empty or of comments
 /// only; a file that does not read is a refusal, since dbt may read it.
-fn read(path: &Path) -> Result<Option<Tree>, String> {
+pub fn read(path: &Path) -> Result<Option<Tree>, String> {
     let Some(text) = text::read(path) else { return Ok(None) };
     let empty = text.lines().map(str::trim).all(|line| line.is_empty() || line.starts_with('#'));
     match yaml::parse(&text) {

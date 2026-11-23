@@ -5,10 +5,8 @@
 //! its output answers, in dbt lsp 2.0.9's shapes.
 
 use crate::capability::{self, CAPABILITIES, Provider};
-use crate::packages;
-use crate::project::{self, Project};
 use crate::run::{self, Ending, Output, Run, Running};
-use crate::yaml::Tree;
+use crate::{packages, project::Project, yaml::Tree};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,10 +25,6 @@ pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus ru
 
 /// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
-
-/// The plain scalars that YAML reads as null, the empty one, no value,
-/// included: an `on-run-*` key holding one is no hook to dbt.
-const NULLS: [&str; 5] = ["", "~", "null", "Null", "NULL"];
 
 /// The commands that `initialize` announces, in the table's order: each
 /// with a provider of dbt's present, dbt lsp when the server LISTS its
@@ -148,24 +142,27 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
 /// on packages lets it run, whose `dbt_project.yml` may have `on-run-start`
 /// or `on-run-end` hooks, which dbt compile runs against the warehouse,
 /// even for one model, or a top-level merge key, which may bring one.  A
-/// null, `""` or `[]` is none; any other value is one.  A package whose
-/// `dbt_project.yml` does not read is not seen.
+/// plain null (the empty one, no value, included), `""` or `[]` is none;
+/// any other value is one.  A `dbt_project.yml` that repeats a key, of
+/// which dbt reads the last, or that does not read refuses too.
 pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
     let install = packages::install_path(root, server).unwrap_or_default();
     let mut installed: Vec<fs::DirEntry> = fs::read_dir(install).into_iter().flatten().flatten().collect();
     installed.sort_by_key(fs::DirEntry::path);
-    let dirs: Vec<PathBuf> = std::iter::once(root.to_owned()).chain(installed.iter().map(fs::DirEntry::path)).collect();
-    let hooks = |(_, config): &(String, Tree)| {
+    let refusal = |dir: PathBuf| {
+        let read = packages::read(&dir.join("dbt_project.yml"));
+        let Ok(Some(config)) = &read else { return read.err() };
         let mut values = ["<<", "on-run-start", "on-run-end"].into_iter().filter_map(|key| config.get(key));
-        values.any(|value| match value {
-            Tree::Scalar { value, plain: true, .. } => !NULLS.contains(&value.as_str()),
+        let hooked = values.any(|value| match value {
+            Tree::Scalar { value, plain: true, .. } => !["", "~", "null", "Null", "NULL"].contains(&value.as_str()),
             Tree::Scalar { value, .. } => !value.is_empty(),
             Tree::Seq(items) => !items.is_empty(),
             Tree::Map { .. } | Tree::Alias => true,
-        })
+        }) || config.repeats();
+        let name = config.get("name").and_then(Tree::as_str).unwrap_or("a package");
+        hooked.then_some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"))
     };
-    let (name, _) = dirs.iter().map(PathBuf::as_path).filter_map(project::package_config).find(hooks)?;
-    Some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"))
+    std::iter::once(root.to_owned()).chain(installed.iter().map(fs::DirEntry::path)).find_map(refusal)
 }
 
 /// The answer of a compile of the file at RELATIVE, a path from the root,
@@ -343,6 +340,9 @@ mod tests {
             "on-run-end:\n  sql: select 1\n",
             "hooks: &hooks select 1\non-run-end: *hooks\n",
             "base: &base\n  on-run-end: select 1\n<<: *base\n",
+            // dbt reads the last of two keys.
+            "on-run-end: []\non-run-end: select 1\n",
+            "base: &base\n  on-run-end: select 1\n<<: []\n<<: *base\n",
         ];
         for form in forms {
             assert_eq!(hooked([form, "", ""], &[]), refused("shop"), "{form:?}");
@@ -355,6 +355,23 @@ mod tests {
         assert_eq!(hooked(["", "", ""], &flagged), refused("hookpkg"), "under the server's");
         let assigned = ["env", "DBT_PACKAGES_INSTALL_PATH=vendor", "dbt", "lsp"].map(str::to_owned);
         assert_eq!(hooked(["", "", ""], &assigned), refused("hookpkg"), "set before the server's dbt");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_compile_is_refused_where_a_package_s_file_does_not_read() {
+        // A tab after a key, which dbt reads, and yaml-rust2 does not: a hook may lie behind it.
+        let config = "name: utils\nmodels:\n  utils:\n    +materialized:\tview\non-run-end: select 1\n";
+        let dir = scratch_project(
+            "hooked-unread",
+            &[("dbt_project.yml", "name: shop\n"), ("dbt_packages/utils/dbt_project.yml", config)],
+        );
+        let file = dir.join("dbt_packages/utils/dbt_project.yml");
+        let why = format!(
+            "dbt-lsp-plus cannot read {} as YAML, a tab after a key perhaps, which dbt may read",
+            file.display()
+        );
+        assert_eq!(super::hooked(&dir, &[]), Some(why));
         fs::remove_dir_all(&dir).unwrap();
     }
 
