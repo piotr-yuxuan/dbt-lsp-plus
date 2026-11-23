@@ -1263,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn with_no_dbt_lsp_a_hover_before_any_index_says_why_after_asking_for_one() {
+    fn a_hover_before_any_index_says_why_after_asking_for_one() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let orders = features::uri(&root.join("models/marts/orders.sql"));
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});

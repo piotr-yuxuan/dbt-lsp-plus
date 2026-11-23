@@ -196,7 +196,7 @@ fn the_client_s_spelling_of_the_root_wins_and_its_paths_match() {
 }
 
 #[test]
-fn without_dbt_lsp_it_serves_its_own_features_alone() {
+fn with_no_dbt_it_serves_the_features_of_the_files() {
     let project = fixture().to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
     let mut session = Session::start(&command, &[], None);
@@ -247,7 +247,7 @@ fn a_bad_option_is_a_usage_error_and_starts_nothing() {
 }
 
 #[test]
-fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
+fn a_dbt_without_lsp_is_served_and_said_once_in_the_log() {
     let (mut session, _) = Session::fake("standalone", json!({}));
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
@@ -354,7 +354,7 @@ fn initialization_options_are_not_read() {
 }
 
 #[test]
-fn alone_the_proxy_s_own_features_answer() {
+fn outline_symbols_folding_and_calls_answer_from_the_files() {
     let (mut session, _) = Session::fake("standalone-features", json!({}));
     session.initialize(&fixture());
     let path = fixture().join("models/marts/orders.sql");
@@ -386,7 +386,7 @@ fn a_request_the_proxy_answers_without_its_parameters_is_invalid() {
 }
 
 #[test]
-fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
+fn the_graph_takes_dbt_s_resolution_from_the_manifest() {
     let mut manifest = manifest();
     let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
     manifest["nodes"]["model.shop.order_summary"] = summary_node;
@@ -415,11 +415,11 @@ fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
 }
 
 #[test]
-fn the_call_hierarchy_asks_for_a_parse_alone_and_none_in_front() {
+fn each_request_of_the_call_hierarchy_asks_for_a_parse() {
     let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
     let path = fixture().join("models/marts/orders.sql");
     let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
-    // Alone, the graph is the last parse's: a follower asks for one, with no document opened.
+    // The graph is the last parse's: a follower asks for one, with no document opened.
     let (mut session, log) = Session::fake("hierarchy-parse-alone", json!({"manifest": manifest()}));
     session.initialize(&fixture());
     session.request("callHierarchy/outgoingCalls", orders.clone());
@@ -441,7 +441,7 @@ fn the_call_hierarchy_asks_for_a_parse_alone_and_none_in_front() {
 }
 
 #[test]
-fn alone_the_proxy_watches_the_project_for_a_client_that_lets_it() {
+fn the_server_watches_the_project_for_a_client_that_lets_it() {
     let (mut session, log) = Session::fake("standalone-watch", json!({"manifest": manifest()}));
     session.initialize_as(&fixture(), json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}));
     let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
@@ -472,7 +472,7 @@ fn on_page_views() -> Value {
 }
 
 #[test]
-fn answers_references_on_a_source_and_forwards_the_others() {
+fn answers_references_on_a_source_and_on_a_ref() {
     let (mut session, _) = Session::fake("source-references", json!({}));
     session.initialize(&fixture());
     let mut params = on_page_views();
@@ -525,7 +525,7 @@ fn renames_a_source_table_and_keeps_its_relation() {
 }
 
 #[test]
-fn alone_it_still_answers_on_sources() {
+fn with_no_dbt_it_still_answers_on_sources() {
     let project = fixture().to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
     let mut session = Session::start(&command, &[], None);
@@ -745,7 +745,7 @@ fn the_project_dir_keeps_its_spelling_when_the_client_names_a_folder_above_it() 
 }
 
 #[test]
-fn a_source_rename_on_a_file_the_scan_does_not_hold_goes_to_the_server_but_not_its_references() {
+fn a_source_rename_on_a_file_the_scan_does_not_hold_is_null_but_not_its_references() {
     let project = copy_fixture("source-unscanned");
     let call = "select * from {{ source('events', 'page_views') }}";
     let outside = project.join("integration_tests/i.sql");
@@ -849,7 +849,7 @@ fn folds_highlights_and_selects_within_a_document() {
 }
 
 #[test]
-fn renames_a_cte_and_forwards_other_renames() {
+fn renames_a_cte_and_gives_null_at_a_ref() {
     let (mut session, _) = Session::fake("cte-rename", json!({}));
     session.initialize(&fixture());
     let orders_sql = uri(&fixture().join("models/marts/orders.sql"));
@@ -908,7 +908,7 @@ fn a_cte_in_yaml_is_renamed_as_in_sql_and_not_highlighted() {
 }
 
 #[test]
-fn without_dbt_lsp_the_features_within_a_document_remain() {
+fn with_no_dbt_the_features_within_a_document_remain() {
     let project = fixture().to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
     let mut session = Session::start(&command, &[], None);
@@ -1089,7 +1089,7 @@ fn node_info_names_a_node_by_id_or_by_position() {
 }
 
 #[test]
-fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
+fn each_change_parses_and_one_more_after_a_change_during_a_parse() {
     let gate = scratch("standalone-gate-file").join("open");
     let script = json!({"manifest": manifest(), "parse_gate": gate});
     let (mut session, log) = Session::fake("standalone-parse", script);
@@ -1110,7 +1110,7 @@ fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
 }
 
 #[test]
-fn alone_a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_request() {
+fn a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_request() {
     let project = copy_fixture("standalone-disk-change");
     let gate = scratch("standalone-disk-change-gate").join("open");
     let script = json!({"manifest": manifest(), "parse_gate": gate});
@@ -1196,7 +1196,7 @@ fn ignores_dbt_s_output_through_a_link_out_of_the_project() {
 }
 
 #[test]
-fn alone_a_completion_starts_no_parse() {
+fn a_completion_starts_no_parse() {
     let (mut session, log) = Session::fake("standalone-completion", json!({"manifest": manifest()}));
     session.initialize(&fixture());
     // No method of the server's, whose answer would read the index.
@@ -1212,7 +1212,7 @@ fn dbt_event(level: &str, code: &str, msg: &str) -> String {
 }
 
 #[test]
-fn alone_the_parse_s_problems_are_diagnostics_until_a_parse_without_them() {
+fn the_parse_s_problems_are_diagnostics_until_a_parse_without_them() {
     let log_file = scratch("standalone-problems-log").join("parse.jsonl");
     let completed = dbt_event("info", "Q039", "Finished 'parse'");
     let error = "[error] [DependencyNotFound (dbt1048)]: Ref 'nowhere' not found\n  --> models/marts/orders.sql:1:21";
@@ -1251,7 +1251,7 @@ fn alone_the_parse_s_problems_are_diagnostics_until_a_parse_without_them() {
 }
 
 #[test]
-fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
+fn a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
     let project = copy_fixture("standalone-broken-project");
     // dbt's log alone says where the project file is broken: one that the
     // guard on packages cannot read is refused before dbt runs.
@@ -1279,7 +1279,7 @@ fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
 }
 
 #[test]
-fn alone_a_yaml_error_named_from_dbt_s_directory_joins_the_last_run_s_failures() {
+fn a_yaml_error_named_from_dbt_s_directory_joins_the_last_run_s_failures() {
     let project = copy_fixture("standalone-cwd-project");
     std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
     write_run(&project, &run_results("build", true), &run_manifest());
@@ -1316,15 +1316,15 @@ fn alone_a_yaml_error_named_from_dbt_s_directory_joins_the_last_run_s_failures()
     assert_eq!(session.received.iter().filter(on_models).count(), 0, "{:?}", session.received);
     // The save's parse finds the same problem: published again, the failure gone.
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&models)}}));
-    let alone =
+    let parsed =
         published(&mut session, &models, |params| params["diagnostics"].as_array().is_some_and(|d| d.len() == 1));
-    assert_eq!(alone["diagnostics"][0]["source"], "dbt parse");
+    assert_eq!(parsed["diagnostics"][0]["source"], "dbt parse");
     assert!(session.finish().success());
 }
 
 /// A copy of the fixture for test NAME with `RUN_MODELS`, and a session
-/// alone in front of the fake, whose parses log ERROR at PLACE.
-fn alone_with_a_problem(name: &str, place: &str) -> (PathBuf, Session) {
+/// with the fake, whose parses log ERROR at PLACE.
+fn with_a_problem(name: &str, place: &str) -> (PathBuf, Session) {
     let project = copy_fixture(&format!("{name}-project"));
     std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
     let error = format!("[warning] [W (dbt1060)]: x\n  --> {place}");
@@ -1338,8 +1338,8 @@ fn alone_with_a_problem(name: &str, place: &str) -> (PathBuf, Session) {
 }
 
 #[test]
-fn alone_a_crlf_file_opened_with_lf_counts_as_saved() {
-    let (project, mut session) = alone_with_a_problem("standalone-crlf", "models/marts/customers.sql:3:1");
+fn a_crlf_file_opened_with_lf_counts_as_saved() {
+    let (project, mut session) = with_a_problem("standalone-crlf", "models/marts/customers.sql:3:1");
     let customers = project.join("models/marts/customers.sql");
     let text = std::fs::read_to_string(&customers).unwrap();
     std::fs::write(&customers, text.replace('\n', "\r\n")).unwrap();
@@ -1357,8 +1357,8 @@ fn alone_a_crlf_file_opened_with_lf_counts_as_saved() {
 }
 
 #[test]
-fn alone_a_new_run_leaves_an_unsaved_document_s_ranges_to_the_client() {
-    let (project, mut session) = alone_with_a_problem("standalone-run-unsaved", "models/marts/_models.yml:3:5");
+fn a_new_run_leaves_an_unsaved_document_s_ranges_to_the_client() {
+    let (project, mut session) = with_a_problem("standalone-run-unsaved", "models/marts/_models.yml:3:5");
     let models = project.join("models/marts/_models.yml");
     session.open(&models, None);
     published(&mut session, &models, |params| params["diagnostics"] != json!([]));
@@ -1378,7 +1378,7 @@ fn alone_a_new_run_leaves_an_unsaved_document_s_ranges_to_the_client() {
 }
 
 #[test]
-fn alone_a_parse_cut_short_keeps_the_last_problems() {
+fn a_parse_cut_short_keeps_the_last_problems() {
     let log_file = scratch("standalone-cut-short-log").join("parse.jsonl");
     let error = |what: &str| {
         let message = format!("[error] [DependencyNotFound (dbt1048)]: {what}\n  --> models/marts/orders.sql:1:1");
@@ -1403,7 +1403,7 @@ fn alone_a_parse_cut_short_keeps_the_last_problems() {
     assert!(session.finish().success());
 }
 
-/// The URI under which the proxy alone publishes dbt's error at PLACE,
+/// The URI under which the server publishes dbt's error at PLACE,
 /// named from the working directory that DIRECTORY gives of a copy of the
 /// fixture, as test NAME.
 fn published_from(name: &str, directory: impl Fn(&Path) -> PathBuf, place: &str) -> (PathBuf, Value) {
@@ -1425,7 +1425,7 @@ fn published_from(name: &str, directory: impl Fn(&Path) -> PathBuf, place: &str)
 }
 
 #[test]
-fn alone_a_problem_named_through_dot_dot_is_published_as_the_root_spells_it() {
+fn a_problem_named_through_dot_dot_is_published_as_the_root_spells_it() {
     // From a sibling, dbt's path reads from the root too.
     let (project, sibling) =
         published_from("standalone-sibling", |p| p.with_file_name("elsewhere"), "../shop/models/marts/orders.sql");
@@ -1436,7 +1436,7 @@ fn alone_a_problem_named_through_dot_dot_is_published_as_the_root_spells_it() {
 }
 
 #[test]
-fn alone_a_parse_leaves_an_unsaved_document_s_ranges_to_the_client() {
+fn a_parse_leaves_an_unsaved_document_s_ranges_to_the_client() {
     let error = "[error] [DependencyNotFound (dbt1048)]: x\n  --> models/marts/customers.sql:3:1";
     let log_file = scratch("standalone-unsaved-log").join("parse.jsonl");
     std::fs::write(&log_file, dbt_event("error", "1048", error) + &dbt_event("info", "Q039", "Finished")).unwrap();
@@ -1546,7 +1546,7 @@ fn a_hover_on_a_ref_gets_the_summary_first_and_any_other_passes_byte_for_byte() 
 }
 
 #[test]
-fn without_dbt_lsp_node_info_says_why_it_has_nothing() {
+fn with_no_dbt_node_info_says_why_it_has_nothing() {
     let project = fixture().to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project];
     let mut session = Session::start(&command, &[], None);
@@ -1626,7 +1626,7 @@ fn the_summary_alone_follows_the_client_s_first_hover_format() {
 }
 
 #[test]
-fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
+fn hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
     let (mut session, _) = Session::fake("standalone-hover", json!({"manifest": manifest()}));
     let capabilities = session.initialize(&fixture())["capabilities"].clone();
     assert_eq!(capabilities["textDocumentSync"], json!({"openClose": true, "change": 2, "save": {}}));
@@ -1653,7 +1653,7 @@ fn alone_hovers_and_hints_come_from_the_parse_and_saves_are_asked_for() {
 }
 
 #[test]
-fn alone_a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
+fn a_hover_at_a_file_s_start_shows_its_node_and_its_facts() {
     let mut manifest = manifest();
     let orders = &mut manifest["nodes"]["model.shop.orders"];
     orders["patch_path"] = json!("shop://models/marts/_orders.yml");
@@ -1715,7 +1715,7 @@ fn a_markdown_hover_gives_the_facts_byte_for_byte_as_claude_code_asks() {
 }
 
 #[test]
-fn alone_a_yaml_snapshot_s_file_names_no_node_at_its_start() {
+fn a_yaml_snapshot_s_file_names_no_node_at_its_start() {
     let project = copy_fixture("hover-yaml-snapshot-project");
     let snapshot = project.join("snapshots/_recent.yml");
     let yaml = "snapshots:\n  - name: recent\n    relation: ref('orders')\n    config:\n      unique_key: order_id\n      strategy: check\n      check_cols: all\n";
@@ -1748,7 +1748,7 @@ fn alone_a_yaml_snapshot_s_file_names_no_node_at_its_start() {
 }
 
 #[test]
-fn alone_a_hover_on_a_node_before_any_index_says_why() {
+fn a_hover_on_a_node_before_any_index_says_why() {
     let gate = scratch("hover-unindexed-gate").join("open");
     let script = json!({"manifest": manifest(), "parse_gate": gate});
     let (mut session, _) = Session::fake("hover-unindexed", script);
@@ -1779,7 +1779,7 @@ fn alone_a_hover_on_a_node_before_any_index_says_why() {
 }
 
 #[test]
-fn alone_a_hover_after_a_failed_parse_says_what_node_info_says() {
+fn a_hover_after_a_failed_parse_says_what_node_info_says() {
     let (mut session, _) = Session::fake("hover-unindexed-failed", json!({"parse_exit": 2}));
     session.initialize(&fixture());
     let orders = fixture().join("models/marts/orders.sql");
@@ -1948,7 +1948,7 @@ fn a_hover_and_node_information_on_a_project_that_no_longer_reads_say_so() {
 }
 
 #[test]
-fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why() {
+fn a_request_on_another_project_s_document_says_why_at_once() {
     let project = navigable("elsewhere-merge");
     let other = project.with_file_name("other");
     let m = other.join("models/m.sql");
@@ -2132,7 +2132,7 @@ fn a_definition_names_an_open_document_by_the_uri_it_was_opened_under() {
 }
 
 #[test]
-fn alone_a_ref_and_a_macro_call_in_sql_lead_where_dbt_resolves_them() {
+fn a_ref_and_a_macro_call_in_sql_lead_where_dbt_resolves_them() {
     let project = copy_fixture("sql-definitions-project");
     let package_models = project.join("dbt_packages/shop_utils/models");
     std::fs::create_dir_all(&package_models).unwrap();
@@ -2175,7 +2175,7 @@ fn alone_a_ref_and_a_macro_call_in_sql_lead_where_dbt_resolves_them() {
 }
 
 #[test]
-fn alone_the_references_of_a_ref_and_a_macro_span_the_project() {
+fn the_references_of_a_ref_and_a_macro_span_the_project() {
     let (mut session, _) = Session::fake("references-alone", json!({}));
     session.initialize(&fixture());
     let mut references = |file: &str, needle: &str, delta: usize, declaration: bool| {
@@ -2224,7 +2224,7 @@ fn with_a_function(name: &str) -> PathBuf {
 }
 
 #[test]
-fn alone_a_function_call_leads_to_its_file_and_back() {
+fn a_function_call_leads_to_its_file_and_back() {
     let project = with_a_function("function-alone");
     let flags = [Path::new("--project-dir"), &project];
     let (mut session, _) = Session::fake_with("function-alone", json!({}), &flags, None);
@@ -2242,7 +2242,7 @@ fn alone_a_function_call_leads_to_its_file_and_back() {
 }
 
 #[test]
-fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_with_dbt_lsp() {
+fn a_ref_in_a_python_model_leads_to_its_model_and_back() {
     let python = "def model(dbt, session):\n    return dbt.ref('stg_orders')\n";
     let project = copy_fixture("python-ref-project");
     std::fs::write(project.join("models/marts/py_orders.py"), python).unwrap();
@@ -2261,31 +2261,14 @@ fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_with_dbt_lsp() {
     assert!(session.finish().success());
 }
 
-/// A definition, references and a hover at the first `select` of
-/// `orders.sql`, where the proxy claims nothing, and the hints of
-/// `order_summary.sql`, which has none of the proxy's; then what the
-/// proxy answers each with alone.
-fn where_the_proxy_has_nothing() -> [(&'static str, Value, Value); 4] {
-    let nowhere = position_in(&fixture().join("models/marts/orders.sql"), "select", 1);
-    let mut references = nowhere.clone();
-    references["context"] = json!({"includeDeclaration": false});
-    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1000, "character": 0}});
-    let summary = uri(&fixture().join("models/marts/order_summary.sql"));
-    [
-        ("textDocument/definition", nowhere.clone(), Value::Null),
-        ("textDocument/references", references, json!([])),
-        ("textDocument/hover", nowhere, Value::Null),
-        ("textDocument/inlayHint", json!({"textDocument": {"uri": summary}, "range": range}), json!([])),
-    ]
-}
-
 #[test]
-fn alone_references_where_the_proxy_has_nothing_are_empty() {
+fn references_where_a_position_names_nothing_are_empty() {
     let (mut session, _) = Session::fake("alone-references-nothing", json!({}));
     session.initialize(&fixture());
-    let (method, params, nothing) = where_the_proxy_has_nothing()[1].clone();
-    let answer = session.request(method, params);
-    assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing), "{answer}");
+    // The first `select` of `orders.sql`.
+    let nowhere = without_declaration(position_in(&fixture().join("models/marts/orders.sql"), "select", 1));
+    let answer = session.request("textDocument/references", nowhere);
+    assert_eq!((answer.get("error"), &answer["result"]), (None, &json!([])), "{answer}");
     assert!(session.finish().success());
 }
 
@@ -2311,7 +2294,7 @@ fn versioned(name: &str) -> (PathBuf, Value) {
 }
 
 #[test]
-fn alone_a_versioned_ref_in_yaml_leads_to_its_version_once_parsed() {
+fn a_versioned_ref_in_yaml_leads_to_its_version_once_parsed() {
     let (project, manifest) = versioned("versioned-alone");
     let flags = [Path::new("--project-dir"), &project];
     let (mut session, _) = Session::fake_with("versioned-alone", json!({"manifest": manifest}), &flags, None);
@@ -2326,7 +2309,7 @@ fn alone_a_versioned_ref_in_yaml_leads_to_its_version_once_parsed() {
 }
 
 #[test]
-fn alone_a_definition_is_the_proxy_s_or_null() {
+fn with_no_dbt_a_definition_is_found_or_null() {
     let project = navigable("definition-alone");
     let project_arg = project.to_string_lossy().into_owned();
     let command = ["/nonexistent/dbt".into(), "lsp".into(), "--project-dir".into(), project_arg];

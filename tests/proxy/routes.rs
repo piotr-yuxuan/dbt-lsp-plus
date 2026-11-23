@@ -166,7 +166,7 @@ fn without_project_dir_the_first_document_in_a_project_names_it_and_its_dbt() {
 }
 
 #[test]
-fn on_a_project_from_a_document_the_proxy_answers_alone() {
+fn on_a_project_from_a_document_the_server_answers() {
     let (mut session, project, ..) = from_a_document("routes-document-answers");
     let orders = project.join("models/marts/orders.sql");
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
@@ -269,7 +269,7 @@ fn from_the_folder(name: &str) -> (Session, Value, PathBuf) {
 }
 
 #[test]
-fn without_project_dir_the_client_s_folder_s_dbt_without_lsp_leaves_the_proxy_alone() {
+fn without_project_dir_the_client_s_folder_s_dbt_without_lsp_serves() {
     let (session, result, dbt) = from_the_folder("routes-folder-alone");
     let said = log_messages(&session);
     assert_eq!(said.len(), 1, "{said:?}");
