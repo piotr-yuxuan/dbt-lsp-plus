@@ -352,7 +352,9 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
 
 /// The CLI's index of the project at ROOT, in WORKSPACE: the manifest kept
 /// for the project as it lies on disk, else that of a parse, guarded as
-/// alone, waited for, and kept when it did not fail.
+/// alone, waited for, and kept when it did not fail; a parse that ended
+/// well with no manifest that reads fails here, where no server's wait
+/// could explain the missing index.
 fn indexed(workspace: &mut Workspace, root: &Path) {
     let stamp = cache::disk(root);
     let cache = workspace.cache_dir(root);
@@ -365,8 +367,9 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
     workspace.parse(true, Some(Box::new(move |outcome| drop(sender.send(outcome)))));
     // None started: no report kept the channel open.
     let Ok(outcome) = outcomes.recv() else { return };
-    let failed = outcome.failure.is_some();
-    workspace.parsed(outcome.index, outcome.failure);
+    let failure = outcome.failure.or(outcome.index.is_none().then_some("it left no manifest that reads".to_owned()));
+    let failed = failure.is_some();
+    workspace.parsed(outcome.index, failure);
     if !failed && stamp != 0 {
         config::keep(&cache, stamp);
     }

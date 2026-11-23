@@ -196,6 +196,9 @@ failed parse still wrote, and `error` says why:
   names none;
 - `dbt parse failed: <dbt's first error> (see <log>)`, the log gone
   with the run directory;
+- `dbt parse failed: it left no manifest that reads`, when dbt ended
+  well but no manifest could be read where it was told to write one, as
+  under a wrapper that drops `--target-path`;
 - why the parse was refused, as doctor's `packages`, or `the server
   command has no lsp, so dbt-lsp-plus runs no dbt parse`;
 - `no dbt project at <root>: ...`, at a `ref`, a `source` or an entry's

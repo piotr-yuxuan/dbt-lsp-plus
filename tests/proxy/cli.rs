@@ -540,5 +540,10 @@ fn node_says_why_when_a_parse_fails_and_keeps_no_manifest() {
         status == Some(1) && answer["node"]["unique_id"] == "model.shop.orders" && why.starts_with(failed),
         "{answer}"
     );
+    // A parse that ends well but leaves no manifest that reads.
+    case.rescript(&json!({}));
+    let (status, answer) = case.run(&case.copy, &["node", "model.shop.orders"]);
+    let none = json!({"error": "dbt parse failed: it left no manifest that reads", "node": null});
+    assert_eq!((status, answer), (Some(1), none));
     assert_eq!(left_in_cache(&case), vec![Vec::<PathBuf>::new()], "no run left, no manifest kept");
 }
