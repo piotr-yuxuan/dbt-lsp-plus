@@ -141,6 +141,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Proxy::tell_settings`: what of the user's settings cannot take
     effect, said once, apart from `on_initialize`'s answer; plan 085
     deletes it with the modes;
+  - `modes::Table::capabilities`: what a session announces, read from the
+    table beside `Table::flag`, apart from `on_initialize`'s answer;
+    plan 085 rewrites it with the modes;
   - `config::anchored`: the server command's relative paths made the
     server's directory's, apart from where dbt then runs, with tests of
     its own;
@@ -182,9 +185,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     them, which files it reads, which local packages it follows), apart
     from what `packages::refused` decides;
   - `Proxy::targeted`, `Proxy::on_source`, `Proxy::on_rename`,
-    `Proxy::on_definition`, `Proxy::on_references` and
-    `Proxy::on_document`: the routing of a request by what its position
-    holds, and one answer per kind of request, as for the owned methods;
+    `Proxy::on_navigation` and `Proxy::on_document`: the routing of a
+    request by what its position holds, and one answer per kind of
+    request, as for the owned methods, a definition and references
+    sharing their reading of the position and the project;
   - `sources::replacement`, `sources::kept_relation`, `sources::refusal`
     and `sources::config_key`: each one rule of a rename (how a name is
     written where it goes; which lines keep the relation; when it is

@@ -202,6 +202,19 @@ impl Table {
         answered
     }
 
+    /// The capabilities a session announces: each method's outside `dbt`,
+    /// saves, which start a parse, the flag and the commands for clients.
+    pub fn capabilities(&self) -> Value {
+        let commands: Vec<&str> = CAPABILITIES.iter().filter(|c| c.is_command()).map(|c| c.name).collect();
+        let mut capabilities = json!({"textDocumentSync": {"openClose": true, "change": 2, "save": {}},
+                                      "experimental": {"dbtLspPlus": self.flag()},
+                                      "executeCommandProvider": {"commands": commands}});
+        for key in CAPABILITIES.iter().filter(|c| self.mode(c.name) != Mode::Dbt).filter_map(|c| c.key) {
+            capabilities[key] = json!(true);
+        }
+        capabilities
+    }
+
     /// The methods set to `dbt`, which no one answers.
     pub fn unanswered(&self) -> Vec<&'static str> {
         capability::with_mode().filter(|method| self.mode(method) == Mode::Dbt).collect()
