@@ -881,8 +881,18 @@ mod tests {
         for nothing in [Value::Null, json!([]), json!(3), echo, json!([{"range": ours["range"]}]), no_range] {
             assert_eq!(united(&ours, nothing.clone()), ours, "one location stays one: {nothing}");
         }
-        let holding = at("a.sql", (0, 0), (14, 0));
-        assert_eq!(united(&ours, json!([holding])), ours, "one range holds the other");
+        let (holding, name) = (at("a.sql", (0, 0), (14, 0)), at("a.sql", (1, 2), (1, 9)));
+        let (block, crossing) = (at("a.sql", (0, 0), (5, 0)), at("a.sql", (4, 0), (7, 0)));
+        let elsewhere = at("b.sql", (0, 0), (0, 0));
+        let matched = [
+            (&ours, &holding, ours.clone(), "one range holds the other"),
+            (&holding, &name, holding.clone(), "the proxy's range holds the server's"),
+            (&block, &crossing, json!([block, crossing]), "ranges that only cross"),
+            (&ours, &elsewhere, json!([ours, elsewhere]), "one range in another file"),
+        ];
+        for (found, server, expected, why) in matched {
+            assert_eq!(united(found, json!([server])), expected, "{why}");
+        }
         let other = at("b.sql", (1, 2), (1, 4));
         assert_eq!(united(&ours, json!([other])), json!([ours, other]));
         let link = json!({"targetUri": "file:///p/c.sql", "targetRange": at("c.sql", (0, 0), (9, 0))["range"],
