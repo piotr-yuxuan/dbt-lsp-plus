@@ -144,8 +144,8 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
 /// even for one model, or a top-level merge key, which may bring one.  A
 /// plain null (the empty one, no value, included), `""` or `[]` is none;
 /// any other value is one.  A `dbt_project.yml` that does not read refuses
-/// too, and one with no hook found that repeats a key, of which dbt reads
-/// the last, refuses in words of its own.
+/// too, and one that repeats a key refuses in words of its own, hook or
+/// none: dbt reads the last of repeated keys, and `Tree::get` the first.
 pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
     let install = packages::install_path(root, server).unwrap_or_default();
     let mut installed: Vec<fs::DirEntry> = fs::read_dir(install).into_iter().flatten().flatten().collect();
@@ -164,7 +164,7 @@ pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
         let name = config.get("name").and_then(Tree::as_str).unwrap_or("a package");
         let hook = format!("{name} has on-run hooks, which dbt compile would run against the warehouse");
         let repeat = format!("{} repeats a key, of which dbt reads the last: a hook may hide there", file.display());
-        hooked.then_some(hook).or(config.repeats().then_some(repeat))
+        config.repeats().then_some(repeat).or(hooked.then_some(hook))
     };
     std::iter::once(root.to_owned()).chain(installed.iter().map(fs::DirEntry::path)).find_map(refusal)
 }
@@ -345,7 +345,7 @@ mod tests {
             "hooks: &hooks select 1\non-run-end: *hooks\n",
             "base: &base\n  on-run-end: select 1\n<<: *base\n",
         ];
-        // dbt reads the last of two keys, where a hook may hide, at any depth.
+        // dbt reads the last of two keys, where a hook may hide, at any depth: a repeat refuses first.
         let repeated = |file: &str| {
             Some(format!(
                 "{} repeats a key, of which dbt reads the last: a hook may hide there",
@@ -353,9 +353,12 @@ mod tests {
             ))
         };
         let (nested, root) = ("models:\n  +materialized: view\n  +materialized: table\n", repeated("dbt_project.yml"));
+        let beside = format!("{hook}{nested}");
         let cases = forms.map(|form| ([form, "", ""], refused("shop"))).into_iter().chain([
             (["on-run-end: []\non-run-end: select 1\n", "", ""], root.clone()),
             (["base: &base\n  on-run-end: select 1\n<<: []\n<<: *base\n", "", ""], root.clone()),
+            (["on-run-end: select 1\non-run-end: []\n", "", ""], root.clone()),
+            ([beside.as_str(), "", ""], root.clone()),
             ([nested, "", ""], root),
             (["", "", nested], repeated("dbt_packages/a_utils/dbt_project.yml")),
         ]);
