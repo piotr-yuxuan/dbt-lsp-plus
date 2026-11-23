@@ -230,19 +230,13 @@ alike unless said:
 - dbt lsp 2.0.9: `dbt.compileFile [URI]` answers `{"error": null,
   "file_uri": "file:///…/target/compiled/shop/models/marts/orders.sql"}`,
   and on a file of no node `{"error": "Compiled file path not found.",
-  "file_uri": null}`; `dbt.show` fails as `{"columns": null, "data": null,
-  "error": TEXT}`, offline on the driver, with or without a limit;
-  `dbt.listNodes ["+stg_orders+"]` answers `{"error": null, "error_kind":
-  null, "grain": "project", "nodes": [...]}`, each node with its
-  `unique_id`, `name`, `resource_type`, `package_name`,
-  `original_file_path`, `depends_on.nodes` and `config` (`access`, `group`,
-  `materialized`), and an empty selection `{"error": "No nodes found",
-  "error_kind": "lineage_query_failed", "grain": "unknown", "nodes": [],
-  "root_project": "shop"}`; `textDocument/codeLens` gives each CTE of a
-  model `{"command": {"command": "dbt.previewCte", "title": "Preview CTE",
-  "arguments": [PATH, {"name", "compiled_path", "compiled_start",
-  "compiled_stop", "start", "stop", "start_location"}]}, "range"}`, PATH a
-  path, not a URI.
+  "file_uri": null}`; `dbt.listNodes ["+stg_orders+"]` answers
+  `{"error": null, "error_kind": null, "grain": "project", "nodes":
+  [...]}`, each node with its `unique_id`, `name`, `resource_type`,
+  `package_name`, `original_file_path`, `depends_on.nodes` and `config`
+  (`access`, `group`, `materialized`), and an empty selection `{"error":
+  "No nodes found", "error_kind": "lineage_query_failed", "grain":
+  "unknown", "nodes": [], "root_project": "shop"}`.
 - `dbt compile --select path:R`, with the proxy's flags and the working
   directory elsewhere, compiles
   statically and writes the node and the tests on it (`*.sql`,
@@ -625,8 +619,7 @@ none, the server answers `initialize` before it can know it.
     sits in a YAML value such as a test's `to:`, is no plain identifier:
     that value may be a plain scalar, where `#`, `: `, `,` or a space at an
     edge would change it while the file still parses.
-- Without a server, the proxy announces references and rename too, for
-  sources and CTEs; on anything else they fail as other requests do.
+- Elsewhere, references answer `[]` and a rename null.
 
 ## The last run as diagnostics
 
@@ -677,15 +670,13 @@ probe where it reported a model's error, and left it alone in another.
 The places are found again in the file's text, open or on disk, at each
 publication, its entries and tests read once.  A file the client changes
 or saves after the run loses its failures, as does one whose file is newer
-than the results; when the server has diagnostics for it (not an empty
-set), the proxy publishes nothing then, since their ranges are of the text
-before the edit, and the server's next publication goes out without the
-failures.  Per file, the
-proxy keeps the server's last diagnostics and URI and the URI it last
-published under: the server's notification passes byte for byte for a file
-without failures, else the proxy publishes the server's diagnostics with
-its own appended, under the server's URI, else the client's, else the
-file's, first clearing a URI it published under before.  Nothing after
+than the results; when the last parse has problems in it (not an empty
+set), the server publishes nothing then, since their ranges are of the
+text before the edit, which the client has moved, and the next parse's
+publication goes out without the failures.  A file's failures and its
+parse's problems go out together, under the URI the client opened it
+under, else the file's; the server keeps the URI it last published each
+file under and first clears it when the URI changes.  Nothing after
 `shutdown`.
 
 ## Navigation
@@ -783,9 +774,7 @@ Hover there extends the hover summary (see "Node information and hover"):
 on a `doc`, the docs block's markdown as written, if it holds any; on a
 generic test, its opening tag and its package, in a code block for a
 client that reads markdown; on an entry's `name:`, its
-node's summary, which `nodeInfo` with that position gives whole.  Without a
-server, the proxy announces `definitionProvider`, answers the same targets,
-and gives null elsewhere rather than a failure.
+node's summary, which `nodeInfo` with that position gives whole.
 
 ## Within a document
 
@@ -851,7 +840,6 @@ CTE:
   arguments of `ref` and `source`, which name models and sources, and the
   names of functions do not count.  A name a macro builds, as in `'ord' ~
   'ers'`, cannot be seen.
-- Without a server, all of these still answer.
 
 ## Node information and hover
 
@@ -927,10 +915,6 @@ the server runs the user's own `dbt parse`.
   `model.p.m.v2`; snapshots declared in YAML; functions (`function('f')`,
   as `function.p.f`), on DuckDB too; and `dbt.ref` and `dbt.source` in a
   Python model.  The scan reads each since plan 018.
-- The server's hover on a `ref` is markdown with no range, starting with the
-  description and the parents and children; on a `source()`, a column, a
-  macro call or a comment it answers null.  The fake does not model this:
-  each test that hovers scripts the server's answer.
 
 ### How the server runs it
 

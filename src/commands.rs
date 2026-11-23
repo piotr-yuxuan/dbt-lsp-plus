@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The commands for clients `dbt-lsp-plus.compile` and `.nodes`, done by
 //! dbt's CLI: the words of a run, and what its output answers, in the
-//! shapes of dbt lsp 2.0.9's `dbt.compileFile` and `dbt.listNodes`.
+//! shapes that the table of design.md's "Commands for clients" holds as
+//! their contract.
 
 use crate::run::{self, Ending, Output, Run, Running};
 use crate::{packages, project::Project, yaml::Tree};
@@ -17,7 +18,8 @@ pub const NODES: &str = "dbt-lsp-plus.nodes";
 /// are those before it.
 pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
 
-/// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
+/// The error of a compile that finds no compiled file, in the contract's
+/// words.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
 
 /// COMMAND's answer that fails for WHY: `error` set, the rest null, or `[]`
@@ -145,8 +147,8 @@ pub fn nodes_job(selector: &str) -> Job {
 }
 
 /// The nodes in TEXT, `dbt list --output json`'s output: each line that is
-/// a JSON object with a `unique_id`; "No nodes found" for none, as dbt lsp
-/// 2.0.9 answers.
+/// a JSON object with a `unique_id`; "No nodes found" for none, as the
+/// contract has it.
 pub fn listed(text: &str) -> Value {
     let nodes = text.lines().filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok());
     let nodes: Vec<Value> = nodes.filter(|node| node["unique_id"].is_string()).collect();

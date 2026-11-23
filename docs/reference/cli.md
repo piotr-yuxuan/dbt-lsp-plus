@@ -82,8 +82,8 @@ Without a project, doctor runs nothing at all and says so:
 On the given route the error is `no dbt_project.yml in DIR, the server
 command's --project-dir`.
 
-Exit status: 0 when a project is found whose dbt answers as a dbt 2 does
-(`dbt.lsp` `true` or `false`); 1 otherwise; 2 for a usage error.
+Exit status: 0 when a project is found whose dbt answers `lsp --help` as
+a dbt 2 does (`dbt.why` `null`); 1 otherwise; 2 for a usage error.
 
 What it runs is what the server runs as it starts, and nothing else:
 `git rev-parse` once, on the folder's and a document's routes when the

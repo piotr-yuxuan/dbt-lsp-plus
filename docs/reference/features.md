@@ -228,9 +228,9 @@ X` or `--flag=X`.
   folder or `rootUri`, when it holds a `dbt_project.yml`; else the
   project of the first file opened in one: the nearest directory above it
   holding a `dbt_project.yml` that lies in no package, installed or local,
-  of a project above it.  Before that the server runs nothing and answers
-  every request with null.  The working directory never names the
-  project.
+  of a project above it.  Before that the server runs nothing, answers
+  each request of its own with null, and any other with -32601.  The
+  working directory never names the project.
 - `--profiles-dir DIR`: where `profiles.yml` is.  Default, as dbt's:
   dbt's working directory, then `~/.dbt`.  dbt runs in the project when
   the client's folder or a file named it, so a `profiles.yml` beside

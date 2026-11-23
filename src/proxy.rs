@@ -1204,8 +1204,8 @@ impl<W: Write> Proxy<W> {
         self.send_client(&publish(&uri, diagnostics));
     }
 
-    /// Handles the events of INBOX until `exit`, or until the client closes
-    /// its output.
+    /// Handles the events of INBOX, one epoch each, until `exit`, or until the
+    /// client closes its output.
     fn serve(&mut self, inbox: Receiver<Event>) {
         for event in inbox {
             // A new epoch: the cache looks at the project's files again.
