@@ -83,14 +83,10 @@
 //!     dbt's log; `run_exit`, the status of either; `run_gate`, a file
 //!     either waits for first; `run_hang`, true when either never exits;
 //! - `FAKE_DBT_LSP_LOG`: a file to which the body of each message received is
-//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID,
-//!   "interfaces": NAMES, "wrote": WROTE}`, NAMES those of the network it
-//!   can reach, WROTE whether it could write into its `--project-dir` when
-//!   the script says `parse_write`,
+//!   appended as one line; a parse appends `{"parse": ARGUMENTS, "pid": PID}`
 //!   to that file's name followed by `.parses`, since two processes
 //!   appending to one file could interleave their lines, and a compile or a
-//!   list `{"run": ARGUMENTS, "pid": PID, "interfaces": NAMES}` to its name
-//!   followed by `.runs`, and `{"ended": PID}` there as it exits; and each
+//!   list `{"run": ARGUMENTS, "pid": PID}` to its name followed by `.runs`, and `{"ended": PID}` there as it exits; and each
 //!   server
 //!   process, a life of the fake, appends its pid to the name followed by
 //!   `.lives`, by which it knows its life; and every process of the fake,
@@ -380,13 +376,8 @@ fn refuse_or_help(script: &Value, arguments: &[String], counted: bool) {
 
 /// `dbt parse` as the script plays it, with the arguments ARGUMENTS.
 fn parse(script: &Value, arguments: &[String], log: Option<File>) {
-    let project = arguments.iter().position(|argument| argument == "--project-dir").map(|at| &arguments[at + 1]);
-    let probe = project.filter(|_| script["parse_write"] == json!(true)).map(|dir| Path::new(dir).join(".written"));
-    // Removed at once, so that a parse that could write leaves nothing.
-    let wrote =
-        probe.is_some_and(|probe| std::fs::write(&probe, "").and_then(|()| std::fs::remove_file(&probe)).is_ok());
     if let Some(mut log) = log {
-        let line = json!({"parse": arguments, "pid": std::process::id(), "interfaces": interfaces(), "wrote": wrote});
+        let line = json!({"parse": arguments, "pid": std::process::id()});
         log.write_all(format!("{line}\n").as_bytes()).expect("write the log");
     }
     if let Some(log) = script["parse_log"].as_str() {
@@ -413,12 +404,6 @@ fn parse(script: &Value, arguments: &[String], log: Option<File>) {
     std::process::exit(script["parse_exit"].as_i64().unwrap_or(0) as i32);
 }
 
-/// The names of the network interfaces this process can reach.
-fn interfaces() -> Vec<String> {
-    let devices = std::fs::read_to_string("/proc/self/net/dev").unwrap_or_default();
-    devices.lines().skip(2).filter_map(|line| Some(line.split_once(':')?.0.trim().to_owned())).collect()
-}
-
 /// The value of FLAG in ARGUMENTS, the word after it.
 fn flag<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
     arguments.iter().position(|argument| argument == flag).map(|at| arguments[at + 1].as_str())
@@ -428,7 +413,7 @@ fn flag<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
 /// it.
 fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
     if let Some(log) = &mut log {
-        let line = json!({"run": arguments, "pid": std::process::id(), "interfaces": interfaces()});
+        let line = json!({"run": arguments, "pid": std::process::id()});
         log.write_all(format!("{line}\n").as_bytes()).expect("write the log");
     }
     if let Some(gate) = script["run_gate"].as_str() {

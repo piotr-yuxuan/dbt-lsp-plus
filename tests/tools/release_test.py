@@ -278,12 +278,6 @@ class Workflows(unittest.TestCase):
                 self.assertNotIn(-1, places)
                 self.assertEqual(places, sorted(places))
 
-    def test_the_test_job_lets_the_proxy_cut_its_parse_off_the_network(self):
-        job = self.jobs["test"]
-        sysctl = "      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
-        sysctl = job.index(sysctl)
-        self.assertLess(sysctl, job.index("      - run: nix develop -c make test"))
-
     def test_no_cache_holds_a_fetched_dbt(self):
         for name, job in self.jobs.items():
             with self.subTest(name):

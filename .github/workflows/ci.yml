@@ -71,9 +71,6 @@ jobs:
             target
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
-      # The proxy cuts its parse off the network where `unshare -r` works, and the tests
-      # check it on Linux.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: nix develop -c make test
 
   # A beginning on macOS, whose result counts for neither CI nor a release, though CD waits

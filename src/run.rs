@@ -4,7 +4,7 @@
 //! with its command line, working directory, deadline, log and target, and
 //! one reader whose outcome is reported once; and `finish`, which waits for
 //! a child and kills it past its deadline: a Run's dbt, dbt's probe of
-//! `lsp --help` and git through `locate`, and the cut's probe.
+//! `lsp --help` and git through `locate`.
 
 use crate::parse_log;
 use serde_json::Value;

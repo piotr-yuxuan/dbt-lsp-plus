@@ -32,11 +32,7 @@ runner's AppArmor otherwise refuses `unshare -r`, then `unshare -rn true`, so th
 cannot run its tests with no network fails rather than passes. It builds the tests with the
 network, `cargo test --locked -j 4 --test proxy --no-run`, then runs the corpus and the live test
 under `unshare -rn`: whatever reaches the network fails. `dbt lsp` runs as the user's command
-gives it, with no flag of the proxy's. The corpus runs each parse under `unshare -rn` again when
-it can, and says "network namespace: no" when it cannot. The `test` job runs the same `sysctl`, as
-the proxy cuts its own parse off the network and from writing the project where it can, and a test
-fails on Linux when it cannot; the proxy's own parse cuts itself again, a namespace within the
-job's.
+gives it, with no flag of the proxy's, and so do the proxy's runs of dbt.
 
 ### dbt
 
@@ -87,7 +83,7 @@ for neither CI nor CD. Its permission is `contents: read`.
 
 What a weekly run shows beyond CI: the latest dbt's resolution, as new and stale divergences;
 a changed error code, through a case's `expected-error`; the proxy's parse flags still
-accepted; a need of the network under the cut; dbt writing into the project; and with the
+accepted; a need of the network; dbt writing into the project; and with the
 proprietary build, the drift of what the live test checks of dbt lsp's protocol, and with
 dbt-oss, of its refusal of `lsp` and its JSON log. Not: rules
 that the corpus has no case for, whether the fake server is still faithful, macOS and other

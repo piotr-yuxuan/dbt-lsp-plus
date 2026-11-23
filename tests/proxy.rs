@@ -2254,24 +2254,6 @@ fn a_parse_takes_the_server_s_reading_flags_and_keeps_its_output_in_the_cache() 
 }
 
 #[test]
-fn a_parse_is_cut_off_the_network_and_its_project_where_it_can_be() {
-    let project = copy_fixture("parse-cut-project");
-    let flags = [Path::new("--project-dir"), &project];
-    let script = json!({"manifest": manifest(), "parse_write": true});
-    let (mut session, log) = Session::fake_with("parse-cut", script, &flags, None);
-    session.initialize(&project);
-    parsed_orders(&mut session);
-    // Linux can, CI's runner once its AppArmor allows it; elsewhere, dbt's
-    // flags and the guard on packages alone keep it offline and harmless.
-    let cut = dbt_lsp_plus::config::can_cut();
-    assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
-    let parse = &parses(&log)[0];
-    let expected = if cut { (json!(["lo"]), json!(false)) } else { (parse["interfaces"].clone(), json!(true)) };
-    assert_eq!((parse["interfaces"].clone(), parse["wrote"].clone()), expected);
-    assert!(session.finish().success());
-}
-
-#[test]
 fn node_info_gives_the_summary_a_hover_shows() {
     let nothing = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
     let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/hover": nothing}});
@@ -2508,9 +2490,8 @@ fn alone_the_parse_s_problems_are_diagnostics_until_a_parse_without_them() {
 #[test]
 fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
     let project = copy_fixture("standalone-broken-project");
-    // dbt still parses, and says where; the scan can no longer read it.
-    let config = std::fs::read_to_string(project.join("dbt_project.yml")).unwrap();
-    std::fs::write(project.join("dbt_project.yml"), config + "models: [\n").unwrap();
+    // dbt's log alone says where the project file is broken: one that the
+    // guard on packages cannot read is refused before dbt runs.
     let log_file = scratch("standalone-broken-project-log").join("parse.jsonl");
     let nowhere = dbt_event("warn", "1097", "[warning] [UnusedResourceConfigPath (dbt1097)]: Configuration paths");
     let at =
@@ -2519,22 +2500,10 @@ fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
     std::fs::write(&log_file, at(2) + &nowhere + &completed).unwrap();
     let flags = [Path::new("--project-dir"), &project];
     let script = json!({"no_lsp": true, "parse_log": log_file});
-    let (mut session, log) = Session::fake_with("standalone-broken-project-session", script, &flags, None);
+    let (mut session, _) = Session::fake_with("standalone-broken-project-session", script, &flags, None);
     session.initialize(&project);
     let model = project.join("models/marts/orders.sql");
     session.open(&model, None);
-    // Without the cut, the guard on packages refuses a project file it
-    // cannot read, as dbt may read it and install packages.
-    let cut = dbt_lsp_plus::config::can_cut();
-    assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
-    if !cut {
-        let refused =
-            |m: &Value| m["params"]["message"].as_str().is_some_and(|text| text.contains("which dbt may read"));
-        session.wait_for(refused);
-        parses_stay(&log, 0);
-        assert!(session.finish().success());
-        return;
-    }
     let on_line = |line: u64| move |params: &Value| params["diagnostics"][0]["range"]["start"]["line"] == line;
     published(&mut session, &project.join("dbt_project.yml"), on_line(1));
     // The next parse moves the error; the warning stays logged once.

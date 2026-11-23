@@ -52,8 +52,6 @@ pub struct Workspace {
     /// The user's dbt, from which every run of dbt is made: the server
     /// command, and where dbt's processes run.
     pub dbt: config::Dbt,
-    /// Whether a parse runs cut off the network and from writing the project.
-    pub cut: bool,
     /// The front end's count of its events: the scan looks at the files once an epoch.
     pub epoch: u64,
     /// The last parse's index: `parsed` alone writes it, as it moves the
@@ -234,12 +232,12 @@ impl Workspace {
     /// for the front end to tell once.
     pub fn parse(&mut self, report: Option<config::ReportFn>) -> Option<String> {
         let root = self.root.clone().filter(|_| !self.fresh && self.running.is_none())?;
-        if let Some(why) = packages::refused(&root, self.dbt.command(), self.cut) {
+        if let Some(why) = packages::refused(&root, self.dbt.command()) {
             return self.failed(Some(why));
         }
         let cache = self.cache_dir(&root);
         let parse = config::PARSE.map(str::to_owned);
-        let Some(run) = self.dbt.run(&parse, &root, cache, config::PARSE_LOG, self.cut) else {
+        let Some(run) = self.dbt.run(&parse, &root, cache, config::PARSE_LOG) else {
             return self.failed(Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".into()));
         };
         let report = report?;

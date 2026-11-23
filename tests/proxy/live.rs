@@ -420,8 +420,7 @@ fn from_a_shell(project: &Path, lsp: bool) {
         (Some(0), (&json!("document"), &json!("the project's .venv"), &json!(lsp))),
         "{doctor}"
     );
-    let cut = dbt_lsp_plus::config::can_cut();
-    assert_eq!((&doctor["cut"], &doctor["packages"]), (&json!(cut), &Value::Null), "{doctor}");
+    assert_eq!(doctor["packages"], Value::Null, "{doctor}");
     // node by id, then by a place, from one parse of its own, whose manifest is kept.
     let (status, by_id) = run(project, &["node", "model.shop.stg_orders"]);
     let (_, by_place) = run(project, &["node", "models/marts/orders.sql:5:29"]);
@@ -435,11 +434,6 @@ fn from_a_shell(project: &Path, lsp: bool) {
         "{by_id} {by_place}"
     );
     let (status, selected) = run(project, &["select", "+stg_orders+"]);
-    if !cut {
-        let _ = writeln!(std::io::stderr(), "from_a_shell: this system cannot cut: the refusal checked instead");
-        assert_eq!((status, &selected["nodes"]), (Some(1), &json!([])), "{selected}");
-        return assert!(selected["error"].as_str().unwrap().contains("cut off the network"), "{selected}");
-    }
     let nodes = selected["nodes"].as_array().into_iter().flatten();
     let orders = nodes.clone().find(|node| node["unique_id"] == "model.shop.orders");
     let upstream = orders.and_then(|orders| orders["depends_on"]["nodes"].as_array());
@@ -523,17 +517,12 @@ fn commands(session: &mut Session, project: &Path) {
     assert!(ids(&nodes).contains(&"model.shop.orders".to_owned()), "{nodes}");
 }
 
-/// Alone, the proxy's commands for clients by dbt's CLI, cut off the
-/// network: a model's compiled file in its cache, a snapshot's in the
-/// directory named after its file, and the nodes of a selector.
+/// Alone, the proxy's commands for clients by dbt's CLI: a model's
+/// compiled file in its cache, a snapshot's in the directory named after
+/// its file, and the nodes of a selector.
 fn alone_commands(session: &mut Session, project: &Path) {
     let compile =
         |session: &mut Session, file: &str| execute(session, "dbt-lsp-plus.compile", json!([uri(&project.join(file))]));
-    if !dbt_lsp_plus::config::can_cut() {
-        let refused = compile(session, "models/marts/orders.sql");
-        assert!(refused["result"]["error"].as_str().unwrap().contains("cut off the network"), "{refused}");
-        return;
-    }
     let (file, text) = compiled_file(&compile(session, "models/marts/orders.sql"));
     assert!(
         file.ends_with("run/target/compiled/shop/models/marts/orders.sql") && !text.contains("{{"),

@@ -68,7 +68,7 @@ fn without_a_project_the_proxy_answers_null_and_runs_nothing() {
     let dir = scratch("routes-quiet");
     let (bin, log, stderr) = (dir.join("bin"), dir.join("stubs.log"), dir.join("stderr"));
     let stub = format!("echo \"$0 $*\" >> '{}'\nexit 1", log.display());
-    ["dbt", "unshare", "git"].iter().for_each(|name| script(&bin.join(name), &stub));
+    ["dbt", "git"].iter().for_each(|name| script(&bin.join(name), &stub));
     let folder = dir.join("repo");
     let (yml, sql) = (folder.join("notes/x.yml"), folder.join("notes/y.sql"));
     fs::create_dir_all(yml.parent().unwrap()).unwrap();
@@ -374,17 +374,11 @@ fn a_project_from_a_document_runs_dbt_in_its_directory() {
     let info = session.poll(Duration::from_secs(10), request, |result| result.is_object());
     assert_eq!(info["unique_id"], "model.shop.orders");
     assert_eq!(path_of(&started(&starts(&log), "parse")["cwd"]), resolved(&project), "the parse");
-    if dbt_lsp_plus::config::can_cut() {
-        let compiled = session.request(
-            "workspace/executeCommand",
-            json!({"command": "dbt-lsp-plus.compile", "arguments": [uri(&orders)]}),
-        );
-        let file = compiled["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("{compiled}"));
-        assert!(url::Url::parse(file).unwrap().to_file_path().unwrap().is_file(), "{compiled}");
-        assert_eq!(path_of(&started(&starts(&log), "compile")["cwd"]), resolved(&project), "the compile");
-    } else {
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), b"no cut here: the compile is not checked\n");
-    }
+    let compiled = session
+        .request("workspace/executeCommand", json!({"command": "dbt-lsp-plus.compile", "arguments": [uri(&orders)]}));
+    let file = compiled["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("{compiled}"));
+    assert!(url::Url::parse(file).unwrap().to_file_path().unwrap().is_file(), "{compiled}");
+    assert_eq!(path_of(&started(&starts(&log), "compile")["cwd"]), resolved(&project), "the compile");
     assert_eq!(node_info(&mut session, json!("model.shop.orders"))["result"]["unique_id"], "model.shop.orders");
     assert!(session.finish().success());
 }
@@ -413,10 +407,6 @@ fn a_project_from_a_document_reads_dbt_s_paths_from_its_directory() {
     session.initialize(&repo);
     let orders = project.join("models/marts/orders.sql");
     session.open(&orders, None);
-    if !dbt_lsp_plus::config::can_cut() {
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), b"no cut here: neither the parse nor the compile\n");
-        return;
-    }
     let found = published(&mut session, &project.join("models/staging/_sources.yml"), |params| {
         params["diagnostics"] != json!([])
     });

@@ -22,9 +22,8 @@ usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
 Says on one line of JSON what the server would find from PATH, by default
 the current directory: the project and by which route; the dbt, where from,
 what was skipped, and whether it has `lsp`; whether the server would answer
-alone, and why; whether this system can cut dbt off the network; why a parse
-would be refused, if it would.  It runs only what the server runs as it
-starts: git, `lsp --help` of the dbt, `unshare` on `true`.  ARGUMENTS are
+alone, and why; why a parse would be refused, if it would.  It runs only
+what the server runs as it starts: git and `lsp --help` of the dbt.  ARGUMENTS are
 the server's own, as an editor gives them: `--backend never`, `-- dbt lsp
 --project-dir DIR`.  Exit status 0 when a project is found whose dbt answers
 as a dbt 2 does, 1 otherwise, 2 for a usage error.
@@ -35,8 +34,8 @@ const SELECT_USAGE: &str = "\
 usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
 
 Lists on one line of JSON the nodes that the dbt selector SELECTOR selects in
-the project of the current directory, as `dbt list` gives them, cut off the
-network: {\"nodes\": [...], \"error\": null}, or `error` set and no node.
+the project of the current directory, as `dbt list` gives them:
+{\"nodes\": [...], \"error\": null}, or `error` set and no node.
 ARGUMENTS are the server's own, as for doctor.  Exit status 0 when nodes are
 listed, 1 otherwise, \"No nodes found\" included, 2 for a usage error.
 
@@ -262,29 +261,24 @@ fn doctor(path: &Path, launch: Launch, command: &[String]) -> (Value, bool) {
         },
     };
     let alone = locate::alone(launch == Launch::Never, route, || probed == Ok(false));
-    let cut = config::can_cut();
     // With the server command as given, as select asks it: finding the dbt
     // changes only a bare `dbt`, and the guard reads none of it.
-    let packages = packages::refused(&project, command, cut);
+    let packages = packages::refused(&project, command);
     let skipped = dbt.skipped.iter().map(|(path, why)| json!({"path": path.display().to_string(), "why": why}));
     let found = json!({"command": dbt.command, "named": dbt.named, "source": dbt.source,
                        "skipped": skipped.collect::<Vec<_>>(), "lsp": probed.as_ref().ok(), "why": probed.as_ref().err()});
     // The route's name as the enum spells it, in lower case.
     let route = format!("{route:?}").to_lowercase();
     let answer = json!({"version": version, "path": shown, "project": project.display().to_string(), "route": route,
-                        "dbt": found, "alone": alone, "cut": cut, "packages": packages});
+                        "dbt": found, "alone": alone, "packages": packages});
     (answer, probed.is_ok())
 }
 
 /// The nodes that SELECTOR selects in the project of the current directory
 /// with the server command COMMAND, as `dbt-lsp-plus.nodes` answers them: by
-/// `dbt list` under the cut, in a run directory removed afterwards; or why
-/// it did not run.  Refused before anything runs where the system cannot
-/// cut, without a project, or by the guard.
+/// `dbt list`, in a run directory removed afterwards; or why it did not
+/// run.  Refused before anything runs without a project, or by the guard.
 fn select(selector: &str, command: &[String]) -> Value {
-    if let Err(failure) = commands::route(commands::NODES, &|_| false, config::can_cut()) {
-        return failure;
-    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let (project, route) = match project(&cwd, command) {
         Ok(found) => found,
@@ -297,7 +291,7 @@ fn select(selector: &str, command: &[String]) -> Value {
     };
     // The guard reads the server command's install path, which finding its
     // dbt leaves as is.
-    if let Some(why) = packages::refused(&project, command, true) {
+    if let Some(why) = packages::refused(&project, command) {
         return commands::failure(commands::NODES, &why);
     }
     let (dbt, dir) = dbt_of(&project, route, command);
@@ -305,7 +299,7 @@ fn select(selector: &str, command: &[String]) -> Value {
     // What a select or a proxy killed by a signal left, swept after a day, as `Workspace::cache_dir` does.
     config::remove_stale(&cache);
     let job = commands::nodes_job(selector);
-    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), config::RUN_LOG, true);
+    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), config::RUN_LOG);
     let Some(run) = run else {
         return commands::failure(commands::NODES, commands::NO_LSP_WORD);
     };
@@ -399,8 +393,7 @@ fn node(asked: &str, command: &[String]) -> Value {
     };
     let (dbt, dir) = dbt_of(&root, route, command);
     let mut workspace = Workspace::default();
-    (workspace.root, workspace.dbt, workspace.cut) =
-        (Some(root.clone()), config::Dbt::new(dbt.command, dir), config::can_cut());
+    (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
     indexed(&mut workspace, &root);
     let which = match place {
         Operand::Id(id) => Which::Id(id),

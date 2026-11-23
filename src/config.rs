@@ -12,8 +12,6 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// The command under which dbt-lsp-plus answers a node's information.
@@ -34,21 +32,6 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// The flags of `dbt lsp` that `dbt parse` takes too and that change what it
 /// reads.
 const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "--packages-install-path"];
-
-/// The cut, before a command and the directory it guards: a user namespace
-/// that no network reaches, where that directory is mounted read-only, so
-/// that dbt's install of packages fails there rather than rewrite it.
-/// Recursive first, as a directory holding a mount point needs, where the
-/// system has it.  The working directory is then entered again, through
-/// the mount: one in that directory would still reach what lies under it;
-/// one that cannot be entered again stops the run.
-const CUT: [&str; 5] = [
-    "unshare",
-    "-rnm",
-    "sh",
-    "-c",
-    r#"{ mount -o rbind,ro=recursive -- "$0" "$0" 2>/dev/null || mount -o bind,ro -- "$0" "$0"; } && here=$(pwd -P) && cd -- "$here" && exec "$@""#,
-];
 
 /// The words of the proxy's `dbt parse`, as `Dbt::run` takes them.
 pub const PARSE: [&str; 3] = ["parse", "--log-format", "json"];
@@ -104,22 +87,14 @@ impl Dbt {
         self.dir.as_deref()
     }
 
-    /// Whether its command has `lsp`, from which its runs are made.
-    pub fn runs(&self) -> bool {
-        self.launcher.is_some()
-    }
-
     /// The run of dbt WORDS, as `PARSE`: the words before `lsp`, then WORDS,
     /// then the flags of KEPT; the project at ROOT; its output under CACHE,
     /// its log LOG there, with neither telemetry nor a check of versions;
-    /// under the cut when CUT, which guards ROOT; killed past
-    /// `PARSE_DEADLINE`.  None when the command has no `lsp` word.
-    pub fn run(&self, words: &[String], root: &Path, cache: PathBuf, log: &'static str, cut: bool) -> Option<Run> {
-        let launcher = self.launcher.as_ref()?;
+    /// killed past `PARSE_DEADLINE`.  None when the command has no `lsp`
+    /// word.
+    pub fn run(&self, words: &[String], root: &Path, cache: PathBuf, log: &'static str) -> Option<Run> {
         let path = |path: &Path| path.to_string_lossy().into_owned();
-        let mut line: Vec<String> = if cut { CUT.map(str::to_owned).into() } else { Vec::new() };
-        line.extend(cut.then(|| path(root)));
-        line.extend_from_slice(launcher);
+        let mut line = self.launcher.clone()?;
         line.extend_from_slice(words);
         line.extend_from_slice(&self.kept);
         line.extend(["--project-dir".into(), path(root), "--target-path".into(), path(&cache.join("target"))]);
@@ -147,18 +122,6 @@ pub fn anchored(server: &[String], dir: &Path) -> Vec<String> {
         }
     };
     server.iter().enumerate().map(anchored).collect()
-}
-
-/// Whether this system can run a command under the cut: Linux, where an
-/// unprivileged user may make a user namespace and mount there.  Probed by
-/// `true` under the cut of the system's temporary directory, killed past
-/// PROBE_DEADLINE.
-pub fn can_cut() -> bool {
-    let mut probe = Command::new(CUT[0]);
-    probe.args(&CUT[1..]).arg(std::env::temp_dir()).arg("true");
-    probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let status = probe.spawn().ok().and_then(|child| run::finish(child, PROBE_DEADLINE, &AtomicBool::new(false)));
-    status.is_some_and(|status| status.success())
 }
 
 /// The user's cache directory: `$XDG_CACHE_HOME`, else `$HOME/.cache`;
@@ -522,8 +485,8 @@ mod tests {
 
     /// The command line of the Dbt of SERVER's run of WORDS, as it was made
     /// before the Dbt.
-    fn dbt_command(server: &[String], root: &Path, cache: &Path, cut: bool, words: &[String]) -> Option<Vec<String>> {
-        Dbt::new(server.to_vec(), None).run(words, root, cache.to_owned(), PARSE_LOG, cut).map(|run| run.line)
+    fn dbt_command(server: &[String], root: &Path, cache: &Path, words: &[String]) -> Option<Vec<String>> {
+        Dbt::new(server.to_vec(), None).run(words, root, cache.to_owned(), PARSE_LOG).map(|run| run.line)
     }
 
     #[test]
@@ -540,7 +503,7 @@ mod tests {
             "debug",
         ]);
         let parse = PARSE.map(str::to_owned);
-        let command = dbt_command(&server, Path::new("/root"), Path::new("/cache"), false, &parse).unwrap();
+        let command = dbt_command(&server, Path::new("/root"), Path::new("/cache"), &parse).unwrap();
         let expected = words(&[
             "dbt",
             "parse",
@@ -563,62 +526,21 @@ mod tests {
             "--quiet",
         ]);
         assert_eq!(command, expected);
-        let wrapped =
-            dbt_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), false, &parse).unwrap();
+        let wrapped = dbt_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), &parse).unwrap();
         assert_eq!(wrapped[..3], words(&["uvx", "dbt", "parse"]));
-        let cut = dbt_command(&words(&["uvx", "dbt", "lsp"]), Path::new("/r"), Path::new("/c"), true, &parse).unwrap();
-        assert_eq!(cut[..2], words(&["unshare", "-rnm"]));
-        assert_eq!(cut[5..9], words(&["/r", "uvx", "dbt", "parse"]), "the root guarded, then the parse");
-        assert_eq!(cut[9..], wrapped[3..]);
-        assert_eq!(
-            dbt_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), true, &parse),
-            None
-        );
+        assert_eq!(dbt_command(&words(&["refmux", "--root", "/r"]), Path::new("/r"), Path::new("/c"), &parse), None);
     }
 
     #[test]
     fn a_dbt_s_run_runs_where_the_dbt_runs_within_the_parse_s_deadline() {
         let dbt = Dbt::new(words(&["dbt", "lsp"]), Some(PathBuf::from("/dbt")));
-        let run = dbt.run(&words(&["list"]), Path::new("/root"), PathBuf::from("/cache/run"), RUN_LOG, true).unwrap();
+        let run = dbt.run(&words(&["list"]), Path::new("/root"), PathBuf::from("/cache/run"), RUN_LOG).unwrap();
         let expected = (Some(PathBuf::from("/dbt")), PathBuf::from("/cache/run"), RUN_LOG, PARSE_DEADLINE);
         assert_eq!((run.cwd, run.dir, run.log, run.deadline), expected, "a command's run as the parse");
         // With no directory, the proxy's, as `Run::cwd` says, not the root.
         let dbt = Dbt::new(words(&["dbt", "lsp"]), None);
-        let run = dbt.run(&words(&["list"]), Path::new("/root"), PathBuf::from("/cache/run"), RUN_LOG, true).unwrap();
+        let run = dbt.run(&words(&["list"]), Path::new("/root"), PathBuf::from("/cache/run"), RUN_LOG).unwrap();
         assert_eq!(run.cwd, None, "a Dbt with no directory");
-    }
-
-    #[test]
-    fn under_the_cut_its_directory_is_read_only_from_within_too() {
-        let cut = can_cut();
-        assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
-        if !cut {
-            return;
-        }
-        let dir = scratch_project("cut-within", &[("x", "")]);
-        let write = r#"touch relative 2>/dev/null; touch "$(pwd)/absolute" 2>/dev/null; exit 0"#;
-        let mut command = Command::new(CUT[0]);
-        command.args(&CUT[1..]).arg(&dir).args(["sh", "-c", write]).current_dir(&dir);
-        assert!(command.status().unwrap().success());
-        assert!(!dir.join("relative").exists() && !dir.join("absolute").exists());
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn under_the_cut_a_working_directory_that_cannot_be_entered_again_stops_the_run() {
-        if !can_cut() {
-            return;
-        }
-        let dir = scratch_project("cut-gone", &[("guarded/x", ""), ("outside/x", "")]);
-        let marker = dir.join("outside/ran");
-        // The run's working directory removed before the cut starts.
-        let gone = "mkdir gone && cd gone && rmdir ../gone && exec \"$@\"";
-        let mut command = Command::new("sh");
-        command.args(["-c", gone, "sh"]).args(CUT).arg(dir.join("guarded")).args(["sh", "-c", "touch \"$0\""]);
-        command.arg(&marker).current_dir(dir.join("outside")).stderr(Stdio::null());
-        assert!(!command.status().unwrap().success());
-        assert!(!marker.exists(), "the command ran");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

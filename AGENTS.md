@@ -58,7 +58,7 @@ src/run.rs                    the proxy's children but dbt lsp: one run of dbt, 
 src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command
 src/modes.rs                  who answers each method: the user's settings and the session's table
-src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
+src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
@@ -130,6 +130,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     read at the boundary, free of the session, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
     free of the file system, with tests of its own;
+  - `commands::hooked`: the decision whether `dbt compile` would run a
+    package's on-run hooks, its reads given, with tests of its own;
   - `project::versions_of`: the decision which versions a model's file
     is, free of the file system, with tests of its own, once every
     properties file of its package is read;

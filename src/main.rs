@@ -36,7 +36,7 @@ worktree's, else the one on PATH, and dbt runs in the project.
 
 doctor says, on one line of JSON, which project and which dbt the server
 would find from PATH and whether it would work; select lists the nodes that
-a dbt selector selects, by `dbt list` cut off the network; node gives what
+a dbt selector selects, by `dbt list`; node gives what
 the command nodeInfo gives of the node that a unique id or a place in a
 file names, from the user's own `dbt parse`.  ARGUMENTS are the server's,
 as above; `dbt-lsp-plus doctor -h`, `dbt-lsp-plus select -h` and

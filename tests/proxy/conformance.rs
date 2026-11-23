@@ -6,7 +6,7 @@
 //!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy conformance -- --ignored
 //!
 //! Each project of `tests/fixtures/conformance/` is parsed by that dbt as
-//! the proxy parses, offline, and what the proxy's library resolves in it
+//! the proxy parses, and what the proxy's library resolves in it
 //! is compared with the manifest.  Every divergence must be registered in
 //! `divergences.txt` with its reason, and every registered one must still
 //! diverge, so that the registry is the exact list of gaps.
@@ -40,14 +40,13 @@ const PATCHED: [&str; 6] = ["model", "seed", "snapshot", "analysis", "macro", "f
 fn corpus() {
     let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/conformance");
-    let namespace = config::can_cut();
     let entries = std::fs::read_dir(&corpus).expect("read the corpus").flatten();
     let mut cases: Vec<PathBuf> = entries.map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
     cases.sort();
     let (mut found, mut versions, mut missed) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
     for case in &cases {
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
-        let (copy, manifest) = parse(&dbt, case, namespace);
+        let (copy, manifest) = parse(&dbt, case);
         versions.insert(manifest["metadata"]["dbt_version"].as_str().unwrap_or("of no version").to_owned());
         let project = project::scan(&copy, &HashMap::new()).expect("scan the case");
         // Navigation as the proxy runs it once a parse exists.
@@ -74,12 +73,11 @@ fn corpus() {
         .collect();
     let unregistered: Vec<&str> = found.difference(&registered).map(String::as_str).collect();
     let stale: Vec<&str> = registered.difference(&found).map(String::as_str).collect();
-    let cut = if namespace { "yes" } else { "no" };
     let versions: Vec<String> = versions.into_iter().collect();
     // Past the harness's capture of `eprintln!`, so that a run that passes says so.
     let _ = writeln!(
         std::io::stderr(),
-        "conformance: dbt {}, network namespace: {cut}, {} cases, {} divergences",
+        "conformance: dbt {}, {} cases, {} divergences",
         versions.join(" and "),
         cases.len(),
         found.len()
@@ -94,13 +92,13 @@ fn corpus() {
 }
 
 /// The oracle: CASE copied to a scratch directory and parsed there by DBT as
-/// the proxy parses it, its network cut when NAMESPACE, in an
-/// empty environment but `PATH` and a scratch home; the copy, and the
+/// the proxy parses it, in an empty environment but `PATH` and a scratch
+/// home; the copy, and the
 /// manifest that dbt wrote.  It fails when dbt runs past the proxy's
 /// deadline, changes the copy, or exits otherwise than the case's
 /// `expected-error` says (dbt's code, a space, then the start of its
 /// message).
-fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
+fn parse(dbt: &str, case: &Path) -> (PathBuf, Value) {
     let name = case.file_name().unwrap().to_string_lossy().into_owned();
     let dir = scratch(&format!("conformance/{name}"));
     let copy = dir.join("project");
@@ -110,7 +108,7 @@ fn parse(dbt: &str, case: &Path, namespace: bool) -> (PathBuf, Value) {
     let server = [dbt.to_owned(), "lsp".into(), "--profiles-dir".into(), copy.to_string_lossy().into_owned()];
     let parse = config::PARSE.map(str::to_owned);
     let words = config::Dbt::new(server.to_vec(), None)
-        .run(&parse, &copy, dir.join("cache"), config::PARSE_LOG, namespace)
+        .run(&parse, &copy, dir.join("cache"), config::PARSE_LOG)
         .expect("the proxy's parse")
         .line;
     let (home, log) = (dir.join("home"), dir.join("parse.log"));

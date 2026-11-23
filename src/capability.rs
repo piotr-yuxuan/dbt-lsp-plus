@@ -26,7 +26,7 @@ pub enum Provider {
     Plus,
     /// dbt lsp, by the method or by its own command.
     DbtLsp,
-    /// dbt's CLI, run by the proxy under the cut.
+    /// dbt's CLI, run by the proxy.
     DbtCli,
 }
 

@@ -109,11 +109,6 @@ type ReadFailures = fn(&Value, &Value) -> Option<Vec<runs::Failure>>;
 /// How often the files of the last run are looked at.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
 
-/// What the proxy says on its standard error where nothing can cut its
-/// runs of dbt off.
-const NO_CUT: &str = "dbt-lsp-plus: unshare -rnm cannot cut dbt parse off the network and the project here: \
-                      dbt's flags and the guard on packages alone keep it offline and the project as it is";
-
 /// Why no dbt lsp runs before any project, said to no one.
 const NO_PROJECT: &str = "no dbt project yet";
 
@@ -783,7 +778,7 @@ impl<W: Write> Proxy<W> {
         let provider = capabilities.entry("executeCommandProvider").or_insert_with(|| json!({}));
         let listed = provider.get("commands").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
         self.backend.commands = listed.map(str::to_owned).collect();
-        let clients = commands::announced(&|dbt| self.backend.commands.contains(dbt), self.runs_cli());
+        let clients = commands::announced(&|dbt| self.backend.commands.contains(dbt));
         let plus = CAPABILITIES.iter().filter(|c| c.is_command() && c.providers == [Provider::Plus]).map(|c| c.name);
         let own = plus.chain(self.shadow.as_ref().map(|_| shadow::SUMMARY));
         if let Some(commands) = provider.as_object_mut().map(|provider| provider.entry("commands").or_insert(json!([])))
@@ -882,9 +877,8 @@ impl<W: Write> Proxy<W> {
     /// Takes ROOT as the project, found from the client's folder, or from a
     /// document when DOCUMENT, on which the proxy stays alone: dbt's
     /// processes run there, the server command's relative paths are taken
-    /// from the proxy's directory, its `dbt` becomes the project's, the cut
-    /// is probed, the server started unless alone, and
-    /// the line that says so is written on the standard error and kept for
+    /// from the proxy's directory, its `dbt` becomes the project's, the
+    /// server started unless alone, and the line that says so is written on the standard error and kept for
     /// the client.
     fn take_project(&mut self, root: PathBuf, document: bool) {
         let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
@@ -895,10 +889,6 @@ impl<W: Write> Proxy<W> {
             || found.lsp.map_or_else(|| locate::probe(&found.command, Some(&root)) == Probe::NoLsp, |lsp| !lsp);
         let route = if document { locate::Route::Document } else { locate::Route::Folder };
         let alone = locate::alone(self.never, route, no_lsp);
-        self.workspace.cut = config::can_cut();
-        if !self.workspace.cut {
-            eprintln!("{NO_CUT}");
-        }
         let skipped: String =
             found.skipped.iter().map(|(path, why)| format!("; skipped {} ({why})", path.display())).collect();
         let tail = alone.map_or_else(|| ".".to_owned(), |why| format!("; {why}: dbt-lsp-plus answers alone."));
@@ -1340,7 +1330,7 @@ impl<W: Write> Proxy<W> {
             return self.reply_error(id, INVALID_PARAMS, "invalid parameters");
         };
         let serves = |dbt: &str| self.backend.running().is_some() && self.backend.commands.contains(dbt);
-        match commands::route(command, &serves, self.runs_cli()) {
+        match commands::route(command, &serves) {
             Ok(Provider::DbtLsp) => {
                 let dbt = capability::of(command).and_then(|own| own.server);
                 let params = json!({"command": dbt, "arguments": arguments});
@@ -1355,16 +1345,10 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// Whether dbt's CLI can do a command for clients: under the cut, by a
-    /// server command with `lsp`, from which the run's is made.
-    fn runs_cli(&self) -> bool {
-        self.workspace.cut && self.workspace.dbt.runs()
-    }
-
-    /// Queues the run of COMMAND by dbt's CLI, under the cut, for the
-    /// client's request ID with ARGUMENT; or answers why it cannot run: a
-    /// file it cannot compile, packages that need the network, a server
-    /// command with no `lsp`.
+    /// Queues the run of COMMAND by dbt's CLI for the client's request ID
+    /// with ARGUMENT; or answers why it cannot run: a file it cannot
+    /// compile, packages that dbt would install, a server command with no
+    /// `lsp`.
     fn run_command(&mut self, command: &'static str, id: &Value, argument: &Value) {
         let root = self.workspace.root.clone().unwrap_or_default();
         let job = match command {
@@ -1379,10 +1363,9 @@ impl<W: Write> Proxy<W> {
             }
             _ => Ok(commands::nodes_job(argument.as_str().unwrap_or_default())),
         };
-        let refused = packages::refused(&root, self.workspace.dbt.command(), true);
+        let refused = packages::refused(&root, self.workspace.dbt.command());
         let dir = self.workspace.cache_dir(&root).join("run");
-        let run =
-            job.as_ref().ok().and_then(|job| self.workspace.dbt.run(&job.words, &root, dir, config::RUN_LOG, true));
+        let run = job.as_ref().ok().and_then(|job| self.workspace.dbt.run(&job.words, &root, dir, config::RUN_LOG));
         let failure = match (job, refused, run) {
             (Ok(job), None, Some(run)) => {
                 self.runs.push_back((id.clone(), job, run));
@@ -2616,7 +2599,7 @@ fn spawn_server(
 
 /// Runs the proxy on the standard input and output, in front of COMMAND,
 /// alone when its dbt has no `lsp`.  Given COMMAND's `--project-dir`, the
-/// probe, the server and the cut start now, in the proxy's working
+/// probe and the server start now, in the proxy's working
 /// directory; else nothing runs before the client's folder or a document
 /// names the project.
 pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch) -> ExitCode {
@@ -2635,16 +2618,12 @@ pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch)
             Err(why) => Life::Lost(why),
         },
     };
-    let cut = given.is_some() && config::can_cut();
-    if given.is_some() && !cut {
-        eprintln!("{NO_CUT}");
-    }
     let dbt = config::Dbt::new(command.to_vec(), None);
     let parsing = Parsing { events: Some(events.clone()), ..Parsing::default() };
     spawn_reader(io::stdin(), events, Event::Client, Event::ClientClosed);
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), life, given);
     (proxy.never, proxy.settings) = (never, settings);
-    (proxy.parsing, proxy.workspace.dbt, proxy.workspace.cut) = (parsing, dbt, cut);
+    (proxy.parsing, proxy.workspace.dbt) = (parsing, dbt);
     proxy.serve(inbox);
     // The shadow's last line: the session's counts.
     if let Some(end) = proxy.shadow.as_ref().map(|shadow| shadow.counts.end()) {
@@ -2738,10 +2717,6 @@ mod tests {
             (
                 "no dbt_project.yml at or above <root>; give a path within the project",
                 r#"Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project")"#,
-            ),
-            (
-                "`dbt-lsp-plus runs dbt only cut off the network, which this system cannot`",
-                r#"failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot")"#,
             ),
             ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
             (
