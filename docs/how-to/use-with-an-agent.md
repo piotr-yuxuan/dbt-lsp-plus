@@ -184,29 +184,23 @@ then each problem, such as `[DependencyNotFound (dbt1048)]: Ref
 The LSP tool cannot reach nodeInfo, rename, inlay hints, completion or
 compiled SQL.  The hover at line 1, character 1 gives a node's facts;
 `dbt-lsp-plus node` gives what nodeInfo gives, and `dbt-lsp-plus select`
-lists nodes with their configuration, where dbt can be cut off the
-network (below).
+lists nodes with their configuration (below).
 
 ## From a shell
 
 `dbt-lsp-plus doctor PATH` says, in one line of JSON, what the server
 would do for the file PATH: `route`, `project`, `dbt` (`command`,
-`named`, `source`, `skipped`, `lsp`, `why`), `alone`, `cut` and
-`packages`; with no PATH, for the current directory.  `dbt-lsp-plus
-select SELECTOR`, run in the project, gives
-`{"error":null,"nodes":[...]}`, each node as `dbt list` prints it.
-select runs dbt only cut off the network, which needs Linux with user
-namespaces: elsewhere, as on macOS, it answers `dbt-lsp-plus runs dbt
-only cut off the network, which this system cannot`, and doctor's `cut`
-is `false`.  `dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]]` gives what
+`named`, `source`, `skipped`, `lsp`, `why`), `alone` and `packages`;
+with no PATH, for the current directory.  `dbt-lsp-plus select
+SELECTOR`, run in the project, gives `{"error":null,"nodes":[...]}`,
+each node as `dbt list` prints it.  `dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]]` gives what
 nodeInfo gives of the node that a unique id names, in the project of the
 current directory, or that a place in a file names, as
 `{"error":null,"node":{...}}`, the node with its `summary` and its
 `children`, the unique ids of the enabled nodes that depend on it.  Its
 first run in a project runs a `dbt parse` and keeps its manifest; the
-next runs read it, while the project's files stay as they were.  Where
-dbt cannot be cut off the network, it parses all the same, unless the
-project names a package from the network.  doctor exits 0 when it finds
+next runs read it, while the project's files stay as they were.  doctor
+exits 0 when it finds
 a project and a dbt 2, select and node when `error` is null; 1
 otherwise; 2 for a usage error ([the subcommands](../reference/cli.md)).
 
@@ -250,11 +244,9 @@ By what the agent reads:
   ask again.  When `dbt lsp` gave no answer either, followed by `; ` and
   why.
 - `dbt parse has not finished: dbt parse failed: ...`: dbt's first error;
-  its log is the path in parentheses.  `Read-only file system (os error
-  30)` there, from a project that has a `.gitignore` without the line
-  `dbt_internal_packages/`: dbt 2 adds that line, and the proxy runs its
-  parse with the project read-only.  Add the line; a project with no
-  `.gitignore` is unaffected.
+  its log is the path in parentheses.  A parse adds the line
+  `dbt_internal_packages/` to a project's `.gitignore` that lacks it, as
+  dbt 2 does; a project with no `.gitignore` is unaffected.
 - `dbt parse has not finished:` then `... run dbt deps`: a package is
   missing or its lock is stale, and the proxy will not let its parse
   install it.  Run `dbt deps`.
@@ -289,10 +281,8 @@ By what the agent reads:
   hover, or definition or references at a kind listed in [Where
   dbt-lsp-plus answers definitions and
   references](#where-dbt-lsp-plus-answers-definitions-and-references),
-  finds the file changed on disk, starts a parse (in front of `dbt lsp`,
-  where dbt cannot be cut off the network and the project names a package
-  from the network, the guard refuses it until `dbt lsp` compiles again)
-  and is answered from the last index meanwhile; ask again once the parse
+  finds the file changed on disk, starts a parse and is answered from
+  the last index meanwhile; ask again once the parse
   has run.
 
 Three setups fail silently.  A `.lsp.json` at a repository's root does
