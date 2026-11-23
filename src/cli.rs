@@ -107,7 +107,6 @@ const SUBCOMMANDS: [Row; 3] = [
 ];
 
 impl Subcommand {
-    /// Its row of `SUBCOMMANDS`.
     fn row(self) -> &'static Row {
         &SUBCOMMANDS[self as usize]
     }
@@ -121,7 +120,6 @@ pub fn named(words: &[String]) -> Option<Subcommand> {
     SUBCOMMANDS.iter().find(|row| row.name == first).map(|row| row.subcommand)
 }
 
-/// What a subcommand's words ask.
 #[derive(Debug, PartialEq)]
 enum Asked {
     Help,
@@ -186,13 +184,11 @@ pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
-/// ANSWER, and whether it worked: whether its `error` is null.
 fn by_error(answer: Value) -> (Value, bool) {
     let ok = answer["error"].is_null();
     (answer, ok)
 }
 
-/// Why no project was found.
 enum Missing {
     /// The server command's `--project-dir` holds no `dbt_project.yml`; why,
     /// in words that need no advice.

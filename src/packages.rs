@@ -15,7 +15,6 @@ use std::path::{Component, Path, PathBuf};
 /// The files of a project that name its packages.
 const FILES: [&str; 2] = ["packages.yml", "dependencies.yml"];
 
-/// The packages that DOC names.
 fn items(doc: &Tree) -> &[Tree] {
     doc.get("packages").map_or(&[][..], Tree::items)
 }

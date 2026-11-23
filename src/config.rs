@@ -14,7 +14,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The command under which dbt-lsp-plus answers a node's information.
 pub const NODE_INFO: &str = "dbt-lsp-plus.nodeInfo";
 
 /// How long a run of dbt, the parse or a command's, may run before it is
@@ -77,12 +76,10 @@ impl Dbt {
         Dbt { command, dir, launcher, kept }
     }
 
-    /// The server command, as read.
     pub fn command(&self) -> &[String] {
         &self.command
     }
 
-    /// Where dbt runs; none, the proxy's working directory.
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()
     }
@@ -217,7 +214,6 @@ pub struct ParseIndex {
     latest: HashSet<String>,
 }
 
-/// The ids of NODES by their name.
 fn by_name(nodes: &HashMap<String, Value>) -> HashMap<String, Vec<String>> {
     let mut named: HashMap<String, Vec<String>> = HashMap::new();
     for (id, node) in nodes {

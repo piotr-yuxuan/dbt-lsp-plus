@@ -16,9 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// One run of dbt.
 pub struct Run {
-    /// The command line.
     pub line: Vec<String>,
     /// Where dbt runs; none, the proxy's directory.
     pub cwd: Option<PathBuf>,
@@ -30,14 +28,11 @@ pub struct Run {
     pub deadline: Duration,
 }
 
-/// How a run ended.
 #[derive(Debug)]
 pub enum Ending {
-    /// dbt exited, with this status.
     Exited(ExitStatus),
     /// It was stopped, or ran past its deadline, and killed.
     Stopped,
-    /// It could not start, for this reason.
     NotStarted(String),
 }
 

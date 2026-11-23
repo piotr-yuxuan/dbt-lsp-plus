@@ -71,7 +71,6 @@ pub struct Workspace {
     /// done: nothing waits for it, and a request that comes before reads
     /// the files itself.
     filling: RefCell<Option<Receiver<Filled>>>,
-    /// The graph, with the generations it was made of.
     graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,

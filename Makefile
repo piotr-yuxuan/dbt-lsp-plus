@@ -15,7 +15,7 @@ export PYTHONDONTWRITEBYTECODE := 1
 # The ceilings of src/'s production lines and types, which each plan of the
 # reduction chain lowers to its own figures.  A commit that raises one says
 # why in a line of its body: "Raises the size ceilings: WHY".
-SIZE_LINES := 6921
+SIZE_LINES := 6883
 SIZE_TYPES := 105
 
 .PHONY: check check-static fmt clippy public python test-python workflows size test conformance live commits
