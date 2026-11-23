@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! `dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]`: a language server on the standard
-//! input and output, in front of SERVER COMMAND, `dbt lsp` by default; or, by
-//! its first word, one of the subcommands `doctor`, `select` and `node`.
+//! `dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]`: a language server
+//! for dbt on the standard input and output, SERVER COMMAND, `dbt lsp` by
+//! default, naming the user's dbt; or, by its first word, one of the
+//! subcommands `doctor`, `select` and `node`.
 
 use dbt_lsp_plus::cli;
 use dbt_lsp_plus::modes::{self, Arguments};
@@ -13,22 +14,20 @@ usage: dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
        dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
        dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
 
-Runs SERVER COMMAND, by default `dbt lsp`, as a language server behind this
-one, on the standard input and output.  Every message passes unchanged; the
-proxy answers itself documentSymbol, workspace/symbol and the call hierarchy
-when the server does not announce them.  With a dbt that has no `lsp`, such
-as dbt-oss, it answers alone, from the files and the user's `dbt parse`.
-The project is the --project-dir of SERVER COMMAND, else the client's root
-folder when it holds dbt_project.yml, else the project of the first file
-opened in one; until then the proxy runs nothing.  Without --project-dir,
-a bare `dbt` is the project's .venv's, its repository's or its main
-worktree's, else the one on PATH, and dbt runs in the project.
+A language server for dbt on the standard input and output, which answers
+from the project's files and the user's `dbt parse`.  SERVER COMMAND, by
+default `dbt lsp`, names the user's dbt, by its words before `lsp`, and
+the flags its parse takes, after it; it never runs as such.  The project
+is the --project-dir of SERVER COMMAND, else the client's root folder when
+it holds dbt_project.yml, else the project of the first file opened in
+one; until then the server runs nothing.  Without --project-dir, a bare
+`dbt` is the project's .venv's, its repository's or its main worktree's,
+else the one on PATH, and dbt runs in the project.
 
-  --mode METHOD=MODE    who answers the LSP method METHOD: plus (the proxy
-                        alone), dbt (dbt lsp alone) or merge (both)
+  --mode METHOD=MODE    who answers the LSP method METHOD: plus (the proxy)
+                        or merge, dbt-lsp-plus; dbt, no one
   --default-mode MODE   the mode of every method the proxy answers but
                         those set with --mode
-  --backend auto|never  never: no dbt lsp, the proxy alone
   -h, --help            this text
   -V, --version         the version
 
@@ -51,9 +50,7 @@ fn main() -> ExitCode {
     match modes::arguments(&words) {
         Ok(Arguments::Help) => println!("{USAGE}"),
         Ok(Arguments::Version) => println!("dbt-lsp-plus {}", env!("CARGO_PKG_VERSION")),
-        Ok(Arguments::Run { settings, launch, command }) => {
-            return dbt_lsp_plus::proxy::run(&command, settings, launch);
-        }
+        Ok(Arguments::Run { settings, command }) => return dbt_lsp_plus::proxy::run(&command, settings),
         Err(why) => {
             eprintln!("dbt-lsp-plus: {why}\n\n{USAGE}");
             return ExitCode::from(2);

@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy's commands for clients, `dbt-lsp-plus.compile` and `.nodes`:
-//! done by dbt lsp's own commands when it runs, else by dbt's CLI.  How
-//! each request goes, the words of a run, and what its output answers, in
-//! dbt lsp 2.0.9's shapes.
+//! The commands for clients `dbt-lsp-plus.compile` and `.nodes`, done by
+//! dbt's CLI: the words of a run, and what its output answers, in the
+//! shapes of dbt lsp 2.0.9's `dbt.compileFile` and `dbt.listNodes`.
 
-use crate::capability::{self, CAPABILITIES, Provider};
 use crate::run::{self, Ending, Output, Run, Running};
 use crate::{packages, project::Project, yaml::Tree};
 use serde_json::{Value, json};
@@ -22,30 +20,6 @@ pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus ru
 /// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
 
-/// The commands that `initialize` announces, in the table's order: each
-/// with a provider of dbt's present, dbt lsp when the server LISTS its
-/// command.
-pub fn announced(lists: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
-    let done = |own: &&capability::Capability| {
-        own.is_command() && route(own.name, lists).is_ok_and(|provider| provider != Provider::Plus)
-    };
-    CAPABILITIES.iter().filter(done).map(|own| own.name).collect()
-}
-
-/// Who answers a request of COMMAND: the first of its providers present,
-/// dbt lsp only when SERVES says that a server runs that listed its
-/// command; else the failure that says why none is.  A run of dbt's CLI
-/// may still refuse, as `NO_LSP_WORD` says.
-pub fn route(command: &str, serves: &dyn Fn(&str) -> bool) -> Result<Provider, Value> {
-    let own = capability::of(command).filter(|own| own.is_command());
-    let providers = own.map_or(&[][..], |own| own.providers);
-    let present = |provider: &&Provider| match provider {
-        Provider::Plus | Provider::DbtCli => true,
-        Provider::DbtLsp => own.and_then(|own| own.server).is_some_and(serves),
-    };
-    providers.iter().find(present).copied().ok_or_else(|| failure(command, "dbt-lsp-plus.show needs dbt lsp"))
-}
-
 /// COMMAND's answer that fails for WHY: `error` set, the rest null, or `[]`
 /// for nodes.
 pub fn failure(command: &str, why: &str) -> Value {
@@ -53,14 +27,6 @@ pub fn failure(command: &str, why: &str) -> Value {
         COMPILE => json!({"file_uri": null, "error": why}),
         _ => json!({"nodes": [], "error": why}),
     }
-}
-
-/// The arguments of a request of a command, from its PARAMS, as dbt lsp
-/// takes them: a URI for a compile, a selector for nodes.  None when they
-/// cannot be read.
-pub fn arguments(params: &Value) -> Option<Vec<Value>> {
-    let first = params.pointer("/arguments/0")?;
-    first.as_str().map(|_| vec![first.clone()])
 }
 
 /// A run of dbt for a request of a command: the command, the words after

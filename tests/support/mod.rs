@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! A client of dbt-lsp-plus for the tests: it starts the proxy in front of a
+//! A client of dbt-lsp-plus for the tests: it starts the server with a
 //! server command and speaks LSP to it.
 
 use dbt_lsp_plus::rpc;
@@ -61,31 +61,29 @@ pub struct Session {
     /// The proxy's process.
     pub child: Child,
     stdin: ChildStdin,
-    inbox: Receiver<(Vec<u8>, Value)>,
+    inbox: Receiver<Value>,
     next_id: i64,
     pub timeout: Duration,
     /// Every message the client received, in order, parsed; null for a body
     /// that is not JSON.
     pub received: Vec<Value>,
-    /// The same, as their bodies arrived.
-    pub received_raw: Vec<Vec<u8>>,
     /// Whether the session answers the server's requests by itself.
     pub auto_answer: bool,
 }
 
 impl Session {
-    /// Starts the proxy in front of SERVER, in DIR when given, from an empty
-    /// environment but for PATH and ENV.
+    /// Starts the server with the server command SERVER, in DIR when given,
+    /// from an empty environment but for PATH and ENV.
     pub fn start(server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
         Session::start_with(&[], server, env, dir)
     }
 
-    /// The same, with the proxy's OPTIONS before the server command.
+    /// The same, with the server's OPTIONS before the server command.
     pub fn start_with(options: &[&str], server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
         Session::start_logged(options, server, env, dir, None)
     }
 
-    /// The same, the proxy's standard error written to the file STDERR when
+    /// The same, the server's standard error written to the file STDERR when
     /// given.
     pub fn start_logged(
         options: &[&str],
@@ -111,8 +109,8 @@ impl Session {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let (sender, inbox) = mpsc::channel();
         thread::spawn(move || {
-            while let Ok(Some(frame)) = rpc::read_frame(&mut stdout) {
-                if sender.send((frame.body, frame.value.unwrap_or(Value::Null))).is_err() {
+            while let Ok(Some(message)) = rpc::read_frame(&mut stdout) {
+                if sender.send(message).is_err() {
                     return;
                 }
             }
@@ -124,18 +122,17 @@ impl Session {
             next_id: 100,
             timeout: Duration::from_secs(10),
             received: Vec::new(),
-            received_raw: Vec::new(),
             auto_answer: true,
         }
     }
 
-    /// Starts the proxy in front of the fake server, `lsp ARGUMENTS...` with
+    /// Starts the server with the fake dbt, `lsp ARGUMENTS...`, playing
     /// SCRIPT, in DIR when given; returns the session and the fake's log.
     pub fn fake_with(name: &str, script: Value, arguments: &[&Path], dir: Option<&Path>) -> (Session, PathBuf) {
         Session::fake_options(name, script, &[], arguments, dir)
     }
 
-    /// The same, with the proxy's OPTIONS.
+    /// The same, with the server's OPTIONS.
     pub fn fake_options(
         name: &str,
         script: Value,
@@ -149,7 +146,7 @@ impl Session {
         let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp"].map(String::from);
         let arguments = arguments.iter().map(|argument| argument.to_string_lossy().into_owned());
         let server: Vec<String> = fake.into_iter().chain(arguments).collect();
-        // The proxy keeps its parses' cache there, not in the system's.
+        // The server keeps its parses' cache there, not in the system's.
         let cache = scratch.join("cache");
         let env = [
             ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
@@ -181,11 +178,10 @@ impl Session {
         let deadline = Instant::now() + self.timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let (body, message) = self.inbox.recv_timeout(left).unwrap_or_else(|_| {
+            let message = self.inbox.recv_timeout(left).unwrap_or_else(|_| {
                 panic!("no awaited message within {:?}; received {:#?}", self.timeout, self.received)
             });
             self.received.push(message.clone());
-            self.received_raw.push(body);
             if let (true, Some(id), Some(_)) = (self.auto_answer, message.get("id"), message.get("method")) {
                 let items = message["params"]["items"].as_array().map(|items| vec![Value::Null; items.len()]);
                 self.send(&json!({"jsonrpc": "2.0", "id": id, "result": items}));
@@ -273,7 +269,7 @@ impl Session {
         let deadline = Instant::now() + self.timeout;
         let mut unread = Vec::new();
         // Until the proxy closes its output.
-        while let Ok((_, message)) = self.inbox.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        while let Ok(message) = self.inbox.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             unread.push(message);
         }
         (self.wait(), unread)

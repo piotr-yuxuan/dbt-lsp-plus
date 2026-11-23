@@ -1,116 +1,57 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! What a session offers: one descriptor per method or command, who answers
-//! it and how.  The capabilities announced, `experimental.dbtLspPlus`, the
-//! commands listed and the methods that take a mode all come from
-//! `CAPABILITIES`.
+//! What a session offers: one descriptor per method or command.  The
+//! capabilities announced, `experimental.dbtLspPlus`, the commands listed
+//! and the methods that take a mode all come from `CAPABILITIES`.
 
 use crate::commands::{COMPILE, NODES};
 use crate::config::NODE_INFO;
 use serde_json::{Value, json};
-use std::time::Duration;
 
-/// A request to which the proxy adds a part is answered with it alone if the
-/// server has not answered within this long: three times what dbt lsp 2.0.9
-/// took on the fixture during a compilation.
-const MERGE_DEADLINE: Duration = Duration::from_millis(300);
-/// A merged request to which the proxy has nothing to add is answered with
-/// that nothing if the server has not answered within this long: above the
-/// slowest answer of dbt lsp 2.0.9 seen, 1.9 s for the first hover on 2,000
-/// models during its compilation.
-const NOTHING_DEADLINE: Duration = Duration::from_secs(2);
-
-/// Who can answer a method or a command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Provider {
-    /// The proxy, from its scan and the parse's index.
-    Plus,
-    /// dbt lsp, by the method or by its own command.
-    DbtLsp,
-    /// dbt's CLI, run by the proxy.
-    DbtCli,
-}
-
-/// How the answers of a method's providers combine in `merge`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Combine {
-    /// One provider answers: for a method the proxy adds, a follower and
-    /// nodeInfo, the proxy, whole; for a rename, the proxy at its kinds,
-    /// else dbt lsp; for a command, the first of its providers present.
-    First,
-    /// The union of the locations, the proxy's first.
-    Union,
-    /// The proxy's part first, then dbt lsp's.
-    Sections,
-    /// dbt lsp's, then the proxy's.
-    Append,
-    /// Both, file by file.
-    PerFile,
-}
-
-/// What the proxy offers of one LSP method or one command for clients.
+/// What the server offers of one LSP method or one command for clients.
 #[derive(Debug)]
 pub struct Capability {
     /// The LSP method, or the command.
     pub name: &'static str,
     /// The server capability that announces it.
     pub key: Option<&'static str>,
-    /// Who can answer it, in the order they are asked.
-    pub providers: &'static [Provider],
-    /// dbt lsp's own command, for a command of the proxy's.
-    pub server: Option<&'static str>,
     /// The method whose mode it takes, as its items come from it.
     pub leader: Option<&'static str>,
-    /// Shipped `plus` unless the first server announces it, else `dbt`;
-    /// when false, a method ships `merge`.
+    /// Shipped `plus`; when false, a method ships `merge`.
     pub added: bool,
-    /// How the providers' answers combine.
-    pub combine: Combine,
     /// Its nothing is `[]` rather than null.
     pub list: bool,
-    /// The proxy's answer asks for the parse's index, in both modes: a
-    /// stale index is parsed again, as for a hover.
+    /// Its answer reads the parse's index, which a stale one makes the
+    /// Workspace parse again first.
     pub wants_index: bool,
-    /// Its answer reads the call hierarchy's graph (`Workspace::graph`),
-    /// which, alone, is the last parse's: alone, it asks for the parse's
-    /// index too, as `wants_index` does in both modes.
-    pub reads_graph: bool,
-    /// What the proxy answers itself, as `experimental.dbtLspPlus`
-    /// announces it, version 2, since dbt lsp 2.0.9 answers with nothing
-    /// there: each kind of target with the places where a request's
+    /// Where the server answers, as `experimental.dbtLspPlus` announces it,
+    /// version 2: each kind of target with the places where a request's
     /// position may be, `sql`, `yaml` or `python` by the file's extension.
-    /// A kind listed at a place is the proxy's at every position of that
-    /// kind there, with dbt lsp or without; in `merge` with a backend, dbt
-    /// lsp is asked too, and its locations that match none of the proxy's
-    /// follow them.  Empty for a method the proxy answers whole.
+    /// A kind listed at a place is answered at every position of that kind
+    /// there; any other position gets the method's nothing.  Empty for a
+    /// method answered whole.
     pub kinds: &'static [(&'static str, &'static [&'static str])],
     /// Whether a request on a document of another project, which it names
     /// by `textDocument.uri`, gets `Elsewhere` (`Proxy::outside`): its
     /// answer there would read the session's project, its scan or its
     /// index, beyond the document's text.  Inlay hints never get it: they
-    /// get `[]`, or dbt lsp's answer in `merge` in front of a running dbt
-    /// lsp.
+    /// get `[]`.
     pub reads_project: bool,
 }
 
-/// What a row of `CAPABILITIES` does not say: an LSP method that both
-/// answer, one at a time.
+/// What a row of `CAPABILITIES` does not say.
 const DEFAULT: Capability = Capability {
     name: "",
     key: None,
-    providers: &[Provider::Plus, Provider::DbtLsp],
-    server: None,
     leader: None,
     added: false,
-    combine: Combine::First,
     list: false,
     wants_index: false,
-    reads_graph: false,
     kinds: &[],
     reads_project: false,
 };
 
-/// Every method and command that the proxy answers or takes part in, a
-/// method's followers after it.  Any other method is dbt lsp's alone.
+/// Every method and command that the server answers, a method's followers
+/// after it.
 pub static CAPABILITIES: [Capability; 17] = [
     Capability { name: "textDocument/documentSymbol", key: Some("documentSymbolProvider"), added: true, ..DEFAULT },
     Capability { name: "workspace/symbol", key: Some("workspaceSymbolProvider"), added: true, list: true, ..DEFAULT },
@@ -118,20 +59,20 @@ pub static CAPABILITIES: [Capability; 17] = [
         name: "textDocument/prepareCallHierarchy",
         key: Some("callHierarchyProvider"),
         added: true,
-        reads_graph: true,
+        wants_index: true,
         reads_project: true,
         ..DEFAULT
     },
     Capability {
         name: "callHierarchy/incomingCalls",
         leader: Some("textDocument/prepareCallHierarchy"),
-        reads_graph: true,
+        wants_index: true,
         ..DEFAULT
     },
     Capability {
         name: "callHierarchy/outgoingCalls",
         leader: Some("textDocument/prepareCallHierarchy"),
-        reads_graph: true,
+        wants_index: true,
         ..DEFAULT
     },
     Capability { name: "textDocument/foldingRange", key: Some("foldingRangeProvider"), added: true, ..DEFAULT },
@@ -145,14 +86,13 @@ pub static CAPABILITIES: [Capability; 17] = [
     Capability {
         name: "textDocument/hover",
         key: Some("hoverProvider"),
-        combine: Combine::Sections,
+        wants_index: true,
         reads_project: true,
         ..DEFAULT
     },
     Capability {
         name: "textDocument/inlayHint",
         key: Some("inlayHintProvider"),
-        combine: Combine::Append,
         list: true,
         reads_project: true,
         ..DEFAULT
@@ -160,7 +100,6 @@ pub static CAPABILITIES: [Capability; 17] = [
     Capability {
         name: "textDocument/definition",
         key: Some("definitionProvider"),
-        combine: Combine::Union,
         wants_index: true,
         kinds: &[
             ("source", &["sql", "yaml", "python"]),
@@ -177,7 +116,6 @@ pub static CAPABILITIES: [Capability; 17] = [
     Capability {
         name: "textDocument/references",
         key: Some("referencesProvider"),
-        combine: Combine::Union,
         list: true,
         wants_index: true,
         kinds: &[
@@ -195,20 +133,10 @@ pub static CAPABILITIES: [Capability; 17] = [
         kinds: &[("source", &["sql", "yaml", "python"]), ("cte", &["sql"])],
         ..DEFAULT
     },
-    Capability { name: "textDocument/publishDiagnostics", combine: Combine::PerFile, ..DEFAULT },
-    Capability { name: NODE_INFO, providers: &[Provider::Plus], wants_index: true, ..DEFAULT },
-    Capability {
-        name: COMPILE,
-        providers: &[Provider::DbtLsp, Provider::DbtCli],
-        server: Some("dbt.compileFile"),
-        ..DEFAULT
-    },
-    Capability {
-        name: NODES,
-        providers: &[Provider::DbtLsp, Provider::DbtCli],
-        server: Some("dbt.listNodes"),
-        ..DEFAULT
-    },
+    Capability { name: "textDocument/publishDiagnostics", ..DEFAULT },
+    Capability { name: NODE_INFO, wants_index: true, ..DEFAULT },
+    Capability { name: COMPILE, ..DEFAULT },
+    Capability { name: NODES, ..DEFAULT },
 ];
 
 impl Capability {
@@ -216,22 +144,6 @@ impl Capability {
     /// method's does, so that a command named like a method is no method.
     pub fn is_command(&self) -> bool {
         !self.name.contains('/')
-    }
-
-    /// Whether it is a method the proxy does not add, announced by a key,
-    /// with no kinds of target: hover and inlay hints, which the proxy
-    /// answers whole when alone.
-    pub fn whole(&self) -> bool {
-        !self.added && self.key.is_some() && self.kinds.is_empty()
-    }
-
-    /// How long a merged request waits for dbt lsp before the client gets
-    /// the proxy's answer alone: `MERGE_DEADLINE` when the proxy has a
-    /// PART, `NOTHING_DEADLINE` when it has nothing; none for a rule that
-    /// waits for no one.
-    pub fn deadline(&self, part: bool) -> Option<Duration> {
-        let waits = matches!(self.combine, Combine::Union | Combine::Sections | Combine::Append);
-        waits.then_some(if part { MERGE_DEADLINE } else { NOTHING_DEADLINE })
     }
 }
 
@@ -259,11 +171,9 @@ mod tests {
 
     #[test]
     fn a_command_is_found_by_its_name_and_a_method_is_no_command() {
-        let compile = of(COMPILE).expect("the compile");
-        assert!(compile.is_command());
-        assert_eq!(compile.server, Some("dbt.compileFile"));
+        assert!(of(COMPILE).is_some_and(Capability::is_command));
         assert!(of("textDocument/hover").is_some_and(|hover| !hover.is_command()));
-        assert!(of("textDocument/completion").is_none(), "dbt lsp's alone");
+        assert!(of("textDocument/completion").is_none(), "no row");
         assert!(!with_mode().any(|name| name == NODE_INFO || name == "callHierarchy/incomingCalls"));
         assert_eq!(with_mode().count(), 12);
     }
@@ -280,35 +190,16 @@ mod tests {
             cells.map(|cell| cell.trim_matches(|c| c == ' ' || c == '`').to_owned()).collect()
         };
         let rows: Vec<Vec<String>> = table.map(cells).collect();
-        let columns = ["Method or command", "Answered by", "Shipped mode", "Combined", "Waits for dbt lsp"];
+        let columns = ["Method or command", "Shipped mode"];
         assert_eq!(rows.first().map(Vec::as_slice), Some(&columns.map(str::to_owned)[..]), "the table under {heading}");
-        let names = [(Provider::Plus, "dbt-lsp-plus"), (Provider::DbtLsp, "dbt lsp"), (Provider::DbtCli, "dbt's CLI")];
-        let rules = [
-            (Combine::Union, "the union, dbt-lsp-plus's first"),
-            (Combine::Sections, "dbt-lsp-plus's text, then dbt lsp's under its name"),
-            (Combine::Append, "dbt lsp's, then dbt-lsp-plus's"),
-            (Combine::PerFile, "both, per file"),
-        ];
         let rendered = CAPABILITIES.iter().map(|capability| {
-            let named = |provider: &Provider| names.iter().find(|(named, _)| named == provider).map(|(_, name)| *name);
-            let providers: Vec<&str> = capability.providers.iter().filter_map(named).collect();
             let leader = capability.leader.map(|leader| format!("{}'s", leader.trim_start_matches("textDocument/")));
             let shipped = match (capability.is_command(), capability.added) {
                 (true, _) => "none".to_owned(),
-                (false, true) => "plus, or dbt where dbt lsp announces it".to_owned(),
+                (false, true) => "plus".to_owned(),
                 (false, false) => leader.unwrap_or_else(|| "merge".to_owned()),
             };
-            let first = match (capability.providers.contains(&Provider::Plus), capability.kinds.is_empty()) {
-                (false, _) => "the first present",
-                (true, true) => "dbt-lsp-plus's",
-                (true, false) => "dbt-lsp-plus's at its kinds, else dbt lsp's",
-            };
-            let rule = rules.iter().find(|(rule, _)| *rule == capability.combine).map_or(first, |(_, said)| *said);
-            let waits = capability.deadline(true).zip(capability.deadline(false));
-            let waits = waits.map_or("no".to_owned(), |(part, nothing)| {
-                format!("{} ms, {} s with nothing", part.as_millis(), nothing.as_secs())
-            });
-            [capability.name.to_owned(), providers.join(", "), shipped, rule.to_owned(), waits].to_vec()
+            [capability.name.to_owned(), shipped].to_vec()
         });
         assert_eq!(rows.get(2..), Some(&rendered.collect::<Vec<_>>()[..]), "the rows under {heading}");
     }

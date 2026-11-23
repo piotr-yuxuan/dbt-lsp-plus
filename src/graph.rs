@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The dependency graph of a project: which resource calls which.
 //!
-//! The edges between nodes come from `dbt.listNodes` when the server has
-//! answered, or, with no server, from the manifest of the user's `dbt
-//! parse`, since only dbt resolves a `ref(var('x'))`; otherwise from the
-//! scan of the files, each call looked up by `navigation::Lookup` with the
-//! last parse's index once there is one.  The server lists no macros, and
-//! a manifest's are transitive, so the edges to and from macros always
-//! come from the scan.
+//! The edges between nodes come from the manifest of the last `dbt parse`
+//! once there is one, since only dbt resolves a `ref(var('x'))`; before,
+//! from the scan of the files, each call looked up by `navigation::Lookup`.
+//! A manifest's edges to macros are transitive, so the edges to and from
+//! macros always come from the scan.
 
 use crate::config::ParseIndex;
 use crate::navigation::Lookup;
@@ -17,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
-/// A node of a `dbt.listNodes` answer.
+/// A node of the manifest, with the dependencies it lists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerNode {
     pub id: String,
@@ -29,31 +27,9 @@ pub struct ServerNode {
     pub depends_on: Vec<String>,
 }
 
-/// What a `dbt.listNodes` answer says.
-#[derive(Debug, PartialEq)]
-pub enum Listing {
-    Nodes(Vec<ServerNode>),
-    /// No node matches: `"error": "No nodes found"`, or no error and no node.
-    Empty,
-    /// Any other error, such as a failed compilation or a cancellation, or
-    /// an answer of another shape.
-    Failed,
-}
-
-impl Listing {
-    /// The nodes listed, none when no node matches; `None` when the listing failed.
-    pub fn into_nodes(self) -> Option<Vec<ServerNode>> {
-        match self {
-            Listing::Nodes(nodes) => Some(nodes),
-            Listing::Empty => Some(Vec::new()),
-            Listing::Failed => None,
-        }
-    }
-}
-
 impl ServerNode {
-    /// The node of NODE, as `dbt.listNodes` and a manifest write one; none
-    /// when it lacks a field.
+    /// The node of NODE, as a manifest writes one; none when it lacks a
+    /// field.
     pub fn of(node: &Value) -> Option<ServerNode> {
         let text = |key: &str| node.get(key).and_then(Value::as_str).map(str::to_owned);
         let depends_on = node
@@ -68,17 +44,6 @@ impl ServerNode {
             original_file_path: text("original_file_path")?,
             depends_on,
         })
-    }
-}
-
-/// The listing of a `dbt.listNodes` RESULT.  Nodes missing a field are left out.
-pub fn parse_list_nodes(result: &Value) -> Listing {
-    let Some(nodes) = result.get("nodes").and_then(Value::as_array) else { return Listing::Failed };
-    let nodes: Vec<ServerNode> = nodes.iter().filter_map(ServerNode::of).collect();
-    match (nodes.is_empty(), result.get("error").and_then(Value::as_str)) {
-        (false, _) => Listing::Nodes(nodes),
-        (true, None | Some("No nodes found")) => Listing::Empty,
-        (true, Some(_)) => Listing::Failed,
     }
 }
 
@@ -137,13 +102,12 @@ impl Graph {
         Graph { items, edges }
     }
 
-    /// This graph with the dependencies of each node listed in NODES as the
-    /// server gives them, instead of the scanned ones; the scanned call sites
-    /// stay.  The server lists no macro, so the scanned edges to and from
-    /// macros stay, and so do those of a node it did not list.  No probe
-    /// shows whether it names functions among a node's dependencies, so a
-    /// scanned edge to a function stays too, as one to a macro.  A node the
-    /// scan missed is placed at the start of its file in PROJECT.
+    /// This graph with the dependencies of each node of NODES as the
+    /// manifest gives them, instead of the scanned ones; the scanned call
+    /// sites stay.  NODES hold no macro, so the scanned edges to and from
+    /// macros stay, and so do those of a node they lack.  A scanned edge to
+    /// a function stays too, as one to a macro.  A node the scan missed is
+    /// placed at the start of its file in PROJECT.
     pub fn with_server(mut self, nodes: &[ServerNode], project: &Project) -> Graph {
         let listed: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
         let mut scanned: HashMap<(String, String), Vec<Range<usize>>> =
@@ -158,7 +122,7 @@ impl Graph {
                 project.packages.get(&node.package).or_else(|| project.packages.get(&project.root_package));
             let path = package_dir.map_or_else(PathBuf::new, |dir| dir.join(&node.original_file_path));
             let resource_type = node.resource_type.clone();
-            // A model's version, which the listing names as its model, is shown as its id ends: `orders.v2`.
+            // A model's version, which the manifest names as its model, is shown as its id ends: `orders.v2`.
             let own = node
                 .id
                 .strip_prefix(&crate::node::id(&crate::node::MODEL, &node.package, ""))
@@ -289,8 +253,7 @@ mod tests {
             let answer = json!({"error": null, "nodes": [
                 {"unique_id": "model.shop.a", "name": "a", "resource_type": "model", "package_name": "shop",
                  "original_file_path": "models/a.sql", "depends_on": {"nodes": depends_on}}]});
-            let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
-            nodes
+            answer["nodes"].as_array().unwrap().iter().filter_map(ServerNode::of).collect::<Vec<_>>()
         };
         for depends_on in [&[][..], &["function.shop.f"]] {
             let graph = Graph::scanned(&project, None).with_server(&listing(depends_on), &project);
@@ -321,7 +284,7 @@ mod tests {
              "package_name": "shop", "original_file_path": "models/z_v3.sql", "depends_on": {"nodes": []}},
             {"name": "no unique_id"}
         ]});
-        let Listing::Nodes(nodes) = parse_list_nodes(&answer) else { panic!("no nodes") };
+        let nodes: Vec<ServerNode> = answer["nodes"].as_array().unwrap().iter().filter_map(ServerNode::of).collect();
         assert_eq!(nodes.len(), 4);
         let graph = Graph::scanned(&project, None).with_server(&nodes, &project);
         let edges = pairs(&graph);

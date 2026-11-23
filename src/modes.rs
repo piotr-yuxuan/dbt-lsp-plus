@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! Who answers each method: the proxy alone (`plus`), `dbt lsp` alone
-//! (`dbt`), or both, merged (`merge`).  The user's settings, from the
+//! Whether dbt-lsp-plus answers each method: `plus` and `merge`, it does;
+//! `dbt`, the method gets its nothing.  The user's settings, from the
 //! command line and `initializationOptions.dbtLspPlus`, parsed here at the
 //! boundary; the table of a session, fixed once `initialize` is answered.
 
-use crate::capability::{self, CAPABILITIES, Combine};
+use crate::capability::{self, CAPABILITIES};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -104,33 +104,10 @@ impl Settings {
         let unknown = entries.iter().filter(|(key, value)| !known(key) || (*key == "modes" && !value.is_object()));
         refused.extend(unknown.filter(|(_, value)| !value.is_null()).map(|(key, _)| match key.as_str() {
             "modes" => "dbtLspPlus.modes is no object".to_owned(),
-            "backend" => "dbtLspPlus.backend is read from the command line only (--backend)".to_owned(),
             key => format!("dbtLspPlus.{key} is not read: modes and defaultMode are"),
         }));
         (settings, refused)
     }
-}
-
-/// `initialize`'s PARAMS without the proxy's own section, as the server got
-/// them before modes: `initializationOptions` without `dbtLspPlus`, none
-/// when nothing else remains.
-pub fn without_section(params: &Value) -> Value {
-    let mut params = params.clone();
-    let options = params.get_mut("initializationOptions").and_then(Value::as_object_mut);
-    let emptied = options.is_some_and(|options| options.remove("dbtLspPlus").is_some() && options.is_empty());
-    if emptied && let Some(params) = params.as_object_mut() {
-        params.remove("initializationOptions");
-    }
-    params
-}
-
-/// Whether the server runs behind the proxy: `auto`, when the dbt has
-/// `lsp`, or `never`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Launch {
-    #[default]
-    Auto,
-    Never,
 }
 
 /// What the proxy's command line asks.
@@ -138,21 +115,18 @@ pub enum Launch {
 pub enum Arguments {
     Help,
     Version,
-    Run { settings: Settings, launch: Launch, command: Vec<String> },
+    Run { settings: Settings, command: Vec<String> },
 }
 
 /// The options that print and exit: true for the usage, false for the version.
 const ASKED: [(&str, bool); 4] = [("-h", true), ("--help", true), ("-V", false), ("--version", false)];
-
-/// The launches that `--backend` names.
-const LAUNCHES: [(&str, Launch); 2] = [("auto", Launch::Auto), ("never", Launch::Never)];
 
 /// The proxy's command line, WORDS, after its name: its options, read from
 /// the first word for as long as one starts with `-` and is not `--`, each
 /// value the next word or after the first `=`; then the server command,
 /// `dbt lsp` when none.  Or why it cannot be read.
 pub fn arguments(words: &[String]) -> Result<Arguments, String> {
-    let (mut settings, mut launch) = (Settings::default(), Launch::Auto);
+    let mut settings = Settings::default();
     let mut rest = words.iter().peekable();
     while let Some(word) = rest.next_if(|word| word.starts_with('-') && *word != "--") {
         let (option, attached) = word.split_once('=').map_or((word.as_str(), None), |(o, v)| (o, Some(v.to_owned())));
@@ -167,10 +141,6 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
                 settings.set(method, mode)
             }),
             "--default-mode" => value().and_then(|value| settings.set_default(&value)),
-            "--backend" => value().and_then(|value| {
-                let named = LAUNCHES.iter().find(|(name, _)| *name == value).map(|(_, named)| *named);
-                named.map(|named| launch = named).ok_or(format!("{value} is no backend: auto or never"))
-            }),
             other => Err(format!("{other} is no option of dbt-lsp-plus")),
         };
         set?;
@@ -178,7 +148,7 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
     let command: Vec<String> = rest.skip_while(|word| *word == "--").cloned().collect();
     let command =
         Some(command).filter(|command| !command.is_empty()).unwrap_or_else(|| vec!["dbt".into(), "lsp".into()]);
-    Ok(Arguments::Run { settings, launch, command })
+    Ok(Arguments::Run { settings, command })
 }
 
 /// The mode of each method that takes one in a session, fixed when its
@@ -189,16 +159,11 @@ pub struct Table {
 }
 
 impl Table {
-    /// The table of SETTINGS, ANNOUNCED saying whether the first server
-    /// announces a method's capability: the user's mode for a method, else
-    /// the user's default, else the shipped one, today's behaviour.
-    pub fn new(settings: &Settings, announced: &dyn Fn(&str) -> bool) -> Table {
+    /// The table of SETTINGS: the user's mode for a method, else the user's
+    /// default, else the shipped one.
+    pub fn new(settings: &Settings) -> Table {
         let added = |method: &str| capability::of(method).is_some_and(|capability| capability.added);
-        let shipped = |method: &str| match (added(method), announced(method)) {
-            (true, false) => Mode::Plus,
-            (true, true) => Mode::Dbt,
-            (false, _) => Mode::Merge,
-        };
+        let shipped = |method: &str| if added(method) { Mode::Plus } else { Mode::Merge };
         let mode = |method: &'static str| {
             let set = settings.modes.get(method).copied().or(settings.default);
             (method, set.unwrap_or_else(|| shipped(method)))
@@ -218,27 +183,10 @@ impl Table {
     }
 
     /// Whether the proxy answers METHOD at a position it claims, by a row of
-    /// `experimental.dbtLspPlus`: every row in `plus` and `merge`, with a
-    /// backend or none, none in `dbt`.
+    /// `experimental.dbtLspPlus`: every row in `plus` and `merge`, none in
+    /// `dbt`.
     pub fn lists(&self, method: &str) -> bool {
         self.mode(method) != Mode::Dbt
-    }
-
-    /// Whether the proxy unites dbt lsp's answer to METHOD with its own: in
-    /// `merge`, unless ALONE, with no dbt lsp answering now, for a capability
-    /// whose answers are a union of locations.
-    pub fn unites(&self, method: &str, alone: bool) -> bool {
-        let union = capability::of(method).is_some_and(|capability| capability.combine == Combine::Union);
-        union && !alone && self.mode(method) == Mode::Merge
-    }
-
-    /// Whether the proxy answers METHOD with the method's nothing where it
-    /// has nothing of its own: in `plus`, and in `dbt` when ALONE, with no
-    /// dbt lsp answering now; not where the server answers.  The nothing's
-    /// shape, null or `[]`, is `Answer::Empty`'s.
-    pub fn answers_nothing(&self, method: &str, alone: bool) -> bool {
-        let (mode, known) = (self.mode(method), self.modes.contains_key(self.leader(method)));
-        known && (mode == Mode::Plus || (alone && mode == Mode::Dbt))
     }
 
     /// `experimental.dbtLspPlus`, version 2: the kinds and places of each
@@ -254,11 +202,9 @@ impl Table {
         answered
     }
 
-    /// The methods set to `dbt` that no one answers when ALONE, with no dbt
-    /// lsp answering now.
-    pub fn unanswered(&self, alone: bool) -> Vec<&'static str> {
-        let unanswered = capability::with_mode().filter(|method| alone && self.mode(method) == Mode::Dbt);
-        unanswered.collect()
+    /// The methods set to `dbt`, which no one answers.
+    pub fn unanswered(&self) -> Vec<&'static str> {
+        capability::with_mode().filter(|method| self.mode(method) == Mode::Dbt).collect()
     }
 }
 
@@ -328,10 +274,10 @@ mod tests {
 
     #[test]
     fn the_shipped_defaults_are_today_s_behaviour() {
-        let announced = |method: &str| method == "textDocument/foldingRange";
-        let table = Table::new(&Settings::default(), &announced);
-        assert_eq!(table.mode("textDocument/documentSymbol"), Mode::Plus, "a capability the server lacks");
-        assert_eq!(table.mode("textDocument/foldingRange"), Mode::Dbt, "one it announces");
+        let table = Table::new(&Settings::default());
+        for added in ["textDocument/documentSymbol", "textDocument/foldingRange"] {
+            assert_eq!(table.mode(added), Mode::Plus, "{added}, which dbt-lsp-plus adds");
+        }
         assert_eq!(table.mode("callHierarchy/outgoingCalls"), Mode::Plus, "its leader's");
         for merged in ["textDocument/hover", "textDocument/definition", "textDocument/publishDiagnostics"] {
             assert_eq!(table.mode(merged), Mode::Merge, "{merged}");
@@ -342,7 +288,7 @@ mod tests {
     #[test]
     fn a_method_s_mode_comes_before_the_default_and_the_default_before_the_shipped_one() {
         let user = settings(&[("textDocument/hover", "dbt")], Some("plus"));
-        let table = Table::new(&user, &|_| false);
+        let table = Table::new(&user);
         assert_eq!(table.mode("textDocument/hover"), Mode::Dbt);
         assert_eq!(table.mode("textDocument/definition"), Mode::Plus);
         assert_eq!(table.mode("textDocument/completion"), Mode::Dbt, "the default reaches the proxy's methods only");
@@ -373,27 +319,25 @@ mod tests {
         let (merged, refused) = Settings::default().over(&options);
         assert_eq!(merged.modes.keys().collect::<Vec<_>>(), ["textDocument/hover"]);
         assert_eq!(refused.len(), 4, "{refused:?}");
-        assert!(refused.iter().any(|why| why.contains("command line only")));
+        assert!(refused.contains(&"dbtLspPlus.backend is not read: modes and defaultMode are".to_owned()));
         assert_eq!(Settings::default().over(&json!({"dbtLspPlus": "plus"})).1.len(), 1);
     }
 
     #[test]
     fn the_command_line_reads_options_then_the_server_command() {
         let run = |words: &[&str]| match arguments(&super::tests::words(words)) {
-            Ok(Arguments::Run { settings, launch, command }) => (settings, launch, command),
+            Ok(Arguments::Run { settings, command }) => (settings, command),
             other => panic!("{other:?}"),
         };
-        let (settings, launch, command) =
-            run(&["--mode", "textDocument/hover=dbt", "--backend=never", "dbt", "lsp", "--project-dir", "p"]);
+        let (settings, command) = run(&["--mode", "textDocument/hover=dbt", "dbt", "lsp", "--project-dir", "p"]);
         assert_eq!(settings.modes["textDocument/hover"], Mode::Dbt);
-        assert_eq!(launch, Launch::Never);
         assert_eq!(command, words(&["dbt", "lsp", "--project-dir", "p"]));
         assert_eq!(run(&["--default-mode=plus"]).0.default, Some(Mode::Plus));
-        assert_eq!(run(&[]).2, words(&["dbt", "lsp"]), "dbt lsp by default");
-        assert_eq!(run(&["--", "-strange", "lsp"]).2, words(&["-strange", "lsp"]), "-- before a dash");
+        assert_eq!(run(&[]).1, words(&["dbt", "lsp"]), "dbt lsp by default");
+        assert_eq!(run(&["--", "-strange", "lsp"]).1, words(&["-strange", "lsp"]), "-- before a dash");
         assert_eq!(arguments(&words(&["-V", "--mode"])), Ok(Arguments::Version));
         for bad in
-            [&["--mode", "hover=dbt"][..], &["--backend", "nevr"], &["--mode"], &["--colour", "x"], &["--mode", "x"]]
+            [&["--mode", "hover=dbt"][..], &["--backend", "never"], &["--mode"], &["--colour", "x"], &["--mode", "x"]]
         {
             assert!(arguments(&words(bad)).is_err(), "{bad:?}");
         }
@@ -415,31 +359,26 @@ mod tests {
         let mut plus = Settings::default();
         plus.set_default("plus").unwrap();
         for settings in [Settings::default(), plus] {
-            assert_eq!(Table::new(&settings, &|_| false).flag(), every, "{settings:?}");
+            assert_eq!(Table::new(&settings).flag(), every, "{settings:?}");
         }
         let mut dbt = Settings::default();
         dbt.set("textDocument/definition", "dbt").unwrap();
         dbt.set("textDocument/references", "dbt").unwrap();
         let rename = json!({"version": 2, "rename": every["rename"]});
-        assert_eq!(Table::new(&dbt, &|_| false).flag(), rename);
+        assert_eq!(Table::new(&dbt).flag(), rename);
     }
 
     #[test]
     fn the_flag_and_empty_answers_follow_the_modes() {
         let every = every();
-        assert_eq!(Table::new(&Settings::default(), &|_| false).flag(), every, "merge");
+        assert_eq!(Table::new(&Settings::default()).flag(), every, "merge");
+        assert!(Table::new(&Settings::default()).unanswered().is_empty());
         let user = settings(&[("textDocument/definition", "plus"), ("textDocument/references", "dbt")], None);
-        let table = Table::new(&user, &|_| false);
+        let table = Table::new(&user);
         let definition = json!({"version": 2, "definition": every["definition"], "rename": every["rename"]});
         assert_eq!(table.flag(), definition, "plus lists, dbt does not");
-        assert!(table.answers_nothing("textDocument/definition", false));
-        assert!(!table.answers_nothing("textDocument/references", false), "dbt with a backend is forwarded");
-        let none = Table::new(&user, &|_| false);
-        assert!(none.answers_nothing("textDocument/references", true), "dbt with no backend");
-        assert_eq!(none.unanswered(true), ["textDocument/references"]);
-        let hierarchy = settings(&[("textDocument/prepareCallHierarchy", "dbt")], None);
-        let none = Table::new(&hierarchy, &|_| false);
-        assert!(none.answers_nothing("callHierarchy/incomingCalls", true), "a follower too");
-        assert!(table.unanswered(false).is_empty());
+        assert_eq!(table.unanswered(), ["textDocument/references"]);
+        let hierarchy = Table::new(&settings(&[("textDocument/prepareCallHierarchy", "dbt")], None));
+        assert_eq!(hierarchy.mode("callHierarchy/incomingCalls"), Mode::Dbt, "a follower too");
     }
 }

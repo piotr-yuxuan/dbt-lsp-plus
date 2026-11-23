@@ -21,27 +21,17 @@ pub fn decoded(bytes: Vec<u8>) -> Option<String> {
     Some(text)
 }
 
-/// The unit in which LSP counts characters, as the server announced it.
+/// The unit in which a position counts characters: UTF-16, LSP's default,
+/// or code points, as dbt, the YAML parser and a shell's user count them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Encoding {
-    Utf8,
     Utf16,
     Utf32,
 }
 
 impl Encoding {
-    /// The encoding that `positionEncoding` names; UTF-16 when absent, as LSP says.
-    pub fn parse(name: Option<&str>) -> Encoding {
-        match name {
-            Some("utf-8") => Encoding::Utf8,
-            Some("utf-32") => Encoding::Utf32,
-            _ => Encoding::Utf16,
-        }
-    }
-
     fn units(self, c: char) -> usize {
         match self {
-            Encoding::Utf8 => c.len_utf8(),
             Encoding::Utf16 => c.len_utf16(),
             Encoding::Utf32 => 1,
         }
@@ -145,7 +135,6 @@ mod tests {
         let starts = LineStarts::new(TEXT);
         let x = TEXT.find(" as").unwrap();
         assert_eq!(starts.position(x, Encoding::Utf16), json!({"line": 0, "character": 12}));
-        assert_eq!(starts.position(x, Encoding::Utf8), json!({"line": 0, "character": 15}));
         assert_eq!(starts.position(x, Encoding::Utf32), json!({"line": 0, "character": 11}));
         assert_eq!(starts.offset(0, 12, Encoding::Utf16), x);
     }

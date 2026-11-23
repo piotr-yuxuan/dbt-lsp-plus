@@ -201,18 +201,6 @@ pub enum Route {
     Document,
 }
 
-/// Why a session on ROUTE answers alone, NEVER saying that the backend is
-/// `never`; none when dbt lsp starts behind the proxy.  NO_LSP, whether the
-/// dbt has no `lsp`, is asked only where it decides: neither under `never`
-/// nor on a document's route, where no dbt lsp starts.
-pub fn alone(never: bool, route: Route, no_lsp: impl FnOnce() -> bool) -> Option<&'static str> {
-    match (never, route) {
-        (true, _) => Some("the backend is never"),
-        (_, Route::Document) => Some("dbt lsp is not started for a project found from a file"),
-        _ => no_lsp().then_some("it has no lsp"),
-    }
-}
-
 /// What a dbt answers to `lsp --help`.
 #[derive(Debug, PartialEq)]
 pub enum Probe {

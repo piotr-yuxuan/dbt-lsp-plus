@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy's commands for clients: by dbt lsp's own commands in front of
-//! the fake, and by the fake dbt's CLI without it.
+//! The commands for clients, by the fake dbt's CLI.
 
-use super::{alive, barrier, dbt_event, logged, scratch, scratch_of, with_options};
+use super::{alive, dbt_event, logged, scratch, scratch_of, with_options};
 use crate::support::{Session, copy_fixture, fixture, until_logged, uri};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -25,12 +24,10 @@ fn execute(session: &mut Session, command: &str, arguments: Value) -> Value {
     session.request("workspace/executeCommand", json!({"command": command, "arguments": arguments}))
 }
 
-/// The session NAME on the fixture, the fake dbt without `lsp` playing
-/// SCRIPT, the proxy working outside the root, as dbt's paths then are;
-/// its fake's log, and its answer to `initialize`.
+/// The session NAME on the fixture, the fake dbt playing SCRIPT, the server
+/// working outside the root, as dbt's paths then are; its fake's log, and
+/// its answer to `initialize`.
 fn alone(name: &str, script: Value) -> (Session, PathBuf, Value) {
-    let mut script = script;
-    script["no_lsp"] = json!(true);
     let arguments = [Path::new("--project-dir"), &fixture()];
     let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
     let result = session.initialize(&fixture());
@@ -40,11 +37,6 @@ fn alone(name: &str, script: Value) -> (Session, PathBuf, Value) {
 /// The runs of dbt's CLI that the fake logged beside LOG, each as it began.
 fn runs(log: &Path) -> Vec<Value> {
     logged(&log.with_extension("jsonl.runs")).into_iter().filter(|line| line.get("run").is_some()).collect()
-}
-
-/// The requests of COMMAND, one of dbt lsp's, that the fake received.
-fn received_command(log: &Path, command: &str) -> Vec<Value> {
-    logged(log).into_iter().filter(|m| m["params"]["command"] == command).collect()
 }
 
 /// Writes SCRIPT as the fake's of the session NAME, which its next run reads.
@@ -73,10 +65,6 @@ fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() 
     };
     assert_eq!(clients(&result), expected);
     assert!(session.finish().success());
-    let (mut session, _) = with_options("commands-no-start", json!({"exit_on": "initialize"}), &[]);
-    let result = session.initialize(&fixture());
-    assert_eq!(clients(&result), expected, "a server that could not start");
-    assert!(session.finish().success());
 }
 
 #[test]
@@ -87,8 +75,7 @@ fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
         let answer = execute(&mut session, command, arguments.clone());
         assert_eq!(answer["error"]["code"], -32602, "{command} {arguments}: {answer}");
     }
-    barrier(&mut session);
-    assert!(received_command(&log, "dbt.compileFile").is_empty());
+    assert!(runs(&log).is_empty(), "{:?}", runs(&log));
     assert!(session.finish().success());
 }
 
@@ -128,7 +115,7 @@ fn alone_a_failing_compile_never_answers_an_earlier_file() {
     let (mut session, _, _) = alone(name, json!({"compiled": "select 1"}));
     compiled_file(&execute(&mut session, COMPILE, json!([uri(&orders())])));
     let failed = dbt_event("error", "dbt1308", "[error] [DbDriverFailed (dbt1308)]: no driver");
-    rescript(name, json!({"no_lsp": true, "run_log": failed, "run_exit": 1}));
+    rescript(name, json!({"run_log": failed, "run_exit": 1}));
     let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
     assert_eq!(answer["result"]["file_uri"], Value::Null, "{answer}");
     assert!(answer["result"]["error"].as_str().unwrap().contains("no driver"), "{answer}");
@@ -146,7 +133,7 @@ fn alone_compile_is_refused_where_a_package_of_the_server_s_install_path_has_hoo
     let hooks = "name: hookpkg\non-run-start: \"select * from hook_probe_ran\"\n";
     std::fs::write(project.join("vendor/hookpkg/dbt_project.yml"), hooks).unwrap();
     let arguments = [Path::new("--project-dir"), &project, Path::new("--packages-install-path"), Path::new("vendor")];
-    let script = json!({"no_lsp": true, "compiled": "select 1"});
+    let script = json!({"compiled": "select 1"});
     let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
     session.initialize(&project);
     let answer = execute(&mut session, COMPILE, json!([uri(&project.join("models/marts/orders.sql"))]));
@@ -187,15 +174,12 @@ fn alone_nodes_runs_dbt_list_and_answers_its_lines() {
     let words: Vec<&str> = run.as_array().unwrap().iter().filter_map(Value::as_str).collect();
     assert_eq!(words[..4], ["list", "--select=+stg_orders+", "--output", "json"]);
     assert!(!words.contains(&"--log-format"), "dbt's text log: {words:?}");
-    rescript(name, json!({"no_lsp": true}));
+    rescript(name, json!({}));
     assert_eq!(
         execute(&mut session, NODES, json!(["nothing"]))["result"],
         json!({"nodes": [], "error": "No nodes found"})
     );
-    rescript(
-        name,
-        json!({"no_lsp": true, "run_log": "[error] [IoError (dbt1001)]: Cannot open file\n", "run_exit": 1}),
-    );
+    rescript(name, json!({"run_log": "[error] [IoError (dbt1001)]: Cannot open file\n", "run_exit": 1}));
     let failed = execute(&mut session, NODES, json!(["x"]));
     assert_eq!(failed["result"]["error"], "[error] [IoError (dbt1001)]: Cannot open file");
     assert!(session.finish().success());
@@ -228,7 +212,7 @@ fn alone_no_run_while_packages_need_the_network() {
     let project = copy_fixture("commands-unsettled-project");
     std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
         .unwrap();
-    let script = json!({"no_lsp": true, "compiled": "select 1"});
+    let script = json!({"compiled": "select 1"});
     let (mut session, log) =
         crate::support::Session::fake_with("commands-unsettled", script, &[Path::new("--project-dir"), &project], None);
     session.initialize(&project);
@@ -271,7 +255,7 @@ fn alone_an_earlier_compiled_file_stays_and_only_this_run_s_manifest_counts() {
     let customers = fixture().join("models/marts/customers.sql");
     compiled_file(&execute(&mut session, COMPILE, json!([uri(&customers)])));
     nodes_then_check(&mut session, &orders_file);
-    rescript(name, json!({"no_lsp": true}));
+    rescript(name, json!({}));
     let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
     assert_eq!(answer["result"]["error"], "Compiled file path not found.", "no manifest from this run: {answer}");
     assert!(orders_file.exists(), "the earlier file stays for the session");
@@ -290,7 +274,7 @@ fn with_no_unshare_on_path_compile_and_nodes_are_announced_and_run() {
     let dir = scratch("commands-no-unshare");
     let (script, log) = (dir.join("script.json"), dir.join("log.jsonl"));
     let node = json!({"unique_id": "model.shop.orders", "name": "orders", "resource_type": "model"});
-    std::fs::write(&script, json!({"no_lsp": true, "compiled": "select 1", "list": [node]}).to_string()).unwrap();
+    std::fs::write(&script, json!({"compiled": "select 1", "list": [node]}).to_string()).unwrap();
     let fixture_arg = fixture().to_string_lossy().into_owned();
     let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir", &fixture_arg].map(str::to_owned);
     // An empty PATH: nothing there, `unshare` included.
@@ -315,7 +299,7 @@ fn with_no_unshare_on_path_compile_and_nodes_are_announced_and_run() {
 fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
     let dir = scratch("commands-no-lsp-word");
     let (script, log) = (dir.join("script.json"), dir.join("log.jsonl"));
-    std::fs::write(&script, json!({"exit_on": "initialize"}).to_string()).unwrap();
+    std::fs::write(&script, json!({}).to_string()).unwrap();
     let fixture_arg = fixture().to_string_lossy().into_owned();
     // A wrapper of the user's own, whose words make no run of dbt's CLI.
     let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "--project-dir", &fixture_arg].map(str::to_owned);

@@ -189,47 +189,36 @@ A value goes in the next word or after `=`, as `--backend=never`.
 
 ### Modes
 
-Each method the proxy answers has a mode: `plus`, the proxy alone; `dbt`,
-`dbt lsp` alone, its answer passed as it is; `merge`, both.  `ours`,
-`plus`'s former name, is still read as `plus`, with one warning a
-session.  Set nothing and each method takes its shipped default.  The
-table says, for each method and command the proxy takes part in, who
-can answer it, its shipped mode, how the answers combine in `merge`, and
-how long a request of it in `merge` waits for `dbt lsp`; any other
-method is `dbt lsp`'s, and a command takes no mode.  Where the proxy's
-answer stands alone, `dbt-lsp-plus's`, `dbt lsp` is not asked in
-`merge`, even when the proxy finds nothing: the methods it adds, the
-call hierarchy's two others and `dbt-lsp-plus.nodeInfo`.  A rename is
-the proxy's at its kinds of target, else `dbt lsp`'s; a command goes to
-the first of its providers present, `dbt lsp` when it runs and lists
-the command, else dbt's CLI.  A definition and references
-are the proxy's at the kinds of target that `experimental.dbtLspPlus`
-lists ([Where dbt-lsp-plus answers definitions and
+Each method that dbt-lsp-plus answers has a mode: `plus` or `merge`, its
+answer, the two alike since no other server answers; `dbt`, none, the
+method left unannounced.  `ours`, `plus`'s former name, is still read as
+`plus`, with one warning a session.  Set nothing and each method takes
+its shipped default, which the table gives; a command takes no mode.  A
+definition and references are answered at the kinds of target that
+`experimental.dbtLspPlus` lists ([Where dbt-lsp-plus answers definitions
+and
 references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)),
-with `dbt lsp`'s other locations after them, and `dbt lsp`'s elsewhere.
-A wait is 300 ms where the proxy has something of its own, 2 s where it
-has nothing; `no` is no deadline: the proxy's answer at once, or `dbt
-lsp`'s however long it takes.
+a rename at a source or a CTE; elsewhere each gets its nothing.
 
-| Method or command | Answered by | Shipped mode | Combined | Waits for dbt lsp |
-|---|---|---|---|---|
-| `textDocument/documentSymbol` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `workspace/symbol` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/prepareCallHierarchy` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `callHierarchy/incomingCalls` | dbt-lsp-plus, dbt lsp | prepareCallHierarchy's | dbt-lsp-plus's | no |
-| `callHierarchy/outgoingCalls` | dbt-lsp-plus, dbt lsp | prepareCallHierarchy's | dbt-lsp-plus's | no |
-| `textDocument/foldingRange` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/documentHighlight` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/selectionRange` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/hover` | dbt-lsp-plus, dbt lsp | merge | dbt-lsp-plus's text, then dbt lsp's under its name | 300 ms, 2 s with nothing |
-| `textDocument/inlayHint` | dbt-lsp-plus, dbt lsp | merge | dbt lsp's, then dbt-lsp-plus's | 300 ms, 2 s with nothing |
-| `textDocument/definition` | dbt-lsp-plus, dbt lsp | merge | the union, dbt-lsp-plus's first | 300 ms, 2 s with nothing |
-| `textDocument/references` | dbt-lsp-plus, dbt lsp | merge | the union, dbt-lsp-plus's first | 300 ms, 2 s with nothing |
-| `textDocument/rename` | dbt-lsp-plus, dbt lsp | merge | dbt-lsp-plus's at its kinds, else dbt lsp's | no |
-| `textDocument/publishDiagnostics` | dbt-lsp-plus, dbt lsp | merge | both, per file | no |
-| `dbt-lsp-plus.nodeInfo` | dbt-lsp-plus | none | dbt-lsp-plus's | no |
-| `dbt-lsp-plus.compile` | dbt lsp, dbt's CLI | none | the first present | no |
-| `dbt-lsp-plus.nodes` | dbt lsp, dbt's CLI | none | the first present | no |
+| Method or command | Shipped mode |
+|---|---|
+| `textDocument/documentSymbol` | plus |
+| `workspace/symbol` | plus |
+| `textDocument/prepareCallHierarchy` | plus |
+| `callHierarchy/incomingCalls` | prepareCallHierarchy's |
+| `callHierarchy/outgoingCalls` | prepareCallHierarchy's |
+| `textDocument/foldingRange` | plus |
+| `textDocument/documentHighlight` | plus |
+| `textDocument/selectionRange` | plus |
+| `textDocument/hover` | merge |
+| `textDocument/inlayHint` | merge |
+| `textDocument/definition` | merge |
+| `textDocument/references` | merge |
+| `textDocument/rename` | merge |
+| `textDocument/publishDiagnostics` | merge |
+| `dbt-lsp-plus.nodeInfo` | none |
+| `dbt-lsp-plus.compile` | none |
+| `dbt-lsp-plus.nodes` | none |
 
 Besides the command line, a client sets the modes in
 `initializationOptions`, which win method by method:
@@ -238,18 +227,11 @@ Besides the command line, a client sets the modes in
 {"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}
 ```
 
-For the methods the proxy adds (the outline, workspace symbols, the call
-hierarchy, folding, highlights and selection ranges), `merge` is the
-proxy's answer, as `plus` is, until a later version merges them; `dbt`
-leaves the capability as `dbt lsp` announced it, so that a method it
-announces as absent is never asked.
-
-In Neovim that is `init_options`, not `settings`: the proxy reads no
+In Neovim that is `init_options`, not `settings`: dbt-lsp-plus reads no
 `workspace/didChangeConfiguration`, and a change applies when the client
-starts again.  A refused key is ignored and shown once in a warning.
-`dbt lsp` gets `initializationOptions` without `dbtLspPlus`.  With no
-`dbt lsp`, a method set to `dbt` gets its nothing, null or `[]`, which
-does not say why, and a warning says so once.
+starts again.  A refused key is ignored and shown once in a warning.  A
+method set to `dbt` gets its nothing, null or `[]`, which does not say
+why, and a warning says so once.
 
 ### The server command
 

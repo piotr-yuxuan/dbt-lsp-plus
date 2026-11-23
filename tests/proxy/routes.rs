@@ -4,7 +4,7 @@
 //! of a session that has none.
 
 use crate::support::{Session, copy_fixture, scratch, script, uri};
-use crate::{dbt_event, lives, logged, manifest, node_info, published};
+use crate::{dbt_event, logged, manifest, node_info, published};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ fn path_of(value: &Value) -> PathBuf {
     resolved(Path::new(value.as_str().unwrap()))
 }
 
-/// The fake's script, SCRIPT_VALUE written, its log and the proxy's cache,
+/// The fake's script, SCRIPT_VALUE written, its log and the server's cache,
 /// as `Session::fake` places them, under DIR.
 pub(crate) fn fake_env(dir: &Path, script_value: &Value) -> (PathBuf, PathBuf, PathBuf) {
     let (script_path, log, cache) = (dir.join("script.json"), dir.join("log.jsonl"), dir.join("cache"));
@@ -93,8 +93,14 @@ fn without_a_project_the_proxy_answers_null_and_runs_nothing() {
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.p.x"]})),
         ("shutdown", Value::Null),
     ];
-    let results: Vec<Value> = requests.map(|(method, params)| session.request(method, params)["result"].clone()).into();
-    assert_eq!(results, vec![Value::Null; 9]);
+    let answers: Vec<Value> = requests.map(|(method, params)| session.request(method, params)).into();
+    // Null to each of the server's methods and commands; an unknown method is not found.
+    let results: Vec<Option<&Value>> = answers.iter().map(|answer| answer.get("result")).collect();
+    let mut expected = vec![Some(&Value::Null); 9];
+    expected[6] = None;
+    assert_eq!(results, expected);
+    let unknown = json!({"code": -32601, "message": "dbt-lsp-plus does not answer textDocument/implementation"});
+    assert_eq!(answers[6]["error"], unknown);
     let received = session.received.len();
     let (status, unread) = session.exit();
     // The answers to initialize, the eight requests and shutdown: no other frame.
@@ -103,8 +109,8 @@ fn without_a_project_the_proxy_answers_null_and_runs_nothing() {
     assert_eq!(fs::read_to_string(&stderr).unwrap(), "");
 }
 
-/// A session NAME without `--project-dir` in front of the default `dbt
-/// lsp`, in `repo` as Claude Code 2.1.317 starts it at a repository's
+/// A session NAME without `--project-dir`, the default `dbt lsp` as its
+/// server command, in `repo` as Claude Code 2.1.317 starts it at a repository's
 /// root, the fixture copied to `repo/dbt`, whose `.venv/bin/dbt` is the
 /// fake, and a stub `dbt` first on PATH; `repo/ci.yml`, then `orders.sql`
 /// opened.  Returns the session, the project, its dbt, the fake's log and
@@ -135,7 +141,7 @@ fn from_a_document(name: &str) -> (Session, PathBuf, PathBuf, PathBuf, PathBuf) 
                          "documentSymbol": {"hierarchicalDocumentSymbolSupport": true}},
         "workspace": {"workspaceFolders": false, "didChangeWatchedFiles": {"dynamicRegistration": false}}});
     let result = session.initialize_as(&repo, capabilities);
-    assert_eq!(result["capabilities"]["hoverProvider"], json!(true), "alone: {result}");
+    assert_eq!(result["capabilities"]["hoverProvider"], json!(true), "{result}");
     fs::write(repo.join("ci.yml"), "on: push\n").unwrap();
     session.open(&repo.join("ci.yml"), None);
     session.open(&project.join("models/marts/orders.sql"), None);
@@ -150,12 +156,11 @@ fn without_project_dir_the_first_document_in_a_project_names_it_and_its_dbt() {
     let (mut session, project, dbt, log, stub_log) = from_a_document("routes-document");
     session.request("workspace/symbol", json!({"query": "orders"}));
     let said = log_messages(&session);
-    let line = format!("project {}, dbt {} (the project's .venv)", project.display(), dbt.display());
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert!(said[0].contains(&line) && said[0].contains("dbt lsp is not started"), "{said:?}");
+    let line = format!("dbt-lsp-plus: project {}, dbt {} (the project's .venv).", project.display(), dbt.display());
+    assert_eq!(said, [line]);
     assert!(!session.received.iter().any(|m| m["method"] == "window/showMessage"));
     assert!(session.finish().success());
-    assert_eq!((lives(&log).len(), stub_log.exists()), (0, false), "a server started, or PATH's dbt ran");
+    assert!(!stub_log.exists(), "PATH's dbt ran");
     let parse = started(&starts(&log), "parse").clone();
     assert_eq!((path_of(&parse["argv0"]), path_of(&parse["cwd"])), (resolved(&dbt), resolved(&project)), "{parse}");
 }
@@ -240,8 +245,8 @@ fn a_document_of_another_project_is_told_where_it_lies() {
     assert!(session.finish().success());
 }
 
-/// A session NAME without `--project-dir` in front of the default `dbt
-/// lsp`, run outside the project, the client's folder a copy of the
+/// A session NAME without `--project-dir`, the default `dbt lsp` as its
+/// server command, run outside the project, the client's folder a copy of the
 /// fixture whose `.venv/bin/dbt` is the fake playing SCRIPT_VALUE.  Returns
 /// the session, its answer to `initialize`, the fake's starts by then,
 /// the project, its dbt and the fake's log.
@@ -267,25 +272,24 @@ fn from_the_folder(name: &str, script_value: &Value) -> (Session, Value, Vec<Val
 
 #[test]
 fn without_project_dir_the_client_s_folder_s_dbt_without_lsp_leaves_the_proxy_alone() {
-    let (session, result, _, _, dbt, log) = from_the_folder("routes-folder-alone", &json!({"no_lsp": true}));
+    let (session, result, _, _, dbt, _) = from_the_folder("routes-folder-alone", &json!({}));
     let said = log_messages(&session);
     assert_eq!(said.len(), 1, "{said:?}");
-    let named = format!("dbt {} (the project's .venv); it has no lsp", dbt.display());
-    assert!(said[0].contains(&named), "{said:?}");
+    let named = format!("dbt {} (the project's .venv).", dbt.display());
+    assert!(said[0].ends_with(&named), "{said:?}");
     assert!(session.finish().success());
     let answer = (&result["serverInfo"]["name"], &result["capabilities"]["hoverProvider"]);
     assert_eq!(answer, (&json!("dbt-lsp-plus"), &json!(true)), "{result}");
-    assert!(lives(&log).is_empty(), "a server started");
 }
 
 #[test]
-fn given_project_dir_the_command_runs_as_written_and_nothing_is_said() {
+fn given_project_dir_the_command_runs_as_written_and_one_line_says_so() {
     let project = copy_fixture("routes-given");
     let dir = project.parent().unwrap().to_owned();
     let venv_log = dir.join("venv.log");
     script(&project.join(".venv/bin/dbt"), &format!("echo \"$0 $*\" >> '{}'\nexit 0", venv_log.display()));
     let (path, stub_log) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt-lsp")));
-    let (script_path, log, cache) = fake_env(&dir, &json!({}));
+    let (script_path, log, cache) = fake_env(&dir, &json!({"manifest": manifest()}));
     let env = [
         ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
         ("FAKE_DBT_LSP_LOG", log.as_path()),
@@ -295,18 +299,21 @@ fn given_project_dir_the_command_runs_as_written_and_nothing_is_said() {
     let command = ["dbt".to_owned(), "lsp".into(), "--project-dir".into(), project.to_string_lossy().into_owned()];
     let mut session = Session::start(&command, &env, None);
     let result = session.initialize(&project);
-    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    assert_eq!(log_messages(&session), Vec::<String>::new());
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(log_messages(&session), [format!("dbt-lsp-plus: project {}, dbt dbt.", project.display())]);
     assert!(session.finish().success());
+    // PATH's dbt, as written, ran the parse alone: no probe.
     let ran = fs::read_to_string(&stub_log).unwrap();
-    let server = format!("lsp --project-dir {}", project.display());
-    assert_eq!(ran.lines().collect::<Vec<_>>(), ["lsp --help", &server], "the probe, then the server");
+    let ran: Vec<&str> = ran.lines().collect();
+    assert!(ran.len() == 1 && ran[0].starts_with("parse "), "{ran:?}");
     assert!(!venv_log.exists(), "the project's .venv ran");
-    // In the proxy's working directory, this process's: dbt-mode's profiles.yml stays found.
+    // In the server's working directory, this process's: dbt-mode's profiles.yml stays found.
     let here = resolved(&std::env::current_dir().unwrap());
     let dirs: Vec<PathBuf> = starts(&log).iter().map(|start| path_of(&start["cwd"])).collect();
-    assert_eq!(dirs, [here.clone(), here], "the probe and the server");
+    assert_eq!(dirs, [here], "the parse");
 }
 
 #[test]
@@ -327,7 +334,7 @@ fn a_dbt_skipped_in_the_project_s_venv_is_named_in_the_line_before_path_s() {
         ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
     ];
     let mut session = Session::start(&[], &env, Some(&dir));
-    assert_eq!(session.initialize(&project)["serverInfo"]["name"], "dbt-lsp");
+    assert_eq!(session.initialize(&project)["serverInfo"]["name"], "dbt-lsp-plus");
     session.request("workspace/symbol", json!({"query": "orders"}));
     let said = log_messages(&session);
     let named = format!("dbt {} (PATH); skipped {} (cannot run: ", dir.join("bin/dbt").display(), venv.display());
