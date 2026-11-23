@@ -11,16 +11,14 @@ dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
 ```
 
 A subcommand is the first word after the program's name, and nothing
-else: `dbt-lsp-plus -- doctor` and `dbt-lsp-plus --default-mode plus
-select x` still start a server whose command is `doctor` or `select x`.  A server
-command whose first word is a subcommand's name (`doctor`, `select` or
-`node`) follows `--`.
+else: `dbt-lsp-plus -- doctor` starts a server whose command is
+`doctor`.  A server command whose first word is a subcommand's name
+(`doctor`, `select` or `node`) follows `--`.
 
 ARGUMENTS are the server's own command line, as an editor or `.lsp.json`'s
 `args` give it: `--` and the server command, `dbt lsp` by default
 (`-- dbt lsp --target prod`, `-- uvx dbt lsp`, `-- dbt lsp --project-dir
-dbt`).  Of them the subcommands read the server command; `--mode` and
-`--default-mode` are checked and unused.
+dbt`).
 
 `-h` or `--help` right after the subcommand's name prints its usage, whatever
 follows; elsewhere it is a usage error.

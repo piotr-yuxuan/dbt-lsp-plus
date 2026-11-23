@@ -43,45 +43,21 @@ loop, which owns all state and writes the output; the parse, the runs of
 dbt's CLI and the watchers of the last run report to it from threads of
 their own.
 
-- `initialize` is answered at once: the capability of each method that
-  takes a mode, outside `dbt` (see "Modes"), saves, which start a parse,
-  `experimental.dbtLspPlus`, and the commands `dbt-lsp-plus.nodeInfo`,
-  `dbt-lsp-plus.compile` and `dbt-lsp-plus.nodes`.  Positions are in
-  UTF-16, LSP's default, which the server keeps by announcing no
+- `initialize` is answered at once: the capability of each method of
+  `CAPABILITIES` (see "Capabilities"), saves, which start a parse, and
+  the commands `dbt-lsp-plus.nodeInfo`, `dbt-lsp-plus.compile` and
+  `dbt-lsp-plus.nodes`.  `initializationOptions` is not read.  Positions
+  are in UTF-16, LSP's default, which the server keeps by announcing no
   `positionEncoding`.
 - A request names a row of `CAPABILITIES` (`src/capability.rs`), a
   command only through `workspace/executeCommand`; with none, it gets
   error -32601 `dbt-lsp-plus does not answer <name>`, before a project
   too, `shutdown` aside, null as LSP asks: no one else will answer it
-  (plan 075).  Before a project, a row's request gets null (see "Root").
-  Outside `dbt`, a method answered whole (the outline, workspace symbols,
-  the call hierarchy, folding, highlights, selection ranges, hover, inlay
-  hints) goes to its handler; one with kinds of target, a definition,
-  references or a rename, to its handler where its position holds one of
-  its kinds, else gets its nothing, null or `[]` for references.
-- `experimental.dbtLspPlus`, `"dbtLspPlus": {"version": 2, "definition":
-  {KIND: [PLACE, ...]}, "references": {...}, "rename": {...}}`, names,
-  per request, the kinds of target answered and the places of a
-  request's position, `sql` (a `.sql` file), `yaml` (`.yml`, `.yaml`) or
-  `python` (`.py`): those of definitions and references, with their
-  places, in [Where dbt-lsp-plus answers definitions and
-  references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references),
-  which a unit test keeps equal to the flag; a rename's, which no test
-  holds this page to, a source in SQL, YAML and Python and a CTE in SQL.
-  A kind listed at a place is answered at every position of that kind
-  there, possibly null or `[]`, in any file under the root: references
-  come from the scan whichever file asks, while a rename needs a file the
-  scan holds, since it would leave the asking file as it is.  The kinds
-  are by position, and the lists follow the modes (see "Modes"): `entry`
-  is the `name:` of an entry, a function's under `functions:` included,
-  `test` a generic test's name, `ref` in YAML a unit test's `model:` too,
-  `function` either argument of `function()`, and `macro` the `ref` and
-  `function` keywords themselves, which a project's macro may replace,
-  and the name in the tag of a macro or a generic test.  dbt-mode steps
-  aside for exactly those (its plan 014, agreed with plans 017 and 018),
-  and reads version 2 only: it asks only for the kinds it knows, and maps
-  only `.sql`, `.yml` and `.yaml` to places, so plan 018's `function` and
-  `python` changed nothing for it.
+  (plan 075).  Before a project, a row's request gets null (see "Root");
+  after, its handler's answer, at any position of any file: its nothing,
+  null or `[]` for a list, where the position names nothing.  References
+  come from the scan whichever file asks, while a source's rename needs
+  a file the scan holds, since it would leave the asking file as it is.
 - Request ids: the client's pass unchanged.  The server's own requests to
   the client (`workspace/inlayHint/refresh`, `client/registerCapability`)
   carry string ids `dbt-lsp-plus/N`; the client's answers to them are
@@ -126,43 +102,16 @@ not finished: ...`), and so does a hover at a `ref`, a `source` or an
 entry's `name:`.  A command's failure, a result with `error` set, keeps
 its own form.
 
-## Modes
+## Capabilities
 
 Each method the server answers has a capability (`src/capability.rs`,
 plan 042): one descriptor per method or command for clients, which says
-the capability that announces it, the method whose mode a follower
-takes, whether its nothing is `[]`, whether it wants the parse's index,
-whether it reads the project, and the kinds of target the flag lists for
-it.  The capabilities announced, `experimental.dbtLspPlus`, the commands
-listed and the methods that take a mode all come from that one table,
-and the reference's table of shipped modes is held to it by a unit test.
-Each method has a mode (`src/modes.rs`): `plus` and `merge`, both
-dbt-lsp-plus's answer since plan 075, as no other server answers; `dbt`,
-the method left unanswered: not announced, its rows left out of the
-flag, null or `[]` to a request, and a warning once after `initialize`
-that names it (plan 020, at dbt-mode's request: it reads announcements
-as the truth).  The methods are `textDocument/documentSymbol`,
-`workspace/symbol`, `textDocument/prepareCallHierarchy` (whose two
-followers take its mode), `textDocument/foldingRange`,
-`textDocument/documentHighlight`, `textDocument/selectionRange`,
-`textDocument/hover`, `textDocument/inlayHint`, `textDocument/definition`,
-`textDocument/references`, `textDocument/rename` and
-`textDocument/publishDiagnostics`.  `ours`, `plus`'s name before plan
-037, is still read as `plus`, wherever a mode is, and said once after
-`initialize`, in the warning that names refused settings.  The shipped
-default is `plus` for the methods dbt-lsp-plus adds (the outline,
-workspace symbols, the call hierarchy, folding, highlights, selection
-ranges), `merge` for the others.  A method's mode is the user's for it,
-else the user's default, else the shipped one: the command line's
-`--mode` and `--default-mode`, then `initializationOptions.dbtLspPlus`'s
-`modes` and `defaultMode` over them, method by method.  The table is
-fixed when `initialize` is answered; capabilities and the flag follow
-it.  `workspace/didChangeConfiguration` is not read, since the flag that
-dbt-mode reads at `initialize` could not follow a change: a change
-applies at the next session.  A refused setting of
-`initializationOptions` is ignored and shown once in a warning; a bad
-option on the command line is a usage error.  Plan 085 removes the
-modes, which no longer choose between two servers.
+the capability that announces it, whether its nothing is `[]`, whether
+it wants the parse's index, and whether it reads the project.  The
+capabilities announced, the commands listed and the reference's table
+of methods and commands all come from that one table, and a unit test
+holds the reference's table to it.  The command line takes `-h` and
+`-V` alone; any other option is a usage error.
 
 ## Commands for clients
 
@@ -329,10 +278,9 @@ and in another project when the walk up from it finds one
 method that reads the project and names its document by
 `textDocument.uri` (a hover, a definition, references,
 `prepareCallHierarchy`), fails with `<document> lies in the dbt project
-at <project>, and this session serves only the one at <root>`, alone and
-in `plus`, and a nodeInfo at a position there, which has no mode, fails
-with it too, before or after the first parse.  Inlay hints there are
-`[]`; a method set to `dbt` gets its nothing.  The rest is answered as
+at <project>, and this session serves only the one at <root>`, and so
+does a nodeInfo at a position there, before or after the first parse.
+Inlay hints there are `[]`.  The rest is answered as
 before: the methods of the document's own text, a rename, which there
 is a CTE's alone, a document in no project, every request while the
 root's `dbt_project.yml` does not read, and a project nested under the
@@ -682,8 +630,8 @@ file under and first clears it when the URI changes.  Nothing after
 ## Navigation
 
 The server answers a definition, and references, where the document
-alone shows one of these targets, as `experimental.dbtLspPlus` lists them
-(see "Message flow"), and gives its nothing elsewhere:
+alone shows one of these targets, in any file, a Markdown docs block's
+Jinja included, and gives its nothing elsewhere:
 
 - `source`: a `source()` argument in any file, or a source's or table's
   `name:`, leads to the table's or source's `name:`;
@@ -830,7 +778,7 @@ CTE:
   proxy answers null, so that a client that falls back on null, as VS Code
   does, folds and selects by indentation; one that does not gets nothing,
   as it got before the proxy announced folding.
-- CTE rename, in a SQL file: the definition and every use, whole words
+- CTE rename, in any file: the definition and every use, whole words
   (whose neighbours are no letter, digit, `_` or `$`) outside Jinja,
   comments and strings, within the innermost block that defines the CTE,
   not after a `.`, matched without regard to case unless quoted.  A new
@@ -1437,10 +1385,12 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   that refuses `lsp` as dbt-oss 2.0.11 does and plays `parse`, `compile`
   and `list` as the script says, logging each process's `argv[0]`,
   arguments and working directory.  They cover:
-  - `initialize`: the capabilities, the flag of the kinds answered, the
-    commands; an unknown method or command, -32601, before a project too;
-    a command with no name, -32602; a rename at no source and no CTE, and
-    the server's notification sent as a request, null;
+  - `initialize`: the capabilities and the commands, no `experimental`,
+    `initializationOptions` not read; a bad option, a usage error; an
+    unknown method or command, -32601, before a project too, a command
+    named as a method and the server's notification sent as a request
+    among them; a command with no name, -32602; a rename at no source
+    and no CTE, null;
   - the outline of unsaved edits in UTF-16, after a character that UTF-16
     and UTF-32 count apart; flat for a client without hierarchy; a closed
     document's edits dropped; the outline of a properties file, flat and
@@ -1465,7 +1415,7 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   - references and renames of sources, files the scan does not hold, the
     client's URI of an open document; navigation at each kind of target,
     dbt's own test null, a versioned `ref`, functions, a Python model's
-    `ref`;
+    `ref`, a name in any file; a CTE renamed in YAML, not highlighted;
   - node information and the hover: the parse's flags and cache, dbt's
     output kept off the client's channel and its standard error in
     `parse.log`, one parse at a time and one more after a change during
@@ -1481,9 +1431,6 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     under before cleared when the client opens the file under another;
   - inlay hints: a first parse from a hint request, none more once an
     index exists; the refresh asked of a client that can;
-  - the modes: `plus` for every method, `ours` read as `plus` with one
-    warning, a method in `dbt` unannounced and answered with its nothing,
-    `initializationOptions` read and refused, a bad option;
   - the guard on packages, alike on every route; the commands for
     clients by dbt's CLI, one run at a time, refused where a package may
     have on-run hooks, and with a server command without `lsp`.
@@ -1553,14 +1500,17 @@ lsp`, the language server of dbt Labs' build of dbt 2, observed on 2.0.9:
   ten minutes, replaying the session;
 - with a dbt without `lsp`, dbt-oss, or `--backend never`, it answered
   alone, as it now always does;
-- `dbt-lsp-plus.show` went to `dbt.show`, and the modes chose between the
-  proxy, dbt lsp and both.
+- `dbt-lsp-plus.show` went to `dbt.show`, and the modes (plans 019 and
+  020), `plus`, `dbt` and `merge` by `--mode`, `--default-mode` and
+  `initializationOptions.dbtLspPlus`, chose between the proxy, dbt lsp
+  and both, the proxy's kinds of target named in
+  `experimental.dbtLspPlus`.
 
 The owner decided on 2026-11-22 that the server stands alone: dbt lsp
 needs dbt Labs' build, answers as nothing documents, and costs most of
 the code; what it alone gave (completion, formatting, its compile
 diagnostics, column features) a user may still get by running it beside
 dbt-lsp-plus (see `docs/how-to/troubleshoot.md`).  Plan 075 removed it;
-plan 085 removes the modes.  The full record of what dbt lsp 2.0.9 was
+plan 085 removed the modes.  The full record of what dbt lsp 2.0.9 was
 observed to do, its messages, compilations, listings and restarts, is in
 `git show 61cdd67:docs/explanation/design.md`.

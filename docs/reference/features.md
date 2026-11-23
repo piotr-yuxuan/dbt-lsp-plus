@@ -77,12 +77,10 @@ What dbt-lsp-plus answers, from the project's files and the user's own
   when a string in a Jinja tag names it, since a macro may render it as
   SQL.
 
-Definitions and references are answered at the kinds of target that
-[Where dbt-lsp-plus answers definitions and
-references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)
-lists; the initialize result names those, per kind of target and kind of
-file, under `experimental.dbtLspPlus`.  Elsewhere they get their
-nothing, null or `[]`, and a rename at no source and no CTE gets null.
+Definitions and references are answered at every position, in any file,
+as dbt's lookup resolves the name there; a position that names no
+target gets their nothing, null or `[]`, and a rename at no source and
+no CTE gets null.
 A method or a command that dbt-lsp-plus does not answer, such as
 `textDocument/completion`, gets error -32601 `dbt-lsp-plus does not
 answer <name>`.  When the root's `dbt_project.yml` no longer reads, a
@@ -102,10 +100,10 @@ the one at <root>`.
 
 ## Configuration
 
-dbt-lsp-plus reads no configuration file: what it takes is on its
-command line, which ends with the server command, in its environment,
-and in the client's `initializationOptions` (see "Modes" below).  Every
-option at once, for a project whose profile sits beside it:
+dbt-lsp-plus reads no configuration file, nor the client's
+`initializationOptions`: what it takes is on its command line, which
+ends with the server command, and in its environment.  Every option at
+once, for a project whose profile sits beside it:
 
 ```sh
 env DBT_PACKAGES_INSTALL_PATH=vendor/dbt_packages \
@@ -128,25 +126,18 @@ it in the project.
 ### The arguments
 
 ```
-dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
+dbt-lsp-plus [--] [SERVER COMMAND...]
+dbt-lsp-plus -h|-V
 ```
 
-Options are read from the first word for as long as a word starts with
-`-`; the first word that does not begins the server command.  An unknown
-option, a missing value or a bad one is a usage error: the reason and
-the usage on standard error, exit status 2, nothing started.
+A first word that starts with `-`, but `--`, is an option; any other
+option is a usage error: the reason and the usage on standard error,
+exit status 2, nothing started.
 
-- `--mode METHOD=MODE`: who answers the LSP method METHOD, by its full
-  name, such as `textDocument/hover`: `plus`, `dbt` or `merge` (see
-  "Modes").  Repeatable.
-- `--default-mode MODE`: the mode of every method the server answers but
-  those `--mode` sets.
 - `--`: ends dbt-lsp-plus's own arguments; needed only before a server
   command that starts with a dash.
 - `-h`, `--help`: prints the usage and exits.
 - `-V`, `--version`: prints `dbt-lsp-plus X.Y.Z` and exits.
-
-A value goes in the next word or after `=`, as `--default-mode=plus`.
 
 ### Methods and commands
 

@@ -17,19 +17,16 @@ takes the directory all the same, and its parse fails there.
 
 ## Who answers a request
 
-- **dbt-lsp-plus** answers the outline, workspace symbols, the call
-  hierarchy, folding, highlights, selection ranges, the rename of a CTE,
-  hovers, inlay hints and `dbt-lsp-plus.nodeInfo`; references and renames
-  on a source; definitions and references of the kinds of target in
-  [Where dbt-lsp-plus answers definitions and
-  references](use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references).
-  The answer to `initialize` names those kinds, per request, under
-  `capabilities.experimental.dbtLspPlus`.  For each operation of an
+- **dbt-lsp-plus** answers every request of [its methods and
+  commands](../reference/features.md#methods-and-commands): the outline,
+  workspace symbols, the call hierarchy, folding, highlights, selection
+  ranges, the rename of a CTE, hovers, inlay hints and
+  `dbt-lsp-plus.nodeInfo`; references and renames on a source;
+  definitions and references at any target.  For each operation of an
   agent's LSP tool, see [Who answers
-  what](use-with-an-agent.md#who-answers-what); for each method, [the
-  modes](../reference/features.md#modes).
-- At a position that holds none of its kinds, references are `[]`, a
-  definition and a rename null.
+  what](use-with-an-agent.md#who-answers-what).
+- At a position that names no target, references are `[]`, a definition
+  and a rename null.
 - **No one else**: a method or a command that dbt-lsp-plus does not
   answer, completion and formatting among them, gets error -32601
   `dbt-lsp-plus does not answer <name>` at once.

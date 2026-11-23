@@ -119,8 +119,8 @@ file takes the file's route unless the arguments after `--` name
 
 | Operation | LSP method | Answer |
 |-----------|------------|--------|
-| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null |
-| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` |
+| goToDefinition | `textDocument/definition` | dbt-lsp-plus; null where the position names no target |
+| findReferences | `textDocument/references` | dbt-lsp-plus; `[]` where the position names no target |
 | hover | `textDocument/hover` | a node's summary and facts, a docs block, a test's signature; before the first parse, the error above |
 | documentSymbol | `textDocument/documentSymbol` | dbt-lsp-plus |
 | workspaceSymbol | `workspace/symbol` | dbt-lsp-plus |
@@ -129,30 +129,10 @@ file takes the file's route unless the arguments after `--` name
 
 dbt-lsp-plus's answers carry a node's unique id: a symbol reads
 `orders (Class) - Line 1 in model.shop.orders`, a call hierarchy item
-ends `[model.shop.orders]`.  The modes `merge`, the default, and `plus`
-give the same answers; `dbt` leaves a method unanswered ([the
-modes](../reference/features.md#modes)).
-
-### Where dbt-lsp-plus answers definitions and references
-
-In the modes `merge`, the default, and `plus`, at these kinds of
-target, by the file the position is in, dbt-lsp-plus answers; the answer
-to `initialize` lists them under `capabilities.experimental.dbtLspPlus`.
-A request set to `dbt` lists none.
-
-| request | kind | places | meaning |
-|---------|------|--------|---------|
-| definition | `source` | sql, yaml, python | a `source()` argument, a source's or table's `name:` |
-| definition | `ref` | sql, yaml, python | a `ref()` argument, a unit test's `model:` |
-| definition | `macro` | sql, yaml | a macro call, the name in a macro's or a generic test's tag |
-| definition | `doc` | yaml | a `doc()` argument |
-| definition | `entry` | yaml | an entry's `name:`, a function's included |
-| definition | `test` | yaml | a generic test's name |
-| definition | `function` | sql, yaml | a `function()` argument |
-| references | `source` | sql, yaml, python | as for definition |
-| references | `ref` | sql, yaml, python | as for definition |
-| references | `macro` | sql, yaml | as for definition |
-| references | `function` | sql, yaml | as for definition |
+ends `[model.shop.orders]`.  A definition and references answer at any
+target that dbt's lookup resolves, in any file: a `source()` or a
+`ref()` argument, a unit test's `model:`, a macro call, a `doc()`, an
+entry's `name:`, a generic test's name, a `function()` argument.
 
 After an `Edit` of a file the server has open, the parse's problems
 reach the agent's context unasked, after a later tool result, as
@@ -238,12 +218,9 @@ By what the agent reads:
   method: no server of this session answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not
   opened, other than the first, opens it without saving it.  The next
-  hover, or definition or references at a kind listed in [Where
-  dbt-lsp-plus answers definitions and
-  references](#where-dbt-lsp-plus-answers-definitions-and-references),
-  finds the file changed on disk, starts a parse and is answered from
-  the last index meanwhile; ask again once the parse
-  has run.
+  hover, definition or references finds the file changed on disk,
+  starts a parse and is answered from the last index meanwhile; ask
+  again once the parse has run.
 
 Three setups fail silently.  A `.lsp.json` at a repository's root does
 nothing: Claude Code reads it at a plugin's root only.  A plugin
