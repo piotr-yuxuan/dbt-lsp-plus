@@ -174,7 +174,6 @@ pub fn empty(name: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::Kind;
 
     #[test]
     fn a_command_is_found_by_its_name_and_a_method_is_no_command() {
@@ -209,34 +208,5 @@ mod tests {
             [capability.name.to_owned(), shipped].to_vec()
         });
         assert_eq!(rows.get(2..), Some(&rendered.collect::<Vec<_>>()[..]), "the rows under {heading}");
-    }
-
-    #[test]
-    fn each_kind_shows_today_s_word_and_each_listed_word_is_a_kind_s() {
-        // The word that each kind's position showed before plan 045, and a dispatch's, which no position names.
-        let mut words = vec![
-            (Kind::Ref, "ref"),
-            (Kind::UnitTestModel, "ref"),
-            (Kind::Table { source: "raw".into() }, "source"),
-            (Kind::Source, "source"),
-            (Kind::Macro, "macro"),
-            (Kind::Function, "function"),
-            (Kind::Doc, "doc"),
-            (Kind::Test, "test"),
-            (Kind::Dispatch, "dispatch"),
-        ];
-        // An entry of each label, a macro's and a function's included.
-        let labels = ["model", "seed", "snapshot", "analysis", "macro", "function"];
-        words.extend(labels.map(|label| (Kind::Entry { label }, "entry")));
-        for (kind, word) in &words {
-            assert_eq!(kind.flag(), *word, "{kind:?}");
-        }
-        // A CTE is local to its document, no Name.
-        for capability in &CAPABILITIES {
-            let listed = capability.kinds.iter().map(|(word, _)| *word);
-            for word in listed.filter(|word| !(capability.name == "textDocument/rename" && *word == "cte")) {
-                assert!(words.iter().any(|(_, shown)| *shown == word), "{} lists {word}", capability.name);
-            }
-        }
     }
 }

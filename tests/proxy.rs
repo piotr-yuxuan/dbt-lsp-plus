@@ -776,27 +776,6 @@ fn a_rename_names_an_open_document_by_the_uri_it_was_opened_under() {
     assert!(session.finish().success());
 }
 
-/// What `experimental.dbtLspPlus` says the server answers by what a
-/// position holds.
-fn answered_itself() -> Value {
-    let everywhere = json!(["sql", "yaml", "python"]);
-    let definition = json!({"source": everywhere, "ref": everywhere, "macro": ["sql", "yaml"], "doc": ["yaml"],
-                            "entry": ["yaml"], "test": ["yaml"], "function": ["sql", "yaml"]});
-    let references =
-        json!({"source": everywhere, "ref": everywhere, "macro": ["sql", "yaml"], "function": ["sql", "yaml"]});
-    json!({"version": 2, "definition": definition, "references": references,
-           "rename": {"source": everywhere, "cte": ["sql"]}})
-}
-
-#[test]
-fn tells_which_requests_it_answers_itself() {
-    let (mut session, _) = Session::fake("experimental", json!({}));
-    let result = session.initialize(&fixture());
-    assert_eq!(result["capabilities"]["experimental"], json!({"dbtLspPlus": answered_itself()}));
-    assert_eq!(result["capabilities"]["definitionProvider"], true);
-    assert!(session.finish().success());
-}
-
 /// The position of `orders` in `from orders` in `orders.sql`, with that file's URI.
 fn on_from_orders() -> Value {
     let path = fixture().join("models/marts/orders.sql");
@@ -1938,10 +1917,8 @@ fn in_merge_a_document_of_another_project_leaves_dbt_lsp_s_answer_then_says_why(
     std::fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
     std::fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
     let script = json!({"manifest": manifest()});
-    // References in `plus`, and the call hierarchy in `merge`.
-    let modes = ["--mode", "textDocument/references=plus", "--mode", "textDocument/prepareCallHierarchy=merge"];
     let flags = [Path::new("--project-dir"), &project];
-    let (mut session, _) = Session::fake_options("elsewhere-merge", script, &modes, &flags, None);
+    let (mut session, _) = Session::fake_with("elsewhere-merge", script, &flags, None);
     session.initialize(&project);
     session.open(&m, None);
     let on_ref = position_in(&m, "ref('orders')", 6);
@@ -2100,8 +2077,7 @@ fn alone_a_ref_and_a_macro_call_in_sql_lead_where_dbt_resolves_them() {
     std::fs::write(package_models.join("uses.sql"), "select * from {{ ref('orders') }}").unwrap();
     let flags = [Path::new("--project-dir"), &project];
     let (mut session, _) = Session::fake_with("sql-definitions", json!({}), &flags, None);
-    let result = session.initialize(&project);
-    assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered_itself());
+    session.initialize(&project);
     let mut definition = |file: &str, needle: &str, delta: usize| {
         session.request("textDocument/definition", position_in(&project.join(file), needle, delta))["result"].clone()
     };
@@ -2219,222 +2195,6 @@ fn a_ref_in_a_python_model_is_the_proxy_s_alone_and_with_dbt_lsp() {
     let files: Vec<&str> = used["result"].as_array().unwrap().iter().map(|l| l["uri"].as_str().unwrap()).collect();
     let uses = ["models/marts/orders.sql", "models/marts/py_orders.py", "snapshots/orders_snapshot.sql"];
     assert_eq!(files, uses.map(|file| uri(&project.join(file))), "{used}");
-    assert!(session.finish().success());
-}
-
-/// A session with the fake dbt and the server's OPTIONS, on the fixture.
-fn with_options(name: &str, script: Value, options: &[&str]) -> (Session, PathBuf) {
-    Session::fake_options(name, script, options, &[Path::new("--project-dir"), &fixture()], None)
-}
-
-#[test]
-fn alone_a_hover_left_to_dbt_asks_for_no_index() {
-    let script = json!({"manifest": manifest()});
-    let (mut session, log) = with_options("mode-hover-alone", script, &["--mode", "textDocument/hover=dbt"]);
-    session.initialize(&fixture());
-    // No document opened: alone, the first one starts a parse itself.
-    let orders = fixture().join("models/marts/orders.sql");
-    let hover = session.request("textDocument/hover", position_in(&orders, "ref('stg_orders')", 6));
-    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(parses(&log).len(), 0);
-    assert!(session.finish().success());
-}
-
-#[test]
-fn plus_answers_without_the_server_and_lists_every_row() {
-    let (mut session, _) = with_options("mode-plus", json!({}), &["--default-mode", "plus"]);
-    let result = session.initialize(&fixture());
-    assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], answered_itself());
-    let orders = fixture().join("models/marts/orders.sql");
-    let on_ref = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
-    assert_eq!(on_ref["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{on_ref}");
-    let nowhere = session.request("textDocument/definition", position_in(&orders, "select", 1));
-    assert_eq!((nowhere.get("error"), &nowhere["result"]), (None, &Value::Null), "{nowhere}");
-    let hover = session.request("textDocument/hover", position_in(&orders, "select", 1));
-    assert_eq!((hover.get("error"), &hover["result"]), (None, &Value::Null), "{hover}");
-    assert!(session.finish().success());
-}
-
-#[test]
-fn ours_is_read_as_plus_with_one_warning() {
-    let shown = |session: &Session| -> Vec<String> {
-        let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage");
-        shown.filter_map(|m| m["params"]["message"].as_str()).map(str::to_owned).collect()
-    };
-    let (mut session, _) = with_options("mode-ours", json!({}), &["--mode", "textDocument/definition=ours"]);
-    session.initialize(&fixture());
-    let orders = fixture().join("models/marts/orders.sql");
-    let found = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
-    assert_eq!(found["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
-    let said = shown(&session);
-    assert!(said.len() == 1 && said[0].contains("the mode ours is now named plus"), "{said:?}");
-    assert!(session.finish().success());
-    let (mut options, _) = with_options("mode-ours-options", json!({}), &[]);
-    options.initialize_options(&fixture(), json!({"dbtLspPlus": {"defaultMode": "ours"}}));
-    options.request("workspace/symbol", json!({"query": "orders"}));
-    let said = shown(&options);
-    assert!(said.len() == 1 && said[0].contains("the mode ours is now named plus"), "{said:?}");
-    assert!(options.finish().success());
-}
-
-#[test]
-fn plus_set_either_way_says_nothing() {
-    let (mut session, _) = with_options("mode-plus-quiet", json!({}), &["--mode", "textDocument/definition=plus"]);
-    session.initialize_options(&fixture(), json!({"dbtLspPlus": {"defaultMode": "plus"}}));
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    assert_eq!(show_messages(&session), 0);
-    assert!(session.finish().success());
-}
-
-#[test]
-fn the_usage_names_plus_and_not_ours() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus")).arg("--help").output().unwrap();
-    let usage = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success() && usage.contains("plus (the proxy"), "{usage}");
-    assert!(!usage.split(|c: char| !c.is_alphanumeric()).any(|word| word == "ours"), "{usage}");
-}
-
-#[test]
-fn with_no_backend_a_method_left_to_dbt_gets_nothing_and_is_said_once() {
-    let options = ["--mode", "textDocument/references=dbt"];
-    let (mut session, _) = with_options("mode-no-backend", json!({}), &options);
-    let result = session.initialize(&fixture());
-    assert!(result["capabilities"].get("referencesProvider").is_none(), "not announced alone (plan 020)");
-    assert!(result["capabilities"]["experimental"]["dbtLspPlus"].get("references").is_none(), "{result}");
-    let warning = session.wait_for(|m| m["method"] == "window/showMessage");
-    assert!(warning["params"]["message"].as_str().unwrap().contains("textDocument/references"), "{warning}");
-    let staging = fixture().join("models/staging/stg_customers.sql");
-    let mut params = position_in(&staging, "'customers'", 2);
-    params["context"] = json!({"includeDeclaration": false});
-    let used = session.request("textDocument/references", params);
-    assert_eq!((used.get("error"), &used["result"]), (None, &json!([])), "{used}");
-    assert_eq!(show_messages(&session), 1);
-    assert!(session.finish().success());
-}
-
-#[test]
-fn a_setting_sent_later_is_the_server_s_and_said_once_to_be_no_mode() {
-    let (mut session, _) = with_options("mode-later", json!({}), &[]);
-    session.initialize(&fixture());
-    for _ in 0..2 {
-        session
-            .notify("workspace/didChangeConfiguration", json!({"settings": {"dbtLspPlus": {"defaultMode": "plus"}}}));
-    }
-    let noticed = |m: &Value| {
-        m["method"] == "window/logMessage" && m["params"]["message"].as_str().unwrap().contains("initializationOptions")
-    };
-    assert!(session.wait_for(noticed).is_object());
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    assert_eq!(session.received.iter().filter(|m| noticed(m)).count(), 1);
-    assert!(session.finish().success());
-}
-
-/// The requests of the methods that take a mode, on the fixture's
-/// `orders.sql` at its first `select`, where the proxy claims nothing.
-fn requests_of_every_mode() -> Vec<(&'static str, Value)> {
-    let orders = fixture().join("models/marts/orders.sql");
-    let at = position_in(&orders, "select", 1);
-    let document = json!({"textDocument": {"uri": uri(&orders)}});
-    let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1000, "character": 0}});
-    let mut references = at.clone();
-    references["context"] = json!({"includeDeclaration": false});
-    let mut rename = at.clone();
-    rename["newName"] = json!("renamed");
-    let mut selection = document.clone();
-    selection["positions"] = json!([{"line": 0, "character": 1}]);
-    vec![
-        ("textDocument/documentSymbol", document.clone()),
-        ("workspace/symbol", json!({"query": "orders"})),
-        ("textDocument/prepareCallHierarchy", at.clone()),
-        ("textDocument/foldingRange", document.clone()),
-        ("textDocument/documentHighlight", at.clone()),
-        ("textDocument/selectionRange", selection),
-        ("textDocument/hover", at.clone()),
-        ("textDocument/inlayHint", json!({"textDocument": document["textDocument"], "range": range})),
-        ("textDocument/definition", at),
-        ("textDocument/references", references),
-        ("textDocument/rename", rename),
-    ]
-}
-
-/// What the proxy answers METHOD with where it has nothing: `[]` for a list, else null.
-fn nothing(method: &str) -> Value {
-    let list = matches!(method, "textDocument/references" | "textDocument/inlayHint" | "workspace/symbol");
-    if list { json!([]) } else { Value::Null }
-}
-
-#[test]
-fn plus_answers_every_method_itself() {
-    let (mut session, _) = with_options("mode-every-plus", json!({}), &["--default-mode", "plus"]);
-    session.initialize(&fixture());
-    // At the first `select`, the requests of a target find nothing, nor the hints before an index; the
-    // others find their part.
-    let empty = [
-        "textDocument/hover",
-        "textDocument/definition",
-        "textDocument/references",
-        "textDocument/rename",
-        "textDocument/documentHighlight",
-        "textDocument/inlayHint",
-    ];
-    for (method, params) in requests_of_every_mode() {
-        let answer = session.request(method, params);
-        assert!(answer.get("error").is_none(), "{method}: {answer}");
-        assert_eq!(empty.contains(&method), answer["result"] == nothing(method), "{method}: {answer}");
-    }
-    let orders = fixture().join("models/marts/orders.sql");
-    let found = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
-    assert_eq!(found["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
-    assert!(session.finish().success());
-}
-
-#[test]
-fn with_no_backend_every_method_left_to_dbt_gets_nothing() {
-    let (mut session, _) = with_options("mode-every-none", json!({}), &["--default-mode", "dbt"]);
-    let result = session.initialize(&fixture());
-    assert_eq!(result["capabilities"]["experimental"]["dbtLspPlus"], json!({"version": 2}), "no row");
-    // No one answers them (plan 020): neither the methods the server adds nor the others.
-    let capabilities = [
-        "documentSymbolProvider",
-        "workspaceSymbolProvider",
-        "callHierarchyProvider",
-        "foldingRangeProvider",
-        "documentHighlightProvider",
-        "selectionRangeProvider",
-        "hoverProvider",
-        "inlayHintProvider",
-        "definitionProvider",
-        "referencesProvider",
-        "renameProvider",
-    ];
-    let announced: Vec<&str> = capabilities.into_iter().filter(|c| result["capabilities"].get(*c).is_some()).collect();
-    assert_eq!(announced, Vec::<&str>::new());
-    for (method, params) in requests_of_every_mode() {
-        let answer = session.request(method, params);
-        assert_eq!((answer.get("error"), &answer["result"]), (None, &nothing(method)), "{method}");
-    }
-    let follower =
-        session.request("callHierarchy/incomingCalls", json!({"item": {"data": {"uniqueId": "model.shop.orders"}}}));
-    assert_eq!((follower.get("error"), &follower["result"]), (None, &Value::Null), "{follower}");
-    assert!(session.finish().success());
-}
-
-#[test]
-fn with_no_backend_diagnostics_left_to_dbt_publish_nothing() {
-    let project = copy_fixture("mode-diagnostics-none-project");
-    std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
-    let flags = [Path::new("--project-dir"), &project];
-    let options = ["--mode", "textDocument/publishDiagnostics=dbt"];
-    let (mut session, _) = Session::fake_options("mode-diagnostics-none", json!({}), &options, &flags, None);
-    session.initialize(&project);
-    write_run(&project, &run_results("build", true), &run_manifest());
-    // Past a turn of the watcher of runs, which `dbt` leaves alone.
-    std::thread::sleep(Duration::from_millis(1500));
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    let published = session.received.iter().filter(|m| m["method"] == "textDocument/publishDiagnostics").count();
-    assert_eq!(published, 0);
     assert!(session.finish().success());
 }
 

@@ -74,7 +74,7 @@ fn without_a_project_the_proxy_answers_null_and_runs_nothing() {
     fs::create_dir_all(yml.parent().unwrap()).unwrap();
     fs::write(&yml, "models:\n  - name: x\n").unwrap();
     fs::write(&sql, "select * from {{ ref('x') }}\n").unwrap();
-    let mut session = Session::start_logged(&[], &[], &[("PATH", &bin)], Some(&folder), Some(&stderr));
+    let mut session = Session::start_logged(&[], &[("PATH", &bin)], Some(&folder), Some(&stderr));
     let capabilities = json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
     assert_eq!(session.initialize_as(&folder, capabilities)["serverInfo"]["name"], "dbt-lsp-plus");
     session.open(&yml, None);
@@ -296,7 +296,7 @@ fn given_project_dir_the_command_runs_as_written_and_one_line_says_so() {
     ];
     let command = ["dbt".to_owned(), "lsp".into(), "--project-dir".into(), project.to_string_lossy().into_owned()];
     let stderr = dir.join("stderr");
-    let mut session = Session::start_logged(&[], &command, &env, None, Some(&stderr));
+    let mut session = Session::start_logged(&command, &env, None, Some(&stderr));
     let result = session.initialize(&project);
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
     let request =

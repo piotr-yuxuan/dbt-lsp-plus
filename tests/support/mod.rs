@@ -73,25 +73,19 @@ impl Session {
     /// Starts the server with the server command SERVER, in DIR when given,
     /// from an empty environment but for PATH and ENV.
     pub fn start(server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
-        Session::start_with(&[], server, env, dir)
-    }
-
-    /// The same, with the server's OPTIONS before the server command.
-    pub fn start_with(options: &[&str], server: &[String], env: &[(&str, &Path)], dir: Option<&Path>) -> Session {
-        Session::start_logged(options, server, env, dir, None)
+        Session::start_logged(server, env, dir, None)
     }
 
     /// The same, the server's standard error written to the file STDERR when
     /// given.
     pub fn start_logged(
-        options: &[&str],
         server: &[String],
         env: &[(&str, &Path)],
         dir: Option<&Path>,
         stderr: Option<&Path>,
     ) -> Session {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
-        command.args(options).arg("--").args(server);
+        command.arg("--").args(server);
         let stderr =
             stderr.map_or_else(Stdio::inherit, |path| File::create(path).expect("create the stderr's file").into());
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr);
@@ -119,17 +113,6 @@ impl Session {
     /// Starts the server with the fake dbt, `lsp ARGUMENTS...`, playing
     /// SCRIPT, in DIR when given; returns the session and the fake's log.
     pub fn fake_with(name: &str, script: Value, arguments: &[&Path], dir: Option<&Path>) -> (Session, PathBuf) {
-        Session::fake_options(name, script, &[], arguments, dir)
-    }
-
-    /// The same, with the server's OPTIONS.
-    pub fn fake_options(
-        name: &str,
-        script: Value,
-        options: &[&str],
-        arguments: &[&Path],
-        dir: Option<&Path>,
-    ) -> (Session, PathBuf) {
         let scratch = scratch(name);
         let (script_path, log) = (scratch.join("script.json"), scratch.join("log.jsonl"));
         std::fs::write(&script_path, script.to_string()).unwrap();
@@ -143,7 +126,7 @@ impl Session {
             ("FAKE_DBT_LSP_LOG", log.as_path()),
             ("XDG_CACHE_HOME", cache.as_path()),
         ];
-        (Session::start_with(options, &server, &env, dir), log)
+        (Session::start(&server, &env, dir), log)
     }
 
     /// The same, with the fixture as --project-dir.
@@ -222,16 +205,6 @@ impl Session {
     pub fn initialize_as(&mut self, root: &Path, capabilities: Value) -> Value {
         let params = json!({"processId": null, "rootUri": uri(root), "capabilities": capabilities,
                             "workspaceFolders": [{"uri": uri(root), "name": "shop"}]});
-        let response = self.request("initialize", params);
-        self.notify("initialized", json!({}));
-        response["result"].clone()
-    }
-
-    /// Initializes the session on ROOT with `initializationOptions` OPTIONS;
-    /// returns the result.
-    pub fn initialize_options(&mut self, root: &Path, options: Value) -> Value {
-        let params = json!({"processId": null, "rootUri": uri(root), "capabilities": {},
-                            "workspaceFolders": [{"uri": uri(root), "name": "shop"}], "initializationOptions": options});
         let response = self.request("initialize", params);
         self.notify("initialized", json!({}));
         response["result"].clone()

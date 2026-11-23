@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The commands for clients, by the fake dbt's CLI.
 
-use super::{alive, dbt_event, logged, scratch, scratch_of, with_options};
+use super::{alive, dbt_event, logged, scratch, scratch_of};
 use crate::support::{Session, copy_fixture, fixture, until_logged, uri};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ fn execute(session: &mut Session, command: &str, arguments: Value) -> Value {
 /// its answer to `initialize`.
 fn alone(name: &str, script: Value) -> (Session, PathBuf, Value) {
     let arguments = [Path::new("--project-dir"), &fixture()];
-    let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
+    let (mut session, log) = Session::fake_with(name, script, &arguments, Some(&scratch_of(name)));
     let result = session.initialize(&fixture());
     (session, log, result)
 }
@@ -69,7 +69,7 @@ fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() 
 
 #[test]
 fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
-    let (mut session, log) = with_options("commands-invalid", json!({}), &[]);
+    let (mut session, log) = Session::fake("commands-invalid", json!({}));
     session.initialize(&fixture());
     for (command, arguments) in [(COMPILE, json!([])), (COMPILE, json!([7])), (NODES, json!(null))] {
         let answer = execute(&mut session, command, arguments.clone());
@@ -134,7 +134,7 @@ fn alone_compile_is_refused_where_a_package_of_the_server_s_install_path_has_hoo
     std::fs::write(project.join("vendor/hookpkg/dbt_project.yml"), hooks).unwrap();
     let arguments = [Path::new("--project-dir"), &project, Path::new("--packages-install-path"), Path::new("vendor")];
     let script = json!({"compiled": "select 1"});
-    let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
+    let (mut session, log) = Session::fake_with(name, script, &arguments, Some(&scratch_of(name)));
     session.initialize(&project);
     let answer = execute(&mut session, COMPILE, json!([uri(&project.join("models/marts/orders.sql"))]));
     let why = "hookpkg has on-run hooks, which dbt compile would run against the warehouse";
@@ -286,7 +286,7 @@ fn with_no_unshare_on_path_compile_and_nodes_are_announced_and_run() {
         ("PATH", empty.as_path()),
         ("XDG_CACHE_HOME", dir.as_path()),
     ];
-    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+    let mut session = Session::start(&server, &env, Some(&dir));
     let result = session.initialize(&fixture());
     assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
     assert_eq!(compiled_file(&execute(&mut session, COMPILE, json!([uri(&orders())]))).1, "select 1");
@@ -308,7 +308,7 @@ fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
         ("FAKE_DBT_LSP_LOG", log.as_path()),
         ("XDG_CACHE_HOME", dir.as_path()),
     ];
-    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+    let mut session = Session::start(&server, &env, Some(&dir));
     let result = session.initialize(&fixture());
     assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
     let no_word = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
