@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! What one document alone answers, which dbt lsp 2.0.9 does not: folding
-//! ranges, highlights, selection ranges and the rename of a CTE.  Every
-//! function here is pure.
+//! What one document alone answers: folding ranges, highlights, selection
+//! ranges and the rename of a CTE.  Every function here is pure.
 
 use crate::scan::{self, Symbol};
 use crate::text::{Encoding, LineStarts};

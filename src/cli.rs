@@ -157,9 +157,9 @@ enum Asked {
 }
 
 /// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
-/// `--help` first, whatever follows; else its operand, optional for doctor and needed by
-/// select and node, then, after `--`, the server's arguments, as `arguments`
-/// reads them.  Or why they cannot be read.
+/// `--help` first, whatever follows; else its operand, optional for
+/// doctor and needed by select and node, then, after `--`, the server's
+/// arguments, as `arguments` reads them.  Or why they cannot be read.
 fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
         && (first == "-h" || first == "--help")
