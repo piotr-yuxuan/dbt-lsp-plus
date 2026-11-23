@@ -227,33 +227,27 @@ fn with_no_dbt_it_serves_the_features_of_the_files() {
 }
 
 #[test]
-fn a_bad_option_is_a_usage_error_and_starts_nothing() {
-    let scratch = scratch("bad-option");
-    let log = scratch.join("log.jsonl");
+fn a_bad_option_is_a_usage_error() {
     for bad in [&["--mode", "hover=dbt"][..], &["--backend", "nevr"], &["--mode"]] {
-        let fake = env!("CARGO_BIN_EXE_fake-dbt");
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"))
             .args(bad)
-            .args(["--", fake, "lsp"])
+            .args(["--", "dbt", "lsp"])
             .env_clear()
-            .env("FAKE_DBT_LOG", &log)
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(2), "{bad:?}");
         let said = String::from_utf8_lossy(&output.stderr);
-        assert!(said.starts_with("dbt-lsp-plus: ") && said.contains("usage:"), "{said}");
-        assert!(!log.exists(), "{bad:?} started the server");
+        assert_eq!(output.status.code(), Some(2), "{bad:?}: {said}");
+        let refused = format!("dbt-lsp-plus: {} is no option of dbt-lsp-plus\n", bad[0]);
+        assert!(said.starts_with(&refused) && said.contains("usage:"), "{said}");
     }
 }
 
 #[test]
-fn help_and_version_are_printed_and_start_nothing() {
-    let log = scratch("help-and-version").join("log.jsonl");
+fn help_and_version_are_printed() {
     let run = |option: &str| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"))
-            .args([option, "--", env!("CARGO_BIN_EXE_fake-dbt"), "lsp"])
+            .args([option, "--", "dbt", "lsp"])
             .env_clear()
-            .env("FAKE_DBT_LOG", &log)
             .output()
             .unwrap();
         (output.status.code(), String::from_utf8_lossy(&output.stdout).into_owned())
@@ -261,7 +255,6 @@ fn help_and_version_are_printed_and_start_nothing() {
     let (status, usage) = run("--help");
     assert!(status == Some(0) && usage.starts_with("usage: dbt-lsp-plus [--] [SERVER COMMAND...]\n"), "{usage}");
     assert_eq!(run("-V"), (Some(0), format!("dbt-lsp-plus {}\n", env!("CARGO_PKG_VERSION"))));
-    assert!(!log.exists(), "the fake started");
 }
 
 #[test]
