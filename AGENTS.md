@@ -47,22 +47,21 @@ src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
 src/project.rs                the resources of a project and its packages
-src/cache.rs                  the scan kept between requests, each file by its metadata; the stamp of the files on disk
-src/graph.rs                  the dependency graph: scanned, then the manifest's
+src/cache.rs                  the scan kept between requests, each file by its metadata, an open one by its text's hash; the stamp of the files on disk
+src/graph.rs                  the dependency graph: scanned, then the index's
 src/sources.rs                references and renames of sources
 src/navigation.rs             the Name at a position, from the document's scan, and where it leads: dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
 src/answer.rs                 what a request gets: found, empty, or unanswered with its reasons, as LSP JSON
 src/config.rs                 the user's Dbt, read once from the server command, and its parse: index, summary
-src/run.rs                    the server's children: one run of dbt, the parse's or a command's, and the one wait for each child
+src/run.rs                    the server's children: one run of dbt, the parse's or a command's, and the one wait for each child; dbt's first error and the parse's log
 src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command
 src/commands.rs               the commands for clients, by dbt's CLI
 src/packages.rs               whether dbt would install packages before it parses
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
-src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
-src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries
+src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
 src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell, on the server's resolution
 tests/proxy.rs                the binary with the fake dbt
@@ -124,9 +123,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Cache::build`: the reads of a refresh, through `&self`, so that the
     cache changes only once the project is built;
   - `Workspace::graph`: the graph kept while what it is made of stays,
-    apart from the hierarchy's answer; `Workspace::notice`: a look at the
-    disk on behalf of a request, the core's, public for the front ends,
-    though the LSP front end alone calls it yet (MCP in plan 052);
+    apart from the hierarchy's answer;
   - `Proxy::refresh_hints`: whether a client may be asked to refresh its
     hints, apart from the outcome of the parse that changes them;
   - `runs::locator`: where a failed node is written, apart from how it
@@ -169,10 +166,6 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     or a parse that it keeps, apart from the question `cli::node` asks;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
     which `Running::stop` ends, a resource's start;
-  - `run::Output::error_line`: the list commands' reader of dbt's first
-    error, a text log's `[error]` line, kept apart from `error_event` so
-    that plan 048 changed no answer; plan 071, which reads dbt's output
-    apart from its log, merges the two;
   - `packages::install_path`, `packages::read` and `packages::named`: one
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart

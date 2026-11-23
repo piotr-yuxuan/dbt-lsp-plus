@@ -428,8 +428,10 @@ none, the server answers `initialize` before it can know it.
 
 ## State
 
-- Open documents: the text of each, kept from `didOpen` and the incremental
-  `didChange` (UTF-16 units), so that the outline follows unsaved edits.
+- Open documents: the text of each, kept by the Workspace
+  (`Workspace::open`), which the LSP front end writes from `didOpen` and
+  the incremental `didChange` (UTF-16 units), so that the outline follows
+  unsaved edits.
 - The project: found on each request from `dbt_project.yml`, its resource
   paths, through symbolic links, the packages under the install path
   that the guard takes too (`packages::install_path`: the server
@@ -466,8 +468,8 @@ none, the server answers `initialize` before it can know it.
 - The scan is kept between requests by the Workspace
   (`src/workspace.rs`), the core's state of the session's project beside
   the last parse's index, the parse under way and the call hierarchy's
-  graph, which speaks no protocol: the LSP front end keeps the open
-  documents, the URIs and the positions, and hands it the open texts.  It
+  graph, and the open texts, which speaks no protocol: the LSP front end
+  keeps the URIs and the positions, and writes the open texts.  It
   lives on the event loop, which alone owns it (`src/cache.rs`).  A
   request that needs the project walks the resource paths again and
   reads each file's metadata before its content:
@@ -477,9 +479,9 @@ none, the server answers `initialize` before it can know it.
   dropped.  A file that is not UTF-8, such as a `Thumbs.db`, counts as
   empty; one that cannot be read counts as empty too, and is tried again
   at the next request.  A seed is found but never read, open or not.  An
-  open document is known by the server's count of its edits,
-  bumped at each open and change, since a client's version starts again
-  at each open.  No file event is needed: a client may watch nothing.
+  open document is known by a hash of its text, since a client's version
+  starts again at each open; a text edited back to what it was reuses its
+  scan.  No file event is needed: a client may watch nothing.
   - When no file changed, nor any package's name and paths, which each
     `dbt_project.yml` gives and the walk reads again, the request shares
     the last project.  Otherwise the project is assembled again from the
@@ -501,8 +503,8 @@ none, the server answers `initialize` before it can know it.
     plan 050: a definition, references and the call hierarchy ask
     for the index, and so walk once more when it is fresh and a parse has
     started, to compare the files on disk with that parse's stamp
-    (`Workspace::notice`), and each parse's start walks once more for its
-    stamp (`cache::disk`); unmeasured.
+    (`Workspace::parse` asked to look), and each parse's start walks once
+    more for its stamp (`cache::disk`); unmeasured.
 - The graph: once a parse has given a manifest, the dependencies of each
   node it holds are the manifest's, since only dbt resolves
   `ref(var('x'))`; until then, and for the nodes it lacks, they come from
@@ -1058,11 +1060,13 @@ scope and string values are rendered.
 The server, from its parse:
 
 - takes the graph's edges between nodes from the last parse's manifest,
-  `depends_on.nodes` of its enabled nodes of the kinds that dbt lsp's
-  `dbt.listNodes` listed (`ParseIndex::listed`), and starts a parse for a
-  request of the call hierarchy that finds the index stale; a failed
-  parse's manifest lacks the nodes deleted since, which the index keeps for
-  `nodeInfo` but the graph drops; the edges to and from macros
+  `depends_on.nodes` of its enabled nodes (`ParseIndex::dependencies`,
+  which a node's `children` read too) of the kinds that `dbt list` lists,
+  `*` and `source:*`, and starts a parse for a request of the call
+  hierarchy that finds the index stale; a node that the scan missed is an
+  item at the start of its file; a failed parse's manifest lacks the nodes
+  deleted since, which the index keeps for `nodeInfo` but the graph drops;
+  the edges to and from macros
   stay the scan's, as the manifest's `depends_on.macros` holds every macro
   rendering reached, dbt's own included, and none through a dispatch;
 - publishes the parse's errors and warnings: each line of the JSON log of
@@ -1274,8 +1278,8 @@ over the manifest that node keeps, checked against dbt (plan 058);
   `packages.yml` and `dependencies.yml`: most of the 30 to
   40 ms at 6,000 models.  A request that asks for the index walks it
   once more when the index is fresh and a parse has started, for the
-  stamp of the files on disk (`Workspace::notice`); and each parse's start walks it once
-  more, for its stamp (`cache::disk`).
+  stamp of the files on disk (`Workspace::parse` asked to look); and each
+  parse's start walks it once more, for its stamp (`cache::disk`).
 - The references of a macro that each of 6,000 synthetic models calls,
   6,001 locations and 1.5 MB of JSON, take about 86 ms: the walk above,
   about 25 ms to find and place them, and the rest to encode the answer
