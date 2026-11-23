@@ -42,7 +42,7 @@ release adds a commit to `origin/main`, so a clone pulls (`git pull
 src/rpc.rs                    the framing of LSP messages
 src/text.rs                   LSP positions, encodings, incremental changes
 src/node.rs                   dbt's resource types, one table of what the server does with each, and how unique ids are written
-src/reference.rs              what a place of a document names: its Name, and the flag's word for its kind
+src/reference.rs              what a place of a document names: its Name
 src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
@@ -57,7 +57,6 @@ src/config.rs                 the user's Dbt, read once from the server command,
 src/run.rs                    the server's children: one run of dbt, the parse's or a command's, and the one wait for each child
 src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command
-src/modes.rs                  who answers each method: the user's settings and the session's table
 src/commands.rs               the commands for clients, by dbt's CLI
 src/packages.rs               whether dbt would install packages before it parses
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
@@ -65,7 +64,7 @@ src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
-src/cli.rs                    the subcommands doctor, select and node, from a shell, on the server's resolution
+src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell, on the server's resolution
 tests/proxy.rs                the binary with the fake dbt
 tests/proxy/live.rs           the binary with the real dbt, either build, opt-in
 tests/proxy/commands.rs       the commands for clients, by the fake dbt's CLI
@@ -74,7 +73,7 @@ tests/proxy/conformance.rs    the library's resolution against dbt's manifest, o
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
 tests/proxy/plugin.rs         the Claude Code plugin's files: no path in them
-tests/support/                the test client and fake-dbt-lsp, the fake dbt
+tests/support/                the test client and fake-dbt, a scripted dbt
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
 Makefile                      the checks, which CI runs too
@@ -97,20 +96,18 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
 
 ## Rules of the code
 
-- Route a request by its capability (`src/capability.rs`) and its mode
-  (`src/modes.rs`); unset, a mode is its shipped default: `plus` for the
-  methods dbt-lsp-plus adds, `merge` for the others.
+- Route a method by its capability (`src/capability.rs`).
 - The server's own requests to the client carry ids `dbt-lsp-plus/N`.
 - What dbt does is observed, not documented: record each new observation
   in `docs/explanation/design.md`, make the fake dbt behave the same, and
   let the live test check it.
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline`, `Proxy::symbols`, `Proxy::hierarchy`,
-    `Proxy::on_hover` and `Proxy::on_hints`: one function per owned
-    method, so that `plus_answer` stays a dispatch;
-    `Proxy::plus_answer`: the server's Answer by the handler of its
-    method, which sends nothing, apart from `answer`, which asks for the
-    index, contains a panic and sends the Answer or the failure;
+    `Proxy::on_hover` and `Proxy::on_hints`: one function per method, so
+    that `handle` stays a dispatch; `Proxy::handle`: the server's Answer
+    by the handler of its method, which sends nothing, apart from
+    `answer`, which asks for the index, contains a panic and sends the
+    Answer or the failure;
   - `changes_graph`: the decision whether a client's notification may
     change the graph, free of the file system, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
@@ -138,15 +135,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     `Proxy::on_notification`, `Proxy::on_runs` and `Proxy::on_problems`:
     one handler per kind of message or event, so that `serve`,
     `on_client`, `on_request` and `on_parsed` stay dispatches;
-  - `Proxy::tell_settings`: what of the user's settings cannot take
-    effect, said once, apart from `on_initialize`'s answer; plan 085
-    deletes it with the modes;
-  - `modes::Table::capabilities`: what a session announces, read from the
-    table beside `Table::flag`, apart from `on_initialize`'s answer;
-    plan 085 rewrites it with the modes;
-  - `capability::Capability::whole`: which rows a request answers whole,
-    read beside the row's other facts, apart from `Proxy::route`'s
-    decision; plan 085 deletes it with the kinds;
+  - `capability::announced`: what a session announces, read from the
+    rows beside `CAPABILITIES`, apart from `on_initialize`'s answer;
   - `config::anchored`: the server command's relative paths made the
     server's directory's, apart from where dbt then runs, with tests of
     its own;
@@ -187,11 +177,10 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     rule each of how dbt finds a project's packages (where it installs
     them, which files it reads, which local packages it follows), apart
     from what `packages::refused` decides;
-  - `Proxy::targeted`, `Proxy::on_source`, `Proxy::on_rename`,
-    `Proxy::on_navigation` and `Proxy::on_document`: the routing of a
-    request by what its position holds, and one answer per kind of
-    request, as for the owned methods, a definition and references
-    sharing their reading of the position and the project;
+  - `Proxy::on_source`, `Proxy::on_rename`, `Proxy::on_navigation` and
+    `Proxy::on_document`: one answer per kind of request, as for the
+    other methods, a definition and references sharing their reading of
+    the position and the project;
   - `sources::replacement`, `sources::kept_relation`, `sources::refusal`
     and `sources::config_key`: each one rule of a rename (how a name is
     written where it goes; which lines keep the relation; when it is

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! What one document alone answers, which dbt lsp 2.0.9 does not: folding
-//! ranges, highlights, selection ranges and the rename of a CTE.  Every
-//! function here is pure.
+//! What one document alone answers: folding ranges, highlights, selection
+//! ranges and the rename of a CTE.  Every function here is pure.
 
 use crate::scan::{self, Symbol};
 use crate::text::{Encoding, LineStarts};
@@ -50,7 +49,7 @@ pub fn folding_ranges(text: &str, sql: bool) -> Value {
 
 /// The CTE of TEXT that OFFSET names, by its definition or one of its uses,
 /// with its uses.
-pub fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> {
+fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> {
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
     scan::cte_uses(text).into_iter().find(|(cte, uses)| inside(&cte.name_range) || uses.iter().any(inside))
 }

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! What a place of a document names: its Name, which the scan builds for
-//! every call and navigation for a position, and the word that
-//! `experimental.dbtLspPlus` shows for its kind.  Pure.
+//! every call and navigation for a position.  Pure.
 
 /// What a place of a document names: its kind, the package it gives, if
 /// any, the name, and a `ref`'s version.
@@ -59,24 +58,6 @@ impl Name {
             Kind::Table { source } => Some((source, Some(&self.name))),
             Kind::Source => Some((&self.name, None)),
             _ => None,
-        }
-    }
-}
-
-impl Kind {
-    /// Its word in `experimental.dbtLspPlus`: `ref` for a unit test's
-    /// `model:` too, `source` for a table or a whole source, `entry` for the
-    /// `name:` of any entry, and `dispatch`, which no capability lists.
-    pub fn flag(&self) -> &'static str {
-        match self {
-            Kind::Ref | Kind::UnitTestModel => "ref",
-            Kind::Table { .. } | Kind::Source => "source",
-            Kind::Macro => "macro",
-            Kind::Dispatch => "dispatch",
-            Kind::Function => "function",
-            Kind::Doc => "doc",
-            Kind::Test => "test",
-            Kind::Entry { .. } => "entry",
         }
     }
 }

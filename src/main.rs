@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! `dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]`: a language server
-//! for dbt on the standard input and output, SERVER COMMAND, `dbt lsp` by
-//! default, naming the user's dbt; or, by its first word, one of the
-//! subcommands `doctor`, `select` and `node`.
+//! `dbt-lsp-plus [--] [SERVER COMMAND...]`: a language server for dbt on
+//! the standard input and output, SERVER COMMAND, `dbt lsp` by default,
+//! naming the user's dbt; or, by its first word, one of the subcommands
+//! `doctor`, `select` and `node`.
 
-use dbt_lsp_plus::cli;
-use dbt_lsp_plus::modes::{self, Arguments};
+use dbt_lsp_plus::cli::{self, Arguments};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
+usage: dbt-lsp-plus [--] [SERVER COMMAND...]
+       dbt-lsp-plus -h|-V
        dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
        dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
        dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
@@ -24,12 +24,8 @@ one; until then the server runs nothing.  Without --project-dir, a bare
 `dbt` is the project's .venv's, its repository's or its main worktree's,
 else the one on PATH, and dbt runs in the project.
 
-  --mode METHOD=MODE    who answers the LSP method METHOD: plus (the proxy)
-                        or merge, dbt-lsp-plus; dbt, no one
-  --default-mode MODE   the mode of every method the proxy answers but
-                        those set with --mode
-  -h, --help            this text
-  -V, --version         the version
+  -h, --help     this text
+  -V, --version  the version
 
 doctor says, on one line of JSON, which project and which dbt the server
 would find from PATH and whether it would work; select lists the nodes that
@@ -47,10 +43,10 @@ fn main() -> ExitCode {
     if let Some(subcommand) = cli::named(&words) {
         return cli::main(subcommand, &words[1..]);
     }
-    match modes::arguments(&words) {
+    match cli::arguments(&words) {
         Ok(Arguments::Help) => println!("{USAGE}"),
         Ok(Arguments::Version) => println!("dbt-lsp-plus {}", env!("CARGO_PKG_VERSION")),
-        Ok(Arguments::Run { settings, command }) => return dbt_lsp_plus::proxy::run(&command, settings),
+        Ok(Arguments::Run(command)) => return dbt_lsp_plus::proxy::run(&command),
         Err(why) => {
             eprintln!("dbt-lsp-plus: {why}\n\n{USAGE}");
             return ExitCode::from(2);

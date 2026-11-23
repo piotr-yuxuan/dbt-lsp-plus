@@ -6,7 +6,6 @@ use crate::answer::{Answer, Reason};
 use crate::capability;
 use crate::commands;
 use crate::locate;
-use crate::modes::{self, Mode};
 use crate::project::{Project, Scanned};
 use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
@@ -41,7 +40,7 @@ const ENCODING: Encoding = Encoding::Utf16;
 
 /// How the server answers a request of the client's.
 enum Route {
-    /// As this method.
+    /// By this row's handler, through `answer`.
     Here(&'static str),
     /// With this answer: null before a project, or the method's nothing.
     Answer(Answer),
@@ -97,7 +96,7 @@ struct Diagnostics {
     logged: HashSet<String>,
     /// When the client last changed or saved each document.
     edited: HashMap<PathBuf, SystemTime>,
-    /// The URI under which the proxy last published.
+    /// The URI under which the server last published.
     published: HashMap<PathBuf, String>,
 }
 
@@ -113,16 +112,6 @@ struct Proxy<W: Write> {
     /// The root with its links resolved, onto which the client's paths map.
     canonical_root: Option<PathBuf>,
     hierarchical: bool,
-    /// The user's settings, from the command line, then `initializationOptions`.
-    settings: modes::Settings,
-    /// The mode of each method, fixed when `initialize` is answered.
-    table: modes::Table,
-    /// The user's settings that `initializationOptions` held and the proxy
-    /// refused, said once `initialize` is answered.
-    refused: Vec<String>,
-    /// Whether the proxy said that it reads no `dbtLspPlus` setting of
-    /// `workspace/didChangeConfiguration`.
-    ignored: bool,
     /// Whether the client sent `initialize`, before which LSP lets the server send nothing.
     initialized: bool,
     documents: HashMap<PathBuf, String>,
@@ -140,7 +129,7 @@ struct Proxy<W: Write> {
     /// Whether the client lets a server register a watcher of files.
     watches: bool,
     diagnostics: Diagnostics,
-    /// The core's state of the session's project, which the proxy hands
+    /// The core's state of the session's project, which the server hands
     /// the open texts: its root, its dbt, its scan, its parse and index,
     /// its graph.
     workspace: Workspace,
@@ -168,18 +157,6 @@ pub fn lexical(path: &Path) -> PathBuf {
     })
 }
 
-/// The place of the file at PATH in `experimental.dbtLspPlus`, by its
-/// extension: `sql`, `yaml` or `python`.
-fn place(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("sql") => Some("sql"),
-        Some("yml" | "yaml") => Some("yaml"),
-        Some("py") => Some("python"),
-        _ => None,
-    }
-}
-
-/// The path of a `file:` URI.
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
     Url::parse(uri?).ok()?.to_file_path().ok()
 }
@@ -211,7 +188,7 @@ fn changes_graph(
 }
 
 /// The `--project-dir` of COMMAND, as `--project-dir X` or
-/// `--project-dir=X`, made absolute as spelt, so that the paths the proxy
+/// `--project-dir=X`, made absolute as spelt, so that the paths the server
 /// returns read as the user wrote them: each `..` drops the component before
 /// it.  Resolved only when that names another directory, through a link
 /// before a `..`.
@@ -232,10 +209,6 @@ impl<W: Write> Proxy<W> {
             line: None,
             canonical_root: None,
             hierarchical: false,
-            settings: modes::Settings::default(),
-            table: modes::Table::default(),
-            refused: Vec::new(),
-            ignored: false,
             initialized: false,
             documents: HashMap::new(),
             uris: HashMap::new(),
@@ -272,29 +245,6 @@ impl<W: Write> Proxy<W> {
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}));
     }
 
-    /// Says once, after `initialize` is answered, what of the user's settings
-    /// cannot take effect: each refusal, the methods set to `dbt`, which no
-    /// one answers; and a mode named by its former name.
-    fn tell_settings(&mut self) {
-        let mut said = std::mem::take(&mut self.refused);
-        if !said.is_empty() {
-            said.push(format!(
-                "the methods that take a mode are {}",
-                capability::with_mode().collect::<Vec<_>>().join(", ")
-            ));
-        }
-        said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
-        let unanswered = self.table.unanswered();
-        if !unanswered.is_empty() {
-            said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
-        }
-        if !said.is_empty() {
-            let text = format!("dbt-lsp-plus: {}.", said.join("; "));
-            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
-                                     "params": {"type": 2, "message": text}}));
-        }
-    }
-
     /// Tells the client, once, which project and which dbt the server found,
     /// as one log line.
     fn say_found(&mut self) {
@@ -326,8 +276,6 @@ impl<W: Write> Proxy<W> {
     /// the session keeps; without a project the server stays quiet until a
     /// document names one.
     fn on_initialize(&mut self, id: &Value, params: &Value) {
-        let options = params.get("initializationOptions").unwrap_or(&Value::Null);
-        (self.settings, self.refused) = self.settings.over(options);
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
@@ -348,12 +296,10 @@ impl<W: Write> Proxy<W> {
         }
         self.workspace.warm();
         self.initialized = true;
-        self.table = modes::Table::new(&self.settings);
         self.watch_runs();
-        let result = json!({"capabilities": self.table.capabilities(),
+        let result = json!({"capabilities": capability::announced(),
                             "serverInfo": {"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")}});
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        self.tell_settings();
         self.say_found();
     }
 
@@ -424,8 +370,6 @@ impl<W: Write> Proxy<W> {
         self.workspace.project(&self.open_documents())
     }
 
-    /// The open documents as the Workspace reads them: their texts and the
-    /// count of each one's edits.
     fn open_documents(&self) -> cache::Open<'_> {
         cache::Open { texts: &self.documents, edits: &self.edits }
     }
@@ -495,78 +439,37 @@ impl<W: Write> Proxy<W> {
     }
 
     /// How the server answers the client's request METHOD, by the row of
-    /// `CAPABILITIES` it names: a name with no row is unknown, since no one
-    /// else will answer it, and a row's request before a project is null, a
-    /// valid result of every method (decisions 2 and 3 of plan 075).
+    /// `CAPABILITIES` it names: a name with no row gets -32601 (`shutdown`
+    /// aside, null), `workspace/executeCommand` with no string `command`
+    /// -32602; a row's request before a project gets null, a valid result
+    /// of every method, and after, its handler's answer.
     fn route(&self, method: &str, params: &Value) -> Route {
-        let row = match (method, params["command"].as_str()) {
-            ("workspace/executeCommand", Some(command)) => capability::of(command).filter(|row| row.is_command()),
-            ("workspace/executeCommand", None) => return Route::Invalid,
-            _ => capability::of(method).filter(|row| !row.is_command()),
-        };
-        let Some(row) = row else {
+        let executes = method == "workspace/executeCommand";
+        let name = if executes { params["command"].as_str() } else { Some(method) };
+        let Some(name) = name else { return Route::Invalid };
+        let Some(row) = capability::of(name).filter(|row| row.is_command() == executes) else {
             return if method == "shutdown" { Route::Answer(Answer::Empty) } else { Route::Unknown };
         };
-        // A valid result of every method the server announces, and of each an agent was seen to send.
-        if self.workspace.root.is_none() {
-            return Route::Answer(Answer::Found(Value::Null));
+        match (row.name, self.workspace.root.is_some()) {
+            // A valid result of every method the server announces, and of each an agent was seen to send.
+            (_, false) => Route::Answer(Answer::Found(Value::Null)),
+            (command @ (commands::COMPILE | commands::NODES), true) => Route::Command(command),
+            (name, true) => Route::Here(name),
         }
-        if row.is_command() {
-            return if row.name == config::NODE_INFO { Route::Here(row.name) } else { Route::Command(row.name) };
-        }
-        let answered = self.table.mode(row.name) != Mode::Dbt;
-        if answered && row.whole() {
-            return Route::Here(row.name);
-        }
-        let targeted = answered.then(|| self.targeted(row.name, params)).flatten();
-        targeted.map_or(Route::Answer(Answer::Empty), Route::Here)
     }
 
-    /// A request of a capability with kinds of target that the proxy
-    /// answers itself, by what its position holds: references and rename on
-    /// a source, a rename on a CTE of a SQL file, or a definition on a
-    /// target of `navigation`.
-    fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
-        let method = capability::of(method).filter(|capability| !capability.kinds.is_empty())?.name;
-        let (path, scanned, offset) = self.scan_at(params, None)?;
-        let sql = path.extension().is_some_and(|extension| extension == "sql");
-        let answered = match method {
-            "textDocument/definition" => {
-                navigation::reference_at(&path, &scanned, offset).is_some_and(|name| self.claims(method, &name, &path))
-            }
-            // A CTE lives in its file; a source only the scan sees whole, and so its references.
-            "textDocument/rename" if sql && document::cte_at(&scanned.text, offset).is_some() => true,
-            // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
-            "textDocument/references" => {
-                let claimed = navigation::reference_at(&path, &scanned, offset)
-                    .is_some_and(|name| self.claims(method, &name, &path));
-                claimed && self.workspace.root.as_ref().is_some_and(|root| path.starts_with(root))
-            }
-            _ => self.source_at(params).is_some(),
-        };
-        answered.then_some(method)
-    }
-
-    /// Whether the proxy answers METHOD itself on NAME in the file at
-    /// PATH, as its capability's kinds say, when the table lists it.
-    fn claims(&self, method: &str, name: &reference::Name, path: &Path) -> bool {
-        let Some(place) = place(path) else { return false };
-        let kinds = capability::of(method).map_or(&[][..], |capability| capability.kinds);
-        let listed = |(kind, places): &&(&str, &[&str])| *kind == name.kind.flag() && places.contains(&place);
-        self.table.lists(method) && kinds.iter().any(|kind| listed(&kind))
-    }
-
-    /// The definition or the references, METHOD, of the target at the
-    /// request's position, by dbt 2.0.9's lookup, found, its nothing
-    /// included; empty where the position names no target.  The two share
-    /// the reading of the position and of the project.
-    fn on_navigation(&self, method: &str, params: &Value) -> Option<Answer> {
+    /// The definition, or the REFERENCES, of the target at the request's
+    /// position, by dbt 2.0.9's lookup, found, its nothing included; empty
+    /// where the document or the position does not read, or names no
+    /// target.  The two share the reading of the position and of the
+    /// project.
+    fn on_navigation(&self, references: bool, params: &Value) -> Option<Answer> {
         let project = self.project();
-        let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
-        let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
+        let Some((path, scanned, at)) = self.scan_at(params, project.as_deref()) else { return Some(Answer::Empty) };
+        let Some(name) = navigation::reference_at(&path, &scanned, at) else { return Some(Answer::Empty) };
         let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let lookup = || navigation::Lookup::new(&project, self.workspace.index.as_ref());
-        if method == "textDocument/definition" {
+        if !references {
             let locations = self.locations(&project, &navigation::resolve(&lookup(), &path, &name));
             return Some(Answer::Found(match &locations[..] {
                 [] => Value::Null,
@@ -583,7 +486,7 @@ impl<W: Write> Proxy<W> {
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
     }
 
-    /// Why the proxy cannot answer from the project: the root's
+    /// Why the server cannot answer from the project: the root's
     /// `dbt_project.yml` does not read, which the scan needs.
     fn unreadable(&self) -> Reason {
         Reason::Unreadable(self.workspace.root.clone().unwrap_or_default())
@@ -615,12 +518,13 @@ impl<W: Write> Proxy<W> {
         Some(Answer::of_rename(sources::rename(&project, &name, new, ENCODING, &uri_of)))
     }
 
-    /// The rename of the source, else of the CTE, at the request's position.
+    /// The rename of the source, else of the CTE, at the request's position;
+    /// empty where the document or the position does not read.
     fn on_rename(&self, params: &Value) -> Option<Answer> {
         if self.source_at(params).is_some() {
             return self.on_source(params);
         }
-        let (_, text, offset) = self.document_at(params)?;
+        let Some((_, text, offset)) = self.document_at(params) else { return Some(Answer::Empty) };
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
         Some(document::rename_cte(&text, uri, offset, new, ENCODING).map_or(Answer::Empty, Answer::of_rename))
     }
@@ -867,7 +771,7 @@ impl<W: Write> Proxy<W> {
         self.workspace.stop();
     }
 
-    /// Answers a request with `plus_answer`'s Answer, after asking for the
+    /// Answers a request with `handle`'s Answer, after asking for the
     /// index where that answer reads it, as its capability says, so that a
     /// reason is that of the parse it may start; inlay hints, which only make
     /// an index, ask after, when there is none.  A refusal fails it with its
@@ -877,7 +781,7 @@ impl<W: Write> Proxy<W> {
         if capability::of(method).is_some_and(|capability| capability.wants_index) {
             self.ask_index();
         }
-        let computed = panic::catch_unwind(AssertUnwindSafe(|| self.plus_answer(method, params)));
+        let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
             Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
             Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
@@ -890,12 +794,14 @@ impl<W: Write> Proxy<W> {
 
     /// The Answer to METHOD at PARAMS, by the method's handler; none for
     /// invalid parameters.  It sends nothing.
-    fn plus_answer(&self, method: &str, params: &Value) -> Option<Answer> {
+    fn handle(&self, method: &str, params: &Value) -> Option<Answer> {
         match method {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
             "workspace/symbol" => self.symbols(params),
             config::NODE_INFO => self.node_info(params),
-            "textDocument/references" | "textDocument/definition" => self.on_navigation(method, params),
+            "textDocument/references" | "textDocument/definition" => {
+                self.on_navigation(method == "textDocument/references", params)
+            }
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Answer::Found)
@@ -934,16 +840,6 @@ impl<W: Write> Proxy<W> {
             self.on_first_project(params);
         }
         self.track(method, params);
-        // The modes are fixed with the flag that the client read at `initialize`.
-        let setting = params.pointer("/settings/dbtLspPlus").is_some();
-        if let ("workspace/didChangeConfiguration", true, false) = (method, setting, self.ignored) {
-            self.ignored = true;
-            let text =
-                "dbt-lsp-plus reads dbtLspPlus from initializationOptions and its command line only, at the start";
-            self.send_client(
-                &json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": {"type": 3, "message": text}}),
-            );
-        }
         if method == "initialized" && self.workspace.root.is_some() {
             self.register_watcher();
         }
@@ -1062,11 +958,10 @@ impl<W: Write> Proxy<W> {
     /// Why the request METHOD at PARAMS is not the session's project's: its
     /// document, named by `textDocument.uri`, lies in another project
     /// (`locate::elsewhere`), for a method that reads the project; none
-    /// before a project, in `dbt`, and for any other request.
+    /// before a project, and for any other request.
     fn outside(&self, method: &str, params: &Value) -> Option<Reason> {
         let root = self.workspace.root.as_ref()?;
-        let reads = capability::of(method).is_some_and(|capability| capability.reads_project);
-        if !reads || self.table.mode(method) == Mode::Dbt {
+        if !capability::of(method).is_some_and(|capability| capability.reads_project) {
             return None;
         }
         let document = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
@@ -1088,9 +983,6 @@ impl<W: Write> Proxy<W> {
     /// failures to the loop.
     fn watch_runs(&mut self) {
         let (Some(root), Some(events)) = (self.workspace.root.clone(), self.events.clone()) else { return };
-        if self.table.mode("textDocument/publishDiagnostics") == Mode::Dbt {
-            return;
-        }
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
         let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
         let watched: [(&str, &'static str, ReadFailures); 2] =
@@ -1170,7 +1062,7 @@ impl<W: Write> Proxy<W> {
     /// no version; the URI last published under, if another, gets none.
     /// Nothing after `shutdown`.
     fn publish(&mut self, path: &Path) {
-        if self.shutdown || self.table.mode("textDocument/publishDiagnostics") == Mode::Dbt {
+        if self.shutdown {
             return;
         }
         let uri = self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
@@ -1231,7 +1123,7 @@ impl<W: Write> Proxy<W> {
 /// that project is said at once on the standard error, and to the client
 /// once it is initialized; else nothing runs before the client's folder or
 /// a document names the project.
-pub fn run(command: &[String], settings: modes::Settings) -> ExitCode {
+pub fn run(command: &[String]) -> ExitCode {
     let (events, inbox) = mpsc::channel();
     let reader = events.clone();
     thread::spawn(move || {
@@ -1251,7 +1143,7 @@ pub fn run(command: &[String], settings: modes::Settings) -> ExitCode {
         eprintln!("{line}");
         proxy.line = Some(line);
     }
-    (proxy.settings, proxy.events) = (settings, Some(events));
+    proxy.events = Some(events);
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
     proxy.serve(inbox);
     proxy.stop_parse();
@@ -1262,37 +1154,6 @@ pub fn run(command: &[String], settings: modes::Settings) -> ExitCode {
 mod tests {
     use super::*;
     use crate::project;
-
-    #[test]
-    fn the_agent_page_lists_the_kinds_that_the_flag_announces() {
-        use std::collections::{BTreeMap, BTreeSet};
-        type Kinds = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
-        let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/use-with-an-agent.md"));
-        let (page, heading) = (page.unwrap(), "### Where dbt-lsp-plus answers definitions and references");
-        let section =
-            page.lines().skip_while(|line| *line != heading).skip(1).take_while(|line| !line.starts_with('#'));
-        let mut table = section.skip_while(|line| !line.starts_with('|')).take_while(|line| line.starts_with('|'));
-        let cells = |line: &str| -> Vec<String> {
-            let cells = line.trim().trim_matches('|').split('|');
-            cells.map(|cell| cell.trim_matches(|c| c == ' ' || c == '`').to_string()).collect()
-        };
-        let columns = ["request", "kind", "places", "meaning"].map(String::from).to_vec();
-        assert_eq!(table.next().map(cells), Some(columns), "the table in the section {heading}");
-        assert!(table.next().is_some_and(|line| line.starts_with("|--")), "the table's separator under {heading}");
-        let mut listed = Kinds::new();
-        for row in table.map(cells) {
-            assert_eq!(row.len(), 4, "a row of four cells under {heading}: {row:?}");
-            let places = listed.entry(row[0].clone()).or_default().entry(row[1].clone()).or_default();
-            places.extend(row[2].split(',').map(|place| place.trim().to_string()));
-        }
-        let flag = modes::Table::new(&modes::Settings::default()).flag();
-        let known = ["version", "definition", "references", "rename"];
-        assert!(flag.as_object().unwrap().keys().all(|key| known.contains(&key.as_str())), "{flag}");
-        let announced = ["definition", "references"].map(|request| (request.to_string(), flag[request].clone()));
-        let announced: Kinds = serde_json::from_value(json!(BTreeMap::from(announced))).unwrap();
-        assert!(!listed.is_empty(), "no row under {heading}");
-        assert_eq!(listed, announced);
-    }
 
     #[test]
     fn the_agent_page_quotes_the_proxy_s_own_words() {
@@ -1352,7 +1213,7 @@ mod tests {
     #[test]
     fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
         let root = Path::new("/work/a b/shop");
-        // As the proxy gives them: a link of logs out of the project, resolved, included.
+        // As the server gives them: a link of logs out of the project, resolved, included.
         let output = vec![root.join("target"), root.join("logs"), PathBuf::from("/elsewhere/logs")];
         let file = |path: &str| format!("file:///work/a%20b/shop/{path}");
         let watched = |uris: &[String]| {
@@ -1401,14 +1262,13 @@ mod tests {
     }
 
     #[test]
-    fn with_no_dbt_lsp_a_hover_before_any_index_says_why_after_asking_for_one() {
+    fn a_hover_before_any_index_says_why_after_asking_for_one() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let orders = features::uri(&root.join("models/marts/orders.sql"));
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
         let mut proxy = Proxy::new(Vec::new(), Some(root));
-        proxy.table = modes::Table::new(&modes::Settings::default());
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
         let mut client = &proxy.client[..];
@@ -1509,7 +1369,6 @@ mod tests {
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
             let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()));
-            proxy.table = modes::Table::new(&modes::Settings::default());
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
@@ -1610,13 +1469,13 @@ mod tests {
         let text = "select * from {{ ref('nowhere') }}";
         let proxy = proxy_on(text, &scratch);
         let (keyword, nowhere) = (at(&scratch, 1), at(&scratch, text.find("nowhere").unwrap() + 2));
-        let (definition, references) = ("textDocument/definition", "textDocument/references");
+        // A definition, then the references.
         assert_eq!(
-            [definition, references].map(|method| proxy.on_navigation(method, &keyword)),
+            [false, true].map(|references| proxy.on_navigation(references, &keyword)),
             [Some(Answer::Empty), Some(Answer::Empty)]
         );
         let found = [Some(Answer::Found(Value::Null)), Some(Answer::Found(json!([])))];
-        assert_eq!([definition, references].map(|method| proxy.on_navigation(method, &nowhere)), found);
+        assert_eq!([false, true].map(|references| proxy.on_navigation(references, &nowhere)), found);
         let outside = at(&root.join("packages.yml"), 0);
         assert_eq!(proxy.hierarchy("textDocument/prepareCallHierarchy", &outside), Some(Answer::Empty));
     }

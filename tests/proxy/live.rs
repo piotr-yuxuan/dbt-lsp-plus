@@ -51,13 +51,13 @@ fn with_the_real_dbt() {
     document_features(&mut session, &project);
     navigation(&mut session, &project);
     last_run(&mut session, &project);
-    alone_from_the_parse(&mut session, &project);
+    from_the_parse(&mut session, &project);
     lineage(&mut session, &project);
     node_information(&mut session, &project);
     facts_in_the_hover(&mut session, &project);
-    alone_navigates_sql(&mut session, &project);
-    alone_the_parse_s_errors(&mut session, &project);
-    alone_commands(&mut session, &project);
+    navigation_in_sql(&mut session, &project);
+    the_parse_s_errors(&mut session, &project);
+    commands_by_the_cli(&mut session, &project);
     rename_a_source_table_and_compile(&mut session, &project);
     let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage").count();
     assert_eq!(shown, 0, "no warning");
@@ -194,7 +194,7 @@ fn from_a_shell(project: &Path) {
 
 /// The information of a node, a hover's summary and the graph, as dbt
 /// resolves them: `order_summary`'s upstream is a variable.
-fn alone_from_the_parse(session: &mut Session, project: &Path) {
+fn from_the_parse(session: &mut Session, project: &Path) {
     session.open(&project.join("models/marts/orders.sql"), None);
     let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
     // At once, before the parse has ended: the summary, or why there is none, never a null.
@@ -220,7 +220,7 @@ fn alone_from_the_parse(session: &mut Session, project: &Path) {
 /// Navigation in SQL once the parse has run: a `ref` to its model's file, a
 /// package's macro call to its block, and the references of a model across
 /// files.
-fn alone_navigates_sql(session: &mut Session, project: &Path) {
+fn navigation_in_sql(session: &mut Session, project: &Path) {
     let orders = project.join("models/marts/orders.sql");
     let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
     let on_ref = session.request("textDocument/definition", at(4, 28));
@@ -238,7 +238,7 @@ fn alone_navigates_sql(session: &mut Session, project: &Path) {
 
 /// A model written outside the editor with an unknown `ref`: the watcher's
 /// event parses, and dbt's error shows on it, until the model goes.
-fn alone_the_parse_s_errors(session: &mut Session, project: &Path) {
+fn the_parse_s_errors(session: &mut Session, project: &Path) {
     let broken = project.join("models/marts/broken.sql");
     std::fs::write(&broken, "select * from {{ ref('nowhere') }}\n").unwrap();
     let event = |kind: u8| json!({"changes": [{"uri": uri(&broken), "type": kind}]});
@@ -258,7 +258,7 @@ fn alone_the_parse_s_errors(session: &mut Session, project: &Path) {
 /// The commands for clients by dbt's CLI: a model's compiled file in the
 /// server's cache, a snapshot's in the directory named after its file, and
 /// the nodes of a selector.
-fn alone_commands(session: &mut Session, project: &Path) {
+fn commands_by_the_cli(session: &mut Session, project: &Path) {
     let compile =
         |session: &mut Session, file: &str| execute(session, "dbt-lsp-plus.compile", json!([uri(&project.join(file))]));
     let (file, text) = compiled_file(&compile(session, "models/marts/orders.sql"));

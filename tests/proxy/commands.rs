@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The commands for clients, by the fake dbt's CLI.
 
-use super::{alive, dbt_event, logged, scratch, scratch_of, with_options};
+use super::{alive, dbt_event, logged, scratch, scratch_of};
 use crate::support::{Session, copy_fixture, fixture, until_logged, uri};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -27,9 +27,9 @@ fn execute(session: &mut Session, command: &str, arguments: Value) -> Value {
 /// The session NAME on the fixture, the fake dbt playing SCRIPT, the server
 /// working outside the root, as dbt's paths then are; its fake's log, and
 /// its answer to `initialize`.
-fn alone(name: &str, script: Value) -> (Session, PathBuf, Value) {
+fn session_outside_the_root(name: &str, script: Value) -> (Session, PathBuf, Value) {
     let arguments = [Path::new("--project-dir"), &fixture()];
-    let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
+    let (mut session, log) = Session::fake_with(name, script, &arguments, Some(&scratch_of(name)));
     let result = session.initialize(&fixture());
     (session, log, result)
 }
@@ -53,8 +53,8 @@ fn compiled_file(answer: &Value) -> (PathBuf, String) {
 }
 
 #[test]
-fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() {
-    let (session, _, result) = alone("commands-alone-announced", json!({}));
+fn compile_and_nodes_are_announced_where_they_can_run() {
+    let (session, _, result) = session_outside_the_root("commands-alone-announced", json!({}));
     let expected = [COMPILE, NODES];
     let clients = |result: &Value| -> Vec<String> {
         announced(result)
@@ -69,7 +69,7 @@ fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() 
 
 #[test]
 fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
-    let (mut session, log) = with_options("commands-invalid", json!({}), &[]);
+    let (mut session, log) = Session::fake("commands-invalid", json!({}));
     session.initialize(&fixture());
     for (command, arguments) in [(COMPILE, json!([])), (COMPILE, json!([7])), (NODES, json!(null))] {
         let answer = execute(&mut session, command, arguments.clone());
@@ -80,8 +80,9 @@ fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
 }
 
 #[test]
-fn alone_compile_runs_dbt_compile_on_the_file_s_path() {
-    let (mut session, log, _) = alone("commands-alone-compile", json!({"compiled": "select 1 -- compiled orders"}));
+fn compile_runs_dbt_compile_on_the_file_s_path() {
+    let (mut session, log, _) =
+        session_outside_the_root("commands-alone-compile", json!({"compiled": "select 1 -- compiled orders"}));
     let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
     assert_eq!(answer["result"]["error"], Value::Null, "{answer}");
     let (path, text) = compiled_file(&answer);
@@ -99,10 +100,10 @@ fn alone_compile_runs_dbt_compile_on_the_file_s_path() {
 }
 
 #[test]
-fn alone_a_snapshot_s_compiled_file_is_the_one_inside_its_directory() {
+fn a_snapshot_s_compiled_file_is_the_one_inside_its_directory() {
     let written = "compiled/shop/snapshots/orders_snapshot.sql/orders_snapshot.sql";
     let script = json!({"compiled": "select 2", "compile_writes": written});
-    let (mut session, _, _) = alone("commands-alone-snapshot", script);
+    let (mut session, _, _) = session_outside_the_root("commands-alone-snapshot", script);
     let snapshot = fixture().join("snapshots/orders_snapshot.sql");
     let answer = execute(&mut session, COMPILE, json!([uri(&snapshot)]));
     assert!(compiled_file(&answer).0.ends_with(written), "{answer}");
@@ -110,9 +111,9 @@ fn alone_a_snapshot_s_compiled_file_is_the_one_inside_its_directory() {
 }
 
 #[test]
-fn alone_a_failing_compile_never_answers_an_earlier_file() {
+fn a_failing_compile_never_answers_an_earlier_file() {
     let name = "commands-alone-stale";
-    let (mut session, _, _) = alone(name, json!({"compiled": "select 1"}));
+    let (mut session, _, _) = session_outside_the_root(name, json!({"compiled": "select 1"}));
     compiled_file(&execute(&mut session, COMPILE, json!([uri(&orders())])));
     let failed = dbt_event("error", "dbt1308", "[error] [DbDriverFailed (dbt1308)]: no driver");
     rescript(name, json!({"run_log": failed, "run_exit": 1}));
@@ -123,7 +124,7 @@ fn alone_a_failing_compile_never_answers_an_earlier_file() {
 }
 
 #[test]
-fn alone_compile_is_refused_where_a_package_of_the_server_s_install_path_has_hooks() {
+fn compile_is_refused_where_a_package_of_the_server_s_install_path_has_hooks() {
     // As dbt-oss 2.0.11 was seen to start the hook: the packages under the server command's install path.
     let name = "commands-alone-hooked";
     let project = copy_fixture(&format!("{name}-project"));
@@ -134,7 +135,7 @@ fn alone_compile_is_refused_where_a_package_of_the_server_s_install_path_has_hoo
     std::fs::write(project.join("vendor/hookpkg/dbt_project.yml"), hooks).unwrap();
     let arguments = [Path::new("--project-dir"), &project, Path::new("--packages-install-path"), Path::new("vendor")];
     let script = json!({"compiled": "select 1"});
-    let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
+    let (mut session, log) = Session::fake_with(name, script, &arguments, Some(&scratch_of(name)));
     session.initialize(&project);
     let answer = execute(&mut session, COMPILE, json!([uri(&project.join("models/marts/orders.sql"))]));
     let why = "hookpkg has on-run hooks, which dbt compile would run against the warehouse";
@@ -144,8 +145,8 @@ fn alone_compile_is_refused_where_a_package_of_the_server_s_install_path_has_hoo
 }
 
 #[test]
-fn alone_compile_says_what_it_cannot_select() {
-    let (mut session, log, _) = alone("commands-alone-refused", json!({}));
+fn compile_says_what_it_cannot_select() {
+    let (mut session, log, _) = session_outside_the_root("commands-alone-refused", json!({}));
     let error = |session: &mut Session, path: &Path| {
         let answer = execute(session, COMPILE, json!([uri(path)]));
         assert_eq!(answer["result"]["file_uri"], Value::Null, "{answer}");
@@ -162,12 +163,12 @@ fn alone_compile_says_what_it_cannot_select() {
 }
 
 #[test]
-fn alone_nodes_runs_dbt_list_and_answers_its_lines() {
+fn nodes_runs_dbt_list_and_answers_its_lines() {
     let name = "commands-alone-nodes";
     let node = json!({"unique_id": "model.shop.orders", "name": "orders", "resource_type": "model",
                       "package_name": "shop", "original_file_path": "models/marts/orders.sql",
                       "depends_on": {"nodes": ["model.shop.stg_orders"]}});
-    let (mut session, log, _) = alone(name, json!({"list": [node]}));
+    let (mut session, log, _) = session_outside_the_root(name, json!({"list": [node]}));
     let answer = execute(&mut session, NODES, json!(["+stg_orders+"]));
     assert_eq!(answer["result"], json!({"nodes": [node], "error": null}));
     let run = runs(&log)[0]["run"].clone();
@@ -186,11 +187,11 @@ fn alone_nodes_runs_dbt_list_and_answers_its_lines() {
 }
 
 #[test]
-fn alone_compile_takes_dbt_s_error_from_the_events_of_its_json_log_alone() {
+fn compile_takes_dbt_s_error_from_the_events_of_its_json_log_alone() {
     // As both builds write it under `--log-format json` with a target path they cannot create: no event.
     let bare = "[error] [IoError (dbt1001)]: Failed to create output directory: /p/target";
     let (mut session, _, _) =
-        alone("commands-alone-bare-error", json!({"run_log": format!("{bare}\n"), "run_exit": 1}));
+        session_outside_the_root("commands-alone-bare-error", json!({"run_log": format!("{bare}\n"), "run_exit": 1}));
     let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
     let ended = format!("{bare} (dbt exit status: 1)");
     assert_eq!(answer["result"], json!({"file_uri": null, "error": ended}), "a launcher's line, with how dbt ended");
@@ -198,17 +199,18 @@ fn alone_compile_takes_dbt_s_error_from_the_events_of_its_json_log_alone() {
 }
 
 #[test]
-fn alone_nodes_takes_dbt_s_error_from_the_lines_of_its_text_log_alone() {
+fn nodes_takes_dbt_s_error_from_the_lines_of_its_text_log_alone() {
     // As both builds write it with `DBT_LOG_FORMAT=json` in their environment and no profiles.yml: events alone.
     let event = dbt_event("error", "dbt1005", "[error] [InvalidConfig (dbt1005)]: No profiles.yml found at /h");
-    let (mut session, _, _) = alone("commands-alone-json-list", json!({"run_log": event, "run_exit": 1}));
+    let (mut session, _, _) =
+        session_outside_the_root("commands-alone-json-list", json!({"run_log": event, "run_exit": 1}));
     let answer = execute(&mut session, NODES, json!(["x"]));
     assert_eq!(answer["result"], json!({"nodes": [], "error": "dbt exit status: 1"}), "how dbt ended");
     assert!(session.finish().success());
 }
 
 #[test]
-fn alone_no_run_while_packages_need_the_network() {
+fn no_run_while_packages_need_the_network() {
     let project = copy_fixture("commands-unsettled-project");
     std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
         .unwrap();
@@ -223,11 +225,11 @@ fn alone_no_run_while_packages_need_the_network() {
 }
 
 #[test]
-fn alone_runs_go_one_at_a_time_in_the_order_asked() {
+fn runs_go_one_at_a_time_in_the_order_asked() {
     let name = "commands-alone-queue";
     let gate = scratch_of(name).with_extension("gate");
     let _ = std::fs::remove_file(&gate);
-    let (mut session, log, _) = alone(name, json!({"compiled": "select 1", "run_gate": gate}));
+    let (mut session, log, _) = session_outside_the_root(name, json!({"compiled": "select 1", "run_gate": gate}));
     for id in [501, 502] {
         let params = json!({"command": COMPILE, "arguments": [uri(&orders())]});
         session.send(&json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": params}));
@@ -248,9 +250,9 @@ fn alone_runs_go_one_at_a_time_in_the_order_asked() {
 }
 
 #[test]
-fn alone_an_earlier_compiled_file_stays_and_only_this_run_s_manifest_counts() {
+fn an_earlier_compiled_file_stays_and_only_this_run_s_manifest_counts() {
     let name = "commands-alone-earlier";
-    let (mut session, _, _) = alone(name, json!({"compiled": "select 1"}));
+    let (mut session, _, _) = session_outside_the_root(name, json!({"compiled": "select 1"}));
     let (orders_file, _) = compiled_file(&execute(&mut session, COMPILE, json!([uri(&orders())])));
     let customers = fixture().join("models/marts/customers.sql");
     compiled_file(&execute(&mut session, COMPILE, json!([uri(&customers)])));
@@ -276,17 +278,17 @@ fn with_no_unshare_on_path_compile_and_nodes_are_announced_and_run() {
     let node = json!({"unique_id": "model.shop.orders", "name": "orders", "resource_type": "model"});
     std::fs::write(&script, json!({"compiled": "select 1", "list": [node]}).to_string()).unwrap();
     let fixture_arg = fixture().to_string_lossy().into_owned();
-    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir", &fixture_arg].map(str::to_owned);
+    let server = [env!("CARGO_BIN_EXE_fake-dbt"), "lsp", "--project-dir", &fixture_arg].map(str::to_owned);
     // An empty PATH: nothing there, `unshare` included.
     let empty = dir.join("bin");
     std::fs::create_dir_all(&empty).unwrap();
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("PATH", empty.as_path()),
         ("XDG_CACHE_HOME", dir.as_path()),
     ];
-    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+    let mut session = Session::start(&server, &env, Some(&dir));
     let result = session.initialize(&fixture());
     assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
     assert_eq!(compiled_file(&execute(&mut session, COMPILE, json!([uri(&orders())]))).1, "select 1");
@@ -302,13 +304,10 @@ fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
     std::fs::write(&script, json!({}).to_string()).unwrap();
     let fixture_arg = fixture().to_string_lossy().into_owned();
     // A wrapper of the user's own, whose words make no run of dbt's CLI.
-    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "--project-dir", &fixture_arg].map(str::to_owned);
-    let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
-        ("XDG_CACHE_HOME", dir.as_path()),
-    ];
-    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+    let server = [env!("CARGO_BIN_EXE_fake-dbt"), "--project-dir", &fixture_arg].map(str::to_owned);
+    let env =
+        [("FAKE_DBT_SCRIPT", script.as_path()), ("FAKE_DBT_LOG", log.as_path()), ("XDG_CACHE_HOME", dir.as_path())];
+    let mut session = Session::start(&server, &env, Some(&dir));
     let result = session.initialize(&fixture());
     assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
     let no_word = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
@@ -320,8 +319,9 @@ fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
 }
 
 #[test]
-fn alone_exit_kills_a_run_under_way() {
-    let (mut session, log, _) = alone("commands-alone-exit", json!({"compiled": "select 1", "run_hang": true}));
+fn exit_kills_a_run_under_way() {
+    let (mut session, log, _) =
+        session_outside_the_root("commands-alone-exit", json!({"compiled": "select 1", "run_hang": true}));
     let params = json!({"command": COMPILE, "arguments": [uri(&orders())]});
     session.send(&json!({"jsonrpc": "2.0", "id": 600, "method": "workspace/executeCommand", "params": params}));
     until_logged(&log.with_extension("jsonl.runs"), "the run", |lines| lines.len() == 1);

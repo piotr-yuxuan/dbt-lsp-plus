@@ -77,12 +77,12 @@ What dbt-lsp-plus answers, from the project's files and the user's own
   when a string in a Jinja tag names it, since a macro may render it as
   SQL.
 
-Definitions and references are answered at the kinds of target that
-[Where dbt-lsp-plus answers definitions and
-references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)
-lists; the initialize result names those, per kind of target and kind of
-file, under `experimental.dbtLspPlus`.  Elsewhere they get their
-nothing, null or `[]`, and a rename at no source and no CTE gets null.
+Definitions and references are answered at every position, in any file,
+as dbt's lookup resolves the name there; a position that names no
+target, or a document that does not read, gets their nothing, null or
+`[]`, and a rename at no source and no CTE gets null.  References at a
+`doc()` or at a generic test's name in YAML find no use: `[]`, or the
+declaration alone with `includeDeclaration`.
 A method or a command that dbt-lsp-plus does not answer, such as
 `textDocument/completion`, gets error -32601 `dbt-lsp-plus does not
 answer <name>`.  When the root's `dbt_project.yml` no longer reads, a
@@ -102,10 +102,10 @@ the one at <root>`.
 
 ## Configuration
 
-dbt-lsp-plus reads no configuration file: what it takes is on its
-command line, which ends with the server command, in its environment,
-and in the client's `initializationOptions` (see "Modes" below).  Every
-option at once, for a project whose profile sits beside it:
+dbt-lsp-plus reads no configuration file, nor the client's
+`initializationOptions`: what it takes is on its command line, which
+ends with the server command, and in its environment.  Every option at
+once, for a project whose profile sits beside it:
 
 ```sh
 env DBT_PACKAGES_INSTALL_PATH=vendor/dbt_packages \
@@ -128,71 +128,48 @@ it in the project.
 ### The arguments
 
 ```
-dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
+dbt-lsp-plus [--] [SERVER COMMAND...]
+dbt-lsp-plus -h|-V
 ```
 
-Options are read from the first word for as long as a word starts with
-`-`; the first word that does not begins the server command.  An unknown
-option, a missing value or a bad one is a usage error: the reason and
-the usage on standard error, exit status 2, nothing started.
+A first word that starts with `-`, but `--`, is an option; any other
+option is a usage error: the reason and the usage on standard error,
+exit status 2, nothing started.
 
-- `--mode METHOD=MODE`: who answers the LSP method METHOD, by its full
-  name, such as `textDocument/hover`: `plus`, `dbt` or `merge` (see
-  "Modes").  Repeatable.
-- `--default-mode MODE`: the mode of every method the server answers but
-  those `--mode` sets.
 - `--`: ends dbt-lsp-plus's own arguments; needed only before a server
   command that starts with a dash.
 - `-h`, `--help`: prints the usage and exits.
 - `-V`, `--version`: prints `dbt-lsp-plus X.Y.Z` and exits.
 
-A value goes in the next word or after `=`, as `--default-mode=plus`.
+### Methods and commands
 
-### Modes
+Each method and command that dbt-lsp-plus answers; any other gets error
+-32601.  Its nothing is its answer where it finds nothing.  One that asks
+for a parse starts one first when the index is stale, so that its
+reason, if it cannot answer, is that parse's; inlay hints ask for one
+after answering, while there is no index.  One that reads the project
+fails on a document of another dbt project with the reason above,
+nodeInfo when its argument is a position there; inlay hints get `[]`
+there.
 
-Each method that dbt-lsp-plus answers has a mode: `plus` or `merge`, its
-answer, the two alike since no other server answers; `dbt`, none, the
-method left unannounced.  `ours`, `plus`'s former name, is still read as
-`plus`, with one warning a session.  Set nothing and each method takes
-its shipped default, which the table gives; a command takes no mode.  A
-definition and references are answered at the kinds of target that
-`experimental.dbtLspPlus` lists ([Where dbt-lsp-plus answers definitions
-and
-references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)),
-a rename at a source or a CTE; elsewhere each gets its nothing.
-
-| Method or command | Shipped mode |
-|---|---|
-| `textDocument/documentSymbol` | plus |
-| `workspace/symbol` | plus |
-| `textDocument/prepareCallHierarchy` | plus |
-| `callHierarchy/incomingCalls` | prepareCallHierarchy's |
-| `callHierarchy/outgoingCalls` | prepareCallHierarchy's |
-| `textDocument/foldingRange` | plus |
-| `textDocument/documentHighlight` | plus |
-| `textDocument/selectionRange` | plus |
-| `textDocument/hover` | merge |
-| `textDocument/inlayHint` | merge |
-| `textDocument/definition` | merge |
-| `textDocument/references` | merge |
-| `textDocument/rename` | merge |
-| `textDocument/publishDiagnostics` | merge |
-| `dbt-lsp-plus.nodeInfo` | none |
-| `dbt-lsp-plus.compile` | none |
-| `dbt-lsp-plus.nodes` | none |
-
-Besides the command line, a client sets the modes in
-`initializationOptions`, which win method by method:
-
-```json
-{"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}
-```
-
-In Neovim that is `init_options`, not `settings`: dbt-lsp-plus reads no
-`workspace/didChangeConfiguration`, and a change applies when the client
-starts again.  A refused key is ignored and shown once in a warning.  A
-method set to `dbt` gets its nothing, null or `[]`, which does not say
-why, and a warning says so once.
+| Method or command | Its nothing | Asks for a parse | Reads the project |
+|---|---|---|---|
+| `textDocument/documentSymbol` | null | no | no |
+| `workspace/symbol` | `[]` | no | no |
+| `textDocument/prepareCallHierarchy` | null | yes | yes |
+| `callHierarchy/incomingCalls` | null | yes | no |
+| `callHierarchy/outgoingCalls` | null | yes | no |
+| `textDocument/foldingRange` | null | no | no |
+| `textDocument/documentHighlight` | null | no | no |
+| `textDocument/selectionRange` | null | no | no |
+| `textDocument/hover` | null | yes | yes |
+| `textDocument/inlayHint` | `[]` | no | yes |
+| `textDocument/definition` | null | yes | yes |
+| `textDocument/references` | `[]` | yes | yes |
+| `textDocument/rename` | null | no | no |
+| `dbt-lsp-plus.nodeInfo` | null | yes | yes |
+| `dbt-lsp-plus.compile` | null | no | no |
+| `dbt-lsp-plus.nodes` | null | no | no |
 
 ### The server command
 

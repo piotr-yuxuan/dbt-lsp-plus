@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The subcommands, `doctor`, `select` and `node`: what an agent in a shell
-//! asks without an LSP client, each answered on one line of compact JSON.
-//! The project and its dbt are found as the server finds them.
+//! The command line: the server's arguments, and the subcommands,
+//! `doctor`, `select` and `node`, what an agent in a shell asks without an
+//! LSP client, each answered on one line of compact JSON.  The project and
+//! its dbt are found as the server finds them.
 
 use crate::locate::{self, Route};
-use crate::modes::{self, Arguments};
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{self, Which, Workspace};
 use crate::{cache, commands, config, packages, proxy};
@@ -119,6 +119,32 @@ pub fn named(words: &[String]) -> Option<Subcommand> {
     SUBCOMMANDS.iter().find(|row| row.name == first).map(|row| row.subcommand)
 }
 
+/// What the server's command line asks.
+#[derive(Debug, PartialEq)]
+pub enum Arguments {
+    Help,
+    Version,
+    /// Serve, with this server command.
+    Run(Vec<String>),
+}
+
+/// The server's command line, WORDS, after its name: `-h` or `-V` as its
+/// first word, else the server command after any `--`, `dbt lsp` when
+/// none; or why it cannot be read, a first word that is another option.
+pub fn arguments(words: &[String]) -> Result<Arguments, String> {
+    if let Some(option) = words.first().filter(|word| word.starts_with('-') && *word != "--") {
+        return match option.as_str() {
+            "-h" | "--help" => Ok(Arguments::Help),
+            "-V" | "--version" => Ok(Arguments::Version),
+            other => Err(format!("{other} is no option of dbt-lsp-plus")),
+        };
+    }
+    let command: Vec<String> = words.iter().skip_while(|word| *word == "--").cloned().collect();
+    let command =
+        Some(command).filter(|command| !command.is_empty()).unwrap_or_else(|| vec!["dbt".into(), "lsp".into()]);
+    Ok(Arguments::Run(command))
+}
+
 #[derive(Debug, PartialEq)]
 enum Asked {
     Help,
@@ -131,9 +157,9 @@ enum Asked {
 }
 
 /// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
-/// `--help` first, whatever follows; else its operand, optional for doctor and needed by
-/// select and node, then, after `--`, the server's arguments, as `modes::arguments`
-/// reads them.  Or why they cannot be read.
+/// `--help` first, whatever follows; else its operand, optional for
+/// doctor and needed by select and node, then, after `--`, the server's
+/// arguments, as `arguments` reads them.  Or why they cannot be read.
 fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
         && (first == "-h" || first == "--help")
@@ -154,8 +180,8 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
     {
         return Err(format!("{} needs {needed}", row.name));
     }
-    match modes::arguments(server)? {
-        Arguments::Run { command, .. } => Ok(Asked::Run { operand, command }),
+    match arguments(server)? {
+        Arguments::Run(command) => Ok(Asked::Run { operand, command }),
         _ => Err("-h and -V are not the server's arguments here".into()),
     }
 }
@@ -425,11 +451,33 @@ mod tests {
         ];
         for (line, server) in servers {
             assert_eq!(named(&words(line)), None, "{line:?}");
-            let Ok(Arguments::Run { command, .. }) = modes::arguments(&words(line)) else { panic!("{line:?}") };
+            let Ok(Arguments::Run(command)) = arguments(&words(line)) else { panic!("{line:?}") };
             assert_eq!(command, words(server), "{line:?}");
         }
         let version = words(&["-V", "select"]);
-        assert_eq!((named(&version), modes::arguments(&version)), (None, Ok(Arguments::Version)), "an option first");
+        assert_eq!((named(&version), arguments(&version)), (None, Ok(Arguments::Version)), "an option first");
+    }
+
+    #[test]
+    fn the_command_line_reads_options_then_the_server_command() {
+        let run = |line: &[&str]| arguments(&words(line));
+        let command = words(&["dbt", "lsp", "--project-dir", "p"]);
+        assert_eq!(run(&["dbt", "lsp", "--project-dir", "p"]), Ok(Arguments::Run(command)));
+        assert_eq!(run(&[]), Ok(Arguments::Run(words(&["dbt", "lsp"]))), "dbt lsp by default");
+        assert_eq!(
+            run(&["--", "-strange", "lsp"]),
+            Ok(Arguments::Run(words(&["-strange", "lsp"]))),
+            "-- before a dash"
+        );
+        for (line, asked) in [(&["-h", "x"][..], Arguments::Help), (&["--help"], Arguments::Help)] {
+            assert_eq!(run(line), Ok(asked), "{line:?}");
+        }
+        for (line, asked) in [(&["-V", "--mode"][..], Arguments::Version), (&["--version"], Arguments::Version)] {
+            assert_eq!(run(line), Ok(asked), "{line:?}");
+        }
+        for bad in [&["--mode", "textDocument/hover=dbt"][..], &["--default-mode", "plus"], &["--colour", "x"]] {
+            assert!(run(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

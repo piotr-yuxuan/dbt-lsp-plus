@@ -1037,8 +1037,6 @@ models:
         assert_eq!(at(sql, text, "'r', 'f'", 1), function(Some("r")), "at its package");
         let keyword = Some(Name::new(Kind::Macro, None, "function"));
         assert_eq!(at(sql, text, "function('f')", 2), keyword, "its keyword a macro call, which a project may define");
-        assert_eq!(at(sql, text, "function('f')", 2).unwrap().kind.flag(), "macro");
-        assert_eq!(function(None).unwrap().kind.flag(), "function");
         let uses = [("dbt_project.yml", "f"), ("models/_a.yml", "f"), ("models/a.sql", "f"), ("models/a.sql", "f")];
         let uses = uses.map(|(file, text)| (file.to_owned(), text.to_owned()));
         assert_eq!(used(&root, "models/a.sql", "function('f')", 10, false), uses);
