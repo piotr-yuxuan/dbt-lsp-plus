@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const COMPILE: &str = "dbt-lsp-plus.compile";
-const SHOW: &str = "dbt-lsp-plus.show";
 const NODES: &str = "dbt-lsp-plus.nodes";
 
 fn orders() -> PathBuf {
@@ -84,14 +83,12 @@ fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() 
 fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
     let (mut session, log) = with_options("commands-invalid", json!({}), &[]);
     session.initialize(&fixture());
-    for (command, arguments) in
-        [(COMPILE, json!([])), (COMPILE, json!([7])), (SHOW, json!([{"limit": 3}])), (NODES, json!(null))]
-    {
+    for (command, arguments) in [(COMPILE, json!([])), (COMPILE, json!([7])), (NODES, json!(null))] {
         let answer = execute(&mut session, command, arguments.clone());
         assert_eq!(answer["error"]["code"], -32602, "{command} {arguments}: {answer}");
     }
     barrier(&mut session);
-    assert!(received_command(&log, "dbt.compileFile").is_empty() && received_command(&log, "dbt.show").is_empty());
+    assert!(received_command(&log, "dbt.compileFile").is_empty());
     assert!(session.finish().success());
 }
 

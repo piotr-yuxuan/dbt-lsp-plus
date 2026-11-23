@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy's commands for clients, `dbt-lsp-plus.compile`, `.show` and
-//! `.nodes`: done by dbt lsp's own commands when it runs, else, for two of
-//! them, by dbt's CLI.  How each request goes, the words of a run, and what
-//! its output answers, in dbt lsp 2.0.9's shapes.
+//! The proxy's commands for clients, `dbt-lsp-plus.compile` and `.nodes`:
+//! done by dbt lsp's own commands when it runs, else by dbt's CLI.  How
+//! each request goes, the words of a run, and what its output answers, in
+//! dbt lsp 2.0.9's shapes.
 
 use crate::capability::{self, CAPABILITIES, Provider};
 use crate::run::{self, Ending, Output, Run, Running};
@@ -13,11 +13,7 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 pub const COMPILE: &str = "dbt-lsp-plus.compile";
-pub const SHOW: &str = "dbt-lsp-plus.show";
 pub const NODES: &str = "dbt-lsp-plus.nodes";
-
-/// The rows of a show whose client names no limit: `dbt show`'s default.
-const LIMIT: u64 = 10;
 
 /// Why a server command with no `lsp` word runs no command: dbt's words
 /// are those before it.
@@ -55,31 +51,16 @@ pub fn route(command: &str, serves: &dyn Fn(&str) -> bool) -> Result<Provider, V
 pub fn failure(command: &str, why: &str) -> Value {
     match command {
         COMPILE => json!({"file_uri": null, "error": why}),
-        SHOW => json!({"columns": null, "data": null, "error": why}),
         _ => json!({"nodes": [], "error": why}),
     }
 }
 
-/// The arguments of a request of COMMAND, from its PARAMS, as dbt lsp takes
-/// them: a URI for a compile; for a show, an object with a `uri` or an
-/// `inline` text, and a positive `limit`, `LIMIT` when it has none; a
-/// selector for nodes.  None when they cannot be read.
-pub fn arguments(command: &str, params: &Value) -> Option<Vec<Value>> {
+/// The arguments of a request of a command, from its PARAMS, as dbt lsp
+/// takes them: a URI for a compile, a selector for nodes.  None when they
+/// cannot be read.
+pub fn arguments(params: &Value) -> Option<Vec<Value>> {
     let first = params.pointer("/arguments/0")?;
-    let shown = |object: &serde_json::Map<String, Value>| {
-        let mut object = object.clone();
-        let limit = object.entry("limit").or_insert(json!(LIMIT));
-        limit.as_u64().filter(|limit| *limit > 0)?;
-        Some(Value::Object(object))
-    };
-    let named = |object: &&serde_json::Map<String, Value>| {
-        ["uri", "inline"].iter().any(|key| object.get(*key).is_some_and(Value::is_string))
-    };
-    let argument = match command {
-        SHOW => first.as_object().filter(named).and_then(shown),
-        _ => first.as_str().map(|_| first.clone()),
-    };
-    argument.map(|argument| vec![argument])
+    first.as_str().map(|_| vec![first.clone()])
 }
 
 /// A run of dbt for a request of a command: the command, the words after
@@ -228,7 +209,6 @@ mod tests {
     #[test]
     fn a_failure_has_its_command_s_shape() {
         assert_eq!(failure(COMPILE, "no"), json!({"file_uri": null, "error": "no"}));
-        assert_eq!(failure(SHOW, "no"), json!({"columns": null, "data": null, "error": "no"}));
         assert_eq!(failure(NODES, "no"), json!({"nodes": [], "error": "no"}));
     }
 

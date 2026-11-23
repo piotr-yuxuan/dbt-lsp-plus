@@ -1299,7 +1299,7 @@ impl<W: Write> Proxy<W> {
         if self.shutdown {
             return self.reply_error(id, INVALID_REQUEST, "the client asked for shutdown");
         }
-        let Some(arguments) = commands::arguments(command, params) else {
+        let Some(arguments) = commands::arguments(params) else {
             return self.reply_error(id, INVALID_PARAMS, "invalid parameters");
         };
         let serves = |dbt: &str| self.backend.running().is_some() && self.backend.commands.contains(dbt);

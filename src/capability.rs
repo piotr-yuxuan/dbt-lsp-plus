@@ -4,7 +4,7 @@
 //! commands listed and the methods that take a mode all come from
 //! `CAPABILITIES`.
 
-use crate::commands::{COMPILE, NODES, SHOW};
+use crate::commands::{COMPILE, NODES};
 use crate::config::NODE_INFO;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -111,7 +111,7 @@ const DEFAULT: Capability = Capability {
 
 /// Every method and command that the proxy answers or takes part in, a
 /// method's followers after it.  Any other method is dbt lsp's alone.
-pub static CAPABILITIES: [Capability; 18] = [
+pub static CAPABILITIES: [Capability; 17] = [
     Capability { name: "textDocument/documentSymbol", key: Some("documentSymbolProvider"), added: true, ..DEFAULT },
     Capability { name: "workspace/symbol", key: Some("workspaceSymbolProvider"), added: true, list: true, ..DEFAULT },
     Capability {
@@ -203,8 +203,6 @@ pub static CAPABILITIES: [Capability; 18] = [
         server: Some("dbt.compileFile"),
         ..DEFAULT
     },
-    // `dbt show` alone would reach the network.
-    Capability { name: SHOW, providers: &[Provider::DbtLsp], server: Some("dbt.show"), ..DEFAULT },
     Capability {
         name: NODES,
         providers: &[Provider::DbtLsp, Provider::DbtCli],

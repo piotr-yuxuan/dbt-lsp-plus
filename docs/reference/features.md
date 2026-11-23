@@ -229,7 +229,6 @@ lsp`'s however long it takes.
 | `textDocument/publishDiagnostics` | dbt-lsp-plus, dbt lsp | merge | both, per file | no |
 | `dbt-lsp-plus.nodeInfo` | dbt-lsp-plus | none | dbt-lsp-plus's | no |
 | `dbt-lsp-plus.compile` | dbt lsp, dbt's CLI | none | the first present | no |
-| `dbt-lsp-plus.show` | dbt lsp | none | the first present | no |
 | `dbt-lsp-plus.nodes` | dbt lsp, dbt's CLI | none | the first present | no |
 
 Besides the command line, a client sets the modes in
