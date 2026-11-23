@@ -1,18 +1,20 @@
 # The subcommands
 
-Beside the language server, `dbt-lsp-plus` answers two questions from a
-shell, without an LSP client, each on one line of compact JSON on the
+Beside the language server, `dbt-lsp-plus` answers three questions from
+a shell, without an LSP client, each on one line of compact JSON on the
 standard output:
 
 ```
 dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
 dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
+dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
 ```
 
 A subcommand is the first word after the program's name, and nothing
 else: `dbt-lsp-plus -- doctor` and `dbt-lsp-plus --shadow select x` still
 start a server whose command is `doctor` or `select x`.  A server command
-whose first word is a subcommand's name follows `--`.
+whose first word is a subcommand's name (`doctor`, `select` or `node`)
+follows `--`.
 
 ARGUMENTS are the server's own command line, as an editor or `.lsp.json`'s
 `args` give it: `--backend never`, then `--` and the server command,
@@ -26,13 +28,13 @@ follows; elsewhere it is a usage error.
 
 ## The project and its dbt
 
-Both subcommands find the project and its dbt as the server does, from
-a path, doctor's PATH, else the current directory:
+Each subcommand finds the project and its dbt as the server does, from
+a path: doctor's PATH, node's PATH, else the current directory:
 
 - **given**: the server command names `--project-dir`; the project is
   that directory, made absolute, when it holds `dbt_project.yml`, and
   the dbt is the server command as written, run in the current
-  directory.  Else doctor and select say there is no project, where the
+  directory.  Else the subcommands say there is no project, where the
   server takes the directory all the same, and dbt
   fails there (its dbt lsp, else the proxy's parse);
 - **folder**: the path is a directory that holds `dbt_project.yml`, as a
@@ -143,6 +145,74 @@ included, as `grep` finding nothing; 2 for a usage error.
 
 Fields, limits and paging, and an answer from the last parse's manifest
 without running dbt, are not there yet.
+
+## `node ID|PATH[:LINE[:COLUMN]]`
+
+The node that a unique id names in the project of the current directory,
+or that a place in a file names in the project of that file, as the
+command `dbt-lsp-plus.nodeInfo` gives a client the node it names by an
+id or by a position:
+
+```
+{"error":null,"node":{"unique_id":"model.shop.stg_orders","children":["model.shop.orders"],"summary":"model view, \"shop\".\"main\".\"stg_orders\"",...}}
+```
+
+`node` is the manifest's node, with `relation`, `tests`, `summary`, the
+text of the summary a hover shows first, and `children`, the unique ids,
+sorted, of the enabled nodes whose `depends_on.nodes` names it, every
+test aside; exposures, metrics, semantic models, saved queries and unit
+tests are not among them.
+
+The operand is a place when a file exists at its PATH: tried as
+`PATH:LINE:COLUMN`, `PATH:LINE`, then `PATH`, LINE and COLUMN from 1,
+COLUMN in characters, PATH from the current directory, each `..`
+dropping the component before it, as written.  A place names the `ref`
+or `source` under it, or the entry whose `name:` is there; `PATH` alone
+is `PATH:1:1`, which, where it names nothing else, stands for the one
+node its file defines, but in a YAML file.  Any
+other operand is a unique id, as written: `model.shop.orders`,
+`source.shop.raw.customers`.
+
+The nodes are those of a `dbt parse` of the project, run as the server
+runs its own (the same flags, cut off the network where the system can,
+the guard on packages as when the server answers alone), in a run
+directory under the user's cache that is removed once the answer is
+given.  A parse that does not fail leaves its manifest in `kept/`,
+beside the run directories of the same project, as spelt, and server
+command; the next `node` on that project reads it, and runs no parse,
+while every file of the project that may hold a resource, and every
+package, stays as it was when that parse started: a file written,
+added or removed since, even during the parse, makes the next `node`
+parse again.  `kept/` holds one manifest, the last kept; the next
+`select`, `node` or proxy on the project removes it once it has gone a
+day unwritten.  The kept manifest does not see what changes outside
+those files: `profiles.yml`, a `.env`, the environment, or a dbt
+replaced in place.
+
+On a failure, `node` is `null`, or the node of the last manifest a
+failed parse still wrote, and `error` says why:
+
+- `<ID> names no node`, when the index holds no such node, or the place
+  names none;
+- `dbt parse failed: <dbt's first error> (see <log>)`, the log gone
+  with the run directory;
+- why the parse was refused, as doctor's `packages`, or `the server
+  command has no lsp, so dbt-lsp-plus runs no dbt parse`;
+- `no dbt project at <root>: ...`, at a `ref`, a `source` or an entry's
+  `name:` over a project whose `dbt_project.yml` does not read, once a
+  failed parse still wrote a manifest;
+- `<file> lies in the dbt project at <other>, and this session serves
+  only the one at <root>`, at a place in another project than the server
+  command's `--project-dir`;
+- `no dbt_project.yml at or above DIR; give a PATH within one, run it
+  within one, or name it with -- dbt lsp --project-dir DIR`, outside
+  every project: nothing runs;
+- `no dbt_project.yml in DIR, the server command's --project-dir`, on
+  the given route: nothing runs.
+
+Exit status: 0 when `error` is `null`; 1 otherwise; 2 for a usage error.
+The answer has no time and no parse's id: the manifest kept is that of
+the files as they lie.
 
 ## The standard error
 

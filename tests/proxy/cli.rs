@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The subcommands `doctor` and `select`, the binary run as an agent runs it
-//! in a shell, in front of the fake dbt, in scratch directories.
+//! The subcommands `doctor`, `select` and `node`, the binary run as an agent
+//! runs it in a shell, in front of the fake dbt, in scratch directories.
 
 use crate::live::paths;
 use crate::logged;
@@ -109,9 +109,11 @@ const REFUSED: &str = "dbt-lsp-plus runs dbt only cut off the network, which thi
 #[test]
 fn a_subcommand_s_usage_error_says_its_usage_on_the_standard_error_alone() {
     let case = Case::new("cli-usage", &json!({}));
-    for (words, usage) in
-        [(&["doctor", "--bogus"][..], "usage: dbt-lsp-plus doctor"), (&["select"], "usage: dbt-lsp-plus select")]
-    {
+    for (words, usage) in [
+        (&["doctor", "--bogus"][..], "usage: dbt-lsp-plus doctor"),
+        (&["select"], "usage: dbt-lsp-plus select"),
+        (&["node"], "usage: dbt-lsp-plus node"),
+    ] {
         let output = case.command(&case.copy, words).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!((output.status.code(), output.stdout), (Some(2), Vec::new()), "{words:?}");
@@ -466,4 +468,73 @@ fn select_fails_with_dbt_s_error_or_with_no_nodes() {
         status == Some(1) && why.contains("run it within the project, or name it with -- dbt lsp --project-dir"),
         "{why}"
     );
+}
+
+/// The directories under the case's cache that each parent holds, by name:
+/// what the runs left.
+fn left_in_cache(case: &Case) -> Vec<Vec<PathBuf>> {
+    let parents = fs::read_dir(case.dir.join("cache/dbt-lsp-plus")).unwrap().flatten();
+    let held = |parent: fs::DirEntry| fs::read_dir(parent.path()).unwrap().flatten().map(|e| e.path()).collect();
+    parents.map(held).collect()
+}
+
+#[test]
+fn node_answers_by_id_and_by_place_from_one_parse_kept_for_the_next() {
+    let mut manifest = crate::manifest();
+    manifest["nodes"]["model.shop.orders"]["depends_on"] = json!({"nodes": ["model.shop.stg_orders"]});
+    let case = Case::new("cli-node", &json!({"manifest": manifest}));
+    venv_fake(&case.copy);
+    let (status, answer) = case.run(&case.copy, &["node", "model.shop.stg_orders"]);
+    let node = &answer["node"];
+    let summary = json!("model view, \"shop\".\"main\".\"stg_orders\"");
+    assert_eq!(
+        (status, &answer["error"], &node["children"], &node["summary"]),
+        (Some(0), &Value::Null, &json!(["model.shop.orders"]), &summary),
+        "{answer}"
+    );
+    assert_eq!(crate::parses(&case.log).len(), 1, "one parse");
+    // By a file, from where it is run, then by a place in it: the manifest kept.
+    let (_, by_file) = case.run(&case.copy.join("models"), &["node", "marts/orders.sql"]);
+    let (_, by_place) = case.run(&case.copy, &["node", "models/marts/orders.sql:5:29"]);
+    let named = (&by_file["node"]["unique_id"], &by_place["node"]["unique_id"], crate::parses(&case.log).len());
+    assert_eq!(named, (&json!("model.shop.orders"), &json!("model.shop.stg_orders"), 1), "{by_file} {by_place}");
+    // A file written: a parse again.
+    fs::write(case.copy.join("models/marts/later.sql"), "select 1\n").unwrap();
+    let (status, answer) = case.run(&case.copy, &["node", "model.shop.orders"]);
+    let again = (status, &answer["node"]["unique_id"], crate::parses(&case.log).len());
+    assert_eq!(again, (Some(0), &json!("model.shop.orders"), 2), "{answer}");
+    let (status, answer) = case.run(&case.copy, &["node", "model.shop.nowhere"]);
+    assert_eq!((status, answer), (Some(1), json!({"error": "model.shop.nowhere names no node", "node": null})));
+    let (status, answer) = case.run(&case.dir, &["node", "model.shop.orders"]);
+    let why = answer["error"].as_str().unwrap_or_default();
+    assert!(status == Some(1) && why.starts_with("no dbt_project.yml at or above"), "{answer}");
+    // One parent, holding `kept` alone, with one file.
+    let left = left_in_cache(&case);
+    let kept = left.first().and_then(|held| held.first()).map(|kept| fs::read_dir(kept).unwrap().count());
+    let name = |dir: &PathBuf| dir.file_name().unwrap().to_string_lossy().into_owned();
+    let names: Vec<Vec<String>> = left.iter().map(|held| held.iter().map(name).collect()).collect();
+    assert_eq!((names, kept), (vec![vec!["kept".to_owned()]], Some(1)), "{left:?}");
+}
+
+#[test]
+fn node_says_why_when_a_parse_fails_and_keeps_no_manifest() {
+    let case = Case::new("cli-node-failed", &json!({}));
+    venv_fake(&case.copy);
+    let parse_log = case.dir.join("parse.jsonl");
+    let event = json!({"info": {"code": "1501", "level": "error", "msg": "[error] [JinjaError (dbt1501)]: Failed"}});
+    fs::write(&parse_log, format!("{event}\n")).unwrap();
+    case.rescript(&json!({"parse_exit": 1, "parse_log": parse_log}));
+    let failed = "dbt parse failed: [JinjaError (dbt1501)]: Failed";
+    let (status, answer) = case.run(&case.copy, &["node", "model.shop.orders"]);
+    let why = answer["error"].as_str().unwrap_or_default();
+    assert!(status == Some(1) && answer["node"].is_null() && why.starts_with(failed), "{answer}");
+    // A manifest that the failed parse still wrote answers, with the failure.
+    case.rescript(&json!({"parse_exit": 1, "parse_log": parse_log, "manifest": crate::manifest()}));
+    let (status, answer) = case.run(&case.copy, &["node", "model.shop.orders"]);
+    let why = answer["error"].as_str().unwrap_or_default();
+    assert!(
+        status == Some(1) && answer["node"]["unique_id"] == "model.shop.orders" && why.starts_with(failed),
+        "{answer}"
+    );
+    assert_eq!(left_in_cache(&case), vec![Vec::<PathBuf>::new()], "no run left, no manifest kept");
 }

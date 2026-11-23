@@ -186,6 +186,29 @@ pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
     base.join("dbt-lsp-plus").join(hash(parts)).join(std::process::id().to_string())
 }
 
+/// Where the manifest of a parse that started while the project lay on
+/// disk as STAMP (`cache::disk`) says is kept, beside CACHE, a process's
+/// directory, for those after it: in `kept/` under their one parent,
+/// which `remove_stale` sweeps by its own time.
+pub fn kept(cache: &Path, stamp: u64) -> PathBuf {
+    cache.with_file_name("kept").join(format!("{stamp:016x}.json"))
+}
+
+/// Keeps the manifest that a parse wrote under CACHE, a process's
+/// directory, for the project as it lay on disk as STAMP: renamed to
+/// `kept`'s place, the other files of `kept/` removed; nothing when it
+/// cannot.
+pub fn keep(cache: &Path, stamp: u64) {
+    let kept = kept(cache, stamp);
+    let Some(dir) = kept.parent() else { return };
+    if fs::create_dir_all(dir).is_err() || fs::rename(cache.join("target/manifest.json"), &kept).is_err() {
+        return;
+    }
+    for other in fs::read_dir(dir).into_iter().flatten().flatten().filter(|other| other.path() != kept) {
+        let _ = fs::remove_file(other.path());
+    }
+}
+
 /// Removes the caches beside CACHE that neither a parse nor a run wrote for
 /// a day, as a proxy or a select killed by a signal leaves: a sibling's
 /// time is its `parse.log`'s, else its own, as a select writes no parse's

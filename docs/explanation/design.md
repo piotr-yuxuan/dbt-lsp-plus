@@ -1615,7 +1615,9 @@ here.  The values of variables are not hinted yet: in dbt 2.0.9 a macro's
   null for no node, and error -32803 with the reason until a first parse
   has finished; after that, the last index answers, and a later failure is
   only logged.  A position names the call under it in SQL inside Jinja, and
-  in YAML or a Python model outside it.
+  in YAML or a Python model outside it.  nodeInfo, the subcommand `node`
+  and MCP ask one query of the core, `Workspace::node`.  MCP comes with
+  plan 052.
 - A hover, with inlay hints (see "Inlay hints"), is a method that is
   forwarded and augmented: on a `ref` or
   `source` argument, an entry's `name:` in YAML, or at position 0:0 (line
@@ -1796,14 +1798,14 @@ answer, `dbt.compileFile` among them, fails with -32803.
 
 ## The CLI
 
-`doctor` and `select` (`src/cli.rs`, `docs/reference/cli.md`) answer an
-agent in a shell, without an LSP client.  A subcommand is the command
+`doctor`, `select` and `node` (`src/cli.rs`, `docs/reference/cli.md`)
+answer an agent in a shell, without an LSP client.  A subcommand is the command
 line's first word and nothing else, so that every command line that
 starts the server, `--` first or an option first, keeps its meaning; a
 second binary would be one more file to install, put on a harness's
 `PATH` and allowlist.
 
-- **One resolution.**  Both find the project and its dbt as the server
+- **One resolution.**  Each finds the project and its dbt as the server
   does: the server command's `--project-dir` (`proxy::project_dir`),
   else the path as a client's folder, else as a document's
   (`locate::project_of`), the dbt then `locate::dbt`'s from the command
@@ -1812,7 +1814,7 @@ second binary would be one more file to install, put on a harness's
   `run`, `take_project` and doctor call, so that what doctor says is
   what the server does; its probe stays lazy, so the server probes no
   more than before.  One divergence: a given `--project-dir` without
-  `dbt_project.yml` is no project to doctor and select, where the server
+  `dbt_project.yml` is no project to the subcommands, where the server
   takes the directory all the same, and dbt
   fails there (its dbt lsp, else the proxy's parse).
 - **doctor runs what the server runs.**  git once, `lsp --help`,
@@ -1833,15 +1835,30 @@ second binary would be one more file to install, put on a harness's
   `commands::start` with the parse's deadline), in a run directory of
   its own under the user's cache, removed once the answer is read; its
   answer is `listed`'s, as a client gets it.
+- **node is nodeInfo from a shell.**  The same query of the core,
+  `Workspace::node`, on a Workspace of the CLI's own: its project and dbt
+  found as above, an id's from the current directory, a place's from its
+  file; its index the manifest kept in `kept/`, beside the project's run
+  directories, under the stamp of the files on disk (`cache::disk`) when
+  its parse started (`config::kept`), else a parse of its own, guarded
+  as alone, so that it runs where nothing cuts, the guard deciding,
+  where select refuses; its manifest kept by a rename when it does not
+  fail (`config::keep`), and the Workspace stopped once it answers, so
+  that only the kept manifest outlives the run.  Two runs at once each
+  parse apart, with no lock, which a killed run would leave behind; one
+  may remove the other's newer manifest, and the next parses again.  Its
+  answer is `workspace::reply`'s: the node, or `error` with nodeInfo's
+  reasons, the parse's failure in place of `dbt parse has not finished`.
 - **The answers' form.**  One line of compact JSON, whatever the outcome,
   with `error` when something is missing or failed; nothing on the
-  standard error but a usage error, status 2.  Neither answer has a time
-  or a parse's id, since neither reads an index; nor a `from`, since each
-  has one provider.
+  standard error but a usage error, status 2.  No answer has a time or a
+  parse's id: doctor and select read no index, and node's is the
+  manifest of the files as they lie; nor a `from`, since each has one
+  provider.
 
-Left for later: `node`, with a cache of a parse of the CLI's own; fields,
-limits and paging for `select`, and a fast path over a warm manifest,
-checked against dbt; the profile and the target in doctor, which need
+Left for later: fields, limits and paging for `select`, and a fast path
+over the manifest that node keeps, checked against dbt (plan 058);
+`lineage` (plan 052); the profile and the target in doctor, which need
 `dbt debug` and the warehouse.
 
 ## Failure modes

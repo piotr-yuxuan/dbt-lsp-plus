@@ -390,9 +390,9 @@ fn found_from_the_folder(project: &Path, lsp: bool) {
     assert!(session.finish().success());
 }
 
-/// doctor from the parent of the copy PROJECT, on a model, and select in
-/// PROJECT, as an agent runs them in a shell, with the default server
-/// command; LSP whether the dbt has `lsp`.
+/// doctor from the parent of the copy PROJECT, on a model, and node and
+/// select in PROJECT, as an agent runs them in a shell, with the default
+/// server command; LSP whether the dbt has `lsp`.
 fn from_a_shell(project: &Path, lsp: bool) {
     let dir = project.parent().unwrap();
     let run = |at: &Path, words: &[&str]| {
@@ -420,6 +420,18 @@ fn from_a_shell(project: &Path, lsp: bool) {
     );
     let cut = dbt_lsp_plus::config::can_cut();
     assert_eq!((&doctor["cut"], &doctor["packages"]), (&json!(cut), &Value::Null), "{doctor}");
+    // node by id, then by a place, from one parse of its own, whose manifest is kept.
+    let (status, by_id) = run(project, &["node", "model.shop.stg_orders"]);
+    let (_, by_place) = run(project, &["node", "models/marts/orders.sql:5:29"]);
+    let children = by_id["node"]["children"].as_array().cloned().unwrap_or_default();
+    let parents = std::fs::read_dir(dir.join("cache/dbt-lsp-plus")).into_iter().flatten().flatten();
+    let kept = parents.filter_map(|parent| std::fs::read_dir(parent.path().join("kept")).ok()).flatten().count();
+    let found = (status, &by_id["error"], children.contains(&json!("model.shop.orders")));
+    assert_eq!(
+        (found, &by_place["node"]["unique_id"], kept),
+        ((Some(0), &Value::Null, true), &json!("model.shop.stg_orders"), 1),
+        "{by_id} {by_place}"
+    );
     let (status, selected) = run(project, &["select", "+stg_orders+"]);
     if !cut {
         let _ = writeln!(std::io::stderr(), "from_a_shell: this system cannot cut: the refusal checked instead");

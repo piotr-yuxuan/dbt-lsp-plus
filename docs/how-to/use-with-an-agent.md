@@ -183,8 +183,9 @@ then each problem, such as `[DependencyNotFound (dbt1048)]: Ref
 
 The LSP tool cannot reach nodeInfo, rename, inlay hints, completion or
 compiled SQL.  The hover at line 1, character 1 gives a node's facts;
-`dbt-lsp-plus select` lists nodes with their configuration, where dbt
-can be cut off the network (below).
+`dbt-lsp-plus node` gives what nodeInfo gives, and `dbt-lsp-plus select`
+lists nodes with their configuration, where dbt can be cut off the
+network (below).
 
 ## From a shell
 
@@ -197,9 +198,17 @@ select SELECTOR`, run in the project, gives
 select runs dbt only cut off the network, which needs Linux with user
 namespaces: elsewhere, as on macOS, it answers `dbt-lsp-plus runs dbt
 only cut off the network, which this system cannot`, and doctor's `cut`
-is `false`.  doctor exits 0 when it finds a project and a dbt 2, select
-when `error` is null; 1 otherwise; 2 for a usage error ([the
-subcommands](../reference/cli.md)).
+is `false`.  `dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]]` gives what
+nodeInfo gives of the node that a unique id names, in the project of the
+current directory, or that a place in a file names, as
+`{"error":null,"node":{...}}`, the node with its `summary` and its
+`children`, the unique ids of the enabled nodes that depend on it.  Its
+first run in a project runs a `dbt parse` and keeps its manifest; the
+next runs read it, while the project's files stay as they were.  Where
+dbt cannot be cut off the network, it parses all the same, unless the
+project names a package from the network.  doctor exits 0 when it finds
+a project and a dbt 2, select and node when `error` is null; 1
+otherwise; 2 for a usage error ([the subcommands](../reference/cli.md)).
 
 From a repository's root over `dbt/`, doctor on a model's file gave
 `"route":"document"`, `"source":"the project's .venv"` and
@@ -217,9 +226,10 @@ in `dbt` too.  From the root, `dbt-lsp-plus select orders -- dbt lsp
 current directory: it failed with `no profiles.yml found` where
 `profiles.yml` is in `dbt/`.
 
-Allow both, in `--allowedTools` or the settings' permissions, as
-`Bash(dbt-lsp-plus doctor:*)` and `Bash(dbt-lsp-plus select:*)`; without
-them, Claude Code answers `This command requires approval`.
+Allow them, in `--allowedTools` or the settings' permissions, as
+`Bash(dbt-lsp-plus doctor:*)`, `Bash(dbt-lsp-plus select:*)` and
+`Bash(dbt-lsp-plus node:*)`; without them, Claude Code answers `This
+command requires approval`.
 
 ## When nothing answers
 
