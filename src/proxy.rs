@@ -40,7 +40,6 @@ const ENCODING: Encoding = Encoding::Utf16;
 
 /// How the server answers a request of the client's.
 enum Route {
-    /// As this method.
     Here(&'static str),
     /// With this answer: null before a project, or the method's nothing.
     Answer(Answer),
@@ -96,7 +95,7 @@ struct Diagnostics {
     logged: HashSet<String>,
     /// When the client last changed or saved each document.
     edited: HashMap<PathBuf, SystemTime>,
-    /// The URI under which the proxy last published.
+    /// The URI under which the server last published.
     published: HashMap<PathBuf, String>,
 }
 
@@ -129,7 +128,7 @@ struct Proxy<W: Write> {
     /// Whether the client lets a server register a watcher of files.
     watches: bool,
     diagnostics: Diagnostics,
-    /// The core's state of the session's project, which the proxy hands
+    /// The core's state of the session's project, which the server hands
     /// the open texts: its root, its dbt, its scan, its parse and index,
     /// its graph.
     workspace: Workspace,
@@ -157,7 +156,6 @@ pub fn lexical(path: &Path) -> PathBuf {
     })
 }
 
-/// The path of a `file:` URI.
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
     Url::parse(uri?).ok()?.to_file_path().ok()
 }
@@ -189,7 +187,7 @@ fn changes_graph(
 }
 
 /// The `--project-dir` of COMMAND, as `--project-dir X` or
-/// `--project-dir=X`, made absolute as spelt, so that the paths the proxy
+/// `--project-dir=X`, made absolute as spelt, so that the paths the server
 /// returns read as the user wrote them: each `..` drops the component before
 /// it.  Resolved only when that names another directory, through a link
 /// before a `..`.
@@ -371,8 +369,6 @@ impl<W: Write> Proxy<W> {
         self.workspace.project(&self.open_documents())
     }
 
-    /// The open documents as the Workspace reads them: their texts and the
-    /// count of each one's edits.
     fn open_documents(&self) -> cache::Open<'_> {
         cache::Open { texts: &self.documents, edits: &self.edits }
     }
@@ -488,7 +484,7 @@ impl<W: Write> Proxy<W> {
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
     }
 
-    /// Why the proxy cannot answer from the project: the root's
+    /// Why the server cannot answer from the project: the root's
     /// `dbt_project.yml` does not read, which the scan needs.
     fn unreadable(&self) -> Reason {
         Reason::Unreadable(self.workspace.root.clone().unwrap_or_default())
@@ -1214,7 +1210,7 @@ mod tests {
     #[test]
     fn only_a_change_outside_dbt_s_output_may_change_the_graph() {
         let root = Path::new("/work/a b/shop");
-        // As the proxy gives them: a link of logs out of the project, resolved, included.
+        // As the server gives them: a link of logs out of the project, resolved, included.
         let output = vec![root.join("target"), root.join("logs"), PathBuf::from("/elsewhere/logs")];
         let file = |path: &str| format!("file:///work/a%20b/shop/{path}");
         let watched = |uris: &[String]| {

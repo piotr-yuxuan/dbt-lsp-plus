@@ -88,7 +88,6 @@ impl Capability {
     }
 }
 
-/// The capability named NAME, if the server has one.
 pub fn of(name: &str) -> Option<&'static Capability> {
     CAPABILITIES.iter().find(|capability| capability.name == name)
 }
