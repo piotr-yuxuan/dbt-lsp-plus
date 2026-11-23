@@ -370,7 +370,7 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
         return;
     }
     let (sender, outcomes) = mpsc::channel();
-    workspace.parse(Some(Box::new(move |outcome| drop(sender.send(outcome)))));
+    workspace.parse(false, Box::new(move |outcome| drop(sender.send(outcome))));
     // None started: no report kept the channel open.
     let Ok(outcome) = outcomes.recv() else { return };
     let failure = outcome.failure.or(outcome.index.is_none().then_some("it left no manifest that reads".to_owned()));

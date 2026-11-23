@@ -226,10 +226,16 @@ impl Workspace {
 
     /// Starts a parse when the index is stale and dbt can parse: no parse
     /// under way, packages that dbt would not install, a server command with
-    /// `lsp`; REPORT gets its outcome.  With no REPORT nothing starts.  Why
-    /// none could start, when it is not the last parse's failure already,
-    /// for the front end to tell once.
-    pub fn parse(&mut self, report: Option<config::ReportFn>) -> Option<String> {
+    /// `lsp`; REPORT gets its outcome.  When LOOK, on behalf of a request,
+    /// it looks at the files on disk first: one that may hold a resource and
+    /// that changed since the last parse started makes the index stale, as
+    /// a change told does; nothing to compare before a parse.  Why none
+    /// could start, when it is not the last parse's failure already, for the
+    /// front end to tell once.
+    pub fn parse(&mut self, look: bool, report: config::ReportFn) -> Option<String> {
+        if let (true, true, Some(root), Some(stamp)) = (look, self.fresh, &self.root, self.stamp) {
+            self.fresh = cache::disk(root, self.dbt.command()) == stamp;
+        }
         let root = self.root.clone().filter(|_| !self.fresh && self.running.is_none())?;
         if let Some(why) = packages::refused(&root, self.dbt.command()) {
             return self.failed(Some(why));
@@ -239,18 +245,9 @@ impl Workspace {
         let Some(run) = self.dbt.run(&parse, &root, cache, config::PARSE_LOG) else {
             return self.failed(Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".into()));
         };
-        let report = report?;
         (self.fresh, self.stamp) = (true, Some(cache::disk(&root, self.dbt.command())));
         self.running = Some(config::start(run, report));
         None
-    }
-
-    /// A look at the files on disk on behalf of a request: one that may hold
-    /// a resource and that changed since the last parse started makes the
-    /// index stale, as a change told does.  Nothing to compare before a parse.
-    pub fn notice(&mut self) {
-        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return };
-        self.fresh = cache::disk(root, self.dbt.command()) == stamp;
     }
 
     /// A parse's end, its INDEX and its FAILURE: its run stopped; its index
@@ -451,47 +448,38 @@ mod tests {
         };
         // Before any parse, nothing to compare the disk with.
         let mut before = Workspace { root: Some(root.clone()), fresh: true, ..Workspace::default() };
-        before.notice();
-        look("before any parse", None, &before);
+        look("before any parse", before.parse(true, report()), &before);
         // A server command with no `lsp`: no parse, and why, once.
         workspace.dbt = config::Dbt::new(vec!["dbt".into()], None);
-        look("no lsp", workspace.parse(Some(report())), &workspace);
-        look("no lsp again", workspace.parse(Some(report())), &workspace);
-        // With one, nothing starts without a report, and one parse at a time with one.
+        look("no lsp", workspace.parse(false, report()), &workspace);
+        look("no lsp again", workspace.parse(false, report()), &workspace);
+        // With one, one parse at a time.
         workspace.dbt = config::Dbt::new(vec!["true".into(), "lsp".into()], None);
-        look("no report", workspace.parse(None), &workspace);
-        look("started", workspace.parse(Some(report())), &workspace);
-        workspace.notice();
-        look("nothing written", None, &workspace);
-        look("under way", workspace.parse(Some(report())), &workspace);
+        look("started", workspace.parse(false, report()), &workspace);
+        look("nothing written", workspace.parse(true, report()), &workspace);
         let outcome = outcomes.recv_timeout(Duration::from_secs(10)).expect("the parse's outcome");
         look("parsed", workspace.parsed(outcome.index, outcome.failure), &workspace);
-        look("fresh", workspace.parse(Some(report())), &workspace);
+        look("fresh", workspace.parse(true, report()), &workspace);
         let parsed = workspace.index.is_none() && outcomes.try_recv().is_err();
-        // A file written on disk, with no change told: stale, and parsed again, one parse at a time.
+        // A file written on disk, with no change told: unseen until a look, then stale, and parsed again, one
+        // parse at a time.
         fs::write(root.join("models/b.sql"), "select 2").unwrap();
-        workspace.notice();
-        look("b written", None, &workspace);
-        look("stale", workspace.parse(Some(report())), &workspace);
+        look("b written, no look", workspace.parse(false, report()), &workspace);
+        look("b written", workspace.parse(true, report()), &workspace);
         fs::write(root.join("models/c.sql"), "select 3").unwrap();
-        workspace.notice();
-        look("c written", None, &workspace);
-        look("stale under way", workspace.parse(Some(report())), &workspace);
+        look("c written", workspace.parse(true, report()), &workspace);
         let no_lsp = Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".to_owned());
         let expected = [
             ("before any parse", None, false, true, None),
             ("no lsp", no_lsp.clone(), false, false, no_lsp.clone()),
             ("no lsp again", None, false, false, no_lsp.clone()),
-            ("no report", None, false, false, no_lsp.clone()),
             ("started", None, true, true, no_lsp.clone()),
             ("nothing written", None, true, true, no_lsp.clone()),
-            ("under way", None, true, true, no_lsp.clone()),
             ("parsed", None, false, true, None),
             ("fresh", None, false, true, None),
-            ("b written", None, false, false, None),
-            ("stale", None, true, true, None),
+            ("b written, no look", None, false, true, None),
+            ("b written", None, true, true, None),
             ("c written", None, true, false, None),
-            ("stale under way", None, true, false, None),
         ];
         let expected: Vec<_> = expected
             .into_iter()

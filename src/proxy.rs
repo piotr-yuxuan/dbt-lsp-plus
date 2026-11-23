@@ -101,9 +101,8 @@ struct Diagnostics {
 struct Proxy<W: Write> {
     client: W,
     /// Where the session's threads report: the client's reader, the parse,
-    /// the runs and their watchers; none in the unit tests, which run
-    /// nothing.
-    events: Option<Sender<Event>>,
+    /// the runs and their watchers.
+    events: Sender<Event>,
     /// The line that says which project and which dbt the server found,
     /// told to the client once it can be.
     line: Option<String>,
@@ -194,10 +193,10 @@ pub fn project_dir(command: &[String]) -> Option<PathBuf> {
 }
 
 impl<W: Write> Proxy<W> {
-    fn new(client: W, root: Option<PathBuf>) -> Self {
+    fn new(client: W, root: Option<PathBuf>, events: Sender<Event>) -> Self {
         let mut proxy = Proxy {
             client,
-            events: None,
+            events,
             line: None,
             canonical_root: None,
             hierarchical: false,
@@ -545,25 +544,19 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Lets the Workspace start a parse when the index is stale and dbt can
-    /// parse, but after `shutdown`, when the session ends.  Its outcome comes
-    /// back as an event; why none could start is logged.
-    fn want_index(&mut self) {
+    /// parse, but after `shutdown`, when the session ends; when LOOK, on
+    /// behalf of a request, it looks at the files on disk first.  Its outcome
+    /// comes back as an event; why none could start is logged.
+    fn want_index(&mut self, look: bool) {
         if self.shutdown {
             return;
         }
         let events = self.events.clone();
-        let report = events
-            .map(|events| -> config::ReportFn { Box::new(move |outcome| drop(events.send(Event::Parsed(outcome)))) });
-        if let Some(why) = self.workspace.parse(report) {
+        if let Some(why) =
+            self.workspace.parse(look, Box::new(move |outcome| drop(events.send(Event::Parsed(outcome)))))
+        {
             self.log_parse(&why);
         }
-    }
-
-    /// On behalf of a request: the Workspace looks at the files on disk
-    /// first, then `want_index`.
-    fn ask_index(&mut self) {
-        self.workspace.notice();
-        self.want_index();
     }
 
     /// A request of a command for clients, COMMAND with PARAMS: refused
@@ -613,9 +606,8 @@ impl<W: Write> Proxy<W> {
         if self.run.is_some() {
             return;
         }
-        let (Some(events), Some((id, job, run))) = (self.events.clone(), self.runs.pop_front()) else {
-            return;
-        };
+        let Some((id, job, run)) = self.runs.pop_front() else { return };
+        let events = self.events.clone();
         let report = Box::new(move |result| drop(events.send(Event::Ran(id, result))));
         self.run = Some(commands::start(job, run, report));
     }
@@ -654,7 +646,7 @@ impl<W: Write> Proxy<W> {
         self.on_problems(outcome.problems);
         // A change during this parse wants the next one now: no request may
         // come to ask for it.
-        self.want_index();
+        self.want_index(false);
     }
 
     /// The errors and warnings of a parse that ran to its end, PROBLEMS, in
@@ -754,7 +746,7 @@ impl<W: Write> Proxy<W> {
     /// session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value) {
         if capability::of(method).is_some_and(|capability| capability.wants_index) {
-            self.ask_index();
+            self.want_index(true);
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
@@ -763,7 +755,7 @@ impl<W: Write> Proxy<W> {
             Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
         if method == "textDocument/inlayHint" && self.workspace.index.is_none() {
-            self.ask_index();
+            self.want_index(true);
         }
     }
 
@@ -829,7 +821,7 @@ impl<W: Write> Proxy<W> {
         };
         if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
             self.workspace.fresh = false;
-            self.want_index();
+            self.want_index(false);
         }
     }
 
@@ -957,7 +949,8 @@ impl<W: Write> Proxy<W> {
     /// that reads them when their size or time changes and reports their
     /// failures to the loop.
     fn watch_runs(&mut self) {
-        let (Some(root), Some(events)) = (self.workspace.root.clone(), self.events.clone()) else { return };
+        let Some(root) = self.workspace.root.clone() else { return };
+        let events = self.events.clone();
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
         let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
         let watched: [(&str, &'static str, ReadFailures); 2] =
@@ -1111,14 +1104,13 @@ pub fn run(command: &[String]) -> ExitCode {
         let _ = reader.send(Event::ClientClosed);
     });
     let given = project_dir(command);
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), given.clone());
+    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), given.clone(), events);
     if let Some(root) = given {
         let line =
             format!("dbt-lsp-plus: project {}, dbt {}.", root.display(), locate::Located::written(command).named);
         eprintln!("{line}");
         proxy.line = Some(line);
     }
-    proxy.events = Some(events);
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
     proxy.serve(inbox);
     proxy.stop_parse();
@@ -1243,7 +1235,7 @@ mod tests {
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
-        let mut proxy = Proxy::new(Vec::new(), Some(root));
+        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
         let mut client = &proxy.client[..];
@@ -1258,7 +1250,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/orders.sql");
         let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
-        let mut proxy = Proxy::new(Vec::new(), Some(root));
+        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
         let project = proxy.workspace.project().unwrap();
         let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
         assert!(Arc::ptr_eq(&scanned, &project.files[&path]), "the project's scan of the file");
@@ -1274,7 +1266,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");
         let text = "select {{ function('f') }}(1) as v";
-        let mut proxy = Proxy::new(Vec::new(), Some(root.clone()));
+        let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
         proxy.workspace.open.insert(path.clone(), text.to_owned());
         assert_eq!(
             proxy.workspace.node_at(Some(&(path.clone(), text.to_owned(), text.find("'f'").unwrap() + 1)), false),
@@ -1339,7 +1331,7 @@ mod tests {
         };
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()));
+            let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()), mpsc::channel().0);
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
@@ -1430,7 +1422,7 @@ mod tests {
     fn a_position_that_names_nothing_is_empty_and_a_target_found_nowhere_is_found() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let proxy_on = |text: &str, path: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.clone()));
+            let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
             proxy.workspace.open.insert(path.to_owned(), text.to_owned());
             proxy
         };
