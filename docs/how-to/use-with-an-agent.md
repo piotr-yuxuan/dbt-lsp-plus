@@ -282,8 +282,11 @@ By what the agent reads:
   hover, or definition or references at a kind listed in [Where
   dbt-lsp-plus answers definitions and
   references](#where-dbt-lsp-plus-answers-definitions-and-references),
-  finds the file changed on disk, starts a parse and is answered from
-  the last index meanwhile; ask again once the parse has run.
+  finds the file changed on disk, starts a parse (in front of `dbt lsp`,
+  where dbt cannot be cut off the network and the project names a package
+  from the network, the guard refuses it until `dbt lsp` compiles again)
+  and is answered from the last index meanwhile; ask again once the parse
+  has run.
 
 Three setups fail silently.  A `.lsp.json` at a repository's root does
 nothing: Claude Code reads it at a plugin's root only.  A plugin
