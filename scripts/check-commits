@@ -8,11 +8,14 @@
 # message has no attribution trailer; its message, author and committer
 # hold none of the text that scripts/public-patterns.sh describes.  A version
 # commit of the pipeline is accepted by its exact shape, with GitHub's own
-# author and committer, whose address is not the noreply identity.  A
-# commit with one parent that raises the Makefile's SIZE_LINES or
-# SIZE_TYPES, or removes one, says why on a line of its body that reads
-# "Raises the size ceilings: WHY"; a merge's commits are checked each.
-# Print each finding as COMMIT: MESSAGE, and exit with status 1 when there
+# author and committer, whose address is not the noreply identity.  The
+# size ratchet: once the first parent's Makefile has a ceiling, a commit,
+# a merge included, that does not say why on a line of its body that
+# reads "Raises the size ceilings: WHY" keeps each of SIZE_LINES and
+# SIZE_TYPES one line `NAME := N`, N no higher than the parent's, with no
+# other assignment of either, in any form, and leaves the rules of `size`
+# and `check-static`, and each recipe line that runs check-size, as they
+# were.  Print each finding as COMMIT: MESSAGE, and exit with status 1 when there
 # is any, 2 when the check could not run.
 
 set -uo pipefail
@@ -40,9 +43,13 @@ finding() {
   status=1
 }
 
-# Print the value of the Makefile's ceiling $2 at the commit $1, if any.
-ceiling() {
-  git show "$1:Makefile" 2>/dev/null | sed -n "s/^$2 := \([0-9][0-9]*\)\$/\1/p"
+# Print the lines of the Makefile at the commit $1 that the size ratchet
+# rests on: each assignment of SIZE_LINES or SIZE_TYPES, in any form; the
+# rules of `size` and `check-static`; each recipe line that runs check-size.
+guarded() {
+  git show "$1:Makefile" 2>/dev/null | grep -E \
+    -e '^[[:space:]]*((override|export)[[:space:]]+)*SIZE_(LINES|TYPES)[[:space:]]*(:{1,3}|[!?+])?=' \
+    -e '^(size|check-static)[[:space:]]*:' -e $'^\t.*check-size'
 }
 
 # Return whether the text $2 matches the Perl regexp $1, read as bytes.
@@ -76,17 +83,27 @@ for commit in $commits; do
       finding "$short" "private word"
     fi
   done <<<"$words"
-  read -ra parents <<<"$(git log -1 --format=%P "$commit")"
-  if (( ${#parents[@]} == 1 )) \
-     && ! grep -qE '^Raises the size ceilings: *[^[:space:]]' <<<"$(git log -1 --format=%b "$commit")"; then
-    for name in SIZE_LINES SIZE_TYPES; do
-      before=$(ceiling "${parents[0]}" "$name")
-      after=$(ceiling "$commit" "$name")
-      if [[ -n $before ]] && { [[ -z $after ]] || (( 10#$after > 10#$before )); }; then
-        finding "$short" "$name raised from $before to ${after:-none} without \"Raises the size ceilings: WHY\""
-      fi
-    done
+  first=$(git rev-parse -q --verify "$commit^1") || continue
+  before=$(guarded "$first")
+  after=$(guarded "$commit")
+  if ! grep -qE '^SIZE_(LINES|TYPES) :=' <<<"$before" \
+     || grep -qE '^Raises the size ceilings: *[^[:space:]]' <<<"$(git log -1 --format=%b "$commit")"; then
+    continue
   fi
+  unsaid=' without "Raises the size ceilings: WHY"'
+  own='^SIZE_(LINES|TYPES) := [0-9]+$'
+  if [[ $(grep -vE "$own" <<<"$before") != "$(grep -vE "$own" <<<"$after")" ]]; then
+    finding "$short" "the size check's rules changed$unsaid"
+  fi
+  for name in SIZE_LINES SIZE_TYPES; do
+    was=$(sed -n "s/^$name := \([0-9][0-9]*\)\$/\1/p" <<<"$before" | sort -n | tail -n 1)
+    now=$(sed -n "s/^$name := \([0-9][0-9]*\)\$/\1/p" <<<"$after")
+    if [[ ! $now =~ ^[0-9]+$ ]]; then
+      finding "$short" "$name is not one line \"$name := N\"$unsaid"
+    elif [[ -n $was ]] && (( 10#$now > 10#$was )); then
+      finding "$short" "$name raised from $was to $now$unsaid"
+    fi
+  done
 done
 
 exit "$status"

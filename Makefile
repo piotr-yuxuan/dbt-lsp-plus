@@ -13,8 +13,9 @@ CARGO_TEST := cargo test --locked -j $(CARGO_JOBS)
 PYTHON := scripts/release.py scripts/fetch-dbt scripts/check-size scripts/bench tests/tools tests/bin/fake-gh
 export PYTHONDONTWRITEBYTECODE := 1
 # The ceilings of src/'s production lines and types, which each plan of the
-# reduction chain lowers to its own figures.  A commit that raises one says
-# why in a line of its body: "Raises the size ceilings: WHY".
+# reduction chain lowers to its own figures.  A commit that raises one, or
+# changes how they are checked, says why in a line of its body:
+# "Raises the size ceilings: WHY".
 SIZE_LINES := 6883
 SIZE_TYPES := 105
 
@@ -59,6 +60,7 @@ live:
 	@$(CARGO_TEST) --test proxy live:: -- --ignored --test-threads=$(TEST_THREADS)
 
 # Each commit of BASE..HEAD: its title, its trailers, nothing private, no
-# raise of a size ceiling without "Raises the size ceilings:" in its body.
+# raise of a size ceiling, nor change to its check, without
+# "Raises the size ceilings:" in its body.
 commits:
 	@scripts/check-commits $(BASE)

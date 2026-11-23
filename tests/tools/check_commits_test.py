@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-"""Tests of scripts/check-commits's rule on the size ceilings, from its header.
+"""Tests of scripts/check-commits's size ratchet, from its header.
 
 Each test makes its own repository in a scratch home, with the identity tests@example.invalid,
-no global or system git configuration and an empty list of private words.
+no global or system git configuration and an empty list of private words.  Every git command
+must succeed, so that no case is checked on an empty range.
 """
 
 import os
@@ -13,7 +14,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check-commits"
-CEILINGS = "SIZE_LINES := 100\nSIZE_TYPES := 10\n"
+RULES = "check-static: fmt size\n\nsize:\n\t@scripts/check-size $(SIZE_LINES) $(SIZE_TYPES)\n\n"
+
+
+def makefile(lines=100, types=10, rules=RULES, extra=""):
+    """A Makefile with the size rules RULES, the ceilings LINES and TYPES, then EXTRA."""
+    return f"{rules}SIZE_LINES := {lines}\nSIZE_TYPES := {types}\n{extra}"
 
 
 class Ceilings(unittest.TestCase):
@@ -34,59 +40,112 @@ class Ceilings(unittest.TestCase):
         for who in ("AUTHOR", "COMMITTER"):
             self.env.update({f"GIT_{who}_{key}": value for key, value in identity.items()})
         self.repository.mkdir()
-        self.run_in_repository("git", "init", "-q", "-b", "main")
-        self.commit("Makefile", "check:\n" + CEILINGS, "Start")
-        self.run_in_repository("git", "tag", "base")
+        self.git("init", "-q", "-b", "main")
+        self.commit("Makefile", makefile(), "Start")
+        self.git("tag", "base")
 
-    def run_in_repository(self, *command):
-        return subprocess.run(
-            command, cwd=self.repository, env=self.env, capture_output=True, text=True, check=False
-        )
+    def git(self, *arguments):
+        here = {"cwd": self.repository, "env": self.env}
+        subprocess.run(["git", *arguments], **here, capture_output=True, check=True)
 
-    def branch(self, name):
-        self.run_in_repository("git", "checkout", "-q", "-b", name, "base")
+    def check(self, base="base"):
+        here = {"cwd": self.repository, "env": self.env}
+        return subprocess.run([str(SCRIPT), base], **here, capture_output=True, text=True, check=False)
+
+    def branch(self, name, start="base"):
+        self.git("checkout", "-q", "-b", name, start)
 
     def commit(self, name, text, message):
         (self.repository / name).write_text(text)
-        self.run_in_repository("git", "add", name)
-        self.run_in_repository("git", "commit", "-q", "-m", message)
+        self.git("add", name)
+        self.git("commit", "-q", "-m", message)
+
+    def merge(self, other, text, message):
+        """Merge OTHER into the branch, its Makefile resolved as TEXT."""
+        self.git("merge", "-q", "--no-ff", "--no-commit", other)
+        self.commit("Makefile", text, message)
+
+    def refused(self, cases):
+        """Each case, a Makefile, a message and what the finding names, on a branch of its own."""
+        for at, (text, message, named) in enumerate(cases):
+            with self.subTest(message=message, named=named):
+                self.branch(f"case-{at}")
+                self.commit("Makefile", text, message)
+                done = self.check()
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertIn(named, done.stdout)
 
     def test_a_raise_of_a_ceiling_needs_its_word_in_the_body(self):
-        raised = "check:\nSIZE_LINES := 101\nSIZE_TYPES := 10\n"
-        types = "check:\nSIZE_LINES := 100\nSIZE_TYPES := 11\n"
-        cases = [
-            (raised, "Raise the lines", "SIZE_LINES"),
-            (types, "Raise the types\n\nFor room.", "SIZE_TYPES"),
-            ("check:\nSIZE_TYPES := 10\n", "Drop the lines", "SIZE_LINES"),
-            (raised, "Raise the lines\n\nRaises the size ceilings:", "SIZE_LINES"),
-            (raised, "Raises the size ceilings: the MCP server", "SIZE_LINES"),
-        ]
-        for at, (makefile, message, name) in enumerate(cases):
-            with self.subTest(message=message):
-                self.branch(f"case-{at}")
-                self.commit("Makefile", makefile, message)
-                done = self.run_in_repository(str(SCRIPT), "base")
-                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-                self.assertIn(name, done.stdout)
+        empty = "Raise the lines\n\nRaises the size ceilings:"
+        self.refused(
+            [
+                (makefile(lines=101), "Raise the lines", "SIZE_LINES raised from 100 to 101"),
+                (makefile(types=11), "Raise the types\n\nFor room.", "SIZE_TYPES raised from 10"),
+                (RULES + "SIZE_TYPES := 10\n", "Drop the lines", "SIZE_LINES is not one line"),
+                (makefile(lines=101), empty, "SIZE_LINES raised"),
+                (makefile(lines=101), "Raises the size ceilings: the MCP server", "SIZE_LINES raised"),
+            ]
+        )
         self.branch("said")
         why = "Raises the size ceilings: the MCP server, as the roadmap allows"
-        self.commit("Makefile", raised, f"Raise the lines\n\n{why}")
-        done = self.run_in_repository(str(SCRIPT), "base")
+        self.commit("Makefile", makefile(lines=101), f"Raise the lines\n\n{why}")
+        done = self.check()
+        self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
+
+    def test_another_assignment_of_a_ceiling_needs_its_word(self):
+        rules = "the size check's rules changed"
+        self.refused(
+            [
+                (makefile(extra="SIZE_LINES := 99999\n"), "Add a line", "SIZE_LINES is not one line"),
+                (makefile(extra="SIZE_TYPES = 999\n"), "Add a recursive one", rules),
+                (makefile(extra="SIZE_LINES ?= 50\n"), "Add a conditional one", rules),
+                (makefile(extra="SIZE_LINES += 1\n"), "Add to the lines", rules),
+                (makefile(extra="SIZE_LINES:=99999\n"), "Add one without spaces", rules),
+                (makefile(extra="override SIZE_LINES := 50\n"), "Override the lines", rules),
+            ]
+        )
+
+    def test_a_change_to_how_the_size_is_checked_needs_its_word(self):
+        rules = "the size check's rules changed"
+        recipe = RULES.replace("$(SIZE_LINES)", "9999")
+        self.refused(
+            [
+                (makefile(rules=recipe), "Loosen the recipe", rules),
+                (makefile(rules=RULES.replace(" size\n", "\n", 1)), "Drop the size check", rules),
+                (makefile(rules=RULES.replace("size:", "size-off:")), "Rename the size check", rules),
+            ]
+        )
+
+    def test_a_merge_is_held_to_its_first_parent(self):
+        self.branch("side")
+        self.commit("README", "text\n", "Add a file")
+        self.branch("raised")
+        self.merge("side", makefile(lines=101), "Merge side")
+        done = self.check()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("SIZE_LINES raised from 100 to 101", done.stdout)
+        self.branch("lowered")
+        self.merge("side", makefile(lines=99), "Merge side")
+        done = self.check()
         self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
 
     def test_a_ceiling_lowered_introduced_or_untouched_needs_no_word(self):
         self.branch("lowered")
-        self.commit("Makefile", "check:\nSIZE_LINES := 99\nSIZE_TYPES := 10\n", "Lower the lines")
+        self.commit("Makefile", makefile(lines=99, types=9), "Lower the ceilings")
         self.branch("introduced")
         self.commit("Makefile", "check:\n", "Drop the ceilings")
-        self.run_in_repository("git", "tag", "none")
-        self.commit("Makefile", "check:\n" + CEILINGS, "Add the ceilings")
+        self.git("tag", "none")
+        self.commit("Makefile", makefile(), "Add the ceilings")
         self.branch("untouched")
         self.commit("README", "text\n", "Add a file")
-        for branch, base in (("lowered", "base"), ("introduced", "none"), ("untouched", "base")):
+        self.branch("elsewhere")
+        extra = "PYTHON := scripts/check-size tests\n\nother:\n\t@true\n"
+        self.commit("Makefile", makefile(extra=extra), "Add a target")
+        bases = {"lowered": "base", "introduced": "none", "untouched": "base", "elsewhere": "base"}
+        for branch, base in bases.items():
             with self.subTest(branch=branch):
-                self.run_in_repository("git", "checkout", "-q", branch)
-                done = self.run_in_repository(str(SCRIPT), base)
+                self.git("checkout", "-q", branch)
+                done = self.check(base)
                 self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
 
 
