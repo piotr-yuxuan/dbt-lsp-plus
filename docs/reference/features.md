@@ -79,8 +79,10 @@ What dbt-lsp-plus answers, from the project's files and the user's own
 
 Definitions and references are answered at every position, in any file,
 as dbt's lookup resolves the name there; a position that names no
-target gets their nothing, null or `[]`, and a rename at no source and
-no CTE gets null.
+target, or a document that does not read, gets their nothing, null or
+`[]`, and a rename at no source and no CTE gets null.  References at a
+`doc()` or at a generic test's name in YAML find no use: `[]`, or the
+declaration alone with `includeDeclaration`.
 A method or a command that dbt-lsp-plus does not answer, such as
 `textDocument/completion`, gets error -32601 `dbt-lsp-plus does not
 answer <name>`.  When the root's `dbt_project.yml` no longer reads, a

@@ -120,7 +120,7 @@ file takes the file's route unless the arguments after `--` name
 | Operation | LSP method | Answer |
 |-----------|------------|--------|
 | goToDefinition | `textDocument/definition` | dbt-lsp-plus; null where the position names no target |
-| findReferences | `textDocument/references` | dbt-lsp-plus; `[]` where the position names no target |
+| findReferences | `textDocument/references` | dbt-lsp-plus; `[]` where the position names no target, and at a `doc()` or a generic test's name (below) |
 | hover | `textDocument/hover` | a node's summary and facts, a docs block, a test's signature; before the first parse, the error above |
 | documentSymbol | `textDocument/documentSymbol` | dbt-lsp-plus |
 | workspaceSymbol | `workspace/symbol` | dbt-lsp-plus |
@@ -129,10 +129,12 @@ file takes the file's route unless the arguments after `--` name
 
 dbt-lsp-plus's answers carry a node's unique id: a symbol reads
 `orders (Class) - Line 1 in model.shop.orders`, a call hierarchy item
-ends `[model.shop.orders]`.  A definition and references answer at any
-target that dbt's lookup resolves, in any file: a `source()` or a
-`ref()` argument, a unit test's `model:`, a macro call, a `doc()`, an
-entry's `name:`, a generic test's name, a `function()` argument.
+ends `[model.shop.orders]`.  A definition answers at any target that
+dbt's lookup resolves, in any file: a `source()` or a `ref()` argument,
+a unit test's `model:`, a macro call, a `doc()`, an entry's `name:`, a
+generic test's name, a `function()` argument.  References answer at the
+same targets but a `doc()` and a generic test's name in YAML, where they
+find no use: `[]`, or the declaration alone with `includeDeclaration`.
 
 After an `Edit` of a file the server has open, the parse's problems
 reach the agent's context unasked, after a later tool result, as

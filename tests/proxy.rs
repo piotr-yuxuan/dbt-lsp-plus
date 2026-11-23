@@ -2060,22 +2060,43 @@ fn a_name_anywhere_leads_where_the_lookup_resolves_it() {
     let (mut session, _) = Session::fake("name-anywhere", json!({}));
     let result = session.initialize(&fixture());
     assert!(result["capabilities"].get("experimental").is_none(), "{result}");
-    // An entry's `name:` in an unsaved properties file: the model's references.
+    // An unsaved properties file; a docs block in a file that is no SQL, YAML or Python; a model outside the root.
     let models = fixture().join("models/marts/_models.yml");
-    session.open(&models, Some("models:\n  - name: orders\n"));
-    let on_entry = json!({"textDocument": {"uri": uri(&models)}, "position": {"line": 1, "character": 11},
-                          "context": {"includeDeclaration": false}});
-    let used = session.request("textDocument/references", on_entry);
-    let in_customers = location(&fixture(), "models/marts/customers.sql", 2, 17, 23);
-    assert!(used["result"].as_array().is_some_and(|found| found.contains(&in_customers)), "{used}");
-    // A `ref` in a docs block of a file that is no SQL, YAML or Python: its model.
+    let properties = "models:\n  - name: orders\n    description: \"{{ doc('order_status') }}\"\n    columns:\n      \
+                      - name: status\n        data_tests:\n          - is_even\n";
     let overview = fixture().join("models/overview.md");
     let block = "{% docs overview %}{{ ref('orders') }}{% enddocs %}";
-    session.open(&overview, Some(block));
-    let at = block.find("orders").unwrap() + 2;
-    let on_ref = json!({"textDocument": {"uri": uri(&overview)}, "position": {"line": 0, "character": at}});
-    let found = session.request("textDocument/definition", on_ref);
+    let outside = scratch("name-anywhere-outside").join("elsewhere.sql");
+    let elsewhere = "select * from {{ ref('orders') }}";
+    for (path, text) in [(&models, properties), (&overview, block), (&outside, elsewhere)] {
+        session.open(path, Some(text));
+    }
+    // Inside the first NEEDLE of TEXT, the document at PATH.
+    let at = |path: &Path, text: &str, needle: &str, declaration: bool| {
+        let offset = text.find(needle).unwrap() + 2;
+        let line = text[..offset].matches('\n').count();
+        let character = offset - text[..offset].rfind('\n').map_or(0, |n| n + 1);
+        json!({"textDocument": {"uri": uri(path)}, "position": {"line": line, "character": character},
+               "context": {"includeDeclaration": declaration}})
+    };
+    // The model's references, from an entry's `name:`, a docs block's `ref` and a model outside the root.
+    let in_customers = location(&fixture(), "models/marts/customers.sql", 2, 17, 23);
+    for (path, text) in [(&models, properties), (&overview, block), (&outside, elsewhere)] {
+        let used = session.request("textDocument/references", at(path, text, "orders", false));
+        assert!(used["result"].as_array().is_some_and(|found| found.contains(&in_customers)), "{path:?}: {used}");
+    }
+    let found = session.request("textDocument/definition", at(&overview, block, "orders", false));
     assert_eq!(found["result"], location(&fixture(), "models/marts/orders.sql", 0, 0, 0), "{found}");
+    // At a `doc()` or a generic test's name, references find no use: the declaration alone, when asked.
+    let declared = [
+        ("order_status", location(&fixture(), "models/docs.md", 0, 8, 20)),
+        ("is_even", location(&fixture(), "tests/generic/is_even.sql", 0, 8, 15)),
+    ];
+    for (needle, declaration) in declared {
+        let without = session.request("textDocument/references", at(&models, properties, needle, false));
+        let with = session.request("textDocument/references", at(&models, properties, needle, true));
+        assert_eq!((&without["result"], &with["result"]), (&json!([]), &json!([declaration])), "{needle}");
+    }
     assert!(session.finish().success());
 }
 

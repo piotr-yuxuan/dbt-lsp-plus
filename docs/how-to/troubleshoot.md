@@ -22,8 +22,9 @@ takes the directory all the same, and its parse fails there.
   workspace symbols, the call hierarchy, folding, highlights, selection
   ranges, the rename of a CTE, hovers, inlay hints and
   `dbt-lsp-plus.nodeInfo`; references and renames on a source;
-  definitions and references at any target.  For each operation of an
-  agent's LSP tool, see [Who answers
+  definitions at any target, and references at any but a `doc()` or a
+  generic test's name in YAML, where they are `[]`.  For each operation
+  of an agent's LSP tool, see [Who answers
   what](use-with-an-agent.md#who-answers-what).
 - At a position that names no target, references are `[]`, a definition
   and a rename null.
