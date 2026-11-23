@@ -17,11 +17,15 @@ make check
 
 and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming a
 dbt 2 executable, once with the proprietary build, which has `dbt lsp`, and
-once with dbt-oss, which has none and runs the proxy alone:
+once with dbt-oss, which has none and runs the proxy alone; built with the
+network, then run with none, as CI runs them:
 
 ```
-make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
+cargo test --locked -j 4 --test proxy --no-run
+unshare -rn make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 ```
+
+Where there is no `unshare`, as on a Mac, the second runs unwrapped.
 
 Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
 test runs in one checkout take turns.
@@ -54,7 +58,7 @@ src/run.rs                    the proxy's children but dbt lsp: one run of dbt, 
 src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command
 src/modes.rs                  who answers each method: the user's settings and the session's table
-src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI under the cut
+src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI
 src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
@@ -77,7 +81,8 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
 Makefile                      the checks, which CI runs too
 scripts/check-public          nothing private in the tracked files, an SPDX line in each source
-scripts/check-commits         each commit's title, trailers and text
+scripts/check-commits         each commit's title, trailers and text, and no raise of a size ceiling unsaid
+scripts/check-size            production lines and types of src/ against the Makefile's ceilings
 scripts/release.py            CD's release: the version commit, the tag and its notes
 scripts/fetch-dbt             CI's dbt by its pinned SHA-256, or the latest by its published one
 scripts/bench/                synthetic projects and the proxy's times on them
@@ -125,6 +130,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     read at the boundary, free of the session, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
     free of the file system, with tests of its own;
+  - `commands::hooked`: the decision whether `dbt compile` would run a
+    package's on-run hooks, the packages read where dbt installs them,
+    with tests of its own, apart from `compile_job`'s words;
   - `project::versions_of`: the decision which versions a model's file
     is, free of the file system, with tests of its own, once every
     properties file of its package is read;
@@ -259,6 +267,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     pure decisions, each with tests of its own, apart from the effects;
     `read`, `has_release` and `confirm_ci`, one per question asked of git
     or GitHub, so that `main` stays the run's order;
+  - in `scripts/check-size`: `measure`, the count of one file, pure, with
+    tests of its own, apart from `main`'s reading of `src/` and its
+    verdict;
   - `fetch` in `scripts/fetch-dbt`: the download and its checks, with tests
     of their own, apart from `main`, which reads the arguments and turns
     failures into status 2; `latest_oss`, `latest_proprietary` and

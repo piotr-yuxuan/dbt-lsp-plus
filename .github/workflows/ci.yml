@@ -71,9 +71,6 @@ jobs:
             target
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
-      # The proxy cuts its parse off the network where `unshare -r` works, and the tests
-      # check it on Linux.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: nix develop -c make test
 
   # A beginning on macOS, whose result counts for neither CI nor a release, though CD waits
@@ -128,13 +125,13 @@ jobs:
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
       - run: python3 scripts/fetch-dbt oss "$RUNNER_TEMP/dbt"
-      # That runner's AppArmor otherwise refuses `unshare -r`, which cuts each parse off
-      # the network; and a job without the cut fails rather than pass.
+      # That runner's AppArmor otherwise refuses `unshare -r`, by which the tests run with
+      # no network; and a job that cannot run them so fails rather than pass.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: unshare -rn true
-      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
-      # Built with the network, then the live test with none.
-      - run: nix develop -c cargo test --locked --test proxy --no-run
+      # Built with the network, then the corpus and the live test with none.
+      - run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
+      - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
       - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
 
   # The proprietary build, under dbt Labs' licence, only once the owner sets the repository's
@@ -167,8 +164,8 @@ jobs:
       - run: python3 scripts/fetch-dbt proprietary "$RUNNER_TEMP/dbt"
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: unshare -rn true
-      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
-      # Built with the network, then the live test with none: dbt lsp runs as the user's
-      # command gives it, with no flag of the proxy's.
-      - run: nix develop -c cargo test --locked --test proxy --no-run
+      # Built with the network, then the corpus and the live test with none: dbt lsp runs
+      # as the user's command gives it, with no flag of the proxy's.
+      - run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
+      - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
       - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"

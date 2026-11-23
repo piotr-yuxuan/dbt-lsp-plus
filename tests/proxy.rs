@@ -2254,24 +2254,6 @@ fn a_parse_takes_the_server_s_reading_flags_and_keeps_its_output_in_the_cache() 
 }
 
 #[test]
-fn a_parse_is_cut_off_the_network_and_its_project_where_it_can_be() {
-    let project = copy_fixture("parse-cut-project");
-    let flags = [Path::new("--project-dir"), &project];
-    let script = json!({"manifest": manifest(), "parse_write": true});
-    let (mut session, log) = Session::fake_with("parse-cut", script, &flags, None);
-    session.initialize(&project);
-    parsed_orders(&mut session);
-    // Linux can, CI's runner once its AppArmor allows it; elsewhere, dbt's
-    // flags and the guard on packages alone keep it offline and harmless.
-    let cut = dbt_lsp_plus::config::can_cut();
-    assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
-    let parse = &parses(&log)[0];
-    let expected = if cut { (json!(["lo"]), json!(false)) } else { (parse["interfaces"].clone(), json!(true)) };
-    assert_eq!((parse["interfaces"].clone(), parse["wrote"].clone()), expected);
-    assert!(session.finish().success());
-}
-
-#[test]
 fn node_info_gives_the_summary_a_hover_shows() {
     let nothing = r#"{"jsonrpc":"2.0","id":$ID,"result":null}"#;
     let script = json!({"manifest": manifest(), "raw_answers": {"textDocument/hover": nothing}});
@@ -2508,9 +2490,8 @@ fn alone_the_parse_s_problems_are_diagnostics_until_a_parse_without_them() {
 #[test]
 fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
     let project = copy_fixture("standalone-broken-project");
-    // dbt still parses, and says where; the scan can no longer read it.
-    let config = std::fs::read_to_string(project.join("dbt_project.yml")).unwrap();
-    std::fs::write(project.join("dbt_project.yml"), config + "models: [\n").unwrap();
+    // dbt's log alone says where the project file is broken: one that the
+    // guard on packages cannot read is refused before dbt runs.
     let log_file = scratch("standalone-broken-project-log").join("parse.jsonl");
     let nowhere = dbt_event("warn", "1097", "[warning] [UnusedResourceConfigPath (dbt1097)]: Configuration paths");
     let at =
@@ -2519,22 +2500,10 @@ fn alone_a_broken_project_file_is_shown_and_a_problem_in_no_file_logged_once() {
     std::fs::write(&log_file, at(2) + &nowhere + &completed).unwrap();
     let flags = [Path::new("--project-dir"), &project];
     let script = json!({"no_lsp": true, "parse_log": log_file});
-    let (mut session, log) = Session::fake_with("standalone-broken-project-session", script, &flags, None);
+    let (mut session, _) = Session::fake_with("standalone-broken-project-session", script, &flags, None);
     session.initialize(&project);
     let model = project.join("models/marts/orders.sql");
     session.open(&model, None);
-    // Without the cut, the guard on packages refuses a project file it
-    // cannot read, as dbt may read it and install packages.
-    let cut = dbt_lsp_plus::config::can_cut();
-    assert!(cut || !cfg!(target_os = "linux"), "unshare -rnm cannot cut on this Linux");
-    if !cut {
-        let refused =
-            |m: &Value| m["params"]["message"].as_str().is_some_and(|text| text.contains("which dbt may read"));
-        session.wait_for(refused);
-        parses_stay(&log, 0);
-        assert!(session.finish().success());
-        return;
-    }
     let on_line = |line: u64| move |params: &Value| params["diagnostics"][0]["range"]["start"]["line"] == line;
     published(&mut session, &project.join("dbt_project.yml"), on_line(1));
     // The next parse moves the error; the warning stays logged once.
@@ -2765,100 +2734,33 @@ fn no_parse_while_packages_need_the_network() {
     assert!(session.finish().success());
 }
 
-/// A copy of the fixture for test NAME whose `packages.yml` names a hub
-/// package that a lock as recent names and `dbt_packages/` holds, in front
-/// of the fake with a manifest, compiled, which exits on a completion and
-/// whose next life never answers its `initialize`; a `PATH` with no
-/// `unshare`, so that nothing cuts the parse off the network.  Returns the
-/// session, the fake's log and the copy.
-fn hub_package_without_a_cut(name: &str) -> (Session, PathBuf, PathBuf) {
-    let project = copy_fixture(&format!("{name}-project"));
-    std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
-        .unwrap();
-    let lock = "packages:\n- package: dbt-labs/dbt_utils\n  name: dbt_utils\n  version: 1.4.1\nsha1_hash: x\n";
-    std::fs::write(project.join("package-lock.yml"), lock).unwrap();
-    std::fs::create_dir_all(project.join("dbt_packages/dbt_utils")).unwrap();
-    std::fs::write(project.join("dbt_packages/dbt_utils/dbt_project.yml"), "name: dbt_utils\n").unwrap();
-    let dir = scratch(name);
-    let (script, log, empty) = (dir.join("script.json"), dir.join("log.jsonl"), dir.join("bin"));
-    let fake = json!({"manifest": manifest(), "exit_on": "textDocument/completion", "exit_life": 1,
-                      "hang_on": "initialize", "hang_life": 2});
-    std::fs::write(&script, fake.to_string()).unwrap();
-    std::fs::create_dir_all(&empty).unwrap();
-    let project_arg = project.to_string_lossy().into_owned();
-    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir", &project_arg].map(str::to_owned);
-    let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
-        ("PATH", empty.as_path()),
-        ("XDG_CACHE_HOME", dir.as_path()),
-    ];
-    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+#[test]
+fn in_front_a_refused_parse_leaves_the_last_index_to_answer() {
+    let project = copy_fixture("refused-parse-project");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("refused-parse", json!({"manifest": manifest()}), &flags, None);
     session.initialize(&project);
     session.open(&project.join("models/marts/orders.sql"), None);
     session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
-    (session, log, project)
-}
-
-/// Whether MESSAGE logs that nothing cuts dbt parse off the network.
-fn says_no_cut(message: &Value) -> bool {
-    let text = message["params"]["message"].as_str().unwrap_or_default();
-    message["method"] == "window/logMessage" && text.contains("nothing cuts dbt parse off the network here")
-}
-
-#[test]
-fn after_dbt_lsp_is_lost_a_change_guards_the_packages_as_alone() {
-    let (mut session, log, project) = hub_package_without_a_cut("lost-guard-alone");
-    let request =
-        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
-    session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
-    session.wait_for(|m| m["method"] == "window/showMessage");
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));
-    node_info(&mut session, json!("model.shop.orders"));
-    session.wait_for(says_no_cut);
-    parses_stay(&log, 1);
-    assert!(session.finish().success());
-}
-
-#[test]
-fn after_dbt_lsp_is_lost_with_no_change_its_compilation_still_guards_the_packages() {
-    let (mut session, log, _) = hub_package_without_a_cut("lost-guard-earned");
-    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
-    session.wait_for(|m| m["method"] == "window/showMessage");
-    parses_stay(&log, 0);
-    let request =
-        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
-    let info = session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    assert_eq!(info["relation"], "\"shop\".\"main\".\"orders\"", "{info}");
-    assert_eq!(parses(&log).len(), 1);
-    assert!(!session.received.iter().any(says_no_cut));
-    assert!(session.finish().success());
-}
-
-#[test]
-fn in_front_a_change_found_on_disk_guards_the_packages_as_alone() {
-    let (mut session, log, project) = hub_package_without_a_cut("found-guard-alone");
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
     assert_eq!(parses(&log).len(), 1, "the parse that dbt lsp's compilation allows");
-    // dbt lsp never heard of the write, and has not resolved the packages since.
+    // Written behind dbt lsp's back: a hub package that no lock names, and a model.
+    std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
+        .unwrap();
     std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
     let meanwhile = node_info(&mut session, json!("model.shop.orders"));
-    session.wait_for(says_no_cut);
+    session.wait_for(|m| {
+        let text = m["params"]["message"].as_str().unwrap_or_default();
+        m["method"] == "window/logMessage" && text.contains("run dbt deps")
+    });
     parses_stay(&log, 1);
     assert_eq!(
         (meanwhile.get("error"), &meanwhile["result"]["unique_id"]),
         (None, &json!("model.shop.orders")),
         "answered from the last index meanwhile: {meanwhile}"
     );
-    // A change told, which dbt lsp compiles from the disk as it is: its resolution holds again.
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));
-    node_info(&mut session, json!("model.shop.orders"));
-    until_logged(&log, "the parse after dbt lsp's compilation", |_| parses(&log).len() == 2);
     assert!(session.finish().success());
 }
 

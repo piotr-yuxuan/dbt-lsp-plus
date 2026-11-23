@@ -6,11 +6,9 @@ use crate::live::paths;
 use crate::logged;
 use crate::routes::{fake_env, path_with_stub, resolved, starts, venv_fake};
 use crate::support::{Session, copy_fixture, script};
-use dbt_lsp_plus::config::can_cut;
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -73,16 +71,6 @@ impl Case {
     }
 }
 
-/// Whether this system can cut; when not, says that the test NAME checks
-/// the refusal in place of the run.
-fn cut(name: &str) -> bool {
-    let cut = can_cut();
-    if !cut {
-        let _ = writeln!(std::io::stderr(), "{name}: this system cannot cut: the refusal checked instead");
-    }
-    cut
-}
-
 /// A path's text, resolved, from an answer's VALUE.
 fn path_of(value: &Value) -> PathBuf {
     resolved(Path::new(value.as_str().unwrap_or_else(|| panic!("no path: {value}"))))
@@ -99,12 +87,9 @@ fn spelt(path: &Path) -> PathBuf {
 const HUB: &str =
     "packages:\n  - local: dbt_packages/shop_utils\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n";
 
-/// `packages::refused`'s reason for HUB, on any system, when the session
-/// is not alone.
+/// `packages::refused`'s reason for HUB.
 const NOT_LOCKED: &str = "a package from the network is not in a lock as recent as the files naming it: dbt parse would install it, \
      rewriting the install path; run dbt deps";
-
-const REFUSED: &str = "dbt-lsp-plus runs dbt only cut off the network, which this system cannot";
 
 #[test]
 fn a_subcommand_s_usage_error_says_its_usage_on_the_standard_error_alone() {
@@ -147,7 +132,7 @@ fn doctor_finds_a_document_s_project_and_runs_only_its_dbt_s_probe() {
     let dbt = json!({"command": [null, "lsp"], "named": null, "source": "the project's .venv", "skipped": [],
                      "lsp": true, "why": null});
     let expected = json!({"version": env!("CARGO_PKG_VERSION"), "path": null, "project": null, "route": "document",
-        "dbt": dbt, "alone": "dbt lsp is not started for a project found from a file", "cut": can_cut(),
+        "dbt": dbt, "alone": "dbt lsp is not started for a project found from a file",
         "packages": null});
     assert_eq!((status, answer), (Some(0), expected));
     assert!(!stub_log.exists(), "PATH's dbt ran: {}", fs::read_to_string(&stub_log).unwrap_or_default());
@@ -262,7 +247,7 @@ fn doctor_without_a_project_runs_nothing() {
     let mut case = Case::new("cli-doctor-quiet", &json!({}));
     let (bin, stubs) = (case.dir.join("stubs"), case.dir.join("stubs.log"));
     let stub = format!("echo \"$0 $*\" >> '{}'\nexit 1", stubs.display());
-    ["dbt", "unshare", "git"].iter().for_each(|name| script(&bin.join(name), &stub));
+    ["dbt", "git"].iter().for_each(|name| script(&bin.join(name), &stub));
     case.path = bin.into_os_string();
     let folder = case.dir.join("notes");
     fs::create_dir_all(&folder).unwrap();
@@ -297,39 +282,38 @@ fn doctor_and_select_give_the_guard_s_reason() {
     let case = Case::new("cli-guard", &json!({}));
     venv_fake(&case.copy);
     fs::write(case.copy.join("packages.yml"), HUB).unwrap();
-    // dbt lsp would start behind the proxy: its first parse is guarded as not alone.
     let (status, answer) = case.run(&case.copy, &["doctor"]);
     assert_eq!((status, &answer["packages"]), (Some(0), &json!(NOT_LOCKED)), "{answer}");
     let probes = starts(&case.log).len();
     let (status, answer) = case.run(&case.copy, &["select", "x"]);
-    let expected = if cut("doctor_and_select_give_the_guard_s_reason") { NOT_LOCKED } else { REFUSED };
-    assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": expected})));
+    assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": NOT_LOCKED})));
     assert!(case.runs().is_empty(), "{:?}", case.runs());
     assert_eq!(starts(&case.log).len(), probes, "select probed a dbt it would not run");
 }
 
 #[test]
-fn doctor_asks_the_guard_as_the_session_s_first_parse_would() {
-    let mut case = Case::new("cli-guard-alone", &json!({}));
+fn doctor_guards_a_package_from_the_network_alike_on_every_route() {
+    let case = Case::new("cli-guard-routes", &json!({}));
     venv_fake(&case.copy);
     fs::write(case.copy.join("packages.yml"), HUB).unwrap();
-    // Without the cut on any system, where whether the session is alone decides.
-    let (bin, _) = path_with_stub(&case.dir, "exit 1");
-    script(&case.dir.join("bin/unshare"), "exit 1");
-    case.path = bin;
-    let (_, document) = case.run(&case.copy, &["doctor", "models/marts/orders.sql"]);
-    let alone = "a package from the network is named, and nothing cuts dbt parse off the network here";
-    assert_eq!((&document["cut"], &document["packages"]), (&json!(false), &json!(alone)), "{document}");
-    let (_, folder) = case.run(&case.copy, &["doctor", "."]);
-    assert_eq!((&folder["alone"], &folder["packages"]), (&Value::Null, &json!(NOT_LOCKED)), "{folder}");
+    let on_each_route = |packages: &Value| {
+        for (path, route) in [("models/marts/orders.sql", "document"), (".", "folder")] {
+            let (_, answer) = case.run(&case.copy, &["doctor", path]);
+            assert_eq!((&answer["route"], &answer["packages"]), (&json!(route), packages), "{answer}");
+        }
+    };
+    on_each_route(&json!(NOT_LOCKED));
+    let lock = "packages:\n- local: dbt_packages/shop_utils\n  name: shop_utils\n\
+                - package: dbt-labs/dbt_utils\n  name: dbt_utils\n  version: 1.3.0\nsha1_hash: x\n";
+    fs::write(case.copy.join("package-lock.yml"), lock).unwrap();
+    fs::create_dir_all(case.copy.join("dbt_packages/dbt_utils")).unwrap();
+    fs::write(case.copy.join("dbt_packages/dbt_utils/dbt_project.yml"), "name: dbt_utils\n").unwrap();
+    on_each_route(&Value::Null);
 }
 
 #[test]
 fn select_on_the_given_route_runs_dbt_where_it_is_run() {
     let (case, stub_log, elsewhere) = given("cli-select-given", &json!({"list": listed()}));
-    if !cut("select_on_the_given_route_runs_dbt_where_it_is_run") {
-        return;
-    }
     let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
     let (status, answer) = case.run(&elsewhere, &["select", "+stg_orders+", "--", fake, "lsp", "--project-dir", copy]);
     assert_eq!((status, answer), (Some(0), json!({"nodes": listed(), "error": null})));
@@ -349,12 +333,9 @@ fn listed() -> [Value; 2] {
 }
 
 #[test]
-fn select_lists_the_nodes_by_dbt_list_under_the_cut_and_leaves_no_run() {
+fn select_lists_the_nodes_by_dbt_list_and_leaves_no_run() {
     let case = Case::new("cli-select", &json!({"list": listed()}));
     venv_fake(&case.copy);
-    if !cut("select_lists_the_nodes_by_dbt_list_under_the_cut_and_leaves_no_run") {
-        return;
-    }
     let (status, answer) = case.run(&case.copy, &["select", "+stg_orders+"]);
     assert_eq!((status, answer), (Some(0), json!({"nodes": listed(), "error": null})));
     let runs = case.runs();
@@ -364,7 +345,6 @@ fn select_lists_the_nodes_by_dbt_list_under_the_cut_and_leaves_no_run() {
     for quiet in ["--no-version-check", "--no-send-anonymous-usage-stats", "--no-manage-state", "--quiet"] {
         assert!(words.contains(&quiet), "{quiet} in {words:?}");
     }
-    assert_eq!(runs[0]["interfaces"], json!(["lo"]), "cut off the network");
     let starts = starts(&case.log);
     let list = starts.iter().find(|start| start["arguments"][0] == "list").unwrap();
     assert_eq!(path_of(&list["cwd"]), resolved(&case.copy));
@@ -378,9 +358,6 @@ fn select_lists_the_nodes_by_dbt_list_under_the_cut_and_leaves_no_run() {
 fn select_sweeps_a_run_directory_left_for_a_day() {
     let case = Case::new("cli-select-stale", &json!({"list": listed()}));
     venv_fake(&case.copy);
-    if !cut("select_sweeps_a_run_directory_left_for_a_day") {
-        return;
-    }
     case.run(&case.copy, &["select", "+stg_orders+"]);
     let hashes: Vec<PathBuf> =
         fs::read_dir(case.dir.join("cache/dbt-lsp-plus")).unwrap().flatten().map(|e| e.path()).collect();
@@ -399,25 +376,9 @@ fn select_sweeps_a_run_directory_left_for_a_day() {
 }
 
 #[test]
-fn select_without_the_cut_is_refused_and_runs_nothing() {
-    let mut case = Case::new("cli-select-no-cut", &json!({"list": listed()}));
-    venv_fake(&case.copy);
-    let (bin, _) = path_with_stub(&case.dir, "exit 1");
-    script(&case.dir.join("bin/unshare"), "exit 1");
-    case.path = bin;
-    let (status, answer) = case.run(&case.copy, &["select", "+stg_orders+"]);
-    assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": REFUSED})));
-    assert!(case.runs().is_empty(), "{:?}", case.runs());
-    assert!(starts(&case.log).is_empty(), "not even a probe: {:#?}", starts(&case.log));
-}
-
-#[test]
 fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
     let case = Case::new("cli-select-shared", &json!({"list": listed()}));
     venv_fake(&case.copy);
-    if !cut("select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent") {
-        return;
-    }
     let (home, cache) = (case.dir.join("home"), case.dir.join("cache"));
     let env = [
         ("HOME", home.as_path()),
@@ -452,10 +413,6 @@ fn select_fails_with_dbt_s_error_or_with_no_nodes() {
     let error = "[error] [IoError (dbt1001)]: Cannot open file";
     let case = Case::new("cli-select-failures", &json!({"run_log": format!("{error}\n"), "run_exit": 1}));
     venv_fake(&case.copy);
-    if !cut("select_fails_with_dbt_s_error_or_with_no_nodes") {
-        let (status, answer) = case.run(&case.copy, &["select", "x"]);
-        return assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": REFUSED})));
-    }
     let (status, answer) = case.run(&case.copy, &["select", "x"]);
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": error})));
     case.rescript(&json!({}));

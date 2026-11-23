@@ -50,8 +50,13 @@ method:
   (`workspace/executeCommand`), commands for clients that do what dbt
   lsp's `dbt.compileFile`, `dbt.show` and `dbt.listNodes` do, in their
   shapes: by them when dbt lsp runs; without it, `compile` and `nodes` by
-  dbt's CLI, cut off the network where the system can (Linux), and
-  `show` not at all, since `dbt show` reaches the network;
+  dbt's CLI, as the user runs dbt, and `show` not at all, since `dbt
+  show` reaches the warehouse.  A compile is refused where a package may
+  have `on-run-start` or `on-run-end` hooks, which `dbt compile` runs
+  against the warehouse; a compile of a model that introspects the
+  warehouse, by `run_query` under `execute` or a macro such as
+  `dbt_utils.star`, or of a Python model, queries it, and dbt may
+  download its driver;
 - `dbt-lsp-plus.nodeInfo` (`workspace/executeCommand`), a command that
   gives a node's resolved
   configuration, relation and summary from the user's own `dbt parse`,
@@ -199,7 +204,7 @@ answer stands alone, `dbt-lsp-plus's`, `dbt lsp` is not asked in
 call hierarchy's two others and `dbt-lsp-plus.nodeInfo`.  A rename is
 the proxy's at its kinds of target, else `dbt lsp`'s; a command goes to
 the first of its providers present, `dbt lsp` when it runs and lists
-the command, else dbt's CLI under the cut.  A definition and references
+the command, else dbt's CLI.  A definition and references
 are the proxy's at the kinds of target that `experimental.dbtLspPlus`
 lists ([Where dbt-lsp-plus answers definitions and
 references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)),
@@ -367,7 +372,12 @@ These are not configurable.
   replacing the last: about 2 MB a root.  A line shows at most 20
   locations of each side, and stays under 8 KB but for the session's
   last.  A shadow file that nothing wrote for 30 days is removed.
-- On Linux, the proxy's `dbt parse` runs under `unshare -rnm`, cut off the
-  network with the project read-only, when the system allows it; else
-  dbt's flags and the guard on packages keep it offline and the project
-  as it is.
+- The proxy's runs of dbt, its `dbt parse` and the commands', run as the
+  user runs dbt, with dbt's flags against its statistics and its version
+  check.  The guard on packages refuses such a run where a local or a
+  locked package is not installed, a package from the network is not in
+  a lock as recent as the files naming it, or a file naming packages, or
+  `dbt_project.yml`, does not read.  A lock as recent but stale in
+  content passes, and dbt then installs anew, rewriting the install path
+  ([how the proxy runs
+  dbt](../explanation/design.md#how-the-proxy-runs-it)).

@@ -53,7 +53,6 @@ would work.  For a project found:
 
 ```json
 {"alone":"dbt lsp is not started for a project found from a file",
- "cut":true,
  "dbt":{"command":["/w/repo/dbt/.venv/bin/dbt","lsp"],"lsp":true,
         "named":"/w/repo/dbt/.venv/bin/dbt","skipped":[],
         "source":"the project's .venv","why":null},
@@ -76,8 +75,7 @@ would work.  For a project found:
 | `dbt.lsp` | `true` when the dbt has `lsp`, `false` when it is a dbt 2 without, as dbt-oss; `null` when it does not answer as a dbt 2 does |
 | `dbt.why` | when `dbt.lsp` is `null`, how the dbt answered (`cannot run: ...`, `lsp --help gives exit status: 1`, no answer within 10 s); else `null` |
 | `alone` | `null` when `dbt lsp` would start behind the proxy; else why the proxy would answer alone: `the backend is never`, `dbt lsp is not started for a project found from a file` or `it has no lsp` |
-| `cut` | whether this system can cut dbt off the network (`unshare -rnm`) |
-| `packages` | `null`, or why the proxy's first `dbt parse` would be refused: packages that dbt would install first, or that the network would be needed for |
+| `packages` | `null`, or why the proxy's first `dbt parse` would be refused, alike on every route: packages that dbt would install first, or a file naming them that dbt-lsp-plus cannot read |
 
 Without a project, doctor runs nothing at all and says so:
 
@@ -96,10 +94,9 @@ What it runs is what the server runs as it starts, and nothing else:
 `git rev-parse` once, on the folder's and a document's routes when the
 server command's first word is `dbt`; `lsp --help` of each dbt it looks
 at, the dbt that the server would leave unprobed included (the one on `PATH`, a first word of the user's own, the
-command as written when given); and `unshare -rnm` on `true`.  None of
-these is cut off the network, as the server's are not: a launcher such as
-`uvx dbt` may reach it while it answers `lsp --help`.  doctor parses
-nothing and writes nothing.
+command as written when given).  A launcher such as `uvx dbt` may
+reach the network while it answers `lsp --help`.  doctor parses nothing
+and writes nothing.
 
 Left out: the profile, the target and the environment variables the
 profile needs, which `dbt debug` would tell by connecting to the
@@ -108,8 +105,8 @@ warehouse; and the state of a running server's index.
 ## `select SELECTOR`
 
 The nodes that the dbt selector SELECTOR selects in the project of the
-current directory: `dbt list --select=SELECTOR --output json`, run cut off
-the network as the proxy's own runs are, in a run directory under the
+current directory: `dbt list --select=SELECTOR --output json`, run as
+the proxy's own runs are, in a run directory under the
 user's cache (`$XDG_CACHE_HOME`, else `~/.cache`, else the system's
 temporary directory) that it removes once it has the answer.  A select
 killed by a signal leaves its run directory, and, killed with SIGKILL,
@@ -127,17 +124,13 @@ each node a line of `dbt list`'s output as dbt printed it.  On a failure,
 `nodes` is `[]` and `error` says why:
 
 - `No nodes found`, when the selector selects nothing;
-- `dbt-lsp-plus runs dbt only cut off the network, which this system
-  cannot`, where `unshare -rnm` cannot run, as on macOS, checked first,
-  by the cut's probe, `unshare` on `true`: nothing else runs, neither
-  git nor a dbt's probe;
 - `no dbt_project.yml at or above DIR; run it within the project, or
   name it with -- dbt lsp --project-dir DIR`, outside every project:
-  nothing runs but the cut's probe;
+  nothing runs;
 - `no dbt_project.yml in DIR, the server command's --project-dir`, on
-  the given route: nothing runs but the cut's probe;
+  the given route: nothing runs;
 - why a parse would be refused, as doctor's `packages`, checked before
-  the dbt is looked for: nothing runs but the cut's probe;
+  the dbt is looked for: nothing runs;
 - the first error dbt logged, or how dbt ended.
 
 Exit status: 0 when `error` is `null`; 1 otherwise, `No nodes found`
@@ -177,8 +170,7 @@ a parse when no manifest is kept, and outside one the error of no
 project.
 
 The nodes are those of a `dbt parse` of the project, run as the server
-runs its own (the same flags, cut off the network where the system can,
-the guard on packages as when the server answers alone), in a run
+runs its own (the same flags, the same guard on packages), in a run
 directory under the user's cache that is removed once the answer is
 given.  A parse that does not fail leaves its manifest in `kept/`,
 beside the run directories of the same project, as spelt, and server

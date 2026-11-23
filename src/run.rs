@@ -4,7 +4,7 @@
 //! with its command line, working directory, deadline, log and target, and
 //! one reader whose outcome is reported once; and `finish`, which waits for
 //! a child and kills it past its deadline: a Run's dbt, dbt's probe of
-//! `lsp --help` and git through `locate`, and the cut's probe.
+//! `lsp --help` and git through `locate`.
 
 use crate::parse_log;
 use serde_json::Value;
@@ -16,9 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// One run of dbt.
 pub struct Run {
-    /// The command line.
     pub line: Vec<String>,
     /// Where dbt runs; none, the proxy's directory.
     pub cwd: Option<PathBuf>,
@@ -30,14 +28,11 @@ pub struct Run {
     pub deadline: Duration,
 }
 
-/// How a run ended.
 #[derive(Debug)]
 pub enum Ending {
-    /// dbt exited, with this status.
     Exited(ExitStatus),
     /// It was stopped, or ran past its deadline, and killed.
     Stopped,
-    /// It could not start, for this reason.
     NotStarted(String),
 }
 
@@ -69,13 +64,11 @@ impl Output {
         self.text.lines().map(str::trim).find(|line| line.starts_with("[error]")).map(str::to_owned)
     }
 
-    /// The first line that is none of dbt's events, as a launcher's own.
     pub fn line(&self) -> Option<&str> {
         self.text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'))
     }
 }
 
-/// A run under way, which its owner stops at the latest when it ends.
 pub struct Running {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,

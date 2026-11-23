@@ -22,9 +22,8 @@ usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
 Says on one line of JSON what the server would find from PATH, by default
 the current directory: the project and by which route; the dbt, where from,
 what was skipped, and whether it has `lsp`; whether the server would answer
-alone, and why; whether this system can cut dbt off the network; why a parse
-would be refused, if it would.  It runs only what the server runs as it
-starts: git, `lsp --help` of the dbt, `unshare` on `true`.  ARGUMENTS are
+alone, and why; why a parse would be refused, if it would.  It runs only
+what the server runs as it starts: git and `lsp --help` of the dbt.  ARGUMENTS are
 the server's own, as an editor gives them: `--backend never`, `-- dbt lsp
 --project-dir DIR`.  Exit status 0 when a project is found whose dbt answers
 as a dbt 2 does, 1 otherwise, 2 for a usage error.
@@ -35,8 +34,8 @@ const SELECT_USAGE: &str = "\
 usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
 
 Lists on one line of JSON the nodes that the dbt selector SELECTOR selects in
-the project of the current directory, as `dbt list` gives them, cut off the
-network: {\"nodes\": [...], \"error\": null}, or `error` set and no node.
+the project of the current directory, as `dbt list` gives them:
+{\"nodes\": [...], \"error\": null}, or `error` set and no node.
 ARGUMENTS are the server's own, as for doctor.  Exit status 0 when nodes are
 listed, 1 otherwise, \"No nodes found\" included, 2 for a usage error.
 
@@ -108,7 +107,6 @@ const SUBCOMMANDS: [Row; 3] = [
 ];
 
 impl Subcommand {
-    /// Its row of `SUBCOMMANDS`.
     fn row(self) -> &'static Row {
         &SUBCOMMANDS[self as usize]
     }
@@ -122,7 +120,6 @@ pub fn named(words: &[String]) -> Option<Subcommand> {
     SUBCOMMANDS.iter().find(|row| row.name == first).map(|row| row.subcommand)
 }
 
-/// What a subcommand's words ask.
 #[derive(Debug, PartialEq)]
 enum Asked {
     Help,
@@ -187,13 +184,11 @@ pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
-/// ANSWER, and whether it worked: whether its `error` is null.
 fn by_error(answer: Value) -> (Value, bool) {
     let ok = answer["error"].is_null();
     (answer, ok)
 }
 
-/// Why no project was found.
 enum Missing {
     /// The server command's `--project-dir` holds no `dbt_project.yml`; why,
     /// in words that need no advice.
@@ -262,29 +257,24 @@ fn doctor(path: &Path, launch: Launch, command: &[String]) -> (Value, bool) {
         },
     };
     let alone = locate::alone(launch == Launch::Never, route, || probed == Ok(false));
-    let cut = config::can_cut();
     // With the server command as given, as select asks it: finding the dbt
     // changes only a bare `dbt`, and the guard reads none of it.
-    let packages = packages::refused(&project, command, cut, alone.is_some());
+    let packages = packages::refused(&project, command);
     let skipped = dbt.skipped.iter().map(|(path, why)| json!({"path": path.display().to_string(), "why": why}));
     let found = json!({"command": dbt.command, "named": dbt.named, "source": dbt.source,
                        "skipped": skipped.collect::<Vec<_>>(), "lsp": probed.as_ref().ok(), "why": probed.as_ref().err()});
     // The route's name as the enum spells it, in lower case.
     let route = format!("{route:?}").to_lowercase();
     let answer = json!({"version": version, "path": shown, "project": project.display().to_string(), "route": route,
-                        "dbt": found, "alone": alone, "cut": cut, "packages": packages});
+                        "dbt": found, "alone": alone, "packages": packages});
     (answer, probed.is_ok())
 }
 
 /// The nodes that SELECTOR selects in the project of the current directory
 /// with the server command COMMAND, as `dbt-lsp-plus.nodes` answers them: by
-/// `dbt list` under the cut, in a run directory removed afterwards; or why
-/// it did not run.  Refused before anything runs where the system cannot
-/// cut, without a project, or by the guard.
+/// `dbt list`, in a run directory removed afterwards; or why it did not
+/// run.  Refused before anything runs without a project, or by the guard.
 fn select(selector: &str, command: &[String]) -> Value {
-    if let Err(failure) = commands::route(commands::NODES, &|_| false, config::can_cut()) {
-        return failure;
-    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let (project, route) = match project(&cwd, command) {
         Ok(found) => found,
@@ -295,9 +285,9 @@ fn select(selector: &str, command: &[String]) -> Value {
             return commands::failure(commands::NODES, &why);
         }
     };
-    // Under the cut, whether the session is alone is moot; the guard reads
-    // the server command's install path, which finding its dbt leaves as is.
-    if let Some(why) = packages::refused(&project, command, true, false) {
+    // The guard reads the server command's install path, which finding its
+    // dbt leaves as is.
+    if let Some(why) = packages::refused(&project, command) {
         return commands::failure(commands::NODES, &why);
     }
     let (dbt, dir) = dbt_of(&project, route, command);
@@ -305,7 +295,7 @@ fn select(selector: &str, command: &[String]) -> Value {
     // What a select or a proxy killed by a signal left, swept after a day, as `Workspace::cache_dir` does.
     config::remove_stale(&cache);
     let job = commands::nodes_job(selector);
-    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), config::RUN_LOG, true);
+    let run = config::Dbt::new(dbt.command, dir).run(&job.words, &project, cache.join("run"), config::RUN_LOG);
     let Some(run) = run else {
         return commands::failure(commands::NODES, commands::NO_LSP_WORD);
     };
@@ -352,8 +342,8 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
 }
 
 /// The CLI's index of the project at ROOT, in WORKSPACE: the manifest kept
-/// for the project as it lies on disk, else that of a parse, guarded as
-/// alone, waited for, and kept when it did not fail; a parse that ended
+/// for the project as it lies on disk, else that of a parse, waited for,
+/// and kept when it did not fail; a parse that ended
 /// well with no manifest that reads fails here, where no server's wait
 /// could explain the missing index.
 fn indexed(workspace: &mut Workspace, root: &Path) {
@@ -365,7 +355,7 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
         return;
     }
     let (sender, outcomes) = mpsc::channel();
-    workspace.parse(true, Some(Box::new(move |outcome| drop(sender.send(outcome)))));
+    workspace.parse(Some(Box::new(move |outcome| drop(sender.send(outcome)))));
     // None started: no report kept the channel open.
     let Ok(outcome) = outcomes.recv() else { return };
     let failure = outcome.failure.or(outcome.index.is_none().then_some("it left no manifest that reads".to_owned()));
@@ -399,8 +389,7 @@ fn node(asked: &str, command: &[String]) -> Value {
     };
     let (dbt, dir) = dbt_of(&root, route, command);
     let mut workspace = Workspace::default();
-    (workspace.root, workspace.dbt, workspace.cut) =
-        (Some(root.clone()), config::Dbt::new(dbt.command, dir), config::can_cut());
+    (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
     indexed(&mut workspace, &root);
     let which = match place {
         Operand::Id(id) => Which::Id(id),

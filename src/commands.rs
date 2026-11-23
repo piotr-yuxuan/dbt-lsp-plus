@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The proxy's commands for clients, `dbt-lsp-plus.compile`, `.show` and
 //! `.nodes`: done by dbt lsp's own commands when it runs, else, for two of
-//! them, by dbt's CLI cut off the network.  How each request goes, the
-//! words of a run, and what its output answers, in dbt lsp 2.0.9's shapes.
+//! them, by dbt's CLI.  How each request goes, the words of a run, and what
+//! its output answers, in dbt lsp 2.0.9's shapes.
 
 use crate::capability::{self, CAPABILITIES, Provider};
-use crate::project::Project;
 use crate::run::{self, Ending, Output, Run, Running};
+use crate::{packages, project::Project, yaml::Tree};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,33 +28,26 @@ pub const NOT_FOUND: &str = "Compiled file path not found.";
 
 /// The commands that `initialize` announces, in the table's order: each
 /// with a provider of dbt's present, dbt lsp when the server LISTS its
-/// command, dbt's CLI when the system can CUT.
-pub fn announced(lists: &dyn Fn(&str) -> bool, cut: bool) -> Vec<&'static str> {
+/// command.
+pub fn announced(lists: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
     let done = |own: &&capability::Capability| {
-        own.is_command() && route(own.name, lists, cut).is_ok_and(|provider| provider != Provider::Plus)
+        own.is_command() && route(own.name, lists).is_ok_and(|provider| provider != Provider::Plus)
     };
     CAPABILITIES.iter().filter(done).map(|own| own.name).collect()
 }
 
 /// Who answers a request of COMMAND: the first of its providers present,
-/// the proxy always, dbt lsp when SERVES says that a server runs that
-/// listed its command, dbt's CLI when the system can CUT; else the
-/// failure that says why none is.
-pub fn route(command: &str, serves: &dyn Fn(&str) -> bool, cut: bool) -> Result<Provider, Value> {
+/// dbt lsp only when SERVES says that a server runs that listed its
+/// command; else the failure that says why none is.  A run of dbt's CLI
+/// may still refuse, as `NO_LSP_WORD` says.
+pub fn route(command: &str, serves: &dyn Fn(&str) -> bool) -> Result<Provider, Value> {
     let own = capability::of(command).filter(|own| own.is_command());
     let providers = own.map_or(&[][..], |own| own.providers);
     let present = |provider: &&Provider| match provider {
-        Provider::Plus => true,
+        Provider::Plus | Provider::DbtCli => true,
         Provider::DbtLsp => own.and_then(|own| own.server).is_some_and(serves),
-        Provider::DbtCli => cut,
     };
-    match providers.iter().find(present) {
-        Some(provider) => Ok(*provider),
-        None if providers.contains(&Provider::DbtCli) => {
-            Err(failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot"))
-        }
-        None => Err(failure(command, "dbt-lsp-plus.show needs dbt lsp: dbt show alone would reach the network")),
-    }
+    providers.iter().find(present).copied().ok_or_else(|| failure(command, "dbt-lsp-plus.show needs dbt lsp"))
 }
 
 /// COMMAND's answer that fails for WHY: `error` set, the rest null, or `[]`
@@ -143,6 +136,35 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
     Ok(Job { command: COMPILE, words: words.into(), read: Box::new(read) })
 }
 
+/// Why `dbt compile` of the project at ROOT, with the server command
+/// SERVER, is refused, if it is: the first package, the root, then each
+/// under the install path, by directory, as dbt loads them once the guard
+/// on packages lets it run, whose `dbt_project.yml` may have `on-run-start`
+/// or `on-run-end` hooks, which dbt compile runs against the warehouse,
+/// even for one model, or a top-level merge key, which may bring one.  A
+/// plain null (the empty one, no value, included), `""` or `[]` is none;
+/// any other value is one.  A `dbt_project.yml` that repeats a key, of
+/// which dbt reads the last, or that does not read refuses too.
+pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
+    let install = packages::install_path(root, server).unwrap_or_default();
+    let mut installed: Vec<fs::DirEntry> = fs::read_dir(install).into_iter().flatten().flatten().collect();
+    installed.sort_by_key(fs::DirEntry::path);
+    let refusal = |dir: PathBuf| {
+        let read = packages::read(&dir.join("dbt_project.yml"));
+        let Ok(Some(config)) = &read else { return read.err() };
+        let mut values = ["<<", "on-run-start", "on-run-end"].into_iter().filter_map(|key| config.get(key));
+        let hooked = values.any(|value| match value {
+            Tree::Scalar { value, plain: true, .. } => !["", "~", "null", "Null", "NULL"].contains(&value.as_str()),
+            Tree::Scalar { value, .. } => !value.is_empty(),
+            Tree::Seq(items) => !items.is_empty(),
+            Tree::Map { .. } | Tree::Alias => true,
+        }) || config.repeats();
+        let name = config.get("name").and_then(Tree::as_str).unwrap_or("a package");
+        hooked.then_some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"))
+    };
+    std::iter::once(root.to_owned()).chain(installed.iter().map(fs::DirEntry::path)).find_map(refusal)
+}
+
 /// The answer of a compile of the file at RELATIVE, a path from the root,
 /// from the MANIFEST it wrote: the `compiled_path` of the node of the root
 /// PACKAGE whose file is RELATIVE, a test's never, as of a properties
@@ -204,37 +226,28 @@ mod tests {
     }
 
     #[test]
-    fn a_request_goes_to_dbt_lsp_when_it_listed_the_command_else_to_the_cli_under_the_cut() {
+    fn a_request_goes_to_dbt_lsp_when_it_listed_the_command_else_to_the_cli() {
         let all = served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"]);
         let server = |command: &str| capability::of(command).and_then(|own| own.server);
         assert_eq!(
             [COMPILE, SHOW, NODES].map(server),
             [Some("dbt.compileFile"), Some("dbt.show"), Some("dbt.listNodes")]
         );
-        assert_eq!(route(COMPILE, &all, false), Ok(Provider::DbtLsp));
-        assert_eq!(route(SHOW, &all, true), Ok(Provider::DbtLsp));
-        assert_eq!(route(NODES, &all, true), Ok(Provider::DbtLsp));
+        assert_eq!(route(COMPILE, &all), Ok(Provider::DbtLsp));
+        assert_eq!(route(SHOW, &all), Ok(Provider::DbtLsp));
+        assert_eq!(route(NODES, &all), Ok(Provider::DbtLsp));
         let none = served(&[]);
-        assert_eq!(route(COMPILE, &none, true), Ok(Provider::DbtCli));
-        assert_eq!(route(NODES, &none, true), Ok(Provider::DbtCli));
-        let refused = |routed: Result<Provider, Value>| match routed {
-            Err(failure) => failure["error"].as_str().unwrap().to_owned(),
-            other => panic!("{other:?}"),
-        };
-        assert!(refused(route(SHOW, &none, true)).contains("needs dbt lsp"), "never alone");
-        assert!(refused(route(COMPILE, &none, false)).contains("cut off the network"));
-        assert!(refused(route(NODES, &served(&["dbt.compileFile"]), false)).contains("cut off the network"));
+        assert_eq!(route(COMPILE, &none), Ok(Provider::DbtCli));
+        assert_eq!(route(NODES, &none), Ok(Provider::DbtCli));
+        assert_eq!(route(NODES, &served(&["dbt.compileFile"])), Ok(Provider::DbtCli), "not listed");
+        assert_eq!(route(SHOW, &none), Err(failure(SHOW, "dbt-lsp-plus.show needs dbt lsp")), "never alone");
     }
 
     #[test]
     fn initialize_announces_what_the_server_lists_and_what_the_cli_can_do() {
-        assert_eq!(
-            announced(&served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"]), false),
-            [COMPILE, SHOW, NODES]
-        );
-        assert_eq!(announced(&served(&[]), true), [COMPILE, NODES]);
-        assert_eq!(announced(&served(&["dbt.show"]), false), [SHOW]);
-        assert_eq!(announced(&served(&[]), false), Vec::<&str>::new());
+        assert_eq!(announced(&served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"])), [COMPILE, SHOW, NODES]);
+        assert_eq!(announced(&served(&[])), [COMPILE, NODES]);
+        assert_eq!(announced(&served(&["dbt.show"])), [COMPILE, SHOW, NODES]);
         let providers = |name: &str| capability::of(name).map(|own| own.providers);
         let dbt: &[Provider] = &[Provider::DbtLsp, Provider::DbtCli];
         let plus: &[Provider] = &[Provider::Plus];
@@ -297,6 +310,69 @@ mod tests {
         assert!(refusal(job("/a dir/p/models/my model.sql")).contains("space or a comma"));
         assert!(refusal(job("/a dir/p/models/a,b.sql")).contains("space or a comma"));
         assert!(refusal(compile_job(None, root, Some(&project), PathBuf::new())).contains("no file"));
+    }
+
+    #[test]
+    fn a_compile_is_refused_where_a_package_has_on_run_hooks() {
+        let dir = scratch_project("hooked", &[("dbt_project.yml", "name: shop\n")]);
+        // The root's dbt_project.yml, then b_utils's and a_utils's under the default install path.
+        let packages = [(".", "shop"), ("dbt_packages/b_utils", "b_utils"), ("dbt_packages/a_utils", "a_utils")];
+        let hooked = |configs: [&str; 3], server: &[String]| {
+            for ((at, name), config) in packages.iter().zip(configs) {
+                fs::create_dir_all(dir.join(at)).unwrap();
+                fs::write(dir.join(at).join("dbt_project.yml"), format!("name: {name}\n{config}")).unwrap();
+            }
+            super::hooked(&dir, server)
+        };
+        let refused =
+            |name: &str| Some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"));
+        let harmless = ["", "on-run-start: []\n", "on-run-end: \"\"\n", "on-run-end:\n", "on-run-end: ~\n"];
+        for config in harmless.into_iter().chain(["on-run-start: null\n", "on-run-end: NULL\n"]) {
+            assert_eq!(hooked([config; 3], &[]), None, "{config:?}");
+        }
+        let hook = "on-run-start: \"select 1\"\n";
+        assert_eq!(hooked([hook; 3], &[]), refused("shop"), "the root first");
+        assert_eq!(hooked(["", hook, hook], &[]), refused("a_utils"), "then by directory");
+        let forms = [
+            "on-run-end: \"{{ '' }}\"\n",
+            "on-run-end: \"null\"\n",
+            "on-run-start:\n  - select 1\n",
+            "on-run-end:\n  sql: select 1\n",
+            "hooks: &hooks select 1\non-run-end: *hooks\n",
+            "base: &base\n  on-run-end: select 1\n<<: *base\n",
+            // dbt reads the last of two keys.
+            "on-run-end: []\non-run-end: select 1\n",
+            "base: &base\n  on-run-end: select 1\n<<: []\n<<: *base\n",
+        ];
+        for form in forms {
+            assert_eq!(hooked([form, "", ""], &[]), refused("shop"), "{form:?}");
+        }
+        // As dbt-oss 2.0.11 was seen to start the hook: a package under the server command's install path.
+        fs::create_dir_all(dir.join("vendor/hookpkg")).unwrap();
+        fs::write(dir.join("vendor/hookpkg/dbt_project.yml"), format!("name: hookpkg\n{hook}")).unwrap();
+        assert_eq!(hooked(["", "", ""], &[]), None, "outside the install path");
+        let flagged = ["dbt", "lsp", "--packages-install-path", "vendor"].map(str::to_owned);
+        assert_eq!(hooked(["", "", ""], &flagged), refused("hookpkg"), "under the server's");
+        let assigned = ["env", "DBT_PACKAGES_INSTALL_PATH=vendor", "dbt", "lsp"].map(str::to_owned);
+        assert_eq!(hooked(["", "", ""], &assigned), refused("hookpkg"), "set before the server's dbt");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_compile_is_refused_where_a_package_s_file_does_not_read() {
+        // A tab after a key, which dbt reads, and yaml-rust2 does not: a hook may lie behind it.
+        let config = "name: utils\nmodels:\n  utils:\n    +materialized:\tview\non-run-end: select 1\n";
+        let dir = scratch_project(
+            "hooked-unread",
+            &[("dbt_project.yml", "name: shop\n"), ("dbt_packages/utils/dbt_project.yml", config)],
+        );
+        let file = dir.join("dbt_packages/utils/dbt_project.yml");
+        let why = format!(
+            "dbt-lsp-plus cannot read {} as YAML, a tab after a key perhaps, which dbt may read",
+            file.display()
+        );
+        assert_eq!(super::hooked(&dir, &[]), Some(why));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

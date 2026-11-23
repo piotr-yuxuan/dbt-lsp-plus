@@ -10,8 +10,8 @@ answers](use-with-an-agent.md#when-nothing-answers).
 First, from a shell, run `dbt-lsp-plus doctor PATH -- ARGUMENTS`, PATH a
 file of the project and ARGUMENTS those the editor gives the server: it
 says which project and which dbt the server would take, whether that dbt
-has `lsp`, whether the proxy would answer alone and why, whether dbt can
-be cut off the network, and why a parse would be refused
+has `lsp`, whether the proxy would answer alone and why, and why a parse
+would be refused
 ([the subcommands](../reference/cli.md)).  A given `--project-dir`
 without `dbt_project.yml` is no project to doctor, where the server
 takes the directory all the same, and dbt
@@ -81,7 +81,6 @@ seconds, 10 by default.
 
 - **Its standard error**, for what happens before a client can be told:
   `dbt-lsp-plus: cannot start ...` when the server command does not run;
-  that `unshare -rnm` cannot cut its `dbt parse` off the network here;
   without `--project-dir`, which project and which dbt it found, the line
   that `window/logMessage` repeats.
 - **`window/logMessage`**, once per reason, each prefixed
@@ -123,13 +122,14 @@ seconds, 10 by default.
   deps".**  A package is missing, or the lock is older than the files that
   name it: the proxy will not let its parse install packages.  Run `dbt
   deps`.
-- **"cannot read …/dbt_project.yml as YAML", and no parse, on macOS.**
-  Where the proxy cannot cut its parse off the network, it refuses a
-  project file that does not read as YAML, as dbt might still install
-  packages from it.  Fix the file.
+- **"cannot read …/dbt_project.yml as YAML", and no parse.**  The proxy
+  refuses a project file that its YAML reader cannot read, a tab after a
+  key perhaps, which dbt may read and install packages from.  Fix the
+  file.
 - **"has no lsp: dbt-lsp-plus answers alone".**  The dbt is dbt-oss: the
-  proxy's own features work, formatting, completion, compiled SQL and
-  previews do not (see [Use it with dbt-oss alone](use-with-dbt-oss.md)).
+  proxy's own features work, and compiled SQL by `dbt-lsp-plus.compile`;
+  formatting, completion and previews do not (see [Use it with dbt-oss
+  alone](use-with-dbt-oss.md)).
 - **"...: dbt-lsp-plus answers alone." after restarts, or at the start.**
   `dbt lsp` ended four times in ten minutes, could not start, or exited
   before it answered `initialize`.  The message names why: its exit
