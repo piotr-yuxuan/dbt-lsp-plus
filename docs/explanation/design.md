@@ -560,7 +560,8 @@ alike unless said:
   and status 1; a project directory that cannot be canonicalised does
   the same, which the cut's mount stops before dbt runs.  A list answers
   the first as how dbt ended, and a compile the second as a launcher's
-  line with how dbt ended, until one rule reads both kinds (plan 050).
+  line with how dbt ended, until one rule reads both kinds (plan 071, once
+  dbt's output is read apart from its log).
 
 ## Root
 
@@ -809,9 +810,14 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
     strings, so a CTE that Jinja generates is not one but those after it
     are;
   - names may hold any letter.
-- The scan is kept between requests, on the event loop, which alone owns
-  it (`src/cache.rs`).  A request that needs the project walks the
-  resource paths again and reads each file's metadata before its content:
+- The scan is kept between requests by the Workspace
+  (`src/workspace.rs`), the core's state of the session's project beside
+  the last parse's index, the parse under way and the call hierarchy's
+  graph, which speaks no protocol: the LSP front end keeps the open
+  documents, the URIs and the positions, and hands it the open texts.  It
+  lives on the event loop, which alone owns it (`src/cache.rs`).  A
+  request that needs the project walks the resource paths again and
+  reads each file's metadata before its content:
   its modification and change times, size, inode and device.  A file whose
   metadata stays keeps its text and what that text alone gives (blocks,
   calls, source tables); any other is read again, and a file gone is
@@ -838,7 +844,12 @@ dbt-oss 2.0.11's exits 2 with "unrecognized subcommand 'lsp'".
     calls (see "Known limitations"), and within 0.20 and 0.31 s as the
     first request after the save of a model, of the largest properties
     file or of `dbt_project.yml`.  Each took 0.3 to 1.7 s without the
-    cache.  The proxy then holds 79 and 142 MB.
+    cache.  The proxy then holds 79 and 142 MB.  These figures predate
+    plan 050: a definition, references and an alone call hierarchy ask
+    for the index, and so walk once more when it is fresh and a parse has
+    started, to compare the files on disk with that parse's stamp
+    (`Workspace::notice`), and each parse's start walks once more for its
+    stamp (`cache::disk`); unmeasured.
 - The graph: once the server has listed the graph, the dependencies of each
   node it listed are its own, since only dbt resolves `ref(var('x'))`; until
   then, and for the nodes it did not list, they come from the scan.  The
@@ -1473,10 +1484,19 @@ So the proxy runs the user's own `dbt parse`.
   `nodeInfo`, a hover, or a definition or references request that the
   proxy answers or the shadow follows, that finds it stale, or an inlay
   hint request that finds no index, starts a parse, and is answered from
-  the last index meanwhile.  A parse starts only when the server has
-  compiled since the change, so that dbt has resolved the packages
-  itself, or when no server runs (after a crash, while the restart's
-  process starts: plan 037), and such a request
+  the last index meanwhile.  Such a request first looks at the files the
+  scan holds, by their metadata: one that may hold a resource (not an
+  editor's auto-save `#x.sql#` or backup `x.sql~`) written, added or
+  removed since the last parse started, or a package come or gone, marks
+  the index stale too, with no change told, as after Claude Code's `Edit`
+  of a file it had not opened, which it opens without saving (the
+  Workspace's own refresh).  In front of dbt lsp, such a change waits for
+  no compilation, and its parse is guarded on packages as alone, as dbt
+  lsp has not resolved them since, until its next compilation.  A
+  parse after a change told starts only when the server has compiled
+  since, so that dbt has resolved the packages itself, or when no server
+  runs (after a crash, while the restart's process starts: plan 037),
+  and such a request
   made before that compilation starts it once it comes,
   when every package is local or `package-lock.yml` is no older than the
   file naming the packages (an empty or comment-only file names none), with
@@ -1486,7 +1506,8 @@ So the proxy runs the user's own `dbt parse`.
   agent may ask for a node without opening one.  A reason a parse cannot
   start, or a failure, is logged once with `window/logMessage`, and never
   after `shutdown`.  While no server runs, the guard on packages is the
-  alone one unless a server compiled since the last change: a dbt lsp
+  alone one unless a server compiled since the last change, told or found
+  on disk: a dbt lsp
   that compiled and then crashed, with no change since, has resolved the
   packages as it does when it runs.  With a dbt lsp that could not start,
   the parse's dbt is the same command, which fails too: `nodeInfo` then
@@ -1494,7 +1515,10 @@ So the proxy runs the user's own `dbt parse`.
   lost for good included, eagerly: at the first `didOpen`, at each change
   of the client's that may change the graph, and at a request that finds
   the index stale, with no compilation to wait for; one at a time, and the
-  next at the end of one when a change came during it.
+  next at the end of one when a change came during it.  A change found on
+  disk waits for a request: the end of a parse, a notification and a loss
+  never look, so that a run of dbt that wrote such a file would start no
+  other by itself.
 - The packages (`packages::refused`): a parse is refused, and why logged,
   when dbt would install packages first, which writes `package-lock.yml`,
   rewrites the install path, deleting what it holds, untracked files
@@ -1884,7 +1908,9 @@ checked against dbt; the profile and the target in doctor, which need
   `<file> lies in the dbt project at <package>, ...`, and so do a hover,
   a definition and references alone and in `plus`; in `merge` in front
   of a running dbt lsp, the default, these three go to dbt lsp, whose
-  answer stands, and when it gives none that reason comes first.
+  answer stands, and when it gives none that reason comes first.  A
+  method set to `dbt` gets no such reason (`Proxy::outside` gives none):
+  it goes to dbt lsp as it came, and alone gets its nothing, a hover null.
   `locate::elsewhere` reads the install path from the flag, the variable
   in the server command or the proxy's environment, and the key as
   written (plan 056).
@@ -1981,7 +2007,11 @@ checked against dbt; the profile and the target in doctor, which need
 - Each request that needs the project walks it, reads the metadata of
   every file and each package's `dbt_project.yml`, and the root's
   `packages.yml` and `dependencies.yml`: most of the 30 to
-  40 ms at 6,000 models.
+  40 ms at 6,000 models.  A request that asks for the index walks it
+  once more when the index is fresh and a parse has started, for the
+  stamp of the files on disk (`Workspace::notice`), an alone hover on a
+  node before any index twice; and each parse's start walks it once
+  more, for its stamp (`cache::disk`).
 - The references of a macro that each of 6,000 synthetic models calls,
   6,001 locations and 1.5 MB of JSON, take about 86 ms: the walk above,
   about 25 ms to find and place them, and the rest to encode the answer

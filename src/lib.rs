@@ -27,4 +27,5 @@ pub mod scan;
 pub mod shadow;
 pub mod sources;
 pub mod text;
+pub mod workspace;
 pub mod yaml;

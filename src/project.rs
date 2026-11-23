@@ -314,6 +314,16 @@ const LAYOUT: [Layout; 7] = [
     },
 ];
 
+/// Whether a file of a resource path may hold a resource, by its extension:
+/// YAML, or one that `LAYOUT` reads (`sql`, `py`, `csv`, `md`); an editor's
+/// auto-save (`#x.sql#`) or backup (`x.sql~`) may not.
+pub fn resource_file(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else { return false };
+    let files = LAYOUT.iter().flat_map(|layout| layout.files.iter().map(|(read, _)| *read));
+    let blocks = LAYOUT.iter().flat_map(|layout| layout.blocks.iter().map(|(_, read, ..)| *read));
+    matches!(extension, "yml" | "yaml") || files.chain(blocks).any(|read| read == extension)
+}
+
 /// The entities of one file of SQL, Python, Markdown or CSV of PACKAGE, found in a
 /// directory of LAYOUT, from what its text gives, SCANNED.
 fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned) -> Vec<Entity> {

@@ -584,23 +584,38 @@ fn alone_the_graph_takes_dbt_s_resolution_from_the_manifest() {
 #[test]
 fn the_call_hierarchy_asks_for_a_parse_alone_and_none_in_front() {
     let orders = json!({"item": item("models/marts/orders.sql", "model.shop.orders")});
+    let path = fixture().join("models/marts/orders.sql");
+    let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
     // Alone, the graph is the last parse's: a follower asks for one, with no document opened.
     let (mut session, log) = Session::fake("hierarchy-parse-alone", json!({"no_lsp": true, "manifest": manifest()}));
     session.initialize(&fixture());
     session.request("callHierarchy/outgoingCalls", orders.clone());
     until_logged(&log, "the parse", |_| parses(&log).len() == 1);
     assert!(session.finish().success());
+    // So do its two other requests, each the first of a session of its own.
+    let others = [
+        ("prepare", "textDocument/prepareCallHierarchy", &on_with),
+        ("incoming", "callHierarchy/incomingCalls", &orders),
+    ];
+    for (name, method, params) in others {
+        let script = json!({"no_lsp": true, "manifest": manifest()});
+        let (mut session, log) = Session::fake(&format!("hierarchy-parse-alone-{name}"), script);
+        session.initialize(&fixture());
+        session.request(method, params.clone());
+        until_logged(&log, &format!("the parse {method} asks for"), |_| parses(&log).len() == 1);
+        assert!(session.finish().success());
+    }
     // In front, once dbt lsp compiled, the graph is its listing's: none.
     let (mut session, log) = Session::fake("hierarchy-parse-in-front", json!({"manifest": manifest()}));
     session.initialize(&fixture());
-    let path = fixture().join("models/marts/orders.sql");
     session.open(&path, None);
     session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
-    let on_with = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 3, "character": 1}});
+    // The proxy's own answers, which dbt lsp's echo would not be.
     let prepared = session.request("textDocument/prepareCallHierarchy", on_with);
-    assert!(prepared.get("result").is_some(), "{prepared}");
+    assert_eq!(prepared["result"][0]["data"]["uniqueId"], "model.shop.orders", "{prepared}");
     let outgoing = session.request("callHierarchy/outgoingCalls", orders);
-    assert!(outgoing.get("result").is_some(), "{outgoing}");
+    let to = ["macro.shop_utils.is_positive", "model.shop.stg_customers", "model.shop.stg_orders"];
+    assert_eq!(details(&outgoing["result"], "to"), to, "{outgoing}");
     parses_stay(&log, 0);
     assert!(session.finish().success());
 }
@@ -2359,6 +2374,93 @@ fn alone_each_change_parses_and_one_more_after_a_change_during_a_parse() {
     assert!(session.finish().success());
 }
 
+#[test]
+fn alone_a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_request() {
+    let project = copy_fixture("standalone-disk-change");
+    let gate = scratch("standalone-disk-change-gate").join("open");
+    let script = json!({"no_lsp": true, "manifest": manifest(), "parse_gate": gate});
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("standalone-disk-change-session", script, &flags, None);
+    session.initialize_as(&project, json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    until_logged(&log, "the parse of the first document", |_| parses(&log).len() == 1);
+    // Written while it runs, with no notification, as Claude Code's `Edit` of a file it has not opened.
+    std::fs::write(project.join("models/marts/during.sql"), "select 1").unwrap();
+    std::fs::write(&gate, "").unwrap();
+    // The parse has ended once the client is asked to refresh its hints: its end looks at no file.
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    parses_stay(&log, 1);
+    // The next request that would parse finds the file changed.
+    session.received.clear();
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after the write", |_| parses(&log).len() == 2);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    // A hover, once there is an index, asks for it after its answer: another write, another parse.
+    std::fs::write(project.join("models/marts/later.sql"), "select 2").unwrap();
+    session.received.clear();
+    session.request("textDocument/hover", position_in(&orders, "stg_orders", 1));
+    until_logged(&log, "the parse a hover asks for", |_| parses(&log).len() == 3);
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    // An open text is no change on disk.
+    let change = json!({"textDocument": {"uri": uri(&orders), "version": 2}, "contentChanges": [{"text": "select 1"}]});
+    session.notify("textDocument/didChange", change);
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 3);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_front_a_file_changed_on_disk_is_parsed_at_the_next_request_with_no_compilation() {
+    let project = copy_fixture("in-front-disk-change");
+    let flags = [Path::new("--project-dir"), &project];
+    // A completion ends its first life, and its second never answers its `initialize`.
+    let script = json!({"manifest": manifest(), "exit_on": "textDocument/completion", "hang_on": "initialize",
+                        "hang_life": 2});
+    let (mut session, log) = Session::fake_with("in-front-disk-change-session", script, &flags, None);
+    session.initialize_as(&project, json!({"workspace": {"inlayHint": {"refreshSupport": true}}}));
+    let orders = project.join("models/marts/orders.sql");
+    session.open(&orders, None);
+    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(parses(&log).len(), 1, "the parse of the first request");
+    session.received.clear();
+    // Written with no notification: dbt lsp hears of no change, and compiles nothing.  A hover, forwarded to it,
+    // asks for the index once forwarded.
+    std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
+    let on_ref = position_in(&orders, "stg_orders", 1);
+    session.request("textDocument/hover", on_ref.clone());
+    until_logged(&log, "the parse a hover asks for", |_| parses(&log).len() == 2);
+    session.wait_for(|m| m["method"] == "workspace/inlayHint/refresh");
+    node_info(&mut session, json!("model.shop.orders"));
+    let compiled = |m: &&Value| m["method"] == "dbt/lspCompileStart" || m["method"] == "dbt/lspCompileComplete";
+    let compilations: Vec<&Value> = session.received.iter().filter(compiled).collect();
+    assert!(compilations.is_empty(), "{compilations:?}");
+    // While dbt lsp restarts, a hover asks for the index before its answer: another write, another parse.
+    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
+    session.wait_for(|m| m["method"] == "window/showMessage");
+    std::fs::write(project.join("models/marts/restarting.sql"), "select 2").unwrap();
+    session.request("textDocument/hover", on_ref);
+    until_logged(&log, "the parse a hover asks for while dbt lsp restarts", |_| parses(&log).len() == 3);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn alone_a_completion_starts_no_parse() {
+    let (mut session, log) = Session::fake("standalone-completion", json!({"no_lsp": true, "manifest": manifest()}));
+    session.initialize(&fixture());
+    // No dbt lsp answers it, and no answer of the proxy's reads the index.
+    let orders = fixture().join("models/marts/orders.sql");
+    session.request("textDocument/completion", position_in(&orders, "select", 1));
+    parses_stay(&log, 0);
+    assert!(session.finish().success());
+}
+
 /// A line of dbt parse's JSON log, as both builds write it.
 fn dbt_event(level: &str, code: &str, msg: &str) -> String {
     json!({"data": {}, "info": {"code": code, "level": level, "msg": msg, "name": "Event"}}).to_string() + "\n"
@@ -2732,6 +2834,26 @@ fn after_dbt_lsp_is_lost_with_no_change_its_compilation_still_guards_the_package
     assert_eq!(info["relation"], "\"shop\".\"main\".\"orders\"", "{info}");
     assert_eq!(parses(&log).len(), 1);
     assert!(!session.received.iter().any(says_no_cut));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn in_front_a_change_found_on_disk_guards_the_packages_as_alone() {
+    let (mut session, log, project) = hub_package_without_a_cut("found-guard-alone");
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    assert_eq!(parses(&log).len(), 1, "the parse that dbt lsp's compilation allows");
+    // dbt lsp never heard of the write, and has not resolved the packages since.
+    std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
+    node_info(&mut session, json!("model.shop.orders"));
+    session.wait_for(says_no_cut);
+    parses_stay(&log, 1);
+    // A change told, which dbt lsp compiles from the disk as it is: its resolution holds again.
+    let orders = uri(&project.join("models/marts/orders.sql"));
+    session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after dbt lsp's compilation", |_| parses(&log).len() == 2);
     assert!(session.finish().success());
 }
 

@@ -278,10 +278,12 @@ By what the agent reads:
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not
-  opened, other than the first, opens it without saving it, and starts
-  no parse.  Make an LSP call on a file before editing it; once the
-  answers are stale, edit it again, which saves an open file and starts
-  a parse.
+  opened, other than the first, opens it without saving it.  The next
+  hover, or definition or references at a kind listed in [Where
+  dbt-lsp-plus answers definitions and
+  references](#where-dbt-lsp-plus-answers-definitions-and-references),
+  finds the file changed on disk, starts a parse and is answered from
+  the last index meanwhile; ask again once the parse has run.
 
 Three setups fail silently.  A `.lsp.json` at a repository's root does
 nothing: Claude Code reads it at a plugin's root only.  A plugin
