@@ -1452,16 +1452,16 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     version 1, a file created then deleted, the project's name and model
     paths, an open `dbt_project.yml` renaming the project once saved, a
     package's file replaced with its size and time kept;
-  - the root and the routes: `--project-dir` first and as spelt, with its
-    one line, on the standard error too; the client's folder without it; the working directory
-    naming nothing; without a project, null to every request of the
-    server's, -32601 to another, no other frame, nothing run and nothing
-    on the standard error, with stubs of `dbt` and git alone on `PATH`; a
-    document's project, as Claude Code opens it after a file outside
-    every project, with one line; the parse and a compile in a document's
-    project; the walk up from a document over scratch layouts, and the
-    lookup of dbt in scratch repositories, with a scratch home and no
-    global git configuration;
+  - the root and the routes: `--project-dir` first and as spelt, with
+    its one line, on the standard error too; the client's folder without
+    it; the working directory naming nothing; without a project, null to
+    every request of the server's, -32601 to another, no other frame,
+    nothing run and nothing on the standard error, with stubs of `dbt`
+    and git alone on `PATH`; a document's project, as Claude Code opens
+    it after a file outside every project, with one line; the parse and
+    a compile in a document's project; the walk up from a document over
+    scratch layouts, and the lookup of dbt in scratch repositories, with
+    a scratch home and no global git configuration;
   - references and renames of sources, files the scan does not hold, the
     client's URI of an open document; navigation at each kind of target,
     dbt's own test null, a versioned `ref`, functions, a Python model's
@@ -1470,12 +1470,12 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     output kept off the client's channel and its standard error in
     `parse.log`, one parse at a time and one more after a change during
     it, none after `shutdown`, nor for a watched change of dbt's own
-    output, through a link out of the project too, nor with packages that
-    need the network, the last index answering when they refuse a parse;
-    a parse killed at `exit`; a node by
-    id or by position; the summary and the facts on a hover of a ref and
-    at a file's start, in the client's format; a hover on a node before
-    any index failing with nodeInfo's reason;
+    output, through a link out of the project too, nor with packages
+    that need the network, the last index answering when they refuse a
+    parse; a parse killed at `exit`; a node by id or by position; the
+    summary and the facts on a hover of a ref and at a file's start, in
+    the client's format; a hover on a node before any index failing with
+    nodeInfo's reason;
   - the parse's problems as diagnostics, placed and cleared, and the last
     run's failures and stale sources where written; the URI published
     under before cleared when the client opens the file under another;
@@ -1491,9 +1491,10 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   temporary directory, so they take turns: a process's first scratch
   directory waits for a lock there, held until the process ends.
 - CI runs the same checks on GitHub Actions, and the corpus and the live
-  test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it; each
-  week, the same on the latest stable dbt-oss, and on the latest
-  proprietary build when allowed: see `docs/reference/release-pipeline.md`.
+  test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it;
+  each week, the same on the latest stable dbt-oss, and on the latest
+  proprietary build when allowed: see
+  `docs/reference/release-pipeline.md`.
 - The conformance corpus, opt-in as the live test (see "Conformance"),
   built with the network, `cargo test --locked -j 4 --test proxy
   --no-run`, then run with none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
@@ -1501,21 +1502,21 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
 - One opt-in live test, `with_the_real_dbt`, runs the server with the
   real dbt, either build, on a copy of the fixture, from an empty
   environment with a scratch home, built as the corpus is, then run with
-  none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test
-  proxy -- --ignored`.  It checks the outline of a model and of a
+  none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test
+  --test proxy -- --ignored`.  It checks the outline of a model and of a
   properties file, folding, highlights, selection ranges, a hover at a
   model's start before the parse has ended, the summary or the reason,
-  never null; navigation
-  in a properties file and of a ref in SQL; the last run's failure, a
-  warning of `dbt parse` possibly beside it; the hierarchy from the
-  manifest, `order_summary`'s upstream through its variable; node
-  information, the summary alone on a hover, the hints; the facts of a
-  hover at a model's start; a model written outside the editor with an
-  unknown `ref` shown as dbt1048 from the watcher's event, then cleared;
-  the commands by dbt's CLI; and the rename of a source table, after
-  which dbt lists the new table and the model still compiles to the old
-  relation.  A second one finds the project and its dbt without
-  `--project-dir`, from a document, from the folder, and from a shell.
+  never null; navigation in a properties file and of a ref in SQL; the
+  last run's failure, a warning of `dbt parse` possibly beside it; the
+  hierarchy from the manifest, `order_summary`'s upstream through its
+  variable; node information, the summary alone on a hover, the hints;
+  the facts of a hover at a model's start; a model written outside the
+  editor with an unknown `ref` shown as dbt1048 from the watcher's
+  event, then cleared; the commands by dbt's CLI; and the rename of a
+  source table, after which dbt lists the new table and the model still
+  compiles to the old relation.  A second one finds the project and its
+  dbt without `--project-dir`, from a document, from the folder, and
+  from a shell.
 
 ## What it would take to finish
 

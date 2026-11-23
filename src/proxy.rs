@@ -495,9 +495,10 @@ impl<W: Write> Proxy<W> {
     }
 
     /// How the server answers the client's request METHOD, by the row of
-    /// `CAPABILITIES` it names: a name with no row is unknown, since no one
-    /// else will answer it, and a row's request before a project is null, a
-    /// valid result of every method (decisions 2 and 3 of plan 075).
+    /// `CAPABILITIES` it names: a name with no row gets -32601 (`shutdown`
+    /// aside, null), `workspace/executeCommand` with no string `command`
+    /// -32602; a row's request before a project gets null, a valid result
+    /// of every method, and after, as its mode says.
     fn route(&self, method: &str, params: &Value) -> Route {
         let row = match (method, params["command"].as_str()) {
             ("workspace/executeCommand", Some(command)) => capability::of(command).filter(|row| row.is_command()),
