@@ -258,9 +258,6 @@ By what the agent reads:
 - `dbt parse has not finished:` then `... run dbt deps`: a package is
   missing or its lock is stale, and the proxy will not let its parse
   install it.  Run `dbt deps`.
-- `dbt parse has not finished: a package from the network is named, and
-  nothing cuts dbt parse off the network here`: the system cannot cut
-  dbt off the network, as select cannot.
 - `dbt-lsp-plus runs dbt only cut off the network, which this system
   cannot`, from select: see [From a shell](#from-a-shell).
 - `dbt lsp did not answer within 2 s`: ask again.  Followed by `: it is

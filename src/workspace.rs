@@ -228,13 +228,13 @@ impl Workspace {
     }
 
     /// Starts a parse when the index is stale and dbt can parse: no parse
-    /// under way, packages that need no network, guarded as alone when
-    /// GUARD, a server command with `lsp`; REPORT gets its outcome.  With no
-    /// REPORT nothing starts.  Why none could start, when it is not the
-    /// last parse's failure already, for the front end to tell once.
-    pub fn parse(&mut self, guard: bool, report: Option<config::ReportFn>) -> Option<String> {
+    /// under way, packages that dbt would not install, a server command with
+    /// `lsp`; REPORT gets its outcome.  With no REPORT nothing starts.  Why
+    /// none could start, when it is not the last parse's failure already,
+    /// for the front end to tell once.
+    pub fn parse(&mut self, report: Option<config::ReportFn>) -> Option<String> {
         let root = self.root.clone().filter(|_| !self.fresh && self.running.is_none())?;
-        if let Some(why) = packages::refused(&root, self.dbt.command(), self.cut, guard) {
+        if let Some(why) = packages::refused(&root, self.dbt.command(), self.cut) {
             return self.failed(Some(why));
         }
         let cache = self.cache_dir(&root);
@@ -251,11 +251,9 @@ impl Workspace {
     /// A look at the files on disk on behalf of a request: one that may hold
     /// a resource and that changed since the last parse started makes the
     /// index stale, as a change told does.  Nothing to compare before a parse.
-    /// Whether it found such a change.
-    pub fn notice(&mut self) -> bool {
-        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return false };
+    pub fn notice(&mut self) {
+        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return };
         self.fresh = cache::disk(root) == stamp;
-        !self.fresh
     }
 
     /// A parse's end, its INDEX and its FAILURE: its run stopped; its index
@@ -464,28 +462,28 @@ mod tests {
         look("before any parse", None, &before);
         // A server command with no `lsp`: no parse, and why, once.
         workspace.dbt = config::Dbt::new(vec!["dbt".into()], None);
-        look("no lsp", workspace.parse(true, Some(report())), &workspace);
-        look("no lsp again", workspace.parse(true, Some(report())), &workspace);
+        look("no lsp", workspace.parse(Some(report())), &workspace);
+        look("no lsp again", workspace.parse(Some(report())), &workspace);
         // With one, nothing starts without a report, and one parse at a time with one.
         workspace.dbt = config::Dbt::new(vec!["true".into(), "lsp".into()], None);
-        look("no report", workspace.parse(true, None), &workspace);
-        look("started", workspace.parse(true, Some(report())), &workspace);
+        look("no report", workspace.parse(None), &workspace);
+        look("started", workspace.parse(Some(report())), &workspace);
         workspace.notice();
         look("nothing written", None, &workspace);
-        look("under way", workspace.parse(true, Some(report())), &workspace);
+        look("under way", workspace.parse(Some(report())), &workspace);
         let outcome = outcomes.recv_timeout(Duration::from_secs(10)).expect("the parse's outcome");
         look("parsed", workspace.parsed(outcome.index, outcome.failure), &workspace);
-        look("fresh", workspace.parse(true, Some(report())), &workspace);
+        look("fresh", workspace.parse(Some(report())), &workspace);
         let parsed = workspace.index.is_none() && outcomes.try_recv().is_err();
         // A file written on disk, with no change told: stale, and parsed again, one parse at a time.
         fs::write(root.join("models/b.sql"), "select 2").unwrap();
         workspace.notice();
         look("b written", None, &workspace);
-        look("stale", workspace.parse(true, Some(report())), &workspace);
+        look("stale", workspace.parse(Some(report())), &workspace);
         fs::write(root.join("models/c.sql"), "select 3").unwrap();
         workspace.notice();
         look("c written", None, &workspace);
-        look("stale under way", workspace.parse(true, Some(report())), &workspace);
+        look("stale under way", workspace.parse(Some(report())), &workspace);
         let no_lsp = Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".to_owned());
         let expected = [
             ("before any parse", None, false, true, None),

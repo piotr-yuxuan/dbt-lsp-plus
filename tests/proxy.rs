@@ -2765,100 +2765,33 @@ fn no_parse_while_packages_need_the_network() {
     assert!(session.finish().success());
 }
 
-/// A copy of the fixture for test NAME whose `packages.yml` names a hub
-/// package that a lock as recent names and `dbt_packages/` holds, in front
-/// of the fake with a manifest, compiled, which exits on a completion and
-/// whose next life never answers its `initialize`; a `PATH` with no
-/// `unshare`, so that nothing cuts the parse off the network.  Returns the
-/// session, the fake's log and the copy.
-fn hub_package_without_a_cut(name: &str) -> (Session, PathBuf, PathBuf) {
-    let project = copy_fixture(&format!("{name}-project"));
-    std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
-        .unwrap();
-    let lock = "packages:\n- package: dbt-labs/dbt_utils\n  name: dbt_utils\n  version: 1.4.1\nsha1_hash: x\n";
-    std::fs::write(project.join("package-lock.yml"), lock).unwrap();
-    std::fs::create_dir_all(project.join("dbt_packages/dbt_utils")).unwrap();
-    std::fs::write(project.join("dbt_packages/dbt_utils/dbt_project.yml"), "name: dbt_utils\n").unwrap();
-    let dir = scratch(name);
-    let (script, log, empty) = (dir.join("script.json"), dir.join("log.jsonl"), dir.join("bin"));
-    let fake = json!({"manifest": manifest(), "exit_on": "textDocument/completion", "exit_life": 1,
-                      "hang_on": "initialize", "hang_life": 2});
-    std::fs::write(&script, fake.to_string()).unwrap();
-    std::fs::create_dir_all(&empty).unwrap();
-    let project_arg = project.to_string_lossy().into_owned();
-    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir", &project_arg].map(str::to_owned);
-    let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
-        ("PATH", empty.as_path()),
-        ("XDG_CACHE_HOME", dir.as_path()),
-    ];
-    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+#[test]
+fn in_front_a_refused_parse_leaves_the_last_index_to_answer() {
+    let project = copy_fixture("refused-parse-project");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("refused-parse", json!({"manifest": manifest()}), &flags, None);
     session.initialize(&project);
     session.open(&project.join("models/marts/orders.sql"), None);
     session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
-    (session, log, project)
-}
-
-/// Whether MESSAGE logs that nothing cuts dbt parse off the network.
-fn says_no_cut(message: &Value) -> bool {
-    let text = message["params"]["message"].as_str().unwrap_or_default();
-    message["method"] == "window/logMessage" && text.contains("nothing cuts dbt parse off the network here")
-}
-
-#[test]
-fn after_dbt_lsp_is_lost_a_change_guards_the_packages_as_alone() {
-    let (mut session, log, project) = hub_package_without_a_cut("lost-guard-alone");
-    let request =
-        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
-    session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
-    session.wait_for(|m| m["method"] == "window/showMessage");
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));
-    node_info(&mut session, json!("model.shop.orders"));
-    session.wait_for(says_no_cut);
-    parses_stay(&log, 1);
-    assert!(session.finish().success());
-}
-
-#[test]
-fn after_dbt_lsp_is_lost_with_no_change_its_compilation_still_guards_the_packages() {
-    let (mut session, log, _) = hub_package_without_a_cut("lost-guard-earned");
-    session.send(&json!({"jsonrpc": "2.0", "id": 900, "method": "textDocument/completion", "params": {}}));
-    session.wait_for(|m| m["method"] == "window/showMessage");
-    parses_stay(&log, 0);
-    let request =
-        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
-    let info = session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    assert_eq!(info["relation"], "\"shop\".\"main\".\"orders\"", "{info}");
-    assert_eq!(parses(&log).len(), 1);
-    assert!(!session.received.iter().any(says_no_cut));
-    assert!(session.finish().success());
-}
-
-#[test]
-fn in_front_a_change_found_on_disk_guards_the_packages_as_alone() {
-    let (mut session, log, project) = hub_package_without_a_cut("found-guard-alone");
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
     assert_eq!(parses(&log).len(), 1, "the parse that dbt lsp's compilation allows");
-    // dbt lsp never heard of the write, and has not resolved the packages since.
+    // Written behind dbt lsp's back: a hub package that no lock names, and a model.
+    std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
+        .unwrap();
     std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
     let meanwhile = node_info(&mut session, json!("model.shop.orders"));
-    session.wait_for(says_no_cut);
+    session.wait_for(|m| {
+        let text = m["params"]["message"].as_str().unwrap_or_default();
+        m["method"] == "window/logMessage" && text.contains("run dbt deps")
+    });
     parses_stay(&log, 1);
     assert_eq!(
         (meanwhile.get("error"), &meanwhile["result"]["unique_id"]),
         (None, &json!("model.shop.orders")),
         "answered from the last index meanwhile: {meanwhile}"
     );
-    // A change told, which dbt lsp compiles from the disk as it is: its resolution holds again.
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));
-    node_info(&mut session, json!("model.shop.orders"));
-    until_logged(&log, "the parse after dbt lsp's compilation", |_| parses(&log).len() == 2);
     assert!(session.finish().success());
 }
 

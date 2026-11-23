@@ -265,7 +265,7 @@ fn doctor(path: &Path, launch: Launch, command: &[String]) -> (Value, bool) {
     let cut = config::can_cut();
     // With the server command as given, as select asks it: finding the dbt
     // changes only a bare `dbt`, and the guard reads none of it.
-    let packages = packages::refused(&project, command, cut, alone.is_some());
+    let packages = packages::refused(&project, command, cut);
     let skipped = dbt.skipped.iter().map(|(path, why)| json!({"path": path.display().to_string(), "why": why}));
     let found = json!({"command": dbt.command, "named": dbt.named, "source": dbt.source,
                        "skipped": skipped.collect::<Vec<_>>(), "lsp": probed.as_ref().ok(), "why": probed.as_ref().err()});
@@ -295,9 +295,9 @@ fn select(selector: &str, command: &[String]) -> Value {
             return commands::failure(commands::NODES, &why);
         }
     };
-    // Under the cut, whether the session is alone is moot; the guard reads
-    // the server command's install path, which finding its dbt leaves as is.
-    if let Some(why) = packages::refused(&project, command, true, false) {
+    // The guard reads the server command's install path, which finding its
+    // dbt leaves as is.
+    if let Some(why) = packages::refused(&project, command, true) {
         return commands::failure(commands::NODES, &why);
     }
     let (dbt, dir) = dbt_of(&project, route, command);
@@ -352,8 +352,8 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
 }
 
 /// The CLI's index of the project at ROOT, in WORKSPACE: the manifest kept
-/// for the project as it lies on disk, else that of a parse, guarded as
-/// alone, waited for, and kept when it did not fail; a parse that ended
+/// for the project as it lies on disk, else that of a parse, waited for,
+/// and kept when it did not fail; a parse that ended
 /// well with no manifest that reads fails here, where no server's wait
 /// could explain the missing index.
 fn indexed(workspace: &mut Workspace, root: &Path) {
@@ -365,7 +365,7 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
         return;
     }
     let (sender, outcomes) = mpsc::channel();
-    workspace.parse(true, Some(Box::new(move |outcome| drop(sender.send(outcome)))));
+    workspace.parse(Some(Box::new(move |outcome| drop(sender.send(outcome)))));
     // None started: no report kept the channel open.
     let Ok(outcome) = outcomes.recv() else { return };
     let failure = outcome.failure.or(outcome.index.is_none().then_some("it left no manifest that reads".to_owned()));

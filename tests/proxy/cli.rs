@@ -99,8 +99,7 @@ fn spelt(path: &Path) -> PathBuf {
 const HUB: &str =
     "packages:\n  - local: dbt_packages/shop_utils\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n";
 
-/// `packages::refused`'s reason for HUB, on any system, when the session
-/// is not alone.
+/// `packages::refused`'s reason for HUB.
 const NOT_LOCKED: &str = "a package from the network is not in a lock as recent as the files naming it: dbt parse would install it, \
      rewriting the install path; run dbt deps";
 
@@ -297,7 +296,6 @@ fn doctor_and_select_give_the_guard_s_reason() {
     let case = Case::new("cli-guard", &json!({}));
     venv_fake(&case.copy);
     fs::write(case.copy.join("packages.yml"), HUB).unwrap();
-    // dbt lsp would start behind the proxy: its first parse is guarded as not alone.
     let (status, answer) = case.run(&case.copy, &["doctor"]);
     assert_eq!((status, &answer["packages"]), (Some(0), &json!(NOT_LOCKED)), "{answer}");
     let probes = starts(&case.log).len();
@@ -309,19 +307,23 @@ fn doctor_and_select_give_the_guard_s_reason() {
 }
 
 #[test]
-fn doctor_asks_the_guard_as_the_session_s_first_parse_would() {
-    let mut case = Case::new("cli-guard-alone", &json!({}));
+fn doctor_guards_a_package_from_the_network_alike_on_every_route() {
+    let case = Case::new("cli-guard-routes", &json!({}));
     venv_fake(&case.copy);
     fs::write(case.copy.join("packages.yml"), HUB).unwrap();
-    // Without the cut on any system, where whether the session is alone decides.
-    let (bin, _) = path_with_stub(&case.dir, "exit 1");
-    script(&case.dir.join("bin/unshare"), "exit 1");
-    case.path = bin;
-    let (_, document) = case.run(&case.copy, &["doctor", "models/marts/orders.sql"]);
-    let alone = "a package from the network is named, and nothing cuts dbt parse off the network here";
-    assert_eq!((&document["cut"], &document["packages"]), (&json!(false), &json!(alone)), "{document}");
-    let (_, folder) = case.run(&case.copy, &["doctor", "."]);
-    assert_eq!((&folder["alone"], &folder["packages"]), (&Value::Null, &json!(NOT_LOCKED)), "{folder}");
+    let on_each_route = |packages: &Value| {
+        for (path, route) in [("models/marts/orders.sql", "document"), (".", "folder")] {
+            let (_, answer) = case.run(&case.copy, &["doctor", path]);
+            assert_eq!((&answer["route"], &answer["packages"]), (&json!(route), packages), "{answer}");
+        }
+    };
+    on_each_route(&json!(NOT_LOCKED));
+    let lock = "packages:\n- local: dbt_packages/shop_utils\n  name: shop_utils\n\
+                - package: dbt-labs/dbt_utils\n  name: dbt_utils\n  version: 1.3.0\nsha1_hash: x\n";
+    fs::write(case.copy.join("package-lock.yml"), lock).unwrap();
+    fs::create_dir_all(case.copy.join("dbt_packages/dbt_utils")).unwrap();
+    fs::write(case.copy.join("dbt_packages/dbt_utils/dbt_project.yml"), "name: dbt_utils\n").unwrap();
+    on_each_route(&Value::Null);
 }
 
 #[test]

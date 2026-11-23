@@ -478,10 +478,6 @@ struct Parsing {
     /// Whether a request wanted an index before the server had compiled:
     /// the server's compilation then starts the parse.
     wanted: bool,
-    /// Whether the Workspace found a change on disk since the server's last
-    /// compilation, a change dbt lsp never heard of: its resolution of the
-    /// packages no longer holds.
-    found: bool,
 }
 
 /// What a dbt lsp process said of its compilations: whether one runs.
@@ -1300,8 +1296,7 @@ impl<W: Write> Proxy<W> {
 
     /// Lets the Workspace start a parse when the index is stale and dbt can
     /// parse: with no server running, or with one that compiled since the
-    /// last change; packages guarded as alone while no server runs and none
-    /// compiled since the last change; no shutdown.  Its outcome comes back
+    /// last change; no shutdown.  Its outcome comes back
     /// as an event; why none could start is logged.
     fn want_index(&mut self) {
         // After `shutdown`, neither a listing nor a parse: the session ends.
@@ -1321,7 +1316,7 @@ impl<W: Write> Proxy<W> {
         let events = self.parsing.events.clone();
         let report = events
             .map(|events| -> config::ReportFn { Box::new(move |outcome| drop(events.send(Event::Parsed(outcome)))) });
-        if let Some(why) = self.workspace.parse(self.guards_packages(), report) {
+        if let Some(why) = self.workspace.parse(report) {
             self.log_parse(&why);
         }
     }
@@ -1329,16 +1324,8 @@ impl<W: Write> Proxy<W> {
     /// On behalf of a request: the Workspace looks at the files on disk
     /// first, then `want_index`.
     fn ask_index(&mut self) {
-        self.parsing.found |= self.workspace.notice();
+        self.workspace.notice();
         self.want_index();
-    }
-
-    /// Whether dbt's packages are guarded as alone: a change found on disk
-    /// since dbt lsp's last compilation, or no dbt lsp runs and none
-    /// compiled since the last change told, as one that did resolved them,
-    /// though it may be gone since.
-    fn guards_packages(&self) -> bool {
-        self.parsing.found || (self.backend.running().is_none() && !self.parsing.compiled)
     }
 
     /// A request of one of the proxy's commands for clients, COMMAND with
@@ -1392,7 +1379,7 @@ impl<W: Write> Proxy<W> {
             }
             _ => Ok(commands::nodes_job(argument.as_str().unwrap_or_default())),
         };
-        let refused = packages::refused(&root, self.workspace.dbt.command(), true, self.guards_packages());
+        let refused = packages::refused(&root, self.workspace.dbt.command(), true);
         let dir = self.workspace.cache_dir(&root).join("run");
         let run =
             job.as_ref().ok().and_then(|job| self.workspace.dbt.run(&job.words, &root, dir, config::RUN_LOG, true));
@@ -1996,7 +1983,7 @@ impl<W: Write> Proxy<W> {
         // The server has resolved the packages, from the disk as it is: dbt
         // may parse, for a request that wanted an index before.
         if foreground {
-            (self.parsing.compiled, self.parsing.found) = (true, false);
+            self.parsing.compiled = true;
             if std::mem::take(&mut self.parsing.wanted) {
                 self.want_index();
             }
@@ -2755,10 +2742,6 @@ mod tests {
             (
                 "`dbt-lsp-plus runs dbt only cut off the network, which this system cannot`",
                 r#"failure(command, "dbt-lsp-plus runs dbt only cut off the network, which this system cannot")"#,
-            ),
-            (
-                "a package from the network is named, and nothing cuts dbt parse off the network here",
-                r#"Some("a package from the network is named, and nothing cuts dbt parse off the network here".into())"#,
             ),
             ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
             (
