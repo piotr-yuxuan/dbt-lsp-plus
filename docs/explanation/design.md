@@ -501,8 +501,10 @@ it run, and names the first whose `on-run-start`, `on-run-end` or
 top-level merge key, which may bring one, holds anything but a null, `""`
 or `[]`, the forms seen harmless: `NAME has on-run hooks, which dbt
 compile would run against the warehouse`.  A `dbt_project.yml` there that
-repeats a key, of which dbt reads the last, refuses too, and one that
-does not read refuses with the guard's words.  Its answer is the `compiled_path` of the node of the root package
+repeats a key, of which dbt reads the last, refuses too, where no hook is
+found, in words of its own: `FILE repeats a key, of which dbt reads the
+last: a hook may hide there`; one that does not read refuses with the
+guard's words.  Its answer is the `compiled_path` of the node of the root package
 whose `original_file_path` is R, a test's never (as of a properties file),
 in the manifest the run wrote, resolved from the working directory; none
 answers dbt lsp's "Compiled file path not

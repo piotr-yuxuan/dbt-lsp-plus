@@ -143,14 +143,16 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
 /// or `on-run-end` hooks, which dbt compile runs against the warehouse,
 /// even for one model, or a top-level merge key, which may bring one.  A
 /// plain null (the empty one, no value, included), `""` or `[]` is none;
-/// any other value is one.  A `dbt_project.yml` that repeats a key, of
-/// which dbt reads the last, or that does not read refuses too.
+/// any other value is one.  A `dbt_project.yml` that does not read refuses
+/// too, and one with no hook found that repeats a key, of which dbt reads
+/// the last, refuses in words of its own.
 pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
     let install = packages::install_path(root, server).unwrap_or_default();
     let mut installed: Vec<fs::DirEntry> = fs::read_dir(install).into_iter().flatten().flatten().collect();
     installed.sort_by_key(fs::DirEntry::path);
     let refusal = |dir: PathBuf| {
-        let read = packages::read(&dir.join("dbt_project.yml"));
+        let file = dir.join("dbt_project.yml");
+        let read = packages::read(&file);
         let Ok(Some(config)) = &read else { return read.err() };
         let mut values = ["<<", "on-run-start", "on-run-end"].into_iter().filter_map(|key| config.get(key));
         let hooked = values.any(|value| match value {
@@ -158,9 +160,11 @@ pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
             Tree::Scalar { value, .. } => !value.is_empty(),
             Tree::Seq(items) => !items.is_empty(),
             Tree::Map { .. } | Tree::Alias => true,
-        }) || config.repeats();
+        });
         let name = config.get("name").and_then(Tree::as_str).unwrap_or("a package");
-        hooked.then_some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"))
+        let hook = format!("{name} has on-run hooks, which dbt compile would run against the warehouse");
+        let repeat = format!("{} repeats a key, of which dbt reads the last: a hook may hide there", file.display());
+        hooked.then_some(hook).or(config.repeats().then_some(repeat))
     };
     std::iter::once(root.to_owned()).chain(installed.iter().map(fs::DirEntry::path)).find_map(refusal)
 }
@@ -340,12 +344,23 @@ mod tests {
             "on-run-end:\n  sql: select 1\n",
             "hooks: &hooks select 1\non-run-end: *hooks\n",
             "base: &base\n  on-run-end: select 1\n<<: *base\n",
-            // dbt reads the last of two keys.
-            "on-run-end: []\non-run-end: select 1\n",
-            "base: &base\n  on-run-end: select 1\n<<: []\n<<: *base\n",
         ];
-        for form in forms {
-            assert_eq!(hooked([form, "", ""], &[]), refused("shop"), "{form:?}");
+        // dbt reads the last of two keys, where a hook may hide, at any depth.
+        let repeated = |file: &str| {
+            Some(format!(
+                "{} repeats a key, of which dbt reads the last: a hook may hide there",
+                dir.join(file).display()
+            ))
+        };
+        let (nested, root) = ("models:\n  +materialized: view\n  +materialized: table\n", repeated("dbt_project.yml"));
+        let cases = forms.map(|form| ([form, "", ""], refused("shop"))).into_iter().chain([
+            (["on-run-end: []\non-run-end: select 1\n", "", ""], root.clone()),
+            (["base: &base\n  on-run-end: select 1\n<<: []\n<<: *base\n", "", ""], root.clone()),
+            ([nested, "", ""], root),
+            (["", "", nested], repeated("dbt_packages/a_utils/dbt_project.yml")),
+        ]);
+        for (configs, expected) in cases {
+            assert_eq!(hooked(configs, &[]), expected, "{configs:?}");
         }
         // As dbt-oss 2.0.11 was seen to start the hook: a package under the server command's install path.
         fs::create_dir_all(dir.join("vendor/hookpkg")).unwrap();
