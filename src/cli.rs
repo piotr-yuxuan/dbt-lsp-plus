@@ -507,9 +507,11 @@ mod tests {
             ("x:1", place("/w/shop/x:1", 0, 0)),
         ];
         let ids = ["model.shop.a", "models/a.sql:0", "models/a.sql:3:x", "models/a.sql:1:2:3", "models/b.sql"];
-        let expected = places.into_iter().chain(ids.map(|id| (id, Operand::Id(id.to_owned()))));
-        let (read, expected): (Vec<Operand>, Vec<Operand>) =
-            expected.map(|(asked, expected)| (operand(asked, Path::new("/w/shop"), is_file), expected)).unzip();
+        let expected: Vec<(&str, Operand)> =
+            places.into_iter().chain(ids.map(|id| (id, Operand::Id(id.to_owned())))).collect();
+        // Each operand asked beside what it reads as, so that a failure names it.
+        let read: Vec<(&str, Operand)> =
+            expected.iter().map(|(asked, _)| (*asked, operand(asked, Path::new("/w/shop"), is_file))).collect();
         assert_eq!(read, expected);
     }
 }

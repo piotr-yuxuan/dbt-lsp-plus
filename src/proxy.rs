@@ -349,7 +349,7 @@ enum Kept {
 }
 
 /// The proxy's part of a merged request.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Part {
     /// Nothing of the proxy's at the position: the request is dbt lsp's,
     /// whose answer passes as it came, and when it gives none, the client
@@ -3244,8 +3244,12 @@ mod tests {
             None,
             "a function's argument names no node before any parse"
         );
-        // No argument: why there is no index yet; once there is one, none.
-        assert_eq!(proxy.node_info(&json!({})), Some(Answer::Unanswered(vec![proxy.workspace.unindexed()])));
+        // No argument, or a file neither open nor on disk: why there is no index yet; once there is one, none
+        // and empty.
+        let missing = features::uri(&root.join("models/marts/missing.sql"));
+        let at_missing = json!({"arguments": [{"uri": missing, "position": {"line": 0, "character": 0}}]});
+        let unindexed = Some(Answer::Unanswered(vec![proxy.workspace.unindexed()]));
+        assert_eq!((proxy.node_info(&json!({})), proxy.node_info(&at_missing)), (unindexed.clone(), unindexed));
         let node = json!({"unique_id": "model.shop.uses_f", "name": "uses_f", "resource_type": "model",
                           "package_name": "shop", "original_file_path": "models/marts/uses_f.sql", "config": {}});
         let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_f": node}});
@@ -3256,9 +3260,6 @@ mod tests {
         let Some(Answer::Found(start)) = proxy.node_info(&at(0)) else { panic!("no node at the file's start") };
         assert_eq!(start["unique_id"], "model.shop.uses_f");
         assert_eq!(proxy.node_info(&json!({})), None);
-        // A file neither open nor on disk names nothing.
-        let missing = features::uri(&root.join("models/marts/missing.sql"));
-        let at_missing = json!({"arguments": [{"uri": missing, "position": {"line": 0, "character": 0}}]});
         assert_eq!(proxy.node_info(&at_missing), Some(Answer::Empty));
     }
 
@@ -3386,8 +3387,9 @@ mod tests {
         proxy.workspace.index = None;
         assert!(proxy.hover_part(&dim) == Part::Unindexed, "a hover's part before any index");
         let entry_before = proxy.hover_part(&on_entry);
-        assert!(
-            entry_read == unreadable && entry_before == Part::Unindexed,
+        assert_eq!(
+            (entry_read, entry_before),
+            (unreadable, Part::Unindexed),
             "an entry's, with an index then before any"
         );
         fs::remove_dir_all(root).unwrap();

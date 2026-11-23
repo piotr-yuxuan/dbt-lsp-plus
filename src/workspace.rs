@@ -384,7 +384,7 @@ mod tests {
         look("a file's start", &workspace, at(root.join("models/a.sql"), 0));
         look("an entry's name", &workspace, at(root.join("models/_a.yml"), in_name));
         look("no such id", &workspace, id("model.shop.x"));
-        let described = workspace.node(&open, &id("model.shop.a"));
+        let (a_node, b_node) = (workspace.node(&open, &id("model.shop.a")), workspace.node(&open, &id("model.shop.b")));
         fs::write(root.join("dbt_project.yml"), "name: [").unwrap();
         workspace.epoch += 1;
         look("an entry's name, unreadable", &workspace, at(root.join("models/_a.yml"), in_name));
@@ -400,20 +400,26 @@ mod tests {
             ("an entry's name, unreadable", Answer::Unanswered(vec![Reason::Unreadable(root.clone())])),
         ];
         assert_eq!(seen, expected.map(|(step, answer)| (step.to_owned(), answer)));
-        let Answer::Found(described) = described else { panic!("no node a: {described:?}") };
-        let summary = described["summary"].is_string();
-        assert_eq!((&described["children"], summary), (&json!(["model.shop.b"]), true), "{described}");
+        // a's children and summary; b, which none depends on, has `children` all the same.
+        let field = |answer: &Answer, key: &str| match answer {
+            Answer::Found(node) => node[key].clone(),
+            _ => Value::Null,
+        };
+        let described = (field(&a_node, "children"), field(&a_node, "summary").is_string(), field(&b_node, "children"));
+        assert_eq!(described, (json!(["model.shop.b"]), true, json!([])), "{a_node:?} {b_node:?}");
         // What a front end with fields gives of each.
         let (n, failure) = (json!({"unique_id": "model.shop.a"}), "dbt parse failed: x");
         let replies = [
             reply(Answer::Found(n.clone()), Some(failure), "model.shop.a"),
             reply(Answer::Empty, None, "model.shop.x"),
+            reply(Answer::Empty, Some(failure), "model.shop.x"),
             reply(Answer::Unanswered(vec![Reason::Unindexed("it is running".into())]), Some(failure), "a"),
             reply(Answer::Unanswered(vec![elsewhere.clone()]), Some(failure), "a"),
         ];
         let said = [
             (n, Some(failure.to_owned())),
             (Value::Null, Some("model.shop.x names no node".to_owned())),
+            (Value::Null, Some(failure.to_owned())),
             (Value::Null, Some(failure.to_owned())),
             (Value::Null, Some(elsewhere.to_string())),
         ];

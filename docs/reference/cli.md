@@ -193,7 +193,8 @@ On a failure, `node` is `null`, or the node of the last manifest a
 failed parse still wrote, and `error` says why:
 
 - `<ID> names no node`, when the index holds no such node, or the place
-  names none;
+  names none; in its place, the failure of the last parse when that
+  parse failed but still wrote a manifest;
 - `dbt parse failed: <dbt's first error> (see <log>)`, the log gone
   with the run directory;
 - `dbt parse failed: it left no manifest that reads`, when dbt ended
