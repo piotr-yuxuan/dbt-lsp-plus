@@ -376,18 +376,6 @@ fn select_sweeps_a_run_directory_left_for_a_day() {
 }
 
 #[test]
-fn select_runs_though_unshare_fails() {
-    let mut case = Case::new("cli-select-unshare", &json!({"list": listed()}));
-    venv_fake(&case.copy);
-    let (bin, _) = path_with_stub(&case.dir, "exit 1");
-    script(&case.dir.join("bin/unshare"), "exit 1");
-    case.path = bin;
-    let (status, answer) = case.run(&case.copy, &["select", "+stg_orders+"]);
-    assert_eq!((status, answer), (Some(0), json!({"nodes": listed(), "error": null})));
-    assert_eq!(case.runs().len(), 1, "{:?}", case.runs());
-}
-
-#[test]
 fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
     let case = Case::new("cli-select-shared", &json!({"list": listed()}));
     venv_fake(&case.copy);

@@ -439,6 +439,30 @@ fn with_no_unshare_on_path_compile_and_nodes_are_announced_and_run() {
 }
 
 #[test]
+fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
+    let dir = scratch("commands-no-lsp-word");
+    let (script, log) = (dir.join("script.json"), dir.join("log.jsonl"));
+    std::fs::write(&script, json!({"exit_on": "initialize"}).to_string()).unwrap();
+    let fixture_arg = fixture().to_string_lossy().into_owned();
+    // A wrapper of the user's own, whose words make no run of dbt's CLI.
+    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "--project-dir", &fixture_arg].map(str::to_owned);
+    let env = [
+        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
+        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("XDG_CACHE_HOME", dir.as_path()),
+    ];
+    let mut session = Session::start_with(&[], &server, &env, Some(&dir));
+    let result = session.initialize(&fixture());
+    assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
+    let no_lsp = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
+    let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
+    assert_eq!(compiled["result"], json!({"file_uri": null, "error": no_lsp}));
+    assert_eq!(execute(&mut session, NODES, json!(["x"]))["result"], json!({"nodes": [], "error": no_lsp}));
+    assert!(runs(&log).is_empty(), "{:?}", runs(&log));
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_exit_kills_a_run_under_way() {
     let (mut session, log, _) = alone("commands-alone-exit", json!({"compiled": "select 1", "run_hang": true}));
     let params = json!({"command": COMPILE, "arguments": [uri(&orders())]});

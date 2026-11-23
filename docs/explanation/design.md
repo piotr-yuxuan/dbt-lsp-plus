@@ -2329,7 +2329,8 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     the install path, alike on every route;
   - the commands for clients: a compile refused where a package may have
     on-run hooks, under the server command's install path too, each form
-    seen harmless let through.
+    seen harmless let through; with a server command without `lsp`,
+    `compile` and `nodes` announced, each answering why it runs nothing.
 - CI runs the same checks on GitHub Actions, and the corpus and the live
   test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it; each
   week, the same on the latest stable dbt-oss, and on the latest
