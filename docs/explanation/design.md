@@ -1469,7 +1469,7 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     paths, an open `dbt_project.yml` renaming the project once saved, a
     package's file replaced with its size and time kept;
   - the root and the routes: `--project-dir` first and as spelt, with its
-    one line; the client's folder without it; the working directory
+    one line, on the standard error too; the client's folder without it; the working directory
     naming nothing; without a project, null to every request of the
     server's, -32601 to another, no other frame, nothing run and nothing
     on the standard error, with stubs of `dbt` and git alone on `PATH`; a
@@ -1519,8 +1519,9 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   environment with a scratch home, built as the corpus is, then run with
   none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test
   proxy -- --ignored`.  It checks the outline of a model and of a
-  properties file, folding, highlights, a hover at a model's start before
-  the parse has ended, the summary or the reason, never null; navigation
+  properties file, folding, highlights, selection ranges, a hover at a
+  model's start before the parse has ended, the summary or the reason,
+  never null; navigation
   in a properties file and of a ref in SQL; the last run's failure, a
   warning of `dbt parse` possibly beside it; the hierarchy from the
   manifest, `order_summary`'s upstream through its variable; node

@@ -387,14 +387,19 @@ fn document_features(session: &mut Session, project: &Path) {
     let on_orders = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 17, "character": 10}});
     let highlights = session.request("textDocument/documentHighlight", on_orders);
     assert_eq!(highlights["result"].as_array().map(Vec::len), Some(4), "{highlights}");
-    // At the model's start, before the parse that the open started has ended, the summary or why there is no
-    // index; a null only once that parse has ended in between with no node there, which nodeInfo then shows.
+    // The CTE's use, then outward.
+    let at = json!({"textDocument": {"uri": uri(&orders)}, "positions": [{"line": 17, "character": 11}]});
+    let selection = session.request("textDocument/selectionRange", at);
+    let used = json!({"start": {"line": 17, "character": 9}, "end": {"line": 17, "character": 15}});
+    assert_eq!(selection["result"][0]["range"], used, "{selection}");
+    // At the model's start, the summary, or why there is no index before the parse the open started has
+    // ended: never null.
     let start = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
     let first = session.request("textDocument/hover", start);
-    let indexed = crate::node_info(session, json!("model.shop.orders"));
     let message = first["error"]["message"].as_str().unwrap_or_default();
     let unindexed = first["error"]["code"] == -32803 && message.starts_with("dbt parse has not finished: ");
-    assert!(unindexed || !first["result"].is_null() || indexed["result"].is_object(), "{first}, {indexed}");
+    let summary = first["result"]["contents"]["value"].as_str().is_some_and(|value| value.starts_with("model table"));
+    assert!(unindexed || summary, "{first}");
     // On ref('stg_orders'), line 4, once parsed.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());

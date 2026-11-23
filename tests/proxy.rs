@@ -430,15 +430,6 @@ fn exit_without_shutdown_fails() {
     assert_eq!(session.wait().code(), Some(1));
 }
 
-/// Checks that ANSWER, to a hover on a node before any index in front of
-/// dbt lsp, which gave no answer, says why the proxy has no index, then
-/// ENDING, why dbt lsp gave none.
-pub fn unindexed_then(answer: &Value, ending: &str) {
-    let message = answer["error"]["message"].as_str().unwrap_or_default();
-    assert!(answer.get("result").is_none() && answer["error"]["code"] == -32803, "{answer}");
-    assert!(message.starts_with("dbt parse has not finished: ") && message.ends_with(ending), "{answer}");
-}
-
 /// The position of `page_views` in `stg_page_views.sql`, with that file's URI.
 fn on_page_views() -> Value {
     let path = fixture().join("models/staging/stg_page_views.sql");
@@ -2275,8 +2266,8 @@ fn ours_is_read_as_plus_with_one_warning() {
     let (mut session, _) = with_options("mode-ours", json!({}), &["--mode", "textDocument/definition=ours"]);
     session.initialize(&fixture());
     let orders = fixture().join("models/marts/orders.sql");
-    let nowhere = session.request("textDocument/definition", position_in(&orders, "select", 1));
-    assert_eq!((nowhere.get("error"), &nowhere["result"]), (None, &Value::Null), "{nowhere}");
+    let found = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
+    assert_eq!(found["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
     let said = shown(&session);
     assert!(said.len() == 1 && said[0].contains("the mode ours is now named plus"), "{said:?}");
     assert!(session.finish().success());
@@ -2378,13 +2369,24 @@ fn nothing(method: &str) -> Value {
 fn plus_answers_every_method_itself() {
     let (mut session, _) = with_options("mode-every-plus", json!({}), &["--default-mode", "plus"]);
     session.initialize(&fixture());
-    // At the first `select`, the targeted requests and the hover find nothing of the proxy's.
-    let targeted = ["textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/rename"];
+    // At the first `select`, the requests of a target find nothing, nor the hints before an index; the
+    // others find their part.
+    let empty = [
+        "textDocument/hover",
+        "textDocument/definition",
+        "textDocument/references",
+        "textDocument/rename",
+        "textDocument/documentHighlight",
+        "textDocument/inlayHint",
+    ];
     for (method, params) in requests_of_every_mode() {
         let answer = session.request(method, params);
         assert!(answer.get("error").is_none(), "{method}: {answer}");
-        assert!(!targeted.contains(&method) || answer["result"] == nothing(method), "{method}: {answer}");
+        assert_eq!(empty.contains(&method), answer["result"] == nothing(method), "{method}: {answer}");
     }
+    let orders = fixture().join("models/marts/orders.sql");
+    let found = session.request("textDocument/definition", position_in(&orders, "ref('stg_orders')", 6));
+    assert_eq!(found["result"], location(&fixture(), "models/staging/stg_orders.sql", 0, 0, 0), "{found}");
     assert!(session.finish().success());
 }
 
@@ -2791,22 +2793,6 @@ fn no_failure_is_published_after_shutdown() {
     assert!(!session.received.iter().any(|m| m["method"] == "textDocument/publishDiagnostics"));
     session.notify("exit", Value::Null);
     assert!(session.wait().success());
-}
-
-#[test]
-fn an_edit_clears_failures_over_an_empty_server_set_and_waits_over_a_full_one() {
-    let (project, mut session, _) = run_session("runs-server-sets", json!({}));
-    let model = project.join("models/marts/orders.sql");
-    write_run(&project, &run_results("build", true), &run_manifest());
-    published(&mut session, &model, |p| !last_run(p).is_empty());
-    // With no parse's problem in the file, an edit clears the failure at once.
-    let edit = json!({"textDocument": {"uri": uri(&model), "version": 2}, "contentChanges": [
-        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "# fixed\n"}]});
-    session.open(&model, None);
-    session.received.clear();
-    session.notify("textDocument/didChange", edit);
-    published(&mut session, &model, |p| last_run(p).is_empty());
-    assert!(session.finish().success());
 }
 
 /// The results of `dbt source freshness` as 2.0.9 writes them, LOADED

@@ -1406,12 +1406,11 @@ mod tests {
         let orders = features::uri(&root.join("models/marts/orders.sql"));
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
-        // now; the parse cannot start here, the server command having no `lsp`.
+        // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
         let mut proxy = Proxy::new(Vec::new(), Some(root));
         proxy.table = modes::Table::new(&modes::Settings::default());
+        let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
-        let asked = proxy.workspace.unindexed().to_string();
-        assert!(!asked.contains("waiting for dbt lsp"), "{asked}");
         let mut client = &proxy.client[..];
         let written = std::iter::from_fn(|| rpc::read_frame(&mut client).unwrap());
         let written: Vec<Value> = written.filter(|message| message["id"] == 1).collect();

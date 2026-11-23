@@ -67,8 +67,6 @@ pub struct Session {
     /// Every message the client received, in order, parsed; null for a body
     /// that is not JSON.
     pub received: Vec<Value>,
-    /// Whether the session answers the server's requests by itself.
-    pub auto_answer: bool,
 }
 
 impl Session {
@@ -115,15 +113,7 @@ impl Session {
                 }
             }
         });
-        Session {
-            child,
-            stdin,
-            inbox,
-            next_id: 100,
-            timeout: Duration::from_secs(10),
-            received: Vec::new(),
-            auto_answer: true,
-        }
+        Session { child, stdin, inbox, next_id: 100, timeout: Duration::from_secs(10), received: Vec::new() }
     }
 
     /// Starts the server with the fake dbt, `lsp ARGUMENTS...`, playing
@@ -182,7 +172,7 @@ impl Session {
                 panic!("no awaited message within {:?}; received {:#?}", self.timeout, self.received)
             });
             self.received.push(message.clone());
-            if let (true, Some(id), Some(_)) = (self.auto_answer, message.get("id"), message.get("method")) {
+            if let (Some(id), Some(_)) = (message.get("id"), message.get("method")) {
                 let items = message["params"]["items"].as_array().map(|items| vec![Value::Null; items.len()]);
                 self.send(&json!({"jsonrpc": "2.0", "id": id, "result": items}));
             }
@@ -300,16 +290,17 @@ pub fn script(path: &Path, body: &str) {
     assert!(child.wait().unwrap().success(), "write {path:?}");
 }
 
-/// The bodies the fake server received, one JSON value per line.
+/// The lines of the fake's log LOG, one JSON value each.
 pub fn received_by_server(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_owned).collect()
 }
 
-/// Waits until CONDITION holds of the fake's log, within five seconds.
+/// Waits until CONDITION holds of the lines of the fake's log LOG, within
+/// five seconds.
 pub fn until_logged(log: &Path, what: &str, condition: impl Fn(&[String]) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !condition(&received_by_server(log)) {
-        assert!(Instant::now() < deadline, "the fake server never logged {what}");
+        assert!(Instant::now() < deadline, "the fake never logged {what}");
         thread::sleep(Duration::from_millis(20));
     }
 }

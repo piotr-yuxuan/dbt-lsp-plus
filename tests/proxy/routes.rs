@@ -247,14 +247,13 @@ fn a_document_of_another_project_is_told_where_it_lies() {
 
 /// A session NAME without `--project-dir`, the default `dbt lsp` as its
 /// server command, run outside the project, the client's folder a copy of the
-/// fixture whose `.venv/bin/dbt` is the fake playing SCRIPT_VALUE.  Returns
-/// the session, its answer to `initialize`, the fake's starts by then,
-/// the project, its dbt and the fake's log.
-fn from_the_folder(name: &str, script_value: &Value) -> (Session, Value, Vec<Value>, PathBuf, PathBuf, PathBuf) {
+/// fixture whose `.venv/bin/dbt` is the fake.  Returns the session, its
+/// answer to `initialize` and the project's dbt.
+fn from_the_folder(name: &str) -> (Session, Value, PathBuf) {
     let project = copy_fixture(name);
     let dir = project.parent().unwrap().to_owned();
     let dbt = venv_fake(&project);
-    let (script_path, log, cache) = fake_env(&dir, script_value);
+    let (script_path, log, cache) = fake_env(&dir, &json!({}));
     let env = [
         ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
         ("FAKE_DBT_LSP_LOG", log.as_path()),
@@ -264,15 +263,14 @@ fn from_the_folder(name: &str, script_value: &Value) -> (Session, Value, Vec<Val
     ];
     let mut session = Session::start(&[], &env, Some(&dir));
     let result = session.initialize(&project);
-    let at_answer = starts(&log);
     // Once answered, the line that came before it.
     session.request("workspace/symbol", json!({"query": "orders"}));
-    (session, result, at_answer, project, dbt, log)
+    (session, result, dbt)
 }
 
 #[test]
 fn without_project_dir_the_client_s_folder_s_dbt_without_lsp_leaves_the_proxy_alone() {
-    let (session, result, _, _, dbt, _) = from_the_folder("routes-folder-alone", &json!({}));
+    let (session, result, dbt) = from_the_folder("routes-folder-alone");
     let said = log_messages(&session);
     assert_eq!(said.len(), 1, "{said:?}");
     let named = format!("dbt {} (the project's .venv).", dbt.display());
@@ -297,14 +295,18 @@ fn given_project_dir_the_command_runs_as_written_and_one_line_says_so() {
         ("PATH", Path::new(&path)),
     ];
     let command = ["dbt".to_owned(), "lsp".into(), "--project-dir".into(), project.to_string_lossy().into_owned()];
-    let mut session = Session::start(&command, &env, None);
+    let stderr = dir.join("stderr");
+    let mut session = Session::start_logged(&[], &command, &env, None, Some(&stderr));
     let result = session.initialize(&project);
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    assert_eq!(log_messages(&session), [format!("dbt-lsp-plus: project {}, dbt dbt.", project.display())]);
+    let line = format!("dbt-lsp-plus: project {}, dbt dbt.", project.display());
+    assert_eq!(log_messages(&session), [line.as_str()]);
     assert!(session.finish().success());
+    // The same line on the standard error, which Claude Code's debug log shows.
+    assert_eq!(fs::read_to_string(&stderr).unwrap().lines().next(), Some(line.as_str()));
     // PATH's dbt, as written, ran the parse alone: no probe.
     let ran = fs::read_to_string(&stub_log).unwrap();
     let ran: Vec<&str> = ran.lines().collect();
