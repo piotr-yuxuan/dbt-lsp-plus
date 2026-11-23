@@ -56,6 +56,7 @@ class Ceilings(unittest.TestCase):
         self.git("checkout", "-q", "-b", name, start)
 
     def commit(self, name, text, message):
+        (self.repository / name).parent.mkdir(parents=True, exist_ok=True)
         (self.repository / name).write_text(text)
         self.git("add", name)
         self.git("commit", "-q", "-m", message)
@@ -65,12 +66,12 @@ class Ceilings(unittest.TestCase):
         self.git("merge", "-q", "--no-ff", "--no-commit", other)
         self.commit("Makefile", text, message)
 
-    def refused(self, cases):
-        """Each case, a Makefile, a message and what the finding names, on a branch of its own."""
+    def refused(self, cases, name="Makefile"):
+        """Each case, a text of NAME, a message and what the finding names, on a branch of its own."""
         for at, (text, message, named) in enumerate(cases):
             with self.subTest(message=message, named=named):
-                self.branch(f"case-{at}")
-                self.commit("Makefile", text, message)
+                self.branch(f"case-{name}-{at}")
+                self.commit(name, text, message)
                 done = self.check()
                 self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
                 self.assertIn(named, done.stdout)
@@ -82,6 +83,8 @@ class Ceilings(unittest.TestCase):
                 (makefile(lines=101), "Raise the lines", "SIZE_LINES raised from 100 to 101"),
                 (makefile(types=11), "Raise the types\n\nFor room.", "SIZE_TYPES raised from 10"),
                 (RULES + "SIZE_TYPES := 10\n", "Drop the lines", "SIZE_LINES is not one line"),
+                # 2^64, which bash's arithmetic would take for 0.
+                (makefile(lines=18446744073709551616), "Lift the lines", "SIZE_LINES is not one line"),
                 (makefile(lines=101), empty, "SIZE_LINES raised"),
                 (makefile(lines=101), "Raises the size ceilings: the MCP server", "SIZE_LINES raised"),
             ]
@@ -113,8 +116,13 @@ class Ceilings(unittest.TestCase):
                 (makefile(rules=recipe), "Loosen the recipe", rules),
                 (makefile(rules=RULES.replace(" size\n", "\n", 1)), "Drop the size check", rules),
                 (makefile(rules=RULES.replace("size:", "size-off:")), "Rename the size check", rules),
+                (makefile(extra="include ceilings.mk\n"), "Include more ceilings", rules),
             ]
         )
+        loosened = ("print(1)\n", "Loosen the count", "scripts/check-size changed")
+        self.refused([loosened], "scripts/check-size")
+        ci = "run: make check SIZE_LINES=99999\n"
+        self.refused([(ci, "Lift the lines in CI", "a ceiling named in ci.yml")], "ci.yml")
 
     def test_a_merge_is_held_to_its_first_parent(self):
         self.branch("side")
