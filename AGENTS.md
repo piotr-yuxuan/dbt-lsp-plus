@@ -144,6 +144,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `modes::Table::capabilities`: what a session announces, read from the
     table beside `Table::flag`, apart from `on_initialize`'s answer;
     plan 085 rewrites it with the modes;
+  - `capability::Capability::whole`: which rows a request answers whole,
+    read beside the row's other facts, apart from `Proxy::route`'s
+    decision; plan 085 deletes it with the kinds;
   - `config::anchored`: the server command's relative paths made the
     server's directory's, apart from where dbt then runs, with tests of
     its own;

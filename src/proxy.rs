@@ -49,6 +49,8 @@ enum Route {
     Command(&'static str),
     /// No method or command of the server's.
     Unknown,
+    /// A command with no name.
+    Invalid,
 }
 
 /// The client's notifications after which the graph may have changed.
@@ -493,15 +495,14 @@ impl<W: Write> Proxy<W> {
     }
 
     /// How the server answers the client's request METHOD, by the row of
-    /// `CAPABILITIES` it names, a command only through
-    /// `workspace/executeCommand`: none, unknown, but `shutdown`, null as LSP
-    /// asks; before a project, null; nodeInfo here, another command by dbt's
-    /// CLI; outside `dbt`, a method answered whole, or one with kinds of
-    /// target at a position that holds one, here; else its nothing.
+    /// `CAPABILITIES` it names: a name with no row is unknown, since no one
+    /// else will answer it, and a row's request before a project is null, a
+    /// valid result of every method (decisions 2 and 3 of plan 075).
     fn route(&self, method: &str, params: &Value) -> Route {
-        let row = match params["command"].as_str().filter(|_| method == "workspace/executeCommand") {
-            Some(command) => capability::of(command).filter(|row| row.is_command()),
-            None => capability::of(method).filter(|row| !row.is_command()),
+        let row = match (method, params["command"].as_str()) {
+            ("workspace/executeCommand", Some(command)) => capability::of(command).filter(|row| row.is_command()),
+            ("workspace/executeCommand", None) => return Route::Invalid,
+            _ => capability::of(method).filter(|row| !row.is_command()),
         };
         let Some(row) = row else {
             return if method == "shutdown" { Route::Answer(Answer::Empty) } else { Route::Unknown };
@@ -514,7 +515,7 @@ impl<W: Write> Proxy<W> {
             return if row.name == config::NODE_INFO { Route::Here(row.name) } else { Route::Command(row.name) };
         }
         let answered = self.table.mode(row.name) != Mode::Dbt;
-        if answered && row.kinds.is_empty() {
+        if answered && row.whole() {
             return Route::Here(row.name);
         }
         let targeted = answered.then(|| self.targeted(row.name, params)).flatten();
@@ -1050,10 +1051,11 @@ impl<W: Write> Proxy<W> {
             Route::Answer(answer) => self.send_client(&answer.frame(id, method)),
             Route::Command(command) => self.on_command(command, id, params),
             Route::Unknown => {
-                let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
-                let named = command.unwrap_or(method);
+                let named =
+                    params["command"].as_str().filter(|_| method == "workspace/executeCommand").unwrap_or(method);
                 self.reply_error(id, METHOD_NOT_FOUND, &format!("dbt-lsp-plus does not answer {named}"));
             }
+            Route::Invalid => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
         }
     }
 

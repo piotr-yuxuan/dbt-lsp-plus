@@ -145,6 +145,13 @@ impl Capability {
     pub fn is_command(&self) -> bool {
         !self.name.contains('/')
     }
+
+    /// Whether a request of it is answered whole, outside `dbt`: a method
+    /// announced by a key, or a follower, with no kinds of target;
+    /// `textDocument/publishDiagnostics`, which no request names, is not.
+    pub fn whole(&self) -> bool {
+        (self.key.is_some() || self.leader.is_some()) && self.kinds.is_empty()
+    }
 }
 
 /// The capability named NAME, if the proxy has one.

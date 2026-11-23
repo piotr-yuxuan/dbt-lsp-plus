@@ -305,6 +305,20 @@ fn an_unknown_request_gets_method_not_found_and_a_rename_at_nothing_null() {
 }
 
 #[test]
+fn a_command_with_no_name_is_invalid_and_the_server_s_notification_asked_is_null() {
+    let (mut session, _) = Session::fake("invalid-with-a-project", json!({}));
+    session.initialize(&fixture());
+    let nameless = session.request("workspace/executeCommand", json!({"arguments": []}));
+    let invalid = json!({"code": -32602, "message": "invalid parameters"});
+    assert_eq!((nameless.get("result"), &nameless["error"]), (None, &invalid), "{nameless}");
+    // A row that no request names, sent as one: nothing.
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let published = session.request("textDocument/publishDiagnostics", json!({"uri": orders, "diagnostics": []}));
+    assert_eq!((published.get("error"), &published["result"]), (None, &Value::Null), "{published}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_the_proxy_s_own_features_answer() {
     let (mut session, _) = Session::fake("standalone-features", json!({}));
     session.initialize(&fixture());

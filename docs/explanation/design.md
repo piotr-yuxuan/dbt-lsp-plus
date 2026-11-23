@@ -1455,7 +1455,8 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   arguments and working directory.  They cover:
   - `initialize`: the capabilities, the flag of the kinds answered, the
     commands; an unknown method or command, -32601, before a project too;
-    a rename at no source and no CTE, null;
+    a command with no name, -32602; a rename at no source and no CTE, and
+    the server's notification sent as a request, null;
   - the outline of unsaved edits in UTF-16, after a character that UTF-16
     and UTF-32 count apart; flat for a client without hierarchy; a closed
     document's edits dropped; the outline of a properties file, flat and
