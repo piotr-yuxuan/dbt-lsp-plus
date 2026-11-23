@@ -168,10 +168,6 @@ impl Session {
         rpc::write_value(&mut self.stdin, message).expect("write to the proxy");
     }
 
-    pub fn send_raw(&mut self, body: &[u8]) {
-        rpc::write_body(&mut self.stdin, body).expect("write to the proxy");
-    }
-
     pub fn notify(&mut self, method: &str, params: Value) {
         self.send(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
     }

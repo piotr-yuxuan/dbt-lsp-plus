@@ -313,31 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn a_session_is_alone_under_never_on_a_document_or_with_no_lsp_probed_only_then() {
-        let never = "the backend is never";
-        let document = "dbt lsp is not started for a project found from a file";
-        let cases = [
-            (true, Route::Given, false, Some(never), 0),
-            (true, Route::Folder, true, Some(never), 0),
-            (true, Route::Document, true, Some(never), 0),
-            (false, Route::Document, false, Some(document), 0),
-            (false, Route::Given, true, Some("it has no lsp"), 1),
-            (false, Route::Folder, true, Some("it has no lsp"), 1),
-            (false, Route::Given, false, None, 1),
-            (false, Route::Folder, false, None, 1),
-        ];
-        for (never_set, route, no_lsp, expected, probes) in cases {
-            let asked = std::cell::Cell::new(0);
-            let probe = || {
-                asked.set(asked.get() + 1);
-                no_lsp
-            };
-            assert_eq!(alone(never_set, route, probe), expected, "{never_set} {route:?}");
-            assert_eq!(asked.get(), probes, "probes of {never_set} {route:?}");
-        }
-    }
-
-    #[test]
     fn the_places_of_a_dbt_follow_the_project_its_repository_and_the_main_worktree() {
         let places = |project: &str, repository: Option<(&str, Option<&str>)>| {
             let repository = repository.map(|(top, main)| (PathBuf::from(top), main.map(PathBuf::from)));

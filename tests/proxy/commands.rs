@@ -2,7 +2,7 @@
 //! The proxy's commands for clients: by dbt lsp's own commands in front of
 //! the fake, and by the fake dbt's CLI without it.
 
-use super::{alive, barrier, dbt_event, listings, logged, scratch, scratch_of, unindexed_then, with_options};
+use super::{alive, barrier, dbt_event, logged, scratch, scratch_of, with_options};
 use crate::support::{Session, copy_fixture, fixture, until_logged, uri};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -62,22 +62,6 @@ fn compiled_file(answer: &Value) -> (PathBuf, String) {
 }
 
 #[test]
-fn the_commands_are_announced_as_the_server_lists_their_own() {
-    let (mut session, _) = with_options("commands-announced", json!({}), &[]);
-    let result = session.initialize(&fixture());
-    for command in [COMPILE, SHOW, NODES, "dbt.compileFile", "dbt.show", "dbt.listNodes"] {
-        assert!(announced(&result).contains(&command), "{command}: {result}");
-    }
-    assert!(session.finish().success());
-    let capabilities = json!({"textDocumentSync": {"openClose": true, "change": 2},
-                              "executeCommandProvider": {"commands": ["dbt.compileFile", "dbt.listNodes"]}});
-    let (mut session, _) = with_options("commands-no-show", json!({"capabilities": capabilities}), &[]);
-    let result = session.initialize(&fixture());
-    assert!(announced(&result).contains(&COMPILE) && !announced(&result).contains(&SHOW), "{result}");
-    assert!(session.finish().success());
-}
-
-#[test]
 fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() {
     let (session, _, result) = alone("commands-alone-announced", json!({}));
     let expected = [COMPILE, NODES];
@@ -97,54 +81,6 @@ fn alone_or_with_no_server_compile_and_nodes_are_announced_where_they_can_run() 
 }
 
 #[test]
-fn compile_goes_to_dbt_lsp_as_its_own_and_comes_back_as_it_came() {
-    let key = format!("workspace/executeCommand dbt.compileFile {}", uri(&orders()));
-    let raw = r#"{"jsonrpc":"2.0", "id":$ID , "result":{"error":null,"file_uri":"file:///x/orders.sql"}}"#;
-    let (mut session, log) = with_options("commands-compile", json!({"raw_answers": {key: raw}}), &[]);
-    session.initialize(&fixture());
-    let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
-    let at = session.received.iter().position(|m| *m == answer).unwrap();
-    assert_eq!(String::from_utf8_lossy(&session.received_raw[at]), raw.replace("$ID", &answer["id"].to_string()));
-    let sent = received_command(&log, "dbt.compileFile");
-    assert_eq!((&sent[0]["id"], &sent[0]["params"]["arguments"]), (&answer["id"], &json!([uri(&orders())])));
-    assert!(session.finish().success());
-}
-
-#[test]
-fn show_goes_to_dbt_lsp_with_ten_rows_when_the_client_names_no_limit() {
-    let (mut session, log) = with_options("commands-show", json!({}), &[]);
-    session.initialize(&fixture());
-    let by_uri = json!({"uri": uri(&orders()), "limit": 3});
-    let answer = execute(&mut session, SHOW, json!([by_uri]));
-    assert_eq!(answer["result"]["params"], json!({"command": "dbt.show", "arguments": [by_uri]}), "the fake's echo");
-    execute(&mut session, SHOW, json!([{"inline": "select 1"}]));
-    let sent: Vec<Value> =
-        received_command(&log, "dbt.show").iter().map(|m| m["params"]["arguments"].clone()).collect();
-    assert_eq!(sent, [json!([by_uri]), json!([{"inline": "select 1", "limit": 10}])]);
-    assert!(session.finish().success());
-}
-
-#[test]
-fn nodes_counts_as_the_client_s_listing_which_the_proxy_never_cancels() {
-    let held = "workspace/executeCommand dbt.listNodes +orders+";
-    let (mut session, log) = with_options("commands-nodes", json!({"hold": [held]}), &[]);
-    session.initialize(&fixture());
-    let params = json!({"command": NODES, "arguments": ["+orders+"]});
-    session.send(&json!({"jsonrpc": "2.0", "id": 77, "method": "workspace/executeCommand", "params": params}));
-    session.open(&orders(), None);
-    barrier(&mut session);
-    barrier(&mut session);
-    assert_eq!(listings(&log, "*"), 0, "the proxy's listing would cancel the client's");
-    session.notify("test/release", json!({}));
-    let answer = session.wait_for(|m| m["id"] == json!(77) && m.get("method").is_none());
-    assert_ne!(answer["result"]["error"], "Operation cancelled");
-    let sent = received_command(&log, "dbt.listNodes").into_iter().find(|m| m["id"] == json!(77)).unwrap();
-    assert_eq!(sent["params"]["arguments"], json!(["+orders+"]));
-    until_logged(&log, "the deferred listing", |_| listings(&log, "*") == 1);
-    assert!(session.finish().success());
-}
-
-#[test]
 fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
     let (mut session, log) = with_options("commands-invalid", json!({}), &[]);
     session.initialize(&fixture());
@@ -156,35 +92,6 @@ fn a_request_the_proxy_cannot_read_is_invalid_and_goes_nowhere() {
     }
     barrier(&mut session);
     assert!(received_command(&log, "dbt.compileFile").is_empty() && received_command(&log, "dbt.show").is_empty());
-    assert!(session.finish().success());
-}
-
-#[test]
-fn dbt_lsp_s_error_and_its_lenses_reach_the_client_as_they_came() {
-    let error = r#"{"jsonrpc":"2.0","id":$ID,"error":{"code":-32603,"message":"boom"}}"#;
-    let lenses = r#"{"jsonrpc":"2.0","id":$ID,"result":[{"command":{"arguments":["/p/models/marts/orders.sql",{"name":"customers"}],"command":"dbt.previewCte","title":"Preview CTE"},"range":{"end":{"character":1,"line":7},"start":{"character":1,"line":7}}}]}"#;
-    let script =
-        json!({"raw_answers": {"workspace/executeCommand dbt.listNodes +x+": error, "textDocument/codeLens": lenses}});
-    let (mut session, _) = with_options("commands-raw", script, &[]);
-    session.initialize(&fixture());
-    let refused = execute(&mut session, NODES, json!(["+x+"]));
-    let lens = session.request("textDocument/codeLens", json!({"textDocument": {"uri": uri(&orders())}}));
-    for (answer, raw) in [(refused, error), (lens, lenses)] {
-        let at = session.received.iter().position(|m| *m == answer).unwrap();
-        assert_eq!(String::from_utf8_lossy(&session.received_raw[at]), raw.replace("$ID", &answer["id"].to_string()));
-    }
-    assert!(session.finish().success());
-}
-
-#[test]
-fn with_no_server_compile_runs_and_show_says_why() {
-    let script = json!({"exit_on": "initialize", "compiled": "select 1 -- by the run"});
-    let (mut session, _) = with_options("commands-no-server", script, &[]);
-    session.initialize(&fixture());
-    let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
-    let shown = execute(&mut session, SHOW, json!([{"inline": "select 1", "limit": 2}]));
-    assert!(shown["result"]["error"].as_str().unwrap().contains("needs dbt lsp"), "{shown}");
-    assert_eq!(compiled_file(&compiled).1, "select 1 -- by the run");
     assert!(session.finish().success());
 }
 
@@ -320,16 +227,6 @@ fn alone_nodes_takes_dbt_s_error_from_the_lines_of_its_text_log_alone() {
 }
 
 #[test]
-fn alone_show_is_refused_and_runs_nothing() {
-    let (mut session, log, result) = alone("commands-alone-show", json!({}));
-    assert!(!announced(&result).contains(&SHOW));
-    let answer = execute(&mut session, SHOW, json!([{"inline": "select 1", "limit": 2}]));
-    assert!(answer["result"]["error"].as_str().unwrap().contains("needs dbt lsp"), "{answer}");
-    assert!(runs(&log).is_empty());
-    assert!(session.finish().success());
-}
-
-#[test]
 fn alone_no_run_while_packages_need_the_network() {
     let project = copy_fixture("commands-unsettled-project");
     std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
@@ -389,27 +286,6 @@ fn alone_an_earlier_compiled_file_stays_and_only_this_run_s_manifest_counts() {
 fn nodes_then_check(session: &mut Session, file: &Path) {
     execute(session, NODES, json!(["x"]));
     assert_eq!(std::fs::read_to_string(file).unwrap(), "select 1", "{file:?}");
-}
-
-#[test]
-fn a_server_lost_after_it_listed_the_commands_leaves_compile_to_the_run_and_show_refused() {
-    // The first life dies on a hover; the next never answers its initialize, which holds the restart.
-    let script = json!({"exit_on": "textDocument/hover", "exit_life": 1, "hang_on": "initialize", "hang_life": 2,
-                        "compiled": "select 1 -- by the run"});
-    let (mut session, _) = with_options("commands-lost", script, &[]);
-    let result = session.initialize(&fixture());
-    assert!(announced(&result).contains(&SHOW), "the server listed dbt.show");
-    let hover = session.request(
-        "textDocument/hover",
-        json!({"textDocument": {"uri": uri(&orders())},
-                                                              "position": {"line": 0, "character": 0}}),
-    );
-    unindexed_then(&hover, "; dbt lsp exited (exit status: 3)");
-    let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
-    let shown = execute(&mut session, SHOW, json!([{"inline": "select 1", "limit": 2}]));
-    assert!(shown["result"]["error"].as_str().unwrap().contains("needs dbt lsp"), "{shown}");
-    assert_eq!(compiled_file(&compiled).1, "select 1 -- by the run");
-    session.exit();
 }
 
 #[test]

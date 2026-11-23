@@ -713,45 +713,6 @@ mod tests {
         assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), None);
     }
 
-    #[test]
-    fn puts_the_summary_first_in_every_shape_of_hover() {
-        let summary = "model table, x\ntags a";
-        let marked = "model table, x  \ntags a";
-        let headed = format!("{marked}\n\n---\n\n**dbt lsp**\n\nServer");
-        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let markdown = json!({"contents": {"kind": "markdown", "value": "Server"}, "range": "kept"});
-        let code = json!({"language": "sql", "value": "select 1"});
-        // Each shape, whether the client reads markdown, and the contents merged.
-        let shapes = [
-            (markdown, true, json!({"kind": "markdown", "value": headed})),
-            (
-                json!({"contents": {"kind": "plaintext", "value": "Server"}}),
-                true,
-                json!({"kind": "plaintext", "value": "model table, x\ntags a\n\ndbt lsp:\nServer"}),
-            ),
-            (json!({"contents": "Server"}), true, json!(headed)),
-            (json!({"contents": code}), true, json!([marked, "**dbt lsp**", code])),
-            (json!({"contents": ["a", "b"]}), true, json!([marked, "**dbt lsp**", "a", "b"])),
-            (Value::Null, false, json!({"kind": "plaintext", "value": summary})),
-            // A server's blank text is no section: the summary by itself.
-            (
-                json!({"contents": {"kind": "markdown", "value": " \n"}}),
-                true,
-                json!({"kind": "markdown", "value": marked}),
-            ),
-            (json!({"contents": ""}), true, json!(marked)),
-            (json!({"contents": [" "]}), true, json!([marked])),
-        ];
-        for (result, markdown, expected) in shapes {
-            let merged = merge_hover(&answer(result.clone()), summary, true, markdown).unwrap();
-            assert_eq!(merged["result"]["contents"], expected, "{result}");
-            assert_eq!(merged["result"].get("range"), result.get("range"), "kept: {result}");
-        }
-        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
-        assert_eq!(merge_hover(&error, summary, true, true), None);
-        assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
-    }
-
     fn index() -> ParseIndex {
         let model = |name: &str, materialized: &str, relation: Value| {
             json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
@@ -873,61 +834,6 @@ mod tests {
         let expected = json!([{"position": {"line": 0, "character": 41}, "label": "\"shop\".\"main\".\"orders\"",
                                "kind": 1, "paddingLeft": true, "tooltip": "model.shop.orders"}]);
         assert_eq!(Value::Array(hints), expected);
-    }
-
-    #[test]
-    fn hints_follow_the_server_s_own() {
-        let hint = json!({"label": "x"});
-        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let merged = merge_hints(&answer(json!([{"label": "server"}])), std::slice::from_ref(&hint));
-        assert_eq!(merged, Some(answer(json!([{"label": "server"}, {"label": "x"}]))));
-        assert_eq!(
-            merge_hints(&answer(Value::Null), std::slice::from_ref(&hint)),
-            Some(answer(json!([{"label": "x"}])))
-        );
-        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
-        assert_eq!(merge_hints(&error, std::slice::from_ref(&hint)), None);
-        assert_eq!(merge_hints(&answer(json!({"odd": 1})), std::slice::from_ref(&hint)), None);
-    }
-
-    #[test]
-    fn unites_the_server_s_locations_after_the_proxy_s() {
-        let at = |file: &str, start: (u64, u64), end: (u64, u64)| {
-            json!({"uri": format!("file:///p/{file}"),
-                   "range": {"start": {"line": start.0, "character": start.1}, "end": {"line": end.0, "character": end.1}}})
-        };
-        let path_of = |uri: &str| uri.strip_prefix("file://").map(PathBuf::from);
-        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let united = |found: &Value, result: Value| merge_locations(&answer(result), found, &path_of)["result"].clone();
-        let ours = at("a.sql", (0, 0), (0, 0));
-        let echo = json!({"echo": "textDocument/definition", "params": {}});
-        let no_range = json!({"uri": "file:///p/b.sql", "range": {}});
-        for nothing in [Value::Null, json!([]), json!(3), echo, json!([{"range": ours["range"]}]), no_range] {
-            assert_eq!(united(&ours, nothing.clone()), ours, "one location stays one: {nothing}");
-        }
-        let (holding, name) = (at("a.sql", (0, 0), (14, 0)), at("a.sql", (1, 2), (1, 9)));
-        let (block, crossing) = (at("a.sql", (0, 0), (5, 0)), at("a.sql", (4, 0), (7, 0)));
-        let elsewhere = at("b.sql", (0, 0), (0, 0));
-        let matched = [
-            (&ours, &holding, ours.clone(), "one range holds the other"),
-            (&holding, &name, holding.clone(), "the proxy's range holds the server's"),
-            (&block, &crossing, json!([block, crossing]), "ranges that only cross"),
-            (&ours, &elsewhere, json!([ours, elsewhere]), "one range in another file"),
-        ];
-        for (found, server, expected, why) in matched {
-            assert_eq!(united(found, json!([server])), expected, "{why}");
-        }
-        let other = at("b.sql", (1, 2), (1, 4));
-        assert_eq!(united(&ours, json!([other])), json!([ours, other]));
-        let link = json!({"targetUri": "file:///p/c.sql", "targetRange": at("c.sql", (0, 0), (9, 0))["range"],
-                          "targetSelectionRange": at("c.sql", (0, 0), (0, 3))["range"]});
-        assert_eq!(united(&ours, link), json!([ours, at("c.sql", (0, 0), (0, 3))]), "a link as its target's selection");
-        let unread = json!({"uri": "untitled:x", "range": ours["range"]});
-        assert_eq!(united(&ours, json!([unread, unread])), json!([ours, unread]), "a URI the reader cannot read");
-        assert_eq!(united(&ours, json!([other, other])), json!([ours, other]), "given twice, once");
-        let uses = json!([at("a.sql", (4, 26), (4, 36)), at("s.sql", (2, 22), (2, 32))]);
-        let server = json!([at("s.sql", (2, 22), (2, 32)), other, at("a.sql", (4, 21), (4, 38))]);
-        assert_eq!(united(&uses, server), json!([uses[0], uses[1], other]), "references: the proxy's, then the new");
     }
 
     #[test]

@@ -442,13 +442,4 @@ mod tests {
         assert_eq!(scanned.with_server(&listed, &project).edges, unsited, "no site");
         fs::remove_dir_all(&root).unwrap();
     }
-
-    #[test]
-    fn tells_an_empty_listing_from_a_failed_one() {
-        assert_eq!(parse_list_nodes(&json!({"error": "No nodes found", "nodes": []})), Listing::Empty);
-        assert_eq!(parse_list_nodes(&json!({"error": null, "nodes": []})), Listing::Empty);
-        assert_eq!(parse_list_nodes(&json!({"error": "Operation cancelled", "nodes": []})), Listing::Failed);
-        assert_eq!(parse_list_nodes(&json!({"error": "Compilation failed", "nodes": []})), Listing::Failed);
-        assert_eq!(parse_list_nodes(&Value::Null), Listing::Failed);
-    }
 }

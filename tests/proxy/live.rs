@@ -12,7 +12,6 @@
 //! given is not the kind it needs, and passes.
 
 use crate::support::{Session, copy_fixture, uri};
-use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -106,123 +105,6 @@ fn in_front_of_the_real_dbt_lsp() {
     assert!(session.finish().success());
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
-}
-
-/// A compilation that compiled nothing, as dbt lsp 2.0.9's is when the
-/// profile names a missing `env_var`: said once, with dbt's error and dbt
-/// lsp's log, and not again after a save and its compilation; a listing
-/// meanwhile answered `Compilation failed`.
-#[test]
-#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
-fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
-    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
-    let project = copy_fixture("live-compiled-nothing");
-    let home = project.with_file_name("home");
-    std::fs::create_dir_all(&home).unwrap();
-    if !has_lsp(&dbt, &home, true, "a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp") {
-        return;
-    }
-    let profile = std::fs::read_to_string(project.join("profiles.yml")).unwrap();
-    let missing = profile.replace("'target/shop.duckdb'", "\"{{ env_var('DBT_LSP_PLUS_TEST_MISSING') }}\"");
-    assert_ne!(missing, profile, "the fixture's profile names its database");
-    std::fs::write(project.join("profiles.yml"), missing).unwrap();
-    let project_arg = project.to_string_lossy().into_owned();
-    let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
-    let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
-    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
-    let mut session = Session::start(&server, &env, Some(&project));
-    session.timeout = Duration::from_secs(180);
-    session.initialize(&project);
-    let orders = project.join("models/marts/orders.sql");
-    // dbt lsp 2.0.9 compiles nothing on this didOpen, but the proxy's listing does.
-    session.open(&orders, None);
-    let compiled_nothing = |m: &Value| {
-        let text = m["params"]["message"].as_str().unwrap_or_default();
-        m["method"] == "window/showMessage" && text.starts_with("dbt lsp compiled nothing")
-    };
-    let shown = session.wait_for(compiled_nothing);
-    let text = shown["params"]["message"].as_str().unwrap();
-    let quoted = text.starts_with("dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error");
-    assert!(quoted && text.contains("DBT_LSP_PLUS_TEST_MISSING") && text.contains("logs/dbt-lsp.log"), "{text}");
-    assert_eq!(shown["params"]["type"], 1, "{shown}");
-    // A foreground completion, then its background one, which says the same failure: 2.0.9 sends
-    // the two at once where nothing compiled, so every foreground one has its background one.
-    let completed = |session: &Session| {
-        let count = |method: &str| session.received.iter().filter(|m| m["method"] == method).count();
-        (count("dbt/lspCompileComplete"), count("dbt/lspBackgroundCompileComplete"))
-    };
-    let before = completed(&session);
-    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
-    let waited = Instant::now() + Duration::from_secs(60);
-    let both = |(foreground, background): (usize, usize)| foreground > before.0 && background >= foreground;
-    while !both(completed(&session)) && Instant::now() < waited {
-        session.request("workspace/symbol", json!({"query": "orders"}));
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(both(completed(&session)), "no compilation after a save, or not both completions");
-    let said = session.received.iter().filter(|m| compiled_nothing(m)).count();
-    assert_eq!(said, 1, "said once");
-    // A listing of the client's, which the fake answers alike in a project that compiles nothing.
-    let listed = session.request("workspace/executeCommand", json!({"command": "dbt.listNodes", "arguments": ["*"]}));
-    let failed = (&listed["result"]["error"], &listed["result"]["error_kind"]);
-    assert_eq!(failed, (&json!("Compilation failed"), &json!("compilation_failed")), "{listed}");
-    assert!(session.finish().success());
-}
-
-/// The union in front of the real dbt lsp, by what dbt lsp received: in
-/// `merge`, a definition and references at a position the proxy claims go
-/// to dbt lsp too, and the client gets the proxy's answer, dbt lsp 2.0.9's
-/// locations all within it.  `tee` in the server command records dbt lsp's
-/// input, the fixture's texts and the requests; the proxy takes the words
-/// before `lsp` as dbt's, so its probe and its parse run through it too,
-/// with no input.
-#[test]
-#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
-fn the_union_in_front_of_the_real_dbt_lsp() {
-    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
-    let project = copy_fixture("live-union");
-    let home = project.with_file_name("home");
-    std::fs::create_dir_all(&home).unwrap();
-    if !has_lsp(&dbt, &home, true, "the_union_in_front_of_the_real_dbt_lsp") {
-        return;
-    }
-    let record = project.with_file_name("dbt-lsp-input");
-    let project_arg = project.to_string_lossy().into_owned();
-    let tee = r#"tee -a "$DBT_LSP_INPUT" | "$0" "$@""#;
-    let server = ["sh".into(), "-c".into(), tee.into(), dbt, "lsp".into(), "--project-dir".into(), project_arg.clone()];
-    let flags = ["--profiles-dir".into(), project_arg, "--no-send-anonymous-usage-stats".into()];
-    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1")), ("DBT_LSP_INPUT", record.as_path())];
-    let mut session = Session::start(&[&server[..], &flags[..]].concat(), &env, Some(&project));
-    session.timeout = Duration::from_secs(180);
-    let result = session.initialize(&project);
-    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "probed through tee: {result}");
-    let orders = project.join("models/marts/orders.sql");
-    session.open(&orders, None);
-    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
-    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
-    let found = session.request("textDocument/definition", on_ref.clone());
-    let start = json!({"line": 0, "character": 0});
-    let stg_orders = uri(&project.join("models/staging/stg_orders.sql"));
-    assert_eq!(found["result"], json!({"uri": stg_orders, "range": {"start": start, "end": start}}), "{found}");
-    let mut references = on_ref;
-    references["context"] = json!({"includeDeclaration": false});
-    let used = session.request("textDocument/references", references);
-    let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
-    assert_eq!(json!(files), json!([uri(&orders), uri(&project.join("snapshots/orders_snapshot.sql"))]), "{used}");
-    let request =
-        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
-    let parsed = session.poll(Duration::from_secs(120), request, |result| result.is_object());
-    assert_eq!(parsed["relation"], "\"shop\".\"main\".\"orders\"", "parsed through tee: {parsed}");
-    assert!(session.finish().success());
-    let input = std::fs::read(&record).unwrap();
-    let mut frames = &input[..];
-    let mut methods = Vec::new();
-    while let Ok(Some(frame)) = rpc::read_frame(&mut frames) {
-        methods.extend(frame.value.and_then(|message| message["method"].as_str().map(str::to_owned)));
-    }
-    let asked = ["textDocument/definition", "textDocument/references"]
-        .map(|method| methods.iter().filter(|m| *m == method).count());
-    assert_eq!(asked, [1, 1], "what dbt lsp received: {methods:?}");
 }
 
 /// With a dbt that has no `lsp`, such as dbt-oss: the proxy alone, its

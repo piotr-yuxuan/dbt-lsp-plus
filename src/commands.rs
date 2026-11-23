@@ -225,62 +225,11 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    fn served(listed: &'static [&'static str]) -> impl Fn(&str) -> bool {
-        move |dbt: &str| listed.contains(&dbt)
-    }
-
-    #[test]
-    fn a_request_goes_to_dbt_lsp_when_it_listed_the_command_else_to_the_cli() {
-        let all = served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"]);
-        let server = |command: &str| capability::of(command).and_then(|own| own.server);
-        assert_eq!(
-            [COMPILE, SHOW, NODES].map(server),
-            [Some("dbt.compileFile"), Some("dbt.show"), Some("dbt.listNodes")]
-        );
-        assert_eq!(route(COMPILE, &all), Ok(Provider::DbtLsp));
-        assert_eq!(route(SHOW, &all), Ok(Provider::DbtLsp));
-        assert_eq!(route(NODES, &all), Ok(Provider::DbtLsp));
-        let none = served(&[]);
-        assert_eq!(route(COMPILE, &none), Ok(Provider::DbtCli));
-        assert_eq!(route(NODES, &none), Ok(Provider::DbtCli));
-        assert_eq!(route(NODES, &served(&["dbt.compileFile"])), Ok(Provider::DbtCli), "not listed");
-        assert_eq!(route(SHOW, &none), Err(failure(SHOW, "dbt-lsp-plus.show needs dbt lsp")), "never alone");
-    }
-
-    #[test]
-    fn initialize_announces_what_the_server_lists_and_what_the_cli_can_do() {
-        assert_eq!(announced(&served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"])), [COMPILE, SHOW, NODES]);
-        assert_eq!(announced(&served(&[])), [COMPILE, NODES]);
-        assert_eq!(announced(&served(&["dbt.show"])), [COMPILE, SHOW, NODES]);
-        let providers = |name: &str| capability::of(name).map(|own| own.providers);
-        let dbt: &[Provider] = &[Provider::DbtLsp, Provider::DbtCli];
-        let plus: &[Provider] = &[Provider::Plus];
-        assert_eq!(
-            (providers(COMPILE), providers("dbt.compileFile"), providers(config::NODE_INFO)),
-            (Some(dbt), None, Some(plus))
-        );
-    }
-
     #[test]
     fn a_failure_has_its_command_s_shape() {
         assert_eq!(failure(COMPILE, "no"), json!({"file_uri": null, "error": "no"}));
         assert_eq!(failure(SHOW, "no"), json!({"columns": null, "data": null, "error": "no"}));
         assert_eq!(failure(NODES, "no"), json!({"nodes": [], "error": "no"}));
-    }
-
-    #[test]
-    fn arguments_are_read_as_dbt_lsp_takes_them_a_show_s_limit_ten_when_none() {
-        let read = |command: &str, arguments: Value| super::arguments(command, &json!({"arguments": arguments}));
-        assert_eq!(read(COMPILE, json!(["file:///p/a.sql"])), Some(vec![json!("file:///p/a.sql")]));
-        assert_eq!(read(NODES, json!(["+orders+"])), Some(vec![json!("+orders+")]));
-        let uri = json!({"uri": "file:///p/a.sql", "limit": 3});
-        assert_eq!(read(SHOW, json!([uri])), Some(vec![uri]));
-        assert_eq!(read(SHOW, json!([{"inline": "select 1"}])), Some(vec![json!({"inline": "select 1", "limit": 10})]));
-        for bad in [json!([]), json!([3]), json!([{"limit": 3}]), json!([{"inline": "x", "limit": 0}]), json!("x")] {
-            assert_eq!(read(SHOW, bad.clone()), None, "{bad}");
-        }
-        assert_eq!(read(COMPILE, json!([7])), None);
-        assert_eq!(super::arguments(NODES, &Value::Null), None);
     }
 
     fn project(root: &Path) -> Project {

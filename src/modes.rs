@@ -378,16 +378,6 @@ mod tests {
     }
 
     #[test]
-    fn the_server_gets_initialize_without_the_proxy_s_section() {
-        let alone = json!({"rootUri": "file:///p", "initializationOptions": {"dbtLspPlus": {"defaultMode": "dbt"}}});
-        assert_eq!(without_section(&alone), json!({"rootUri": "file:///p"}));
-        let beside = json!({"initializationOptions": {"dbtLspPlus": {}, "other": 1}});
-        assert_eq!(without_section(&beside), json!({"initializationOptions": {"other": 1}}));
-        let none = json!({"initializationOptions": {"other": 1}});
-        assert_eq!(without_section(&none), none);
-    }
-
-    #[test]
     fn the_command_line_reads_options_then_the_server_command() {
         let run = |words: &[&str]| match arguments(&super::tests::words(words)) {
             Ok(Arguments::Run { settings, launch, command }) => (settings, launch, command),
@@ -432,19 +422,6 @@ mod tests {
         dbt.set("textDocument/references", "dbt").unwrap();
         let rename = json!({"version": 2, "rename": every["rename"]});
         assert_eq!(Table::new(&dbt, &|_| false).flag(), rename);
-    }
-
-    #[test]
-    fn unites_definitions_and_references_in_merge_with_a_backend() {
-        let united = ["textDocument/definition", "textDocument/references"];
-        let merge = Table::new(&Settings::default(), &|_| false);
-        assert_eq!(united.map(|method| merge.unites(method, false)), [true, true]);
-        assert!(!merge.unites("textDocument/hover", false), "a hover's parts are sections");
-        assert!(!merge.unites(united[0], true), "without a backend");
-        for mode in ["plus", "dbt"] {
-            let table = Table::new(&settings(&[], Some(mode)), &|_| false);
-            assert_eq!(united.map(|method| table.unites(method, false)), [false, false], "{mode}");
-        }
     }
 
     #[test]

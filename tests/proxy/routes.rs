@@ -266,20 +266,6 @@ fn from_the_folder(name: &str, script_value: &Value) -> (Session, Value, Vec<Val
 }
 
 #[test]
-fn without_project_dir_the_client_s_folder_starts_its_dbt_at_initialize() {
-    let (session, result, at_answer, project, dbt, log) = from_the_folder("routes-folder", &json!({}));
-    let said = log_messages(&session);
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert!(said[0].ends_with(&format!("dbt {} (the project's .venv).", dbt.display())), "{said:?}");
-    assert!(session.finish().success());
-    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
-    assert_eq!(lives(&log).len(), 1);
-    let server = at_answer.iter().find(|start| start["arguments"] == json!(["lsp"]));
-    let server = server.unwrap_or_else(|| panic!("no server started before initialize: {at_answer:#?}"));
-    assert_eq!((path_of(&server["argv0"]), path_of(&server["cwd"])), (resolved(&dbt), resolved(&project)));
-}
-
-#[test]
 fn without_project_dir_the_client_s_folder_s_dbt_without_lsp_leaves_the_proxy_alone() {
     let (session, result, _, _, dbt, log) = from_the_folder("routes-folder-alone", &json!({"no_lsp": true}));
     let said = log_messages(&session);

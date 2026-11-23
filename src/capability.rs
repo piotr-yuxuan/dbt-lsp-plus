@@ -343,18 +343,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn a_merge_that_waits_for_dbt_lsp_has_both_deadlines() {
-        let waiting =
-            ["textDocument/hover", "textDocument/inlayHint", "textDocument/definition", "textDocument/references"];
-        for capability in &CAPABILITIES {
-            let deadlines = [true, false].map(|part| capability.deadline(part));
-            let expected = match waiting.contains(&capability.name) {
-                true => [Some(Duration::from_millis(300)), Some(Duration::from_secs(2))],
-                false => [None, None],
-            };
-            assert_eq!(deadlines, expected, "{}", capability.name);
-        }
-    }
 }

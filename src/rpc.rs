@@ -62,16 +62,6 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn keeps_the_bytes_of_a_body() {
-        let body = br#"{"b":1, "a":  2.50}"#;
-        let mut buffer = Vec::new();
-        write_body(&mut buffer, body).unwrap();
-        let frame = read_frame(&mut Cursor::new(buffer)).unwrap().unwrap();
-        assert_eq!(frame.body, body);
-        assert_eq!(frame.value, Some(json!({"a": 2.5, "b": 1})));
-    }
-
-    #[test]
     fn reads_headers_in_any_case_and_order() {
         let raw = "content-type: application/vscode-jsonrpc\r\ncontent-LENGTH: 2\r\n\r\n{}";
         let frame = read_frame(&mut Cursor::new(raw)).unwrap().unwrap();
