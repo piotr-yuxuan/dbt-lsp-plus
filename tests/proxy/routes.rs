@@ -200,14 +200,18 @@ fn a_document_of_another_project_is_told_where_it_lies() {
         project.display()
     );
     let elsewhere = json!({"code": -32803, "message": message});
+    // nodeInfo at the same place too, which has no mode.
+    let at = json!({"uri": uri(&m), "position": {"line": 0, "character": 24}});
+    let info = json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": [at]});
     let reading = [
-        "textDocument/hover",
-        "textDocument/definition",
-        "textDocument/references",
-        "textDocument/prepareCallHierarchy",
+        ("textDocument/hover", &on_ref),
+        ("textDocument/definition", &on_ref),
+        ("textDocument/references", &on_ref),
+        ("textDocument/prepareCallHierarchy", &on_ref),
+        ("workspace/executeCommand", &info),
     ];
-    for method in reading {
-        let answer = session.request(method, on_ref.clone());
+    for (method, params) in reading {
+        let answer = session.request(method, params.clone());
         assert_eq!((answer.get("result"), &answer["error"]), (None, &elsewhere), "{method}: {answer}");
     }
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}});

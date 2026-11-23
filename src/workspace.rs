@@ -5,10 +5,11 @@
 //! hierarchy's graph, and when the index is stale.  It speaks no protocol:
 //! no message, no position, no URI.
 
-use crate::answer::Reason;
+use crate::answer::{Answer, Reason};
 use crate::graph::{Graph, ServerNode};
-use crate::project::{self, Project};
-use crate::{cache, config, packages, run};
+use crate::project::{self, Project, Scanned};
+use crate::{cache, config, locate, navigation, packages, reference, run, scan};
+use serde_json::Value;
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,16 @@ type Filled = Vec<(PathBuf, cache::Key, Arc<project::Scanned>)>;
 /// The generations of the project, the server's nodes and the index a
 /// graph was made of, and whether it took the index's edges, alone.
 type MadeOf = (u64, u64, u64, bool);
+
+/// A place in a document: its path, its text as the front end holds it,
+/// open or on disk, and a byte offset in it.
+pub type Place = (PathBuf, String, usize);
+
+/// What a query names a node by: its unique id, or a place in a document.
+pub enum Which {
+    Id(String),
+    At(Place),
+}
 
 /// The core's state of the session's project.  A front end owes it: `epoch`
 /// bumped at each of its events, `fresh` set false at a change told,
@@ -127,6 +138,93 @@ impl Workspace {
         Reason::Unindexed(why.to_owned())
     }
 
+    /// Whether PLACE names a node, and which node of the index: that of the
+    /// `ref` or `source` there, or of the entry whose `name:` is there, as
+    /// `navigation::Lookup::node` finds it, else, when FILE, the one node its
+    /// document defines, but never in a YAML file: there the manifest places
+    /// the generic tests a file declares beside its node, a YAML snapshot's
+    /// included, so neither the scan nor `of_file` can name one node.  The
+    /// project is read with the open texts OPEN.  None for no PLACE, or when
+    /// it names nothing; `Some(None)` when it names a node that the lookup
+    /// does not find, as a `ref`, a `source` or an entry's `name:` over a
+    /// project that does not read once there is an index, or that, without
+    /// an index, the scan tells is named but cannot give, as any `ref` or
+    /// `source`.
+    pub fn node_at(&self, open: &cache::Open, place: Option<&Place>, file: bool) -> Option<Option<&Value>> {
+        let (path, text, offset) = place?;
+        let index = self.index.as_ref();
+        let scanned = Scanned::of(path, text.clone());
+        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
+        // The calls of `sources::file_calls`, which leave out the function calls that a YAML file's scan holds too.
+        let inside = |call: &&scan::Call| {
+            call.arguments.iter().any(|range| range.start <= *offset && *offset <= range.end)
+                && !(yaml && call.name.kind == reference::Kind::Function)
+        };
+        if let Some(call) = scanned.calls.iter().find(inside) {
+            let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
+            // Without an index there is no node to find: the project is not read for none.
+            return named.then(|| {
+                let project = index.and_then(|_| self.project(open))?;
+                navigation::Lookup::new(&project, index).node(path, &call.name)
+            });
+        }
+        // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
+        let entry = navigation::reference_at(path, &scanned, *offset).filter(|name| {
+            matches!(
+                name.kind,
+                reference::Kind::Entry { label: "model" | "seed" | "snapshot" | "analysis" }
+                    | reference::Kind::Table { .. }
+            )
+        });
+        if let Some(name) = entry {
+            let Some(project) = self.project(open) else { return Some(None) };
+            return Some(navigation::Lookup::new(&project, index).node(path, &name));
+        }
+        let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
+        if let Some(index) = index {
+            return index.of_file(&relative.to_string_lossy()).map(Some);
+        }
+        // As `ParseIndex::of_file` reads the manifest: the kinds of resources it holds as nodes.
+        let project = self.project(open)?;
+        let defines = |entity: &&project::Entity| {
+            entity.path == *path
+                && entity.package == project.root_package
+                && matches!(entity.resource_type, "model" | "seed" | "snapshot" | "analysis" | "test")
+        };
+        (project.entities.iter().filter(defines).count() == 1).then_some(None)
+    }
+
+    /// The node that WHICH names, as nodeInfo, the subcommand `node` and MCP
+    /// give it: the manifest's node with its summary and `children`; else
+    /// why none: a place in another project's document, no index yet, or a
+    /// project that does not read where the place names a node; `Empty` for
+    /// no such node.  The project is read with the open texts OPEN.
+    pub fn node(&self, open: &cache::Open, which: &Which) -> Answer {
+        if let (Which::At((document, ..)), Some(root)) = (which, &self.root)
+            && let Some(project) = locate::elsewhere(document, root, self.dbt.command())
+        {
+            let elsewhere = Reason::Elsewhere { document: document.clone(), project, served: root.clone() };
+            return Answer::Unanswered(vec![elsewhere]);
+        }
+        let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
+        let node = match which {
+            Which::Id(id) => index.node(id),
+            Which::At(place) => match self.node_at(open, Some(place), true) {
+                Some(None) if self.project(open).is_none() => {
+                    return Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())]);
+                }
+                named => named.flatten(),
+            },
+        };
+        let described = |node: &Value| {
+            let mut described = node.clone();
+            described["summary"] = index.summary(node).into();
+            described["children"] = index.children(node["unique_id"].as_str().unwrap_or_default()).into();
+            described
+        };
+        node.map(described).map_or(Answer::Empty, Answer::Found)
+    }
+
     /// Starts a parse when the index is stale and dbt can parse: no parse
     /// under way, packages that need no network, guarded as alone when
     /// GUARD, a server command with `lsp`; REPORT gets its outcome.  With no
@@ -213,11 +311,116 @@ impl Workspace {
     }
 }
 
+/// The node and the error that a front end with fields gives (the
+/// subcommand `node`, MCP): ANSWER's node and FAILURE, the last parse's;
+/// for `Empty`, FAILURE, else `<ASKED> names no node`; for `Unanswered`,
+/// its reasons joined by `; `, FAILURE in place of `Unindexed`.
+pub fn reply(answer: Answer, failure: Option<&str>, asked: &str) -> (Value, Option<String>) {
+    match answer {
+        Answer::Found(node) => (node, failure.map(str::to_owned)),
+        Answer::Empty => (Value::Null, Some(failure.map_or_else(|| format!("{asked} names no node"), str::to_owned))),
+        Answer::Unanswered(reasons) => {
+            let said = |reason: &Reason| match (reason, failure) {
+                (Reason::Unindexed(_), Some(failure)) => failure.to_owned(),
+                _ => reason.to_string(),
+            };
+            (Value::Null, Some(reasons.iter().map(said).collect::<Vec<_>>().join("; ")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn a_node_by_its_id_or_a_place_with_its_children_or_why_none() {
+        let (b_sql, a_yml) = ("select * from {{ ref('a') }}", "version: 2\nmodels:\n  - name: a\n");
+        let root = project::scratch_project(
+            "workspace-node",
+            &[
+                ("dbt_project.yml", "name: shop\n"),
+                ("models/a.sql", "select 1"),
+                ("models/b.sql", b_sql),
+                ("models/_a.yml", a_yml),
+            ],
+        );
+        let other = project::scratch_project(
+            "workspace-node-other",
+            &[("dbt_project.yml", "name: other\n"), ("models/m.sql", b_sql)],
+        );
+        let mut workspace = Workspace { root: Some(root.clone()), ..Workspace::default() };
+        let (texts, edits) = (HashMap::new(), HashMap::new());
+        let open = cache::Open { texts: &texts, edits: &edits };
+        let id = |id: &str| Which::Id(id.to_owned());
+        let at = |path: PathBuf, offset: usize| Which::At((path.clone(), fs::read_to_string(&path).unwrap(), offset));
+        let (in_ref, in_name) = (b_sql.find("'a'").unwrap() + 1, a_yml.find("name: a").unwrap() + 6);
+        let m = other.join("models/m.sql");
+        let elsewhere = Reason::Elsewhere { document: m.clone(), project: other.clone(), served: root.clone() };
+        // Each step, what the query gave, as a node's id, else as the Answer.
+        let mut seen = Vec::new();
+        let mut look = |step: &str, workspace: &Workspace, which: Which| {
+            let answer = match workspace.node(&open, &which) {
+                Answer::Found(node) => Answer::Found(node["unique_id"].clone()),
+                other => other,
+            };
+            seen.push((step.to_owned(), answer));
+        };
+        look("an id before an index", &workspace, id("model.shop.a"));
+        look("another project's document before an index", &workspace, at(m.clone(), in_ref));
+        let node = |name: &str, depends_on: &[&str]| {
+            json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
+                   "package_name": "shop", "original_file_path": format!("models/{name}.sql"),
+                   "depends_on": {"nodes": depends_on}, "config": {}})
+        };
+        let manifest = json!({"metadata": {"project_name": "shop"},
+                              "nodes": {"model.shop.a": node("a", &[]), "model.shop.b": node("b", &["model.shop.a"])}});
+        workspace.parsed(Some(config::ParseIndex::of(&manifest)), None);
+        look("another project's document", &workspace, at(m, in_ref));
+        look("a ref's argument", &workspace, at(root.join("models/b.sql"), in_ref));
+        look("a file's start", &workspace, at(root.join("models/a.sql"), 0));
+        look("an entry's name", &workspace, at(root.join("models/_a.yml"), in_name));
+        look("no such id", &workspace, id("model.shop.x"));
+        let described = workspace.node(&open, &id("model.shop.a"));
+        fs::write(root.join("dbt_project.yml"), "name: [").unwrap();
+        workspace.epoch += 1;
+        look("an entry's name, unreadable", &workspace, at(root.join("models/_a.yml"), in_name));
+        let a = Answer::Found(json!("model.shop.a"));
+        let expected = [
+            ("an id before an index", Answer::Unanswered(vec![workspace.unindexed()])),
+            ("another project's document before an index", Answer::Unanswered(vec![elsewhere.clone()])),
+            ("another project's document", Answer::Unanswered(vec![elsewhere.clone()])),
+            ("a ref's argument", a.clone()),
+            ("a file's start", a.clone()),
+            ("an entry's name", a),
+            ("no such id", Answer::Empty),
+            ("an entry's name, unreadable", Answer::Unanswered(vec![Reason::Unreadable(root.clone())])),
+        ];
+        assert_eq!(seen, expected.map(|(step, answer)| (step.to_owned(), answer)));
+        let Answer::Found(described) = described else { panic!("no node a: {described:?}") };
+        let summary = described["summary"].is_string();
+        assert_eq!((&described["children"], summary), (&json!(["model.shop.b"]), true), "{described}");
+        // What a front end with fields gives of each.
+        let (n, failure) = (json!({"unique_id": "model.shop.a"}), "dbt parse failed: x");
+        let replies = [
+            reply(Answer::Found(n.clone()), Some(failure), "model.shop.a"),
+            reply(Answer::Empty, None, "model.shop.x"),
+            reply(Answer::Unanswered(vec![Reason::Unindexed("it is running".into())]), Some(failure), "a"),
+            reply(Answer::Unanswered(vec![elsewhere.clone()]), Some(failure), "a"),
+        ];
+        let said = [
+            (n, Some(failure.to_owned())),
+            (Value::Null, Some("model.shop.x names no node".to_owned())),
+            (Value::Null, Some(failure.to_owned())),
+            (Value::Null, Some(elsewhere.to_string())),
+        ];
+        assert_eq!(replies, said);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other).unwrap();
+    }
 
     #[test]
     fn a_workspace_reads_its_project_and_parses_when_stale_with_no_front_end() {

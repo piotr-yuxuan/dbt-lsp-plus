@@ -265,7 +265,8 @@ By what the agent reads:
 - `no dbt project at <root>: its dbt_project.yml is missing, is not
   YAML, or names no project`: the project's file no longer reads, as
   mid-edit; fix it, and the next request reads it again.  In front of
-  `dbt lsp`, a hover on a `ref` or a `source` once a parse has run, and a
+  `dbt lsp`, a hover on a `ref`, a `source` or an entry's `name:` once a
+  parse has run, and a
   definition or references at a kind listed in [Where dbt-lsp-plus
   answers definitions and
   references](#where-dbt-lsp-plus-answers-definitions-and-references),
@@ -275,6 +276,7 @@ By what the agent reads:
 - `<file> lies in the dbt project at <other>, and this session serves
   only the one at <root>`: a session serves the first project it finds;
   for that file's answers, start a session in its project's directory.
+  A nodeInfo at a position in that file gives it too.
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not

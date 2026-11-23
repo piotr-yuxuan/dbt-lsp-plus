@@ -60,7 +60,7 @@ src/packages.rs               whether dbt would install packages before it parse
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
-src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale
+src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries
 src/proxy.rs                  the event loop; the Backend, dbt lsp's process: its life, its listings
 src/cli.rs                    the subcommands doctor and select, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
