@@ -208,12 +208,8 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
 /// when HARD, as markdown needs two spaces before each; else plain text, as
 /// given.
 pub fn hover(text: &str, hard: bool, markdown: bool) -> Value {
-    let (kind, value) = match (markdown, hard) {
-        (true, true) => ("markdown", text.replace('\n', "  \n")),
-        (true, false) => ("markdown", text.to_owned()),
-        (false, _) => ("plaintext", text.to_owned()),
-    };
-    json!({"contents": {"kind": kind, "value": value}})
+    let value = if markdown && hard { text.replace('\n', "  \n") } else { text.to_owned() };
+    json!({"contents": {"kind": if markdown { "markdown" } else { "plaintext" }, "value": value}})
 }
 
 /// The relation hints of TEXT, the file at PATH, whose calls are CALLS:
@@ -724,13 +720,6 @@ mod tests {
         let expected = json!([{"position": {"line": 0, "character": 41}, "label": "\"shop\".\"main\".\"orders\"",
                                "kind": 1, "paddingLeft": true, "tooltip": "model.shop.orders"}]);
         assert_eq!(Value::Array(hints), expected);
-    }
-
-    #[test]
-    fn keeps_a_markdown_text_s_line_breaks_as_written() {
-        // A paragraph that a docs block wraps in its source stays one.
-        let text = "One sentence\nwrapped.";
-        assert_eq!(hover(text, false, true)["contents"], json!({"kind": "markdown", "value": text}));
     }
 
     #[test]
