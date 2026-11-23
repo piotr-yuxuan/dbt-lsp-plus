@@ -19,7 +19,7 @@ use std::sync::{Arc, LazyLock};
 
 /// A resource: a model, seed, snapshot, analysis, singular test, macro,
 /// function, source table or docs block, with the calls of its body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Entity {
     /// dbt's `unique_id`, such as `model.shop.orders`, or
     /// `model.shop.orders.v2` for a version.
@@ -209,9 +209,7 @@ impl From<&SourceTable> for Entity {
             path: table.path.clone(),
             range: table.table_range.clone(),
             name_range: table.table_range.clone(),
-            calls: Vec::new(),
-            version: None,
-            latest: false,
+            ..Entity::default()
         }
     }
 }
@@ -770,7 +768,7 @@ mod tests {
         assert_eq!(ids("proj"), expected);
         let project = scan(&dir.join("proj"), &HashMap::new()).unwrap();
         let graph = crate::graph::Graph::scanned(&project, None);
-        let edges: Vec<(&str, &str)> = graph.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect();
+        let edges: Vec<(&str, &str)> = graph.edges.keys().map(|(from, to)| (from.as_str(), to.as_str())).collect();
         assert_eq!(edges, [("model.r.c", "model.shared.s_m")], "as dbt resolves it once installed");
         let deps = scan(&dir.join("deps"), &HashMap::new()).unwrap();
         assert_eq!(deps.packages["shared"], dir.join("deps/dbt_packages/shared"), "the installed one, once");

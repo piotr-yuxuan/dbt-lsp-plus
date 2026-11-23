@@ -110,8 +110,8 @@ impl Workspace {
             return graph.clone();
         }
         let scanned = Graph::scanned(project, self.index.as_ref());
-        let graph = Rc::new(match self.index.as_ref().map(config::ParseIndex::listed) {
-            Some(nodes) => scanned.with_server(&nodes, project),
+        let graph = Rc::new(match &self.index {
+            Some(index) => scanned.with_index(index, project),
             None => scanned,
         });
         *self.graph.borrow_mut() = Some((made_of, graph.clone()));
