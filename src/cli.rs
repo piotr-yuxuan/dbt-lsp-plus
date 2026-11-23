@@ -81,7 +81,8 @@ struct Row {
     run: Run,
 }
 
-/// The subcommands, in `Subcommand`'s order.
+/// The subcommands, in `Subcommand`'s order, by which `Subcommand::row`
+/// reads them; a unit test holds each row at its subcommand's place.
 const SUBCOMMANDS: [Row; 3] = [
     Row {
         subcommand: Subcommand::Doctor,

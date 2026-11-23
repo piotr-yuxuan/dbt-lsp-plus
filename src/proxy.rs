@@ -1765,9 +1765,9 @@ impl<W: Write> Proxy<W> {
     /// What the answer to a hover at PARAMS gets first, outside `dbt`: the
     /// summary and facts of the node named there, else a doc's or a generic
     /// test's block; else nothing, null, which a node named before any index
-    /// turns into why the proxy has none, and a node named by a `ref` or a
-    /// `source` over a project that does not read, once there is an index,
-    /// into its reason.
+    /// turns into why the proxy has none, and a node named by a `ref`, a
+    /// `source` or an entry's `name:` over a project that does not read,
+    /// once there is an index, into its reason.
     fn hover_part(&self, params: &Value) -> Part {
         let index = self.workspace.index.as_ref();
         // Line 1, column 1 of a file stands for the node it defines.

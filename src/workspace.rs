@@ -146,10 +146,12 @@ impl Workspace {
     /// included, so neither the scan nor `of_file` can name one node.  The
     /// project is read with the open texts OPEN.  None for no PLACE, or when
     /// it names nothing; `Some(None)` when it names a node that the lookup
-    /// does not find, as a `ref`, a `source` or an entry's `name:` over a
-    /// project that does not read once there is an index, or that, without
-    /// an index, the scan tells is named but cannot give, as any `ref` or
-    /// `source`.
+    /// does not find: without an index, any that the scan tells is named but
+    /// cannot give (a `ref`, a `source`, an entry's `name:`, a file's one
+    /// node); with one, a node the index lacks, or a `ref`, a `source` or an
+    /// entry's `name:` over a project that does not read, which
+    /// `Workspace::node` tells from a node the index lacks by asking for the
+    /// project again.
     pub fn node_at(&self, open: &cache::Open, place: Option<&Place>, file: bool) -> Option<Option<&Value>> {
         let (path, text, offset) = place?;
         let index = self.index.as_ref();

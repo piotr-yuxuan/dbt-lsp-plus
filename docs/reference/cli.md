@@ -171,7 +171,10 @@ or `source` under it, or the entry whose `name:` is there; `PATH` alone
 is `PATH:1:1`, which, where it names nothing else, stands for the one
 node its file defines, but in a YAML file.  Any
 other operand is a unique id, as written: `model.shop.orders`,
-`source.shop.raw.customers`.
+`source.shop.raw.customers`.  So is a PATH mistyped, or of a file not
+written yet: within a project it gets `<operand> names no node`, after
+a parse when no manifest is kept, and outside one the error of no
+project.
 
 The nodes are those of a `dbt parse` of the project, run as the server
 runs its own (the same flags, cut off the network where the system can,
