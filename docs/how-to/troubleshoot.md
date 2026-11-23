@@ -127,8 +127,9 @@ seconds, 10 by default.
   key perhaps, which dbt may read and install packages from.  Fix the
   file.
 - **"has no lsp: dbt-lsp-plus answers alone".**  The dbt is dbt-oss: the
-  proxy's own features work, formatting, completion, compiled SQL and
-  previews do not (see [Use it with dbt-oss alone](use-with-dbt-oss.md)).
+  proxy's own features work, and compiled SQL by `dbt-lsp-plus.compile`;
+  formatting, completion and previews do not (see [Use it with dbt-oss
+  alone](use-with-dbt-oss.md)).
 - **"...: dbt-lsp-plus answers alone." after restarts, or at the start.**
   `dbt lsp` ended four times in ten minutes, could not start, or exited
   before it answered `initialize`.  The message names why: its exit

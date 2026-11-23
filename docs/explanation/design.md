@@ -535,8 +535,8 @@ alike unless said:
   "arguments": [PATH, {"name", "compiled_path", "compiled_start",
   "compiled_stop", "start", "stop", "start_location"}]}, "range"}`, PATH a
   path, not a URI.
-- `dbt compile --select path:R`, with the proxy's flags (then with the
-  root read-only, the working directory elsewhere), compiles
+- `dbt compile --select path:R`, with the proxy's flags and the working
+  directory elsewhere, compiles
   statically and writes the node and the tests on it (`*.sql`,
   `*.macro_spans.json`); its manifest records the node's `compiled_path`
   relative to the working directory.  A snapshot's file is

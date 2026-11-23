@@ -50,10 +50,13 @@ method:
   (`workspace/executeCommand`), commands for clients that do what dbt
   lsp's `dbt.compileFile`, `dbt.show` and `dbt.listNodes` do, in their
   shapes: by them when dbt lsp runs; without it, `compile` and `nodes` by
-  dbt's CLI, as the user runs dbt, a compile refused where a package of
-  the project may have `on-run-start` or `on-run-end` hooks, which `dbt
-  compile` runs against the warehouse; and `show` not at all, since `dbt
-  show` reaches the warehouse;
+  dbt's CLI, as the user runs dbt, and `show` not at all, since `dbt
+  show` reaches the warehouse.  A compile is refused where a package may
+  have `on-run-start` or `on-run-end` hooks, which `dbt compile` runs
+  against the warehouse; a compile of a model that introspects the
+  warehouse, by `run_query` under `execute` or a macro such as
+  `dbt_utils.star`, or of a Python model, queries it, and dbt may
+  download its driver;
 - `dbt-lsp-plus.nodeInfo` (`workspace/executeCommand`), a command that
   gives a node's resolved
   configuration, relation and summary from the user's own `dbt parse`,
@@ -371,5 +374,10 @@ These are not configurable.
   last.  A shadow file that nothing wrote for 30 days is removed.
 - The proxy's runs of dbt, its `dbt parse` and the commands', run as the
   user runs dbt, with dbt's flags against its statistics and its version
-  check; the guard on packages refuses a parse that would install
-  packages first.
+  check.  The guard on packages refuses such a run where a local or a
+  locked package is not installed, a package from the network is not in
+  a lock as recent as the files naming it, or a file naming packages, or
+  `dbt_project.yml`, does not read.  A lock as recent but stale in
+  content passes, and dbt then installs anew, rewriting the install path
+  ([how the proxy runs
+  dbt](../explanation/design.md#how-the-proxy-runs-it)).

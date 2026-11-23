@@ -10,8 +10,10 @@ parse`).  It says so once in the log, and warns of nothing.  Go to
 definition and references cover, as in front of `dbt lsp`, a `ref` and a
 macro call in SQL, a
 `ref` in a Python model, a `function()` call in SQL or YAML, and a macro
-call in YAML: across the project, versions included.  Formatting,
-completion, compiled SQL and previews are `dbt lsp`'s, and absent.
+call in YAML: across the project, versions included.  Compiled SQL comes
+from `dbt-lsp-plus.compile`, by dbt's CLI, refused where a package may
+have on-run hooks.  Formatting, completion and previews are `dbt lsp`'s,
+and absent.
 
 The command is the same, `dbt-lsp-plus -- dbt lsp --project-dir
 /path/to/project`: the proxy asks `dbt lsp --help` first.

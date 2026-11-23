@@ -199,7 +199,9 @@ current directory, or that a place in a file names, as
 `{"error":null,"node":{...}}`, the node with its `summary` and its
 `children`, the unique ids of the enabled nodes that depend on it.  Its
 first run in a project runs a `dbt parse` and keeps its manifest; the
-next runs read it, while the project's files stay as they were.  doctor
+next runs read it, while the project's files stay as they were.  Like the
+server's, that parse adds the line `dbt_internal_packages/` to a
+`.gitignore` of the project that lacks it, as dbt 2 does.  doctor
 exits 0 when it finds
 a project and a dbt 2, select and node when `error` is null; 1
 otherwise; 2 for a usage error ([the subcommands](../reference/cli.md)).
@@ -244,9 +246,7 @@ By what the agent reads:
   ask again.  When `dbt lsp` gave no answer either, followed by `; ` and
   why.
 - `dbt parse has not finished: dbt parse failed: ...`: dbt's first error;
-  its log is the path in parentheses.  A parse adds the line
-  `dbt_internal_packages/` to a project's `.gitignore` that lacks it, as
-  dbt 2 does; a project with no `.gitignore` is unaffected.
+  its log is the path in parentheses.
 - `dbt parse has not finished:` then `... run dbt deps`: a package is
   missing or its lock is stale, and the proxy will not let its parse
   install it.  Run `dbt deps`.
