@@ -263,13 +263,12 @@ that applies:
   dbt, the first scan, the watcher of runs, the watcher of files when the
   client lets the server register it, and the line; then the parse.
 
-The working directory no longer names the project.  Before a project, and
-for ever when no document lies in one, the server is quiet: no process
-(no probe, no git, no dbt), no polling, no watcher, nothing on its
-standard error, no message but a refused setting's at `initialize`, and
-every request of a method or a command of its own gets null, valid for
-each method it announces and each one an agent was seen to send; an
-unknown one gets -32601.
+The working directory no longer names the project.  Before a project,
+and for ever when no document lies in one, the server is quiet: no
+process (no probe, no git, no dbt), no polling, no watcher, nothing on
+its standard error, no message, and every request of a method or a
+command of its own gets null, valid for each method it announces and
+each one an agent was seen to send; an unknown one gets -32601.
 
 Once there is a project, a document lies in it when under the root or
 in one of its packages, installed or local, as spelt or links resolved,
@@ -713,10 +712,11 @@ its unit tests' models, its resources' entries and its generic tests, read
 from one parse, so that no request parses YAML again; calls alike from one
 package are looked up once.
 
-A targeted request reads the document's open text if the client opened
-it, else the saved file, and decides its claim on that text: a client may
-send a request on a file it never opened, and a position that holds no
-target in the saved text is not claimed.
+A definition or references request reads the document's open text if
+the client opened it, else the saved file, since a client may send a
+request on a file it never opened; a position that names no target in
+that text, and a document that is neither open nor on disk, get its
+nothing.
 
 Hover there extends the hover summary (see "Node information and hover"):
 on a `doc`, the docs block's markdown as written, if it holds any; on a

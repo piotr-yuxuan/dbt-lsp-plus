@@ -57,8 +57,6 @@ last one meanwhile, or says why there is none.
   `dbt-lsp-plus:`: which project and which dbt it found; why its `dbt
   parse` failed or was refused; a problem of the parse in no file of the
   project.
-- **`window/showMessage`**, which an editor shows at once and Claude
-  Code does not show at all: what of the settings cannot take effect.
 
 ## Common problems
 
