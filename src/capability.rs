@@ -121,6 +121,30 @@ mod tests {
     }
 
     #[test]
+    fn a_session_announces_each_provider_and_the_commands() {
+        let providers = [
+            "documentSymbolProvider",
+            "workspaceSymbolProvider",
+            "callHierarchyProvider",
+            "foldingRangeProvider",
+            "documentHighlightProvider",
+            "selectionRangeProvider",
+            "hoverProvider",
+            "inlayHintProvider",
+            "definitionProvider",
+            "referencesProvider",
+            "renameProvider",
+        ];
+        let commands = ["dbt-lsp-plus.nodeInfo", "dbt-lsp-plus.compile", "dbt-lsp-plus.nodes"];
+        let mut expected = json!({"textDocumentSync": {"openClose": true, "change": 2, "save": {}},
+                                  "executeCommandProvider": {"commands": commands}});
+        for provider in providers {
+            expected[provider] = json!(true);
+        }
+        assert_eq!(announced(), expected);
+    }
+
+    #[test]
     fn the_reference_page_shows_each_capability() {
         let page = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/reference/features.md")).unwrap();
         let heading = "### Methods and commands";

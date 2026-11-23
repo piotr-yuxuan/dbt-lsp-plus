@@ -247,6 +247,24 @@ fn a_bad_option_is_a_usage_error_and_starts_nothing() {
 }
 
 #[test]
+fn help_and_version_are_printed_and_start_nothing() {
+    let log = scratch("help-and-version").join("log.jsonl");
+    let run = |option: &str| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"))
+            .args([option, "--", env!("CARGO_BIN_EXE_fake-dbt"), "lsp"])
+            .env_clear()
+            .env("FAKE_DBT_LOG", &log)
+            .output()
+            .unwrap();
+        (output.status.code(), String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let (status, usage) = run("--help");
+    assert!(status == Some(0) && usage.starts_with("usage: dbt-lsp-plus [--] [SERVER COMMAND...]\n"), "{usage}");
+    assert_eq!(run("-V"), (Some(0), format!("dbt-lsp-plus {}\n", env!("CARGO_PKG_VERSION"))));
+    assert!(!log.exists(), "the fake started");
+}
+
+#[test]
 fn a_dbt_without_lsp_is_served_and_said_once_in_the_log() {
     let (mut session, _) = Session::fake("standalone", json!({}));
     let result = session.initialize(&fixture());
