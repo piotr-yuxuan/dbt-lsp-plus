@@ -505,9 +505,13 @@ fn node_answers_by_id_and_by_place_from_one_parse_kept_for_the_next() {
     assert_eq!(again, (Some(0), &json!("model.shop.orders"), 2), "{answer}");
     let (status, answer) = case.run(&case.copy, &["node", "model.shop.nowhere"]);
     assert_eq!((status, answer), (Some(1), json!({"error": "model.shop.nowhere names no node", "node": null})));
+    // From outside the project, an id takes the current directory's, which is none, and a PATH its file's.
     let (status, answer) = case.run(&case.dir, &["node", "model.shop.orders"]);
     let why = answer["error"].as_str().unwrap_or_default();
     assert!(status == Some(1) && why.starts_with("no dbt_project.yml at or above"), "{answer}");
+    let (status, outside) = case.run(&case.dir, &["node", "shop/models/marts/orders.sql"]);
+    let by_its_file = (status, &outside["node"]["unique_id"], crate::parses(&case.log).len());
+    assert_eq!(by_its_file, (Some(0), &json!("model.shop.orders"), 2), "the kept manifest: {outside}");
     // One parent, holding `kept` alone, with one file.
     let left = left_in_cache(&case);
     let kept = left.first().and_then(|held| held.first()).map(|kept| fs::read_dir(kept).unwrap().count());
