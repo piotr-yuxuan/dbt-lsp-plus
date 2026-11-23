@@ -256,22 +256,19 @@ each of dbt lsp's entries by its shape first, a `uri` or `targetUri`
 that is a string and a `range` or `targetSelectionRange` whose start
 and end have a line and a character, a `LocationLink` written as a
 `Location` of its target's selection, any other entry dropped (the
-fake's echo is one), then by its path as the shadow reads it; two
-locations match by the shadow's rule, in one file, the range of one
-holding the other's, and one whose path cannot be read matches only
-itself.  When dbt lsp
+fake's echo is one), then by its path, as a client's URI is read and a
+path outside the root with its links resolved; two locations match in
+one file when the range of one holds the other's, and one whose path
+cannot be read matches only itself.  When dbt lsp
 adds nothing, the client gets the proxy's answer as it is, one
 `Location` staying one.  Its cost: every definition and references at a
 claimed position waits for dbt lsp, at most 300 ms where the proxy finds
 a target and 2 s where it finds nothing (`ref('nowhere')`, `- unique`),
 where `plus` answers at once, and each one does during a long
-compilation; dbt lsp 2.0.9
-took 1.2 s over a session's first references on the fixture, once
-compiled (see "Shadow"), past which the proxy answers alone.  Where dbt
-lsp's answer was seen it equals the proxy's or lies within it, but for
-a versioned `ref` in SQL, which dbt lsp 2.0.9 reads without its version
-(see "Navigation"): its location there follows the proxy's, and is
-wrong.  A user who finds dbt lsp wrong sets the method to `plus`.  The
+compilation.  Where dbt lsp's answer was seen it equals the proxy's or
+lies within it, but for a versioned `ref` in SQL, which dbt lsp 2.0.9
+reads without its version (see "Navigation"): its location there
+follows the proxy's, and is wrong.  A user who finds dbt lsp wrong sets the method to `plus`.  The
 narrower rule that plan 042 recorded for the owner would forward a
 claimed position only where the proxy finds nothing.  Rename is no merged
 request: dbt lsp computes a model's rename over the project, and a null
@@ -286,6 +283,23 @@ compilation on the fixture; on a project of 2,000 models from
 the whole compilation, 1.9 s; every other one took under 1 ms.  It ignores `$/cancelRequest`: a hover cancelled at once
 during its compilation was answered with its result 110 ms later.
 
+With the union (plan 042), a definition on `ref('stg_orders')` and on
+`shop_utils.is_positive(...)` in `orders.sql`, and references on that
+`ref`, get the proxy's answer in `merge`, observed on 2026-11-22 on the
+fixture: dbt lsp 2.0.9's locations all match the proxy's, its reference
+`'stg_orders'` (4:25-37, the quotes included) holding the proxy's name.
+Once it has compiled, it answers a definition within 20 ms; but it took
+1.2 s over the first references of the session, past the deadline, where
+the proxy answers alone and logs it, then 2 ms over each later one.  One
+check depends on those times: `navigation` asserts that no definition
+was late, which holds while dbt lsp answers a definition within the
+300 ms deadline.  The live test checks the answers, the proxy's
+(`navigation`), and that dbt lsp is asked:
+`the_union_in_front_of_the_real_dbt_lsp` records dbt lsp's input by
+`tee` in the server command, and counts there one definition and one
+references in `merge` at a claimed position.  The fake answers at once,
+and its `hold` stands for a late server.
+
 Plan 020 narrowed the roadmap's merge table.  Definition and references
 stay per kind of target: the kinds the flag lists are the proxy's, dbt
 lsp answering nothing there, with dbt lsp's other locations after them
@@ -295,7 +309,8 @@ whose null on a package's `ref` or on a name two packages hold, and
 references from the asking file only, passed as they came; with dbt lsp
 running, an agent's definition on a `ref` came back null after 40 s.  Plan
 037 lists them with a server too, on the corpus's evidence (see
-"Conformance"), the live baseline (see "Shadow") and those nulls, as the
+"Conformance"), plan 021's live baseline, in which dbt lsp 2.0.9's
+references on a `ref` left out the snapshot's, and those nulls, as the
 owner decided on 2026-11-17, and announced the change to dbt-mode.  Plan
 042 built the union of both answers at those kinds in `merge`, on the
 owner's decision of 2026-11-17 ("`merge` is the union of both servers'
@@ -334,111 +349,6 @@ a change applies at the next session.  A refused setting of
 option on the command line is a usage error.  dbt lsp 2.0.9 ignores
 `initializationOptions`, whatever its shape (probed by plan 019); the
 proxy removes its section all the same.
-
-## Shadow
-
-The shadow (`src/shadow.rs`, plan 021) gathers the evidence on which a
-method's shipped mode may change.  Off by default, it is set for the
-session by `--shadow` or `initializationOptions.dbtLspPlus.shadow: true`,
-and on from dbt lsp's answer to `initialize`: with no backend it is off,
-and said once.  It follows each definition or references request in
-`dbt`, decided from the method alone; none in `plus` or `merge`: in
-`merge` the union decides what the switching rule was to settle, and a
-merged request falls back to the proxy's part (plans 037 and 042), so
-that with the shipped modes the shadow's log holds no provenance of a
-merged location.  With the shadow on and neither definition nor references in `dbt`,
-one warning after `initialize` says that it has nothing to follow.  The
-client gets dbt lsp's answer first, as it came; then, on the loop, the
-proxy computes its own (`on_definition`, `on_references`, whatever the
-flag lists, but `[]` for references from a file outside the root, as
-`plus` answers) and compares the two, so that
-the next message waits for one answer of the proxy's, 15 to 40 ms, 0.2
-to 0.31 s after a save.  A panic there costs the comparison alone.  A
-followed request asks for a fresh index, as the proxy's own answer would,
-so that a parse runs in front of a server too.
-
-The comparison is location by location, both sides' URIs read as paths
-as a client's are, and a path outside the root with its links resolved:
-two locations match when they are in one file and the range of one holds
-the other's, as dbt lsp's whole macro block holds a name.  `both` counts
-the proxy's locations that match.  The relation is `equal`, `oursAdds` (dbt lsp's all matched, the
-proxy has more), `oursMisses`, `overlap`, `disjoint`, `oursEmpty`,
-`dbtEmpty` or `bothEmpty`; apart, not compared, `dbtError`, then
-`changed` (the client changed or closed a document before dbt lsp
-answered; an open changes nothing the proxy reads), then
-`dbtMissingFile` (a location of dbt lsp's in no file on disk, as for
-dbt's own macros).  A request lost to dbt lsp's exit is not counted.  The
-target of a `changed` request is read after the edit.
-
-The session's counts, by method, kind of target, place and relation,
-answer `workspace/executeCommand` `dbt-lsp-plus.shadowSummary`, announced
-with the shadow on.  The log is
-`$XDG_CACHE_HOME/dbt-lsp-plus/shadow/<hash of the root>.jsonl`, else under
-`$HOME/.cache`; with neither absolute, there is no log, the counts alone,
-never the temporary directory.  Its directory is made owner-only, the
-file created owner-only, each line appended in one write so that two
-proxies on one root share it, on a local file system; a file of 1 MB is
-renamed `.jsonl.1`, replacing the last, before the next line (two
-proxies that rotate at once may lose the older file), and the logs that
-nothing wrote for 30 days, and nothing else, are removed when a shadowed
-session starts.  A write that fails, or no place for the log, is said
-once (`window/logMessage`, type 2), and the counts go on.  Nothing is sent anywhere.  The session's first line holds its pid,
-its start, the proxy's version, dbt lsp's `serverInfo` and the modes of
-definition and references; each followed request a line with the pid,
-the method, the asking file, the target's kind, its place and the
-relation, the number of locations only the proxy has, only dbt lsp has
-and both have, at most 20 unmatched locations a side (paths relative to
-the root, fewer as needed to stay under 8 KB), the target as read (kind,
-package, name, version), the index's state (present, fresh, a parse
-running), and the oracle: for a `ref` or a `function` whose file is one
-node of the index, the ids among that node's `depends_on.nodes` of the
-call's kind that bear its name, in the package and at the version the
-call names, if it names them, dbt's own resolution at the last parse,
-each with its file relative to the root, the node's own in its package
-(a function, which the index does not hold, by its id and the scan's
-file; none for a macro call).  The last line, at `exit` or when the client
-closes, holds the session's counts; every line but that one stays under
-8 KB.
-
-The rule that a later plan applies, fixed before the data: on a kind and
-a place, over at least 200 followed requests from at least three
-projects, dbt lsp's empty answers are filled from the proxy when, of the
-`dbtEmpty` lines with an oracle, at least 95% have the proxy's locations
-among the oracle's files; the full union is considered only when
-`disjoint` is under 1% of the compared requests and no `disjoint` line's
-oracle sides with dbt lsp; `plus` is considered as the shipped default
-only when `oursMisses`, `oursEmpty`, `overlap` and `disjoint` together,
-every relation where dbt lsp has a location the proxy lacks, are under
-1%.  The owner may change the rule.  Plan 037 set it aside for the
-definition and references of `ref`, `macro` and `function`, which the
-proxy now answers in `merge`, on the owner's decision of 2026-11-17 to
-fix the agent's null answers first; no data of 200 followed requests
-was recorded.  Plan 042 built the full union in `merge` on the owner's
-decision of the same day, not on the rule, which still holds for the
-requests that the shadow follows in `dbt`.  The log's names (`oursAdds`, `oursOnly` and the others)
-keep the mode's former name: they are its format.
-
-The baseline, live in front of dbt lsp 2.0.9 on the fixture: a
-definition on `ref('stg_orders')` and on `shop_utils.is_positive(...)`
-in `orders.sql` is `equal`; references on that `ref` are `oursAdds`,
-dbt lsp leaving out the `ref` of `snapshots/orders_snapshot.sql`.  The
-live test leaves definitions and references to dbt lsp (`dbt`) to follow
-them.
-
-With the union (plan 042), the same requests in `merge` get the proxy's
-answer, observed on 2026-11-22: dbt lsp 2.0.9's locations all match the
-proxy's, its reference `'stg_orders'` (4:25-37, the quotes included)
-holding the proxy's name.  Once it has compiled, it answers a definition
-within 20 ms; but it took 1.2 s over the first references of the
-session, past the deadline, where the proxy answers alone and logs it,
-then 2 ms over each later one.  One check depends on those times:
-`navigation` asserts that no definition was late, which holds while dbt
-lsp answers a definition within the 300 ms deadline.  The live test
-checks the answers, the proxy's (`navigation`), and that dbt
-lsp is asked: `the_union_in_front_of_the_real_dbt_lsp` records dbt
-lsp's input by `tee` in the server command, and counts there one
-definition and one references in `merge` at a claimed position.  The
-fake answers at once, and its `hold` stands for a late server.
 
 ## Commands for clients
 
@@ -1497,7 +1407,7 @@ So the proxy runs the user's own `dbt parse`.
   grandchild may outlive it.
 - When, with a server: lazily.  A change of the client's marks the index stale; a
   `nodeInfo`, a hover, or a definition or references request that the
-  proxy answers or the shadow follows, that finds it stale, or an inlay
+  proxy answers, that finds it stale, or an inlay
   hint request that finds no index, starts a parse, and is answered from
   the last index meanwhile.  Such a request first looks at the files the
   scan holds, by their metadata: one that may hold a resource (not an
