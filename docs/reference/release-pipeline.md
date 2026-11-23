@@ -82,7 +82,7 @@ for neither CI nor CD. Its permission is `contents: read`.
   activity: it is enabled again under **Actions**.
 
 What a weekly run shows beyond CI: the latest dbt's resolution, as new and stale divergences;
-a changed error code, through a case's `expected-error`; the proxy's parse flags still
+a changed error code, through a case's `expected-error`; the server's parse flags still
 accepted; a need of the network; dbt writing into the project; and with either build, the
 drift of what the live test checks, its answer to `lsp --help` and its JSON log among them. Not:
 rules that the corpus has no case for, whether the fake dbt is still faithful, macOS and other

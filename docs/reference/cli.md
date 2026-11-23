@@ -11,17 +11,16 @@ dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
 ```
 
 A subcommand is the first word after the program's name, and nothing
-else: `dbt-lsp-plus -- doctor` and `dbt-lsp-plus --backend auto select x`
-still start a server whose command is `doctor` or `select x`.  A server
+else: `dbt-lsp-plus -- doctor` and `dbt-lsp-plus --default-mode plus
+select x` still start a server whose command is `doctor` or `select x`.  A server
 command whose first word is a subcommand's name (`doctor`, `select` or
 `node`) follows `--`.
 
 ARGUMENTS are the server's own command line, as an editor or `.lsp.json`'s
-`args` give it: `--backend never`, then `--` and the server command,
-`dbt lsp` by default (`-- dbt lsp --target prod`, `-- uvx dbt lsp`,
-`-- dbt lsp --project-dir dbt`).  Of them the subcommands read the server
-command and `--backend`; `--mode` and `--default-mode` are checked and
-unused.
+`args` give it: `--` and the server command, `dbt lsp` by default
+(`-- dbt lsp --target prod`, `-- uvx dbt lsp`, `-- dbt lsp --project-dir
+dbt`).  Of them the subcommands read the server command; `--mode` and
+`--default-mode` are checked and unused.
 
 `-h` or `--help` right after the subcommand's name prints its usage, whatever
 follows; elsewhere it is a usage error.
@@ -35,8 +34,7 @@ a path: doctor's PATH, node's PATH, else the current directory:
   that directory, made absolute, when it holds `dbt_project.yml`, and
   the dbt is the server command as written, run in the current
   directory.  Else the subcommands say there is no project, where the
-  server takes the directory all the same, and dbt
-  fails there (its dbt lsp, else the proxy's parse);
+  server takes the directory all the same, and its parse fails there;
 - **folder**: the path is a directory that holds `dbt_project.yml`, as a
   client's folder; the dbt is found as the server finds it (the project's
   `.venv`, its repository's, its main worktree's, else `PATH`; see
@@ -52,8 +50,7 @@ What the server would find from PATH, `.` by default, and whether it
 would work.  For a project found:
 
 ```json
-{"alone":"dbt lsp is not started for a project found from a file",
- "dbt":{"command":["/w/repo/dbt/.venv/bin/dbt","lsp"],"lsp":true,
+{"dbt":{"command":["/w/repo/dbt/.venv/bin/dbt","lsp"],
         "named":"/w/repo/dbt/.venv/bin/dbt","skipped":[],
         "source":"the project's .venv","why":null},
  "packages":null,"path":"/w/repo/dbt/models/marts/orders.sql",
@@ -72,10 +69,8 @@ would work.  For a project found:
 | `dbt.named` | the dbt: its path, or the words of the server command before `lsp` |
 | `dbt.source` | where it was found: `the server command`, `the project's .venv`, `the repository's .venv`, `the main worktree's project .venv`, `the main worktree's .venv` or `PATH` |
 | `dbt.skipped` | each place passed over, as `{"path": ..., "why": ...}`, such as a dbt-core 1.x whose `lsp --help` gives exit status 2 |
-| `dbt.lsp` | `true` when the dbt has `lsp`, `false` when it is a dbt 2 without, as dbt-oss; `null` when it does not answer as a dbt 2 does |
-| `dbt.why` | when `dbt.lsp` is `null`, how the dbt answered (`cannot run: ...`, `lsp --help gives exit status: 1`, no answer within 10 s); else `null` |
-| `alone` | `null` when `dbt lsp` would start behind the proxy; else why the proxy would answer alone: `the backend is never`, `dbt lsp is not started for a project found from a file` or `it has no lsp` |
-| `packages` | `null`, or why the proxy's first `dbt parse` would be refused, alike on every route: packages that dbt would install first, or a file naming them that dbt-lsp-plus cannot read |
+| `dbt.why` | when the dbt does not answer `lsp --help` as a dbt 2 does, with its help or with dbt-oss's refusal of `lsp`, how it answered (`cannot run: ...`, `lsp --help gives exit status: 1`, no answer within 10 s); else `null` |
+| `packages` | `null`, or why the server's first `dbt parse` would be refused, alike on every route: packages that dbt would install first, or a file naming them that dbt-lsp-plus cannot read |
 
 Without a project, doctor runs nothing at all and says so:
 
@@ -106,11 +101,11 @@ warehouse; and the state of a running server's index.
 
 The nodes that the dbt selector SELECTOR selects in the project of the
 current directory: `dbt list --select=SELECTOR --output json`, run as
-the proxy's own runs are, in a run directory under the
+the server's own runs are, in a run directory under the
 user's cache (`$XDG_CACHE_HOME`, else `~/.cache`, else the system's
 temporary directory) that it removes once it has the answer.  A select
 killed by a signal leaves its run directory, and, killed with SIGKILL,
-leaves dbt running on, unwatched; the next select or proxy on the
+leaves dbt running on, unwatched; the next select or server on the
 same project, as spelt, and server command removes such directories
 once neither a parse nor a run has
 written them for a day.  The answer
@@ -179,7 +174,7 @@ while every file of the project that may hold a resource, and every
 package, stays as it was when that parse started: a file written,
 added or removed since, even during the parse, makes the next `node`
 parse again.  `kept/` holds one manifest, the last kept; the next
-`select`, `node` or proxy on the project removes it once it has gone a
+`select`, `node` or server on the project removes it once it has gone a
 day unwritten.  The kept manifest does not see what changes outside
 those files: `profiles.yml`, a `.env`, the environment, or a dbt
 replaced in place.

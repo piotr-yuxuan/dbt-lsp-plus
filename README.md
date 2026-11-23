@@ -8,17 +8,16 @@
 [![Issues](https://img.shields.io/github/issues/piotr-yuxuan/dbt-lsp-plus)](https://github.com/piotr-yuxuan/dbt-lsp-plus/issues)
 [![Minimum Rust](https://img.shields.io/badge/rust-1.89%2B-informational)](https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/Cargo.toml)
 
-A language server that sits in front of `dbt lsp`, the language server
-of dbt 2, and adds what it lacks, for every editor and for agents: the
-outline of a model, every resource of a project as a workspace symbol,
-the call hierarchy of models, sources, macros and functions, references
-and renames of sources, definitions from YAML, definitions and
-references of refs, macros and functions, and the last run's failures
-as diagnostics.  With
-dbt-oss, which has no `dbt lsp`, it works alone, from the files and your
-own `dbt parse`.  It uses only the server's interface, unlocks nothing
-that dbt gates behind an account, and does not ship dbt.  It is
-pre-release.
+A language server for dbt projects, for every editor and for agents,
+from the project's files and your own `dbt parse`: the outline of a
+model, every resource of a project as a workspace symbol, the call
+hierarchy of models, sources, macros and functions, references and
+renames of sources, definitions from YAML, definitions and references of
+refs, macros and functions, a node's information on a hover, and the
+last run's failures and the parse's errors as diagnostics.  It works
+with dbt-oss and with dbt Labs' build of dbt 2 alike, runs no `dbt lsp`,
+unlocks nothing that dbt gates behind an account, and does not ship dbt.
+It is pre-release.
 
 ![](./docs/social-media-preview.png)
 
@@ -34,16 +33,16 @@ cargo install --locked --git https://github.com/piotr-yuxuan/dbt-lsp-plus --bin 
 or, for a branch or a local checkout, `cargo install --locked --path .
 --bin dbt-lsp-plus` in a clone.
 
-Then have your editor's LSP client start, in place of `dbt lsp`:
+Then have your editor's LSP client start:
 
 ```
 dbt-lsp-plus -- dbt lsp --project-dir /path/to/project
 ```
 
-The proxy answers what the server lacks, and passes every other message
-unchanged, byte for byte.  [Your first
-session](docs/tutorials/first-session.md) walks through it on the project
-of the tests, from Emacs.
+The server command after `--` names your dbt, by its words before `lsp`,
+and the flags that its `dbt parse` takes; it never runs as such.  [Your
+first session](docs/tutorials/first-session.md) walks through it on the
+project of the tests, from Emacs.
 
 Without `--project-dir`, the project is the client's folder when it holds
 `dbt_project.yml`, else the one of the first file opened in a project, a
@@ -74,15 +73,15 @@ subcommands](docs/reference/cli.md)).
 - Tutorial: [Your first session](docs/tutorials/first-session.md)
 - How-to: [Configure an editor](docs/how-to/configure-an-editor.md),
   [Use it with an agent](docs/how-to/use-with-an-agent.md),
-  [Use it with dbt-oss alone](docs/how-to/use-with-dbt-oss.md),
   [Build and test](docs/how-to/build-and-test.md),
   [Troubleshoot](docs/how-to/troubleshoot.md)
 - Reference: [The features](docs/reference/features.md), by LSP method,
   then [the configuration](docs/reference/features.md#configuration), every option;
   [The subcommands](docs/reference/cli.md), doctor, select and node;
   [The release pipeline](docs/reference/release-pipeline.md)
-- Explanation: [The design](docs/explanation/design.md), what `dbt lsp`
-  was observed to do, and what it would take to finish
+- Explanation: [The design](docs/explanation/design.md), how it reads a
+  project and runs dbt, what dbt was observed to do, and what it would
+  take to finish
 
 ## Licence
 

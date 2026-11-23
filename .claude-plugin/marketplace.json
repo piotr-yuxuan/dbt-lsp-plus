@@ -6,7 +6,7 @@
     {
       "name": "dbt-lsp-plus",
       "source": "./plugins/dbt-lsp-plus",
-      "description": "dbt-lsp-plus as the language server of dbt projects: dbt lsp with what it lacks, or alone with dbt-oss"
+      "description": "dbt-lsp-plus as the language server of dbt projects, with dbt-oss or dbt Labs' build"
     }
   ]
 }
