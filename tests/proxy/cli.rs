@@ -407,8 +407,8 @@ fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
 
 #[test]
 fn select_fails_with_dbt_s_error_or_with_no_nodes() {
-    let error = "[error] [IoError (dbt1001)]: Cannot open file";
-    let case = Case::new("cli-select-failures", &json!({"run_log": format!("{error}\n"), "run_exit": 1}));
+    let error = "[IoError (dbt1001)]: Cannot open file";
+    let case = Case::new("cli-select-failures", &json!({"run_log": format!("[error] {error}\n"), "run_exit": 1}));
     venv_fake(&case.copy);
     let (status, answer) = case.run(&case.copy, &["select", "x"]);
     assert_eq!((status, answer), (Some(1), json!({"nodes": [], "error": error})));

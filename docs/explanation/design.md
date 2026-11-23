@@ -164,11 +164,12 @@ answers dbt lsp's "Compiled file path not
 found."; a failed run, dbt's first error (below).  `nodes` runs
 `dbt list --select=SELECTOR --output json` with dbt's text log and
 `--quiet`, and answers its JSON lines with a `unique_id`.  Either answers
-dbt's first error, whatever its exit status, from the log it asks for: a
-compile, the first error event of its JSON log; a list, the first
-`[error]` line of its text log (`run::Output`), though dbt may write the
-other kind (below); else, for a failed run, the first line that is none
-of dbt's events, as a launcher's own, with how the run ended.  The
+dbt's first error, whatever its exit status, by one rule for either kind
+of log, since dbt may write the kind its format does not name (below):
+the first line that is an error event, its message, or that begins
+`[error] `, without that prefix (`run::Output::first_error`), as the
+parse's failure does too; else, for a failed run, the first line that is
+none of dbt's events, as a launcher's own, with how the run ended.  The
 compiled file lives while the session does, as the cache.
 
 ### What dbt does for these commands, observed on 2026-11-17
@@ -215,10 +216,13 @@ alike unless said:
   dbt cannot create, its log path writable, gives the bare line `[error]
   [IoError (dbt1001)]: Failed to create output directory: …`, no event,
   and status 1; a project directory that cannot be canonicalised does
-  the same.  A list answers
-  the first as how dbt ended, and a compile the second as a launcher's
-  line with how dbt ended, until one rule reads both kinds (plan 071, once
-  dbt's output is read apart from its log).
+  the same.  On 2026-11-24, by plan 082, offline on a copy of the
+  fixture, `dbt list --select '*' --output json --quiet` printed 11 node
+  lines on dbt-oss 2.0.11 and on dbt 2.0.9 alike, whose keys are
+  `alias`, `config`, `depends_on`, `name`, `original_file_path`,
+  `package_name`, `resource_type`, `tags` and `unique_id`: no `info`, so
+  no node line reads as an error event, and one rule reads both kinds
+  for either command.
 - Observed on 2026-11-18, offline, on both builds: `dbt compile` stopped
   at an `on-run-start` or `on-run-end` hook given as a string, a list, a
   package's, even `"{{ '' }}"` (dbt1308, the driver), and did nothing

@@ -182,30 +182,24 @@ fn nodes_runs_dbt_list_and_answers_its_lines() {
     );
     rescript(name, json!({"run_log": "[error] [IoError (dbt1001)]: Cannot open file\n", "run_exit": 1}));
     let failed = execute(&mut session, NODES, json!(["x"]));
-    assert_eq!(failed["result"]["error"], "[error] [IoError (dbt1001)]: Cannot open file");
+    assert_eq!(failed["result"]["error"], "[IoError (dbt1001)]: Cannot open file");
     assert!(session.finish().success());
 }
 
 #[test]
-fn compile_takes_dbt_s_error_from_the_events_of_its_json_log_alone() {
-    // As both builds write it under `--log-format json` with a target path they cannot create: no event.
-    let bare = "[error] [IoError (dbt1001)]: Failed to create output directory: /p/target";
-    let (mut session, _, _) =
-        session_outside_the_root("commands-alone-bare-error", json!({"run_log": format!("{bare}\n"), "run_exit": 1}));
-    let answer = execute(&mut session, COMPILE, json!([uri(&orders())]));
-    let ended = format!("{bare} (dbt exit status: 1)");
-    assert_eq!(answer["result"], json!({"file_uri": null, "error": ended}), "a launcher's line, with how dbt ended");
-    assert!(session.finish().success());
-}
-
-#[test]
-fn nodes_takes_dbt_s_error_from_the_lines_of_its_text_log_alone() {
+fn either_command_takes_dbt_s_first_error_of_either_kind_of_log() {
+    let name = "commands-alone-either-error";
     // As both builds write it with `DBT_LOG_FORMAT=json` in their environment and no profiles.yml: events alone.
     let event = dbt_event("error", "dbt1005", "[error] [InvalidConfig (dbt1005)]: No profiles.yml found at /h");
-    let (mut session, _, _) =
-        session_outside_the_root("commands-alone-json-list", json!({"run_log": event, "run_exit": 1}));
-    let answer = execute(&mut session, NODES, json!(["x"]));
-    assert_eq!(answer["result"], json!({"nodes": [], "error": "dbt exit status: 1"}), "how dbt ended");
+    let (mut session, _, _) = session_outside_the_root(name, json!({"run_log": event, "run_exit": 1}));
+    let listed = execute(&mut session, NODES, json!(["x"]));
+    let profiles = "[InvalidConfig (dbt1005)]: No profiles.yml found at /h";
+    assert_eq!(listed["result"], json!({"nodes": [], "error": profiles}), "a list's error event");
+    // As both builds write it under `--log-format json` with a target path they cannot create: no event.
+    rescript(name, json!({"run_log": "[error] [IoError (dbt1001)]: Failed\n", "run_exit": 1}));
+    let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
+    let failed = json!({"file_uri": null, "error": "[IoError (dbt1001)]: Failed"});
+    assert_eq!(compiled["result"], failed, "a compile's error line");
     assert!(session.finish().success());
 }
 

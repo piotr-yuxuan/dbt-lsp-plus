@@ -5,8 +5,7 @@
 //! the index of the manifest it writes, and the summary of a node.
 
 use crate::node::Type;
-use crate::parse_log;
-use crate::run::{self, Ending, Output, Run, Running};
+use crate::run::{self, Ending, Output, Problem, Run, Running};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -411,7 +410,7 @@ impl ParseIndex {
 pub struct Outcome {
     pub index: Option<ParseIndex>,
     pub failure: Option<String>,
-    pub problems: Option<Vec<parse_log::Problem>>,
+    pub problems: Option<Vec<Problem>>,
 }
 
 /// Where a parse's outcome goes, once, from the parse's thread: the front
@@ -419,12 +418,12 @@ pub struct Outcome {
 pub type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 
 /// Runs RUN, a `dbt parse`, as `run::start` runs it, and hands REPORT the
-/// outcome: a failure words dbt's first error event, else the first line
-/// that is none of its events, as a launcher's own, and names the log; one
-/// that ends with no outcome, as on a panic, fails.
+/// outcome: a failure words dbt's first error, of either kind of log, else
+/// the first line that is none of its events, as a launcher's own, and names
+/// the log; one that ends with no outcome, as on a panic, fails.
 pub fn start(run: Run, report: ReportFn) -> Running {
     let read = |output: &Output| {
-        let first = output.error_event().or_else(|| output.line().map(str::to_owned));
+        let first = output.first_error().or_else(|| output.line().map(str::to_owned));
         let failure = match &output.ending {
             Ending::Exited(status) if status.success() => None,
             Ending::Exited(status) => Some(first.map_or_else(
@@ -434,8 +433,8 @@ pub fn start(run: Run, report: ReportFn) -> Running {
             Ending::Stopped => Some("dbt parse was stopped, or ran past its deadline".into()),
             Ending::NotStarted(why) => Some(why.clone()),
         };
-        let read = parse_log::read(&output.text);
-        let problems = read.completed.then_some(read.problems);
+        let (problems, completed) = run::problems(&output.text);
+        let problems = completed.then_some(problems);
         Outcome { index: output.manifest.as_ref().map(ParseIndex::of), failure, problems }
     };
     let ended = Outcome { index: None, failure: Some("the parse ended without an outcome".into()), problems: None };
@@ -833,6 +832,22 @@ mod tests {
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(failure.starts_with("error: Failed to fetch the index (see "), "{failure}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_parse_s_bare_error_line_is_its_failure_without_its_prefix() {
+        let dir = scratch_project("runner-bare", &[("x", "")]);
+        let (sender, outcomes) = mpsc::channel();
+        let report: ReportFn = Box::new(move |outcome| drop(sender.send(outcome)));
+        // As dbt writes it under `--log-format json` when it cannot write its target, after a launcher's line.
+        let bare = "echo 'Installed 1 package'; \
+                    echo '[error] [IoError (dbt1001)]: Failed to create output directory: /p/target'; exit 1";
+        let failing = start(words(&["sh", "-c", bare]), None, dir.clone(), Duration::from_secs(10), report);
+        let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
+        failing.stop();
+        let expected = "[IoError (dbt1001)]: Failed to create output directory: /p/target (see ";
+        assert!(failure.starts_with(expected) && failure.ends_with("parse.log)"), "{failure}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

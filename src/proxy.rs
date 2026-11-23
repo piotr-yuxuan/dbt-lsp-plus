@@ -10,7 +10,7 @@ use crate::project::{Project, Scanned};
 use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{Which, Workspace};
-use crate::{config, document, features, navigation, packages, parse_log, properties, reference, run, runs, sources};
+use crate::{config, document, features, navigation, packages, properties, reference, run, runs, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -89,7 +89,7 @@ struct Diagnostics {
     /// The failures of the last run.
     failures: HashMap<PathBuf, Vec<runs::Failure>>,
     /// The errors and warnings of the last parse that ran to its end.
-    parsed: HashMap<PathBuf, Vec<parse_log::Problem>>,
+    parsed: HashMap<PathBuf, Vec<run::Problem>>,
     /// The messages of the problems in no file that were logged.
     logged: HashSet<String>,
     /// When the client last changed or saved each document.
@@ -654,7 +654,7 @@ impl<W: Write> Proxy<W> {
     /// there, else the one in dbt's working directory, else the one
     /// package's that holds it; one in no such file is logged, once.  Each
     /// file with problems, before or now, is published again.
-    fn on_problems(&mut self, problems: Option<Vec<parse_log::Problem>>) {
+    fn on_problems(&mut self, problems: Option<Vec<run::Problem>>) {
         let Some(problems) = problems else { return };
         // The packages, while the project's configuration still reads.
         let packages: Vec<PathBuf> =
@@ -662,7 +662,7 @@ impl<W: Write> Proxy<W> {
         // dbt names a YAML file's error from its working directory, and a
         // package's file from its package.
         let cwd = self.dbt_dir();
-        let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
+        let mut placed: HashMap<PathBuf, Vec<run::Problem>> = HashMap::new();
         for problem in problems {
             let path = problem.spot.as_ref().and_then(|spot| {
                 // dbt names a file from a sibling directory with `..`.
