@@ -40,6 +40,7 @@ const ENCODING: Encoding = Encoding::Utf16;
 
 /// How the server answers a request of the client's.
 enum Route {
+    /// By this row's handler, through `answer`.
     Here(&'static str),
     /// With this answer: null before a project, or the method's nothing.
     Answer(Answer),
@@ -446,14 +447,14 @@ impl<W: Write> Proxy<W> {
         let executes = method == "workspace/executeCommand";
         let name = if executes { params["command"].as_str() } else { Some(method) };
         let Some(name) = name else { return Route::Invalid };
-        let row = capability::of(name).filter(|row| row.is_command() == executes);
-        match (row.map(|row| row.name), self.workspace.root.is_some()) {
-            (None, _) if method == "shutdown" => Route::Answer(Answer::Empty),
-            (None, _) => Route::Unknown,
+        let Some(row) = capability::of(name).filter(|row| row.is_command() == executes) else {
+            return if method == "shutdown" { Route::Answer(Answer::Empty) } else { Route::Unknown };
+        };
+        match (row.name, self.workspace.root.is_some()) {
             // A valid result of every method the server announces, and of each an agent was seen to send.
-            (Some(_), false) => Route::Answer(Answer::Found(Value::Null)),
-            (Some(command @ (commands::COMPILE | commands::NODES)), true) => Route::Command(command),
-            (Some(name), true) => Route::Here(name),
+            (_, false) => Route::Answer(Answer::Found(Value::Null)),
+            (command @ (commands::COMPILE | commands::NODES), true) => Route::Command(command),
+            (name, true) => Route::Here(name),
         }
     }
 
