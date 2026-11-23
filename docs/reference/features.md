@@ -148,8 +148,9 @@ Each method and command that dbt-lsp-plus answers; any other gets error
 for a parse starts one first when the index is stale, so that its
 reason, if it cannot answer, is that parse's; inlay hints ask for one
 after answering, while there is no index.  One that reads the project
-fails on a document of another dbt project with the reason above; inlay
-hints get `[]` there.
+fails on a document of another dbt project with the reason above,
+nodeInfo when its argument is a position there; inlay hints get `[]`
+there.
 
 | Method or command | Its nothing | Asks for a parse | Reads the project |
 |---|---|---|---|
@@ -166,7 +167,7 @@ hints get `[]` there.
 | `textDocument/definition` | null | yes | yes |
 | `textDocument/references` | `[]` | yes | yes |
 | `textDocument/rename` | null | no | no |
-| `dbt-lsp-plus.nodeInfo` | null | yes | no |
+| `dbt-lsp-plus.nodeInfo` | null | yes | yes |
 | `dbt-lsp-plus.compile` | null | no | no |
 | `dbt-lsp-plus.nodes` | null | no | no |
 

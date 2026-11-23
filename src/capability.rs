@@ -19,11 +19,11 @@ pub struct Capability {
     /// Its answer reads the parse's index, which a stale one makes the
     /// Workspace parse again first.
     pub wants_index: bool,
-    /// Whether a request on a document of another project, which it names
-    /// by `textDocument.uri`, gets `Elsewhere` (`Proxy::outside`): its
-    /// answer there would read the session's project, its scan or its
-    /// index, beyond the document's text.  Inlay hints never get it: they
-    /// get `[]`.
+    /// Whether a request on a document of another project gets `Elsewhere`:
+    /// a method's, which names it by `textDocument.uri` (`Proxy::outside`),
+    /// and nodeInfo's at a position (`Workspace::node`).  Its answer there
+    /// would read the session's project, its scan or its index, beyond the
+    /// document's text.  Inlay hints never get it: they get `[]`.
     pub reads_project: bool,
 }
 
@@ -75,7 +75,7 @@ pub static CAPABILITIES: [Capability; 16] = [
         reads_project: true,
     },
     Capability { name: "textDocument/rename", key: Some("renameProvider"), ..DEFAULT },
-    Capability { name: NODE_INFO, wants_index: true, ..DEFAULT },
+    Capability { name: NODE_INFO, wants_index: true, reads_project: true, ..DEFAULT },
     Capability { name: COMPILE, ..DEFAULT },
     Capability { name: NODES, ..DEFAULT },
 ];

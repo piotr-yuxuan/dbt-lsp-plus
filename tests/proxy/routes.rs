@@ -5,6 +5,8 @@
 
 use crate::support::{Session, copy_fixture, scratch, script, uri};
 use crate::{dbt_event, logged, manifest, node_info, published};
+use dbt_lsp_plus::capability::{self, CAPABILITIES};
+use dbt_lsp_plus::config::NODE_INFO;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -196,8 +198,6 @@ fn a_document_of_another_project_is_told_where_it_lies() {
     fs::write(other.join("dbt_project.yml"), "name: other\n").unwrap();
     fs::write(&m, "select * from {{ ref('orders') }}\n").unwrap();
     session.open(&m, None);
-    let on_ref = json!({"textDocument": {"uri": uri(&m)}, "position": {"line": 0, "character": 24},
-                        "context": {"includeDeclaration": false}});
     let message = format!(
         "{} lies in the dbt project at {}, and this session serves only the one at {}",
         m.display(),
@@ -205,21 +205,21 @@ fn a_document_of_another_project_is_told_where_it_lies() {
         project.display()
     );
     let elsewhere = json!({"code": -32803, "message": message});
-    // nodeInfo at the same place too, which has no mode.
-    let at = json!({"uri": uri(&m), "position": {"line": 0, "character": 24}});
-    let info = json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": [at]});
-    let reading = [
-        ("textDocument/hover", &on_ref),
-        ("textDocument/definition", &on_ref),
-        ("textDocument/references", &on_ref),
-        ("textDocument/prepareCallHierarchy", &on_ref),
-        ("workspace/executeCommand", &info),
-    ];
-    for (method, params) in reading {
-        let answer = session.request(method, params.clone());
-        assert_eq!((answer.get("result"), &answer["error"]), (None, &elsewhere), "{method}: {answer}");
-    }
+    // At `orders`, each row that reads the project, as the reference's table says (its unit test holds the table to
+    // the rows), gets the reason, nodeInfo at a position included; inlay hints, a decoration, `[]`.  Each other row
+    // that names a document answers.
+    let position = json!({"line": 0, "character": 24});
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}});
+    let any = json!({"textDocument": {"uri": uri(&m)}, "position": position, "positions": [position], "range": range,
+                     "context": {"includeDeclaration": false}, "newName": "x"});
+    let info = json!({"command": NODE_INFO, "arguments": [{"uri": uri(&m), "position": position}]});
+    let documents = CAPABILITIES.iter().filter(|row| row.name.starts_with("textDocument/"));
+    let named = documents.filter(|row| row.name != "textDocument/inlayHint").map(|row| (row, row.name, &any));
+    let node_info = capability::of(NODE_INFO).map(|row| (row, "workspace/executeCommand", &info));
+    for (row, method, params) in named.chain(node_info) {
+        let answer = session.request(method, params.clone());
+        assert_eq!(answer.get("error"), row.reads_project.then_some(&elsewhere), "{}: {answer}", row.name);
+    }
     let hints = session.request("textDocument/inlayHint", json!({"textDocument": {"uri": uri(&m)}, "range": range}));
     assert_eq!((hints.get("error"), &hints["result"]), (None, &json!([])), "{hints}");
     // The methods of the document's own text, a CTE's rename among them, a document in no project, and the
