@@ -45,6 +45,18 @@ class Measure(unittest.TestCase):
         )
         self.assertEqual(check_size.measure(text), (12, 4))
 
+    def test_counts_unions_and_unsafe_traits(self):
+        text = "pub union U {\n    a: u8,\n}\nunsafe trait S {}\npub(crate) unsafe trait T {}\n"
+        self.assertEqual(check_size.measure(text), (5, 3))
+
+    def test_refuses_code_after_the_test_module(self):
+        tests = ["pub fn a() {}", "#[cfg(test)]", "mod tests {", "    #[test]", "    fn t() {}", "}"]
+        self.assertEqual(check_size.measure("\n".join([*tests, "", "// The end."])), (1, 0))
+        for after in (["mod imp {", "    pub fn hidden() {}", "}"], ["pub struct Escaped;"]):
+            with self.subTest(after=after):
+                with self.assertRaisesRegex(ValueError, "after its test module"):
+                    check_size.measure("\n".join([*tests, *after]))
+
 
 class Main(unittest.TestCase):
     def setUp(self):
@@ -74,6 +86,14 @@ class Main(unittest.TestCase):
             with self.subTest(lines=lines, types=types):
                 self.assertEqual(self.run_script(lines, types).returncode, 1)
         self.assertEqual(self.run_script("9", "9").returncode, 0)
+
+    def test_names_a_file_with_code_after_its_test_module(self):
+        (self.scratch / "src").mkdir()
+        escaped = "#[cfg(test)]\nmod tests {\n}\npub struct Escaped;\n"
+        (self.scratch / "src" / "a.rs").write_text(escaped)
+        done = self.run_script("9", "9")
+        self.assertEqual((done.returncode, done.stdout), (1, ""))
+        self.assertIn("src/a.rs: code after its test module", done.stderr)
 
     def test_refuses_what_is_no_ceiling(self):
         (self.scratch / "src").mkdir()
