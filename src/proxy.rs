@@ -461,17 +461,17 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// The definition or the references, METHOD, of the target at the
-    /// request's position, by dbt 2.0.9's lookup, found, its nothing
-    /// included; empty where the position names no target.  The two share
-    /// the reading of the position and of the project.
-    fn on_navigation(&self, method: &str, params: &Value) -> Option<Answer> {
+    /// The definition, or the REFERENCES, of the target at the request's
+    /// position, by dbt 2.0.9's lookup, found, its nothing included; empty
+    /// where the position names no target.  The two share the reading of
+    /// the position and of the project.
+    fn on_navigation(&self, references: bool, params: &Value) -> Option<Answer> {
         let project = self.project();
         let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
         let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
         let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let lookup = || navigation::Lookup::new(&project, self.workspace.index.as_ref());
-        if method == "textDocument/definition" {
+        if !references {
             let locations = self.locations(&project, &navigation::resolve(&lookup(), &path, &name));
             return Some(Answer::Found(match &locations[..] {
                 [] => Value::Null,
@@ -800,7 +800,9 @@ impl<W: Write> Proxy<W> {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
             "workspace/symbol" => self.symbols(params),
             config::NODE_INFO => self.node_info(params),
-            "textDocument/references" | "textDocument/definition" => self.on_navigation(method, params),
+            "textDocument/references" | "textDocument/definition" => {
+                self.on_navigation(method == "textDocument/references", params)
+            }
             "textDocument/rename" => self.on_rename(params),
             "textDocument/foldingRange" | "textDocument/documentHighlight" | "textDocument/selectionRange" => {
                 self.on_document(method, params).map(Answer::Found)
@@ -1468,13 +1470,13 @@ mod tests {
         let text = "select * from {{ ref('nowhere') }}";
         let proxy = proxy_on(text, &scratch);
         let (keyword, nowhere) = (at(&scratch, 1), at(&scratch, text.find("nowhere").unwrap() + 2));
-        let (definition, references) = ("textDocument/definition", "textDocument/references");
+        // A definition, then the references.
         assert_eq!(
-            [definition, references].map(|method| proxy.on_navigation(method, &keyword)),
+            [false, true].map(|references| proxy.on_navigation(references, &keyword)),
             [Some(Answer::Empty), Some(Answer::Empty)]
         );
         let found = [Some(Answer::Found(Value::Null)), Some(Answer::Found(json!([])))];
-        assert_eq!([definition, references].map(|method| proxy.on_navigation(method, &nowhere)), found);
+        assert_eq!([false, true].map(|references| proxy.on_navigation(references, &nowhere)), found);
         let outside = at(&root.join("packages.yml"), 0);
         assert_eq!(proxy.hierarchy("textDocument/prepareCallHierarchy", &outside), Some(Answer::Empty));
     }
