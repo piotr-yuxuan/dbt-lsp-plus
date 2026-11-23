@@ -770,7 +770,7 @@ impl<W: Write> Proxy<W> {
         self.workspace.stop();
     }
 
-    /// Answers a request with `plus_answer`'s Answer, after asking for the
+    /// Answers a request with `handle`'s Answer, after asking for the
     /// index where that answer reads it, as its capability says, so that a
     /// reason is that of the parse it may start; inlay hints, which only make
     /// an index, ask after, when there is none.  A refusal fails it with its
@@ -780,7 +780,7 @@ impl<W: Write> Proxy<W> {
         if capability::of(method).is_some_and(|capability| capability.wants_index) {
             self.ask_index();
         }
-        let computed = panic::catch_unwind(AssertUnwindSafe(|| self.plus_answer(method, params)));
+        let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
             Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
             Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
@@ -793,7 +793,7 @@ impl<W: Write> Proxy<W> {
 
     /// The Answer to METHOD at PARAMS, by the method's handler; none for
     /// invalid parameters.  It sends nothing.
-    fn plus_answer(&self, method: &str, params: &Value) -> Option<Answer> {
+    fn handle(&self, method: &str, params: &Value) -> Option<Answer> {
         match method {
             "textDocument/documentSymbol" => self.outline(params).map(Answer::Found),
             "workspace/symbol" => self.symbols(params),

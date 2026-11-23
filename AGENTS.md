@@ -103,11 +103,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   let the live test check it.
 - No single-use private helper, but for these, each with its reason:
   - `Proxy::outline`, `Proxy::symbols`, `Proxy::hierarchy`,
-    `Proxy::on_hover` and `Proxy::on_hints`: one function per owned
-    method, so that `plus_answer` stays a dispatch;
-    `Proxy::plus_answer`: the server's Answer by the handler of its
-    method, which sends nothing, apart from `answer`, which asks for the
-    index, contains a panic and sends the Answer or the failure;
+    `Proxy::on_hover` and `Proxy::on_hints`: one function per method, so
+    that `handle` stays a dispatch; `Proxy::handle`: the server's Answer
+    by the handler of its method, which sends nothing, apart from
+    `answer`, which asks for the index, contains a panic and sends the
+    Answer or the failure;
   - `changes_graph`: the decision whether a client's notification may
     change the graph, free of the file system, with tests of its own;
   - `cache::unchanged`: the decision whether a project is built again,
@@ -179,7 +179,7 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     from what `packages::refused` decides;
   - `Proxy::on_source`, `Proxy::on_rename`, `Proxy::on_navigation` and
     `Proxy::on_document`: one answer per kind of request, as for the
-    owned methods, a definition and references sharing their reading of
+    other methods, a definition and references sharing their reading of
     the position and the project;
   - `sources::replacement`, `sources::kept_relation`, `sources::refusal`
     and `sources::config_key`: each one rule of a rename (how a name is
