@@ -985,6 +985,41 @@ fn node_info_by_id_needs_no_document_opened() {
     assert!(session.finish().success());
 }
 
+/// The files named NAME under DIR.
+fn files_named(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        for path in std::fs::read_dir(&next).into_iter().flatten().flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|file| file == name) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn node_info_parses_with_the_server_s_dbt_whose_output_never_reaches_the_client() {
+    let (mut session, log) = Session::fake("node-info", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    let orders = parsed_orders(&mut session);
+    assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
+    assert_eq!(orders["config"]["materialized"], "table");
+    // dbt's noise never reached the client; its stderr is in the cache's log.
+    assert!(session.received.iter().all(|m| !m.is_null()), "a body that is not JSON");
+    let logs = files_named(&scratch_of("node-info").join("cache"), "parse.log");
+    assert!(std::fs::read_to_string(&logs[0]).unwrap().contains("noise on stderr"), "{logs:?}");
+    // An index with no change since needs no parse.
+    node_info(&mut session, json!("model.shop.orders"));
+    node_info(&mut session, json!("model.shop.stg_orders"));
+    parses_stay(&log, 1);
+    assert!(session.finish().success());
+    assert!(files_named(&scratch_of("node-info").join("cache"), "parse.log").is_empty(), "the cache stayed");
+}
+
 #[test]
 fn a_parse_takes_the_server_s_reading_flags_and_keeps_its_output_in_the_cache() {
     let flags = [
@@ -1101,6 +1136,53 @@ fn alone_a_file_changed_on_disk_with_no_notification_is_parsed_at_the_next_reque
     session.notify("textDocument/didChange", change);
     node_info(&mut session, json!("model.shop.orders"));
     parses_stay(&log, 3);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn ignores_watched_changes_of_dbt_s_own_output() {
+    let link = scratch("dbt-output-link").join("shop");
+    std::os::unix::fs::symlink(fixture(), &link).unwrap();
+    let (mut session, log) = Session::fake("dbt-output-events", json!({"manifest": manifest()}));
+    session.initialize(&fixture());
+    parsed_orders(&mut session);
+    let changed = |paths: &[PathBuf]| {
+        let changes: Vec<Value> = paths.iter().map(|path| json!({"uri": uri(path), "type": 2})).collect();
+        json!({"changes": changes})
+    };
+    let written = ["target", "target/compiled/shop/x.sql", "logs/dbt-lsp.log"].map(|path| fixture().join(path));
+    // Through another spelling of the root: the directory itself, as the fixture has none to resolve below.
+    session.notify("workspace/didChangeWatchedFiles", changed(&[&written[..], &[link.join("logs")]].concat()));
+    // A request that wants the index, which a change of the graph would parse again.
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 1);
+    let both = changed(&[fixture().join("models/marts/orders.sql"), fixture().join("logs/dbt-lsp.log")]);
+    session.notify("workspace/didChangeWatchedFiles", both);
+    node_info(&mut session, json!("model.shop.orders"));
+    until_logged(&log, "the parse after a model's change", |_| parses(&log).len() == 2);
+    assert!(session.finish().success());
+}
+
+#[test]
+fn ignores_dbt_s_output_through_a_link_out_of_the_project() {
+    let project = copy_fixture("dbt-output-out-link");
+    let elsewhere = project.with_file_name("elsewhere-logs");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    // As lsp-mode reports it, whatever links the scratch directory sits under.
+    let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, project.join("logs")).unwrap();
+    let arguments = [Path::new("--project-dir"), &project];
+    let (mut session, log) =
+        Session::fake_with("dbt-output-out-link-session", json!({"manifest": manifest()}), &arguments, None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    let written = json!({"changes": [{"uri": uri(&elsewhere.join("dbt-lsp.log")), "type": 2}]});
+    session.notify("workspace/didChangeWatchedFiles", written);
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 1);
     assert!(session.finish().success());
 }
 
@@ -1389,6 +1471,34 @@ fn no_parse_while_packages_need_the_network() {
     let logged_once = session.received.iter().filter(|m| m["method"] == "window/logMessage").filter(deps).count();
     assert_eq!(logged_once, 1);
     assert!(parses(&log).is_empty());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_refused_parse_leaves_the_last_index_to_answer() {
+    let project = copy_fixture("refused-parse-project");
+    let flags = [Path::new("--project-dir"), &project];
+    let (mut session, log) = Session::fake_with("refused-parse", json!({"manifest": manifest()}), &flags, None);
+    session.initialize(&project);
+    session.open(&project.join("models/marts/orders.sql"), None);
+    let request =
+        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
+    session.poll(Duration::from_secs(10), request, |result| result.is_object());
+    // Written outside the editor: a hub package that no lock names, and a model.
+    std::fs::write(project.join("packages.yml"), "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.4.1\n")
+        .unwrap();
+    std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
+    let meanwhile = node_info(&mut session, json!("model.shop.orders"));
+    node_info(&mut session, json!("model.shop.orders"));
+    parses_stay(&log, 1);
+    assert_eq!(
+        (meanwhile.get("error"), &meanwhile["result"]["unique_id"]),
+        (None, &json!("model.shop.orders")),
+        "answered from the last index meanwhile: {meanwhile}"
+    );
+    let deps = |m: &&Value| m["params"]["message"].as_str().is_some_and(|text| text.contains("run dbt deps"));
+    let logged_once = session.received.iter().filter(|m| m["method"] == "window/logMessage").filter(deps).count();
+    assert_eq!(logged_once, 1);
     assert!(session.finish().success());
 }
 
@@ -2575,6 +2685,26 @@ fn the_last_run_s_failures_show_where_they_are_written() {
     assert_eq!(failed["message"], "dbt build: is_even failed: 2 rows");
     assert_eq!(failed["range"], json!({"start": {"line": 6, "character": 12}, "end": {"line": 6, "character": 19}}));
     assert!(test.get("version").is_none());
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_change_of_uri_clears_the_one_published_before() {
+    let project = copy_fixture("runs-spelling-project");
+    std::fs::write(project.join("models/marts/_models.yml"), RUN_MODELS).unwrap();
+    let link = project.with_file_name("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    // Published under the root's spelling, then opened under the resolved path.
+    let resolved = project.join("models/marts/_models.yml");
+    let spelt = link.join("models/marts/_models.yml");
+    let (mut session, _) = Session::fake_with("runs-spelling", json!({}), &[Path::new("--project-dir"), &link], None);
+    session.initialize(&link);
+    write_run(&project, &run_results("build", true), &run_manifest());
+    published(&mut session, &spelt, |p| !last_run(p).is_empty());
+    session.open(&resolved, None);
+    write_run(&project, &run_results("test", true), &run_manifest());
+    published(&mut session, &resolved, |p| !last_run(p).is_empty());
+    published(&mut session, &spelt, |p| p["diagnostics"] == json!([]));
     assert!(session.finish().success());
 }
 

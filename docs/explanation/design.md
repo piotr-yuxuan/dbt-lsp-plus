@@ -1483,14 +1483,18 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
     dbt's own test null, a versioned `ref`, functions, a Python model's
     `ref`;
   - node information and the hover: the parse's flags and cache, dbt's
-    output kept off the client's channel, one parse at a time and one
-    more after a change during it, none after `shutdown` nor with
-    packages that need the network, a parse killed at `exit`; a node by
+    output kept off the client's channel and its standard error in
+    `parse.log`, one parse at a time and one more after a change during
+    it, none after `shutdown`, nor for a watched change of dbt's own
+    output, through a link out of the project too, nor with packages that
+    need the network, the last index answering when they refuse a parse;
+    a parse killed at `exit`; a node by
     id or by position; the summary and the facts on a hover of a ref and
     at a file's start, in the client's format; a hover on a node before
     any index failing with nodeInfo's reason;
   - the parse's problems as diagnostics, placed and cleared, and the last
-    run's failures and stale sources where written;
+    run's failures and stale sources where written; the URI published
+    under before cleared when the client opens the file under another;
   - inlay hints: a first parse from a hint request, none more once an
     index exists; the refresh asked of a client that can;
   - the modes: `plus` for every method, `ours` read as `plus` with one
