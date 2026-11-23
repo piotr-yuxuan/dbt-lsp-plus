@@ -459,12 +459,13 @@ impl<W: Write> Proxy<W> {
 
     /// The definition, or the REFERENCES, of the target at the request's
     /// position, by dbt 2.0.9's lookup, found, its nothing included; empty
-    /// where the position names no target.  The two share the reading of
-    /// the position and of the project.
+    /// where the document or the position does not read, or names no
+    /// target.  The two share the reading of the position and of the
+    /// project.
     fn on_navigation(&self, references: bool, params: &Value) -> Option<Answer> {
         let project = self.project();
-        let (path, scanned, offset) = self.scan_at(params, project.as_deref())?;
-        let Some(name) = navigation::reference_at(&path, &scanned, offset) else { return Some(Answer::Empty) };
+        let Some((path, scanned, at)) = self.scan_at(params, project.as_deref()) else { return Some(Answer::Empty) };
+        let Some(name) = navigation::reference_at(&path, &scanned, at) else { return Some(Answer::Empty) };
         let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let lookup = || navigation::Lookup::new(&project, self.workspace.index.as_ref());
         if !references {
@@ -516,12 +517,13 @@ impl<W: Write> Proxy<W> {
         Some(Answer::of_rename(sources::rename(&project, &name, new, ENCODING, &uri_of)))
     }
 
-    /// The rename of the source, else of the CTE, at the request's position.
+    /// The rename of the source, else of the CTE, at the request's position;
+    /// empty where the document or the position does not read.
     fn on_rename(&self, params: &Value) -> Option<Answer> {
         if self.source_at(params).is_some() {
             return self.on_source(params);
         }
-        let (_, text, offset) = self.document_at(params)?;
+        let Some((_, text, offset)) = self.document_at(params) else { return Some(Answer::Empty) };
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
         Some(document::rename_cte(&text, uri, offset, new, ENCODING).map_or(Answer::Empty, Answer::of_rename))
     }

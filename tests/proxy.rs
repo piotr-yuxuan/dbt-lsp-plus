@@ -386,6 +386,31 @@ fn a_request_the_proxy_answers_without_its_parameters_is_invalid() {
 }
 
 #[test]
+fn navigation_and_a_rename_on_a_document_that_does_not_read_get_their_nothing() {
+    let (mut session, _) = Session::fake("unreadable-document", json!({}));
+    session.initialize(&fixture());
+    let text = "select * from {{ ref('orders') }}";
+    let document = json!({"uri": "untitled:Untitled-1", "languageId": "sql", "version": 1, "text": text});
+    session.notify("textDocument/didOpen", json!({"textDocument": document}));
+    // An editor's buffer of no file, opened; a file neither open nor on disk.
+    let missing = uri(&fixture().join("models/marts/missing.sql"));
+    for document in ["untitled:Untitled-1", missing.as_str()] {
+        let at = json!({"textDocument": {"uri": document}, "position": {"line": 0, "character": text.find("orders").unwrap() + 2},
+                        "context": {"includeDeclaration": false}, "newName": "x"});
+        let nothing = [
+            ("textDocument/definition", Value::Null),
+            ("textDocument/references", json!([])),
+            ("textDocument/rename", Value::Null),
+        ];
+        for (method, expected) in nothing {
+            let answer = session.request(method, at.clone());
+            assert_eq!((answer.get("error"), &answer["result"]), (None, &expected), "{document} {method}: {answer}");
+        }
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
 fn the_graph_takes_dbt_s_resolution_from_the_manifest() {
     let mut manifest = manifest();
     let summary_node = node("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]);
