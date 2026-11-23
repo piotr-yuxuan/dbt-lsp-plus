@@ -24,7 +24,6 @@ pub mod rpc;
 pub mod run;
 pub mod runs;
 pub mod scan;
-pub mod shadow;
 pub mod sources;
 pub mod text;
 pub mod workspace;

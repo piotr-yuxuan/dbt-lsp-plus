@@ -180,8 +180,6 @@ the usage on standard error, exit status 2, nothing started.
   those `--mode` sets.
 - `--backend auto|never`: `never` starts no `dbt lsp`, and the proxy
   answers alone, as with dbt-oss.  Default: `auto`.
-- `--shadow`: compares the proxy's definitions and references with
-  `dbt lsp`'s, in a local log (see "The shadow").  It takes no value.
 - `--`: ends the proxy's own arguments; needed only before a server
   command that starts with a dash.
 - `-h`, `--help`: prints the usage and exits.
@@ -253,26 +251,6 @@ starts again.  A refused key is ignored and shown once in a warning.
 `dbt lsp` gets `initializationOptions` without `dbtLspPlus`.  With no
 `dbt lsp`, a method set to `dbt` gets its nothing, null or `[]`, which
 does not say why, and a warning says so once.
-
-### The shadow
-
-With `--shadow`, or `{"dbtLspPlus": {"shadow": true}}` in
-`initializationOptions`, the proxy follows each definition and references
-request in `dbt`, which it leaves to `dbt lsp` (`--mode
-textDocument/definition=dbt --mode textDocument/references=dbt`); with
-neither in `dbt`, a warning says it has nothing to follow.  The client
-gets `dbt lsp`'s answer
-as it came, then the proxy computes its own and compares the two,
-location by location.  The session's counts, by method, kind of target,
-kind of file and how the two answers stand, answer the command
-`dbt-lsp-plus.shadowSummary` (`workspace/executeCommand`), announced only
-with the shadow on.  Each request is a line of
-`$XDG_CACHE_HOME/dbt-lsp-plus/shadow/<hash of the root>.jsonl`, created
-readable by its owner alone; nothing is sent anywhere.  Without `dbt lsp`
-the shadow is off, and a warning says so.  A session with the shadow off
-leaves the logs as they are: they go once a shadowed session finds them
-30 days old, or by hand.  [The design](../explanation/design.md)
-says what a line holds and the rule by which a later version reads them.
 
 ### The server command
 
@@ -353,9 +331,8 @@ can be changed.
 - `XDG_CACHE_HOME`: where the proxy keeps its parses, under
   `dbt-lsp-plus/`.  Default: `$HOME/.cache`, else the system's temporary
   directory.  A relative value counts as unset.  A cache that no parse
-  wrote for a day is removed.  The shadow's log is under
-  `dbt-lsp-plus/shadow/`, never in the temporary directory: with neither
-  variable absolute, there is none.
+  wrote for a day is removed.  A `shadow/` folder there, which a former
+  option wrote, is no longer read nor removed: it may be deleted.
 
 The server command, `dbt lsp` and the proxy's `dbt parse` inherit the
 whole environment.
@@ -368,10 +345,6 @@ These are not configurable.
 - The probe of `lsp --help` is stopped after 10 s.
 - `workspace/symbol` answers at most 20 000 symbols.
 - A message larger than 64 MiB stops the session.
-- The shadow's log of a root is renamed `.jsonl.1` once it reaches 1 MB,
-  replacing the last: about 2 MB a root.  A line shows at most 20
-  locations of each side, and stays under 8 KB but for the session's
-  last.  A shadow file that nothing wrote for 30 days is removed.
 - The proxy's runs of dbt, its `dbt parse` and the commands', run as the
   user runs dbt, with dbt's flags against its statistics and its version
   check.  The guard on packages refuses such a run where a local or a

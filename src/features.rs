@@ -9,7 +9,6 @@ use crate::project::Project;
 use crate::properties;
 use crate::reference;
 use crate::scan::{self, Kind, Symbol};
-use crate::shadow;
 use crate::text::{Encoding, LineStarts};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -17,7 +16,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-/// At most this many workspace symbols per answer.
 pub const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 
 /// LSP's `SymbolKind` and a label of each kind of block or CTE of the
@@ -254,32 +252,58 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
     Some(merged)
 }
 
+/// A location as the union compares it: its file, and its range from a
+/// (line, character) to another.
+struct Location {
+    path: PathBuf,
+    start: (u64, u64),
+    end: (u64, u64),
+}
+
+/// The entries of RESULT, an answer to a definition or references: none
+/// for null, the one location or link, or each of a list.
+fn entries(result: &Value) -> Vec<&Value> {
+    match result {
+        Value::Null => Vec::new(),
+        Value::Array(entries) => entries.iter().collect(),
+        entry => vec![entry],
+    }
+}
+
+/// ENTRY as the union reads it, by its shape alone: none unless it has a
+/// `uri` or a `targetUri` that is a string and a `range` or a
+/// `targetSelectionRange` whose start and end each have a line and a
+/// character; else written as a `Location`, a link's of its target's
+/// selection, and its location, if PATH_OF reads its URI.
+fn location(entry: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<(Value, Option<Location>)> {
+    let uri = entry.get("uri").or_else(|| entry.get("targetUri"))?.as_str()?;
+    let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
+    let position = |at: &str| range[at]["line"].as_u64().zip(range[at]["character"].as_u64());
+    let (start, end) = (position("start")?, position("end")?);
+    Some((json!({"uri": uri, "range": range}), path_of(uri).map(|path| Location { path, start, end })))
+}
+
 /// The server's answer to a definition or references, MESSAGE, with as its
 /// result the proxy's locations FOUND first, then each of the server's
-/// entries that matches none before it, URIs read as paths by PATH_OF.
-/// An entry is a location by its shape alone, a `uri` or a `targetUri`
-/// that is a string, a `range` or a `targetSelectionRange` whose start and
-/// end each have a line and a character, and written as a `Location`, a
-/// link's of its target's selection; any other is dropped.  One whose URI
-/// PATH_OF cannot read matches none but itself, given again.  When the
-/// server adds nothing, the result is FOUND as it is, else an array.
+/// entries, as `location` reads it, that matches none before it; any other
+/// is dropped.  Two match in one file when the range of one holds the
+/// other's; one whose URI PATH_OF cannot read matches none but itself,
+/// given again.  When the server adds nothing, the result is FOUND as it
+/// is, else an array.
 pub fn merge_locations(message: &Value, found: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Value {
-    let written = |entry: &&Value| {
-        let uri = entry.get("uri").or_else(|| entry.get("targetUri")).filter(|uri| uri.is_string())?;
-        let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
-        let at = |end: &str| ["line", "character"].iter().all(|key| range[end][*key].is_u64());
-        (at("start") && at("end")).then(|| json!({"uri": uri, "range": range}))
+    let matches = |one: &Location, other: &Location| {
+        let holds = |outer: &Location, inner: &Location| outer.start <= inner.start && inner.end <= outer.end;
+        one.path == other.path && (holds(one, other) || holds(other, one))
     };
-    let mut united: Vec<Value> = shadow::entries(found).into_iter().cloned().collect();
+    let mut united: Vec<Value> = entries(found).into_iter().cloned().collect();
     let own = united.len();
-    let mut seen: Vec<shadow::Location> = united.iter().filter_map(|entry| shadow::location(entry, path_of)).collect();
-    for entry in shadow::entries(&message["result"]).iter().filter_map(written) {
-        let location = shadow::location(&entry, path_of);
-        let matched = location.as_ref().is_some_and(|location| seen.iter().any(|before| before.matches(location)));
+    let mut seen: Vec<Location> = united.iter().filter_map(|entry| location(entry, path_of)?.1).collect();
+    for (entry, place) in entries(&message["result"]).into_iter().filter_map(|entry| location(entry, path_of)) {
+        let matched = place.as_ref().is_some_and(|place| seen.iter().any(|before| matches(before, place)));
         if matched || united.contains(&entry) {
             continue;
         }
-        seen.extend(location);
+        seen.extend(place);
         united.push(entry);
     }
     let mut merged = message.clone();
@@ -881,8 +905,18 @@ mod tests {
         for nothing in [Value::Null, json!([]), json!(3), echo, json!([{"range": ours["range"]}]), no_range] {
             assert_eq!(united(&ours, nothing.clone()), ours, "one location stays one: {nothing}");
         }
-        let holding = at("a.sql", (0, 0), (14, 0));
-        assert_eq!(united(&ours, json!([holding])), ours, "one range holds the other");
+        let (holding, name) = (at("a.sql", (0, 0), (14, 0)), at("a.sql", (1, 2), (1, 9)));
+        let (block, crossing) = (at("a.sql", (0, 0), (5, 0)), at("a.sql", (4, 0), (7, 0)));
+        let elsewhere = at("b.sql", (0, 0), (0, 0));
+        let matched = [
+            (&ours, &holding, ours.clone(), "one range holds the other"),
+            (&holding, &name, holding.clone(), "the proxy's range holds the server's"),
+            (&block, &crossing, json!([block, crossing]), "ranges that only cross"),
+            (&ours, &elsewhere, json!([ours, elsewhere]), "one range in another file"),
+        ];
+        for (found, server, expected, why) in matched {
+            assert_eq!(united(found, json!([server])), expected, "{why}");
+        }
         let other = at("b.sql", (1, 2), (1, 4));
         assert_eq!(united(&ours, json!([other])), json!([ours, other]));
         let link = json!({"targetUri": "file:///p/c.sql", "targetRange": at("c.sql", (0, 0), (9, 0))["range"],

@@ -59,7 +59,6 @@ src/runs.rs                   the user's last run, from the files dbt left: its 
 src/capability.rs             what a session offers: one descriptor per method or command
 src/modes.rs                  who answers each method: the user's settings and the session's table
 src/commands.rs               the commands for clients: by dbt lsp's own, or by dbt's CLI
-src/shadow.rs                 the proxy's definitions and references against dbt lsp's: compared, counted, logged
 src/packages.rs               whether dbt would install packages before it parses
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
@@ -69,7 +68,6 @@ src/proxy.rs                  the event loop; the Backend, dbt lsp's process: it
 src/cli.rs                    the subcommands doctor, select and node, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
-tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
 tests/proxy/cli.rs            the subcommands doctor, select and node, the binary run as from a shell
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
@@ -189,19 +187,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     in `SUBCOMMANDS`; `cli::operand`, the decision on node's operand, with
     tests of its own; `cli::indexed`, the CLI's index, the kept manifest
     or a parse that it keeps, apart from the question `cli::node` asks;
-  - `Proxy::compare`: the shadow's work on a followed request's answer,
-    once the client has it, so that `on_server_response` stays a dispatch;
-  - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's
-    answer and on how two answers stand, free of the file system, with
-    tests of their own;
-  - `shadow::target`, `shadow::oracle`, `shadow::start`, `Record::line`
-    and `Counts::end`: the log's lines in one place, apart from where the
-    proxy reads what they hold;
-  - `Log::open`, `Log::append` and `Shadow::write`: the start of the
-    shadow's log and its writes, a resource's start and use;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
-    which `Running::stop` ends, a resource's start, as `Log::open` and
-    `Proxy::start_restart` are, where `Proxy::stop_server` is an end;
+    which `Running::stop` ends, a resource's start, as
+    `Proxy::start_restart` is, where `Proxy::stop_server` is an end;
   - `run::Output::error_line`: the list commands' reader of dbt's first
     error, a text log's `[error]` line, kept apart from `error_event` so
     that plan 048 changed no answer; plan 071, which reads dbt's output

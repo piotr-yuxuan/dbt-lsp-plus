@@ -16,8 +16,6 @@ mod locate;
 mod plugin;
 #[path = "proxy/routes.rs"]
 mod routes;
-#[path = "proxy/shadow.rs"]
-mod shadow;
 mod support;
 
 use serde_json::{Value, json};

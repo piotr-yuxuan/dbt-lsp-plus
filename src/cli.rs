@@ -291,7 +291,7 @@ fn select(selector: &str, command: &[String]) -> Value {
         return commands::failure(commands::NODES, &why);
     }
     let (dbt, dir) = dbt_of(&project, route, command);
-    let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), &project, &dbt.command);
+    let cache = config::cache_dir(&config::cache_base(), &project, &dbt.command);
     // What a select or a proxy killed by a signal left, swept after a day, as `Workspace::cache_dir` does.
     config::remove_stale(&cache);
     let job = commands::nodes_job(selector);
@@ -429,7 +429,7 @@ mod tests {
         assert!(placed, "each row of SUBCOMMANDS at its subcommand's place");
         let servers: [(&[&str], &[&str]); 5] = [
             (&["--", "doctor"], &["doctor"]),
-            (&["--shadow", "select", "x"], &["select", "x"]),
+            (&["--backend", "auto", "select", "x"], &["select", "x"]),
             (&["dbt", "lsp"], &["dbt", "lsp"]),
             (
                 &["--backend", "never", "--", "/p/dbt", "lsp", "--project-dir", "/p"],
@@ -466,7 +466,7 @@ mod tests {
             asked(Subcommand::Doctor, &given),
             run(None, Launch::Never, &["uvx", "dbt", "lsp", "--target", "prod"])
         );
-        let selected = words(&["+m+", "--", "--shadow", "dbt", "lsp"]);
+        let selected = words(&["+m+", "--", "--backend", "auto", "dbt", "lsp"]);
         assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), Launch::Auto, &default));
         let refused: [(Subcommand, &[&str]); 8] = [
             (Subcommand::Doctor, &["--bogus"]),
