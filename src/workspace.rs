@@ -88,15 +88,15 @@ impl Workspace {
             Some(Err(TryRecvError::Empty)) => drop(self.filling.replace(filling)),
             Some(Err(TryRecvError::Disconnected)) | None => {}
         }
-        cache.project(self.root.as_deref()?, self.epoch, open)
+        cache.project(self.root.as_deref()?, self.epoch, open, self.dbt.command())
     }
 
     /// The first scan of the project, read on a thread meanwhile, so that
     /// the first request needs none.
     pub fn warm(&self) {
         if let Some(root) = self.root.clone() {
-            let (filled, filling) = mpsc::channel();
-            thread::spawn(move || drop(filled.send(cache::fill(&root))));
+            let ((filled, filling), server) = (mpsc::channel(), self.dbt.command().to_vec());
+            thread::spawn(move || drop(filled.send(cache::fill(&root, &server))));
             self.filling.replace(Some(filling));
         }
     }
@@ -232,7 +232,7 @@ impl Workspace {
             return self.failed(Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".into()));
         };
         let report = report?;
-        (self.fresh, self.stamp) = (true, Some(cache::disk(&root)));
+        (self.fresh, self.stamp) = (true, Some(cache::disk(&root, self.dbt.command())));
         self.running = Some(config::start(run, report));
         None
     }
@@ -242,7 +242,7 @@ impl Workspace {
     /// index stale, as a change told does.  Nothing to compare before a parse.
     pub fn notice(&mut self) {
         let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return };
-        self.fresh = cache::disk(root) == stamp;
+        self.fresh = cache::disk(root, self.dbt.command()) == stamp;
     }
 
     /// A parse's end, its INDEX and its FAILURE: its run stopped; its index

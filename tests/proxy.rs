@@ -712,6 +712,26 @@ fn a_package_unpacked_again_with_the_same_sizes_and_times_is_read_again() {
 }
 
 #[test]
+fn a_package_under_the_server_s_install_path_is_scanned() {
+    let name = "install-path-scanned";
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::rename(project.join("dbt_packages"), project.join("vendor")).unwrap();
+    std::fs::write(project.join("packages.yml"), "packages:\n  - local: vendor/shop_utils\n").unwrap();
+    // A package that no packages file names: only the install path finds it.
+    std::fs::create_dir_all(project.join("vendor/extra/macros")).unwrap();
+    std::fs::write(project.join("vendor/extra/dbt_project.yml"), "name: extra\n").unwrap();
+    std::fs::write(project.join("vendor/extra/macros/greet.sql"), "{% macro greet() %}1{% endmacro %}").unwrap();
+    let model = project.join("models/greeting.sql");
+    std::fs::write(&model, "select {{ extra.greet() }}").unwrap();
+    let flags = [Path::new("--project-dir"), &project, Path::new("--packages-install-path"), Path::new("vendor")];
+    let (mut session, _) = Session::fake_with(name, json!({}), &flags, None);
+    session.initialize(&project);
+    let found = session.request("textDocument/definition", position_in(&model, "greet", 0));
+    assert_eq!(found["result"]["uri"], uri(&project.join("vendor/extra/macros/greet.sql")), "{found}");
+    assert!(session.finish().success());
+}
+
+#[test]
 fn a_document_under_a_link_inside_the_project_is_found_where_it_was_opened() {
     let project = copy_fixture("link-inside");
     std::fs::create_dir(project.join("elsewhere")).unwrap();

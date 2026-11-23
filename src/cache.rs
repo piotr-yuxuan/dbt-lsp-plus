@@ -90,11 +90,11 @@ impl Cache {
     /// package changed, each file read again only when its key changed.  A
     /// failure while building leaves the cache as it was; a project that is
     /// no longer found keeps its files for when it is again.
-    pub fn project(&mut self, root: &Path, epoch: u64, open: &Open) -> Option<Rc<Project>> {
+    pub fn project(&mut self, root: &Path, epoch: u64, open: &Open, server: &[String]) -> Option<Rc<Project>> {
         if self.epoch == Some(epoch) && self.root.as_deref() == Some(root) {
             return self.project.clone();
         }
-        let Some(inventory) = project::find(root) else {
+        let Some(inventory) = project::find(root, server) else {
             self.project = None;
             return None;
         };
@@ -154,8 +154,8 @@ impl Cache {
 
 /// Every file of the project at ROOT that reads from disk, with the key it
 /// was read under: what a thread does before the first request needs it.
-pub fn fill(root: &Path) -> Vec<(PathBuf, Key, Arc<Scanned>)> {
-    let files = project::find(root).map_or_else(Vec::new, |inventory| inventory.files);
+pub fn fill(root: &Path, server: &[String]) -> Vec<(PathBuf, Key, Arc<Scanned>)> {
+    let files = project::find(root, server).map_or_else(Vec::new, |inventory| inventory.files);
     let read = |found: File| {
         let key = Key::of(found.metadata.as_ref()?);
         Some((Arc::new(Scanned::read(&found.path, None)?), key, found.path))
@@ -172,8 +172,8 @@ pub fn fill(root: &Path) -> Vec<(PathBuf, Key, Arc<Scanned>)> {
 /// dbt parses the disk.  0 where ROOT holds no project.  It changes when
 /// such a file is written, added, removed or replaced, and when a package
 /// comes or goes, a `local:` one named included.
-pub fn disk(root: &Path) -> u64 {
-    let Some(inventory) = project::find(root) else { return 0 };
+pub fn disk(root: &Path, server: &[String]) -> u64 {
+    let Some(inventory) = project::find(root, server) else { return 0 };
     let mut hasher = DefaultHasher::new();
     inventory.packages.hash(&mut hasher);
     for found in inventory.files.iter().filter(|found| project::resource_file(&found.path)) {
@@ -227,23 +227,23 @@ mod tests {
         let dir = scratch_project("cache", &files);
         let (texts, mut edits) = (HashMap::new(), HashMap::new());
         let mut cache = Cache::default();
-        let first = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }).unwrap();
-        assert!(Rc::ptr_eq(&first, &cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }).unwrap()));
-        let again = cache.project(&dir, 2, &Open { texts: &texts, edits: &edits }).unwrap();
+        let first = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
+        assert!(Rc::ptr_eq(&first, &cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }, &[]).unwrap()));
+        let again = cache.project(&dir, 2, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert!(Rc::ptr_eq(&first, &again), "nothing changed: the same project");
         // Of another size: an edit of the same size may keep every key.
         fs::write(dir.join("models/b.sql"), "select 22").unwrap();
-        let changed = cache.project(&dir, 3, &Open { texts: &texts, edits: &edits }).unwrap();
+        let changed = cache.project(&dir, 3, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert_eq!(changed.text(&dir.join("models/b.sql")), Some("select 22"));
         let a = dir.join("models/a.sql");
         assert!(Arc::ptr_eq(&first.files[&a], &changed.files[&a]), "an unchanged file is not read again");
         // An open document wins, under its count of edits.
         let texts = HashMap::from([(a.clone(), "select 3".to_owned())]);
         edits.insert(a.clone(), 1);
-        let opened = cache.project(&dir, 4, &Open { texts: &texts, edits: &edits }).unwrap();
+        let opened = cache.project(&dir, 4, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert_eq!(opened.text(&a), Some("select 3"));
         fs::remove_file(dir.join("models/b.sql")).unwrap();
-        let gone = cache.project(&dir, 5, &Open { texts: &texts, edits: &edits }).unwrap();
+        let gone = cache.project(&dir, 5, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert!(gone.text(&dir.join("models/b.sql")).is_none(), "a deleted file dropped");
         assert_eq!(cache.generation, 4);
         fs::remove_dir_all(&dir).unwrap();
@@ -253,14 +253,14 @@ mod tests {
     fn a_fill_gives_what_the_first_scan_then_reuses_but_a_file_changed_since() {
         let files = [("dbt_project.yml", "name: shop\n"), ("models/a.sql", "select 1"), ("models/b.sql", "select 1")];
         let dir = scratch_project("cache-fill", &files);
-        let filled = fill(&dir);
+        let filled = fill(&dir, &[]);
         let a = dir.join("models/a.sql");
         let read = filled.iter().find(|(path, ..)| *path == a).map(|(_, _, scanned)| scanned.clone()).unwrap();
         fs::write(dir.join("models/b.sql"), "select 22").unwrap();
         let mut cache = Cache::default();
         cache.adopt(filled);
         let (texts, edits) = (HashMap::new(), HashMap::new());
-        let project = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }).unwrap();
+        let project = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert!(Arc::ptr_eq(&project.files[&a], &read));
         assert_eq!(project.text(&dir.join("models/b.sql")), Some("select 22"));
         fs::remove_dir_all(&dir).unwrap();
@@ -274,16 +274,16 @@ mod tests {
         fs::write(dir.join("models/Thumbs.db"), b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\xff").unwrap();
         let (texts, edits) = (HashMap::new(), HashMap::new());
         let mut cache = Cache::default();
-        let first = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }).unwrap();
+        let first = cache.project(&dir, 1, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert_eq!(first.text(&dir.join("models/Thumbs.db")), Some(""));
-        cache.project(&dir, 2, &Open { texts: &texts, edits: &edits }).unwrap();
+        cache.project(&dir, 2, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert_eq!(cache.generation, 1, "nothing changed: not built again");
         let unreadable = dir.join("models/b.sql");
         fs::write(&unreadable, "select 2").unwrap();
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
         assert!(fs::read(&unreadable).is_err(), "run as a user whom permissions bind");
-        cache.project(&dir, 3, &Open { texts: &texts, edits: &edits }).unwrap();
-        cache.project(&dir, 4, &Open { texts: &texts, edits: &edits }).unwrap();
+        cache.project(&dir, 3, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
+        cache.project(&dir, 4, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert_eq!(cache.generation, 3, "built again, the file read again");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -299,8 +299,8 @@ mod tests {
             fs::write(path, text).unwrap();
         };
         // The stamp after each step.
-        let mut seen = vec![("first", super::disk(&dir))];
-        let mut look = |step: &'static str| seen.push((step, super::disk(&dir)));
+        let mut seen = vec![("first", super::disk(&dir, &[]))];
+        let mut look = |step: &'static str| seen.push((step, super::disk(&dir, &[])));
         look("again");
         // Outside the resource paths, hidden, an editor's auto-save and its backup.
         write("target/x.sql", "select 3");
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(seen[5].1, seen[3].1, "the model removed: the stamp before it was added");
         assert_eq!(seen[9].1, 0, "a project that does not read");
         let none = scratch_project("cache-stamp-none", &[("models/a.sql", "select 1")]);
-        assert_eq!(super::disk(&none), 0, "no project");
+        assert_eq!(super::disk(&none, &[]), 0, "no project");
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&none).unwrap();
     }
@@ -352,7 +352,7 @@ mod tests {
         let seed = dir.join("seeds/s.csv");
         let texts = HashMap::from([(seed.clone(), "{{ ref('a') }}".to_owned())]);
         let edits = HashMap::from([(seed.clone(), 1)]);
-        let project = Cache::default().project(&dir, 1, &Open { texts: &texts, edits: &edits }).unwrap();
+        let project = Cache::default().project(&dir, 1, &Open { texts: &texts, edits: &edits }, &[]).unwrap();
         assert_eq!(project.text(&seed), Some(""));
         assert!(project.files[&seed].calls.is_empty());
         fs::remove_dir_all(&dir).unwrap();

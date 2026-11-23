@@ -427,10 +427,12 @@ none, the server answers `initialize` before it can know it.
 - Open documents: the text of each, kept from `didOpen` and the incremental
   `didChange` (UTF-16 units), so that the outline follows unsaved edits.
 - The project: found on each request from `dbt_project.yml`, its resource
-  paths, through symbolic links, the packages under
-  `packages-install-path`, and the `local:` packages of `packages.yml` and
-  `dependencies.yml` not installed there yet, as dbt reads them, with the
-  open texts winning over the files on disk.  A file whose name starts
+  paths, through symbolic links, the packages under the install path
+  that the guard takes too (`packages::install_path`: the server
+  command's `--packages-install-path`, else `DBT_PACKAGES_INSTALL_PATH`,
+  else the project's `packages-install-path`), and the `local:` packages
+  of `packages.yml` and `dependencies.yml` not installed there yet, as
+  dbt reads them, with the open texts winning over the files on disk.  A file whose name starts
   with a dot is left out, as dbt leaves it out, but not the files of a
   directory whose name does.  Seeds are found but not read.  This finds:
   - models, Python models among them, seeds, snapshots, analyses,
@@ -1181,10 +1183,6 @@ over the manifest that node keeps, checked against dbt (plan 058);
 - A version that YAML reads as a number other than as written, such as
   `v: 1e3`, which dbt takes as 1000, keeps its written form in the scan:
   its file `<name>_v1e3` is the version there, where dbt finds none.
-- The scan reads the install path from the project's
-  `packages-install-path` only, not from the server's
-  `--packages-install-path` or `DBT_PACKAGES_INSTALL_PATH`, which the
-  guard of the parse follows.
 - The scan lists files that the root's or a package's `.dbtignore`
   matches, which dbt 2 leaves out: they get workspace symbols, call
   hierarchy items and edges that dbt does not have, and can be a second

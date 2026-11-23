@@ -363,7 +363,7 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
 /// well with no manifest that reads fails here, where no server's wait
 /// could explain the missing index.
 fn indexed(workspace: &mut Workspace, root: &Path) {
-    let stamp = cache::disk(root);
+    let stamp = cache::disk(root, workspace.dbt.command());
     let cache = workspace.cache_dir(root);
     let kept = fs::read(config::kept(&cache, stamp)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
     if let Some(manifest) = kept {

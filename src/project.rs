@@ -492,14 +492,14 @@ pub struct Inventory {
 
 /// What a scan finds of the project at ROOT: each package's resource paths,
 /// layout by layout, then its `dbt_project.yml`, whose vars and hooks hold
-/// calls too.  Its packages are those installed, then the local packages
-/// that its packages files name and that are not.  None when ROOT has no
-/// named `dbt_project.yml`.
-pub fn find(root: &Path) -> Option<Inventory> {
+/// calls too.  Its packages are those installed where dbt installs them
+/// with the server command SERVER, then the local packages that its
+/// packages files name and that are not.  None when ROOT has no named
+/// `dbt_project.yml`.
+pub fn find(root: &Path, server: &[String]) -> Option<Inventory> {
     let (root_package, root_config) = package_config(root)?;
-    let install = root_config.get("packages-install-path").and_then(Tree::as_str).unwrap_or("dbt_packages");
-    let mut installed: Vec<PathBuf> =
-        fs::read_dir(root.join(install)).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let install = packages::install_path(root, server).unwrap_or_default();
+    let mut installed: Vec<PathBuf> = fs::read_dir(install).into_iter().flatten().flatten().map(|e| e.path()).collect();
     installed.sort();
     let others = installed.into_iter().filter_map(|dir| package_config(&dir).map(|(name, config)| (name, dir, config)));
     let mut packages: Vec<(String, PathBuf, Tree)> =
@@ -609,7 +609,7 @@ pub fn assemble(inventory: &Inventory, read: &mut Read) -> Project {
 /// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
 /// editor has open, which wins over the file on disk.
 pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
-    let inventory = find(root)?;
+    let inventory = find(root, &[])?;
     let mut read =
         |file: &File| Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default());
     Some(assemble(&inventory, &mut read))
@@ -1070,6 +1070,23 @@ mod tests {
         );
         let project = scan(&dir, &HashMap::new()).unwrap();
         assert_eq!(sorted_ids(&project), ["macro.p.m", "model.p.a", "model.q.b"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn find_reads_the_packages_where_dbt_installs_them() {
+        let files = [("dbt_project.yml", "name: shop\n"), ("vendor/extra/dbt_project.yml", "name: extra\n")];
+        let dir = scratch_project("find-install-path", &files);
+        let packages = |server: &[&str]| {
+            let server: Vec<String> = server.iter().map(|word| word.to_string()).collect();
+            find(&dir, &server).unwrap().packages.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
+        };
+        assert_eq!(packages(&["dbt", "lsp"]), ["shop"], "nowhere dbt installs them");
+        assert_eq!(packages(&["dbt", "lsp", "--packages-install-path", "vendor"]), ["shop", "extra"], "the flag");
+        let assigned = ["env", "DBT_PACKAGES_INSTALL_PATH=vendor", "dbt", "lsp"];
+        assert_eq!(packages(&assigned), ["shop", "extra"], "the variable before lsp");
+        fs::write(dir.join("dbt_project.yml"), "name: shop\npackages-install-path: vendor\n").unwrap();
+        assert_eq!(packages(&["dbt", "lsp"]), ["shop", "extra"], "the project's key");
         fs::remove_dir_all(&dir).unwrap();
     }
 
