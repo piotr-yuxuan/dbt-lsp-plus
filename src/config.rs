@@ -131,8 +131,8 @@ pub fn cache_base() -> PathBuf {
 
 /// Where this process keeps its parses of ROOT with the server command
 /// SERVER, under BASE: one directory per root and command, by their hash
-/// with FNV-1a, which no build changes, each ended by a zero byte; then
-/// one per process.
+/// with FNV-1a, which no build changes, each ended by a zero byte, as
+/// sixteen hexadecimal digits; then one per process.
 pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
     let parts = std::iter::once(root.to_string_lossy().into_owned()).chain(server.iter().cloned());
     let key = parts.fold(0xcbf2_9ce4_8422_2325_u64, |hash, part| {
@@ -562,9 +562,9 @@ mod tests {
     fn a_cache_belongs_to_a_root_a_command_and_a_process() {
         let server = words(&["dbt", "lsp"]);
         let one = cache_dir(Path::new("/base"), Path::new("/a"), &server);
-        assert!(
-            one.starts_with("/base/dbt-lsp-plus/4459adff89af72f0") && one.ends_with(std::process::id().to_string())
-        );
+        let why = "the name of a root's cache directory must not change between builds";
+        assert!(one.starts_with("/base/dbt-lsp-plus/4459adff89af72f0"), "{why}: {one:?}");
+        assert!(one.ends_with(std::process::id().to_string()), "{one:?}");
         assert_eq!(one, cache_dir(Path::new("/base"), Path::new("/a"), &server));
         assert_ne!(one, cache_dir(Path::new("/base"), Path::new("/b"), &server));
         assert_ne!(one, cache_dir(Path::new("/base"), Path::new("/a"), &words(&["dbt", "lsp", "--target", "prod"])));
