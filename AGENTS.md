@@ -77,7 +77,8 @@ tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
 Makefile                      the checks, which CI runs too
 scripts/check-public          nothing private in the tracked files, an SPDX line in each source
-scripts/check-commits         each commit's title, trailers and text
+scripts/check-commits         each commit's title, trailers and text, and no raise of a size ceiling unsaid
+scripts/check-size            production lines and types of src/ against the Makefile's ceilings
 scripts/release.py            CD's release: the version commit, the tag and its notes
 scripts/fetch-dbt             CI's dbt by its pinned SHA-256, or the latest by its published one
 scripts/bench/                synthetic projects and the proxy's times on them
@@ -259,6 +260,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     pure decisions, each with tests of its own, apart from the effects;
     `read`, `has_release` and `confirm_ci`, one per question asked of git
     or GitHub, so that `main` stays the run's order;
+  - in `scripts/check-size`: `measure`, the count of one file, pure, with
+    tests of its own, apart from `main`'s reading of `src/` and its
+    verdict;
   - `fetch` in `scripts/fetch-dbt`: the download and its checks, with tests
     of their own, apart from `main`, which reads the arguments and turns
     failures into status 2; `latest_oss`, `latest_proprietary` and

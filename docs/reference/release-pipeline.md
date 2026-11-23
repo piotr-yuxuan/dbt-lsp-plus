@@ -14,7 +14,7 @@ cache, and has 30 minutes:
 
 | Job | Runs |
 |---|---|
-| `static` | `make check-static`: fmt, clippy, `public`, Ruff and the Python tests, actionlint; and off `main`, `make commits BASE=origin/main` |
+| `static` | `make check-static`: fmt, clippy, `public`, Ruff and the Python tests, actionlint, `src/`'s size against its ceilings; and off `main`, `make commits BASE=origin/main` |
 | `test` | `make test` |
 | `macos` | On `macos-15`, `make test`. Its failure fails neither CI nor a release |
 | `dbt-oss` | dbt-oss 2.0.11 fetched, the network cut checked, then `make conformance`, then `make live` with the network cut, the proxy alone, as dbt-oss has no `dbt lsp` |

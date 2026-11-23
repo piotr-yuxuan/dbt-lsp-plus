@@ -8,9 +8,12 @@
 # message has no attribution trailer; its message, author and committer
 # hold none of the text that scripts/public-patterns.sh describes.  A version
 # commit of the pipeline is accepted by its exact shape, with GitHub's own
-# author and committer, whose address is not the noreply identity.  Print
-# each finding as COMMIT: MESSAGE, and exit with status 1 when there is
-# any, 2 when the check could not run.
+# author and committer, whose address is not the noreply identity.  A
+# commit with one parent that raises the Makefile's SIZE_LINES or
+# SIZE_TYPES, or removes one, says why on a line of its body that reads
+# "Raises the size ceilings: WHY"; a merge's commits are checked each.
+# Print each finding as COMMIT: MESSAGE, and exit with status 1 when there
+# is any, 2 when the check could not run.
 
 set -uo pipefail
 export LC_ALL=C.UTF-8
@@ -35,6 +38,11 @@ version_message=$'^Version (0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\n
 finding() {
   echo "$1: $2"
   status=1
+}
+
+# Print the value of the Makefile's ceiling $2 at the commit $1, if any.
+ceiling() {
+  git show "$1:Makefile" 2>/dev/null | sed -n "s/^$2 := \([0-9][0-9]*\)\$/\1/p"
 }
 
 # Return whether the text $2 matches the Perl regexp $1, read as bytes.
@@ -68,6 +76,17 @@ for commit in $commits; do
       finding "$short" "private word"
     fi
   done <<<"$words"
+  read -ra parents <<<"$(git log -1 --format=%P "$commit")"
+  if (( ${#parents[@]} == 1 )) \
+     && ! grep -qE '^Raises the size ceilings: *[^[:space:]]' <<<"$(git log -1 --format=%b "$commit")"; then
+    for name in SIZE_LINES SIZE_TYPES; do
+      before=$(ceiling "${parents[0]}" "$name")
+      after=$(ceiling "$commit" "$name")
+      if [[ -n $before ]] && { [[ -z $after ]] || (( 10#$after > 10#$before )); }; then
+        finding "$short" "$name raised from $before to ${after:-none} without \"Raises the size ceilings: WHY\""
+      fi
+    done
+  fi
 done
 
 exit "$status"
