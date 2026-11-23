@@ -183,8 +183,9 @@ then each problem, such as `[DependencyNotFound (dbt1048)]: Ref
 
 The LSP tool cannot reach nodeInfo, rename, inlay hints, completion or
 compiled SQL.  The hover at line 1, character 1 gives a node's facts;
-`dbt-lsp-plus select` lists nodes with their configuration, where dbt
-can be cut off the network (below).
+`dbt-lsp-plus node` gives what nodeInfo gives, and `dbt-lsp-plus select`
+lists nodes with their configuration, where dbt can be cut off the
+network (below).
 
 ## From a shell
 
@@ -197,9 +198,17 @@ select SELECTOR`, run in the project, gives
 select runs dbt only cut off the network, which needs Linux with user
 namespaces: elsewhere, as on macOS, it answers `dbt-lsp-plus runs dbt
 only cut off the network, which this system cannot`, and doctor's `cut`
-is `false`.  doctor exits 0 when it finds a project and a dbt 2, select
-when `error` is null; 1 otherwise; 2 for a usage error ([the
-subcommands](../reference/cli.md)).
+is `false`.  `dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]]` gives what
+nodeInfo gives of the node that a unique id names, in the project of the
+current directory, or that a place in a file names, as
+`{"error":null,"node":{...}}`, the node with its `summary` and its
+`children`, the unique ids of the enabled nodes that depend on it.  Its
+first run in a project runs a `dbt parse` and keeps its manifest; the
+next runs read it, while the project's files stay as they were.  Where
+dbt cannot be cut off the network, it parses all the same, unless the
+project names a package from the network.  doctor exits 0 when it finds
+a project and a dbt 2, select and node when `error` is null; 1
+otherwise; 2 for a usage error ([the subcommands](../reference/cli.md)).
 
 From a repository's root over `dbt/`, doctor on a model's file gave
 `"route":"document"`, `"source":"the project's .venv"` and
@@ -217,9 +226,10 @@ in `dbt` too.  From the root, `dbt-lsp-plus select orders -- dbt lsp
 current directory: it failed with `no profiles.yml found` where
 `profiles.yml` is in `dbt/`.
 
-Allow both, in `--allowedTools` or the settings' permissions, as
-`Bash(dbt-lsp-plus doctor:*)` and `Bash(dbt-lsp-plus select:*)`; without
-them, Claude Code answers `This command requires approval`.
+Allow them, in `--allowedTools` or the settings' permissions, as
+`Bash(dbt-lsp-plus doctor:*)`, `Bash(dbt-lsp-plus select:*)` and
+`Bash(dbt-lsp-plus node:*)`; without them, Claude Code answers `This
+command requires approval`.
 
 ## When nothing answers
 
@@ -265,7 +275,8 @@ By what the agent reads:
 - `no dbt project at <root>: its dbt_project.yml is missing, is not
   YAML, or names no project`: the project's file no longer reads, as
   mid-edit; fix it, and the next request reads it again.  In front of
-  `dbt lsp`, a hover on a `ref` or a `source` once a parse has run, and a
+  `dbt lsp`, a hover on a `ref`, a `source` or an entry's `name:` once a
+  parse has run, and a
   definition or references at a kind listed in [Where dbt-lsp-plus
   answers definitions and
   references](#where-dbt-lsp-plus-answers-definitions-and-references),
@@ -275,6 +286,7 @@ By what the agent reads:
 - `<file> lies in the dbt project at <other>, and this session serves
   only the one at <root>`: a session serves the first project it finds;
   for that file's answers, start a session in its project's directory.
+  A nodeInfo at a position in that file gives it too.
 - goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
   answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not
@@ -282,8 +294,11 @@ By what the agent reads:
   hover, or definition or references at a kind listed in [Where
   dbt-lsp-plus answers definitions and
   references](#where-dbt-lsp-plus-answers-definitions-and-references),
-  finds the file changed on disk, starts a parse and is answered from
-  the last index meanwhile; ask again once the parse has run.
+  finds the file changed on disk, starts a parse (in front of `dbt lsp`,
+  where dbt cannot be cut off the network and the project names a package
+  from the network, the guard refuses it until `dbt lsp` compiles again)
+  and is answered from the last index meanwhile; ask again once the parse
+  has run.
 
 Three setups fail silently.  A `.lsp.json` at a repository's root does
 nothing: Claude Code reads it at a plugin's root only.  A plugin

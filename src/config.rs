@@ -186,6 +186,29 @@ pub fn cache_dir(base: &Path, root: &Path, server: &[String]) -> PathBuf {
     base.join("dbt-lsp-plus").join(hash(parts)).join(std::process::id().to_string())
 }
 
+/// Where the manifest of a parse that started while the project lay on
+/// disk as STAMP (`cache::disk`) says is kept, beside CACHE, a process's
+/// directory, for those after it: in `kept/` under their one parent,
+/// which `remove_stale` sweeps by its own time.
+pub fn kept(cache: &Path, stamp: u64) -> PathBuf {
+    cache.with_file_name("kept").join(format!("{stamp:016x}.json"))
+}
+
+/// Keeps the manifest that a parse wrote under CACHE, a process's
+/// directory, for the project as it lay on disk as STAMP: renamed to
+/// `kept`'s place, the other files of `kept/` removed; nothing when it
+/// cannot.
+pub fn keep(cache: &Path, stamp: u64) {
+    let kept = kept(cache, stamp);
+    let Some(dir) = kept.parent() else { return };
+    if fs::create_dir_all(dir).is_err() || fs::rename(cache.join("target/manifest.json"), &kept).is_err() {
+        return;
+    }
+    for other in fs::read_dir(dir).into_iter().flatten().flatten().filter(|other| other.path() != kept) {
+        let _ = fs::remove_file(other.path());
+    }
+}
+
 /// Removes the caches beside CACHE that neither a parse nor a run wrote for
 /// a day, as a proxy or a select killed by a signal leaves: a sibling's
 /// time is its `parse.log`'s, else its own, as a select writes no parse's
@@ -294,6 +317,26 @@ impl ParseIndex {
 
     pub fn node(&self, id: &str) -> Option<&Value> {
         self.nodes.get(id)
+    }
+
+    /// The unique ids, sorted, of the enabled nodes of the last manifest
+    /// laid whose `depends_on.nodes` names the node ID, every test aside,
+    /// by its `resource_type`.
+    pub fn children(&self, id: &str) -> Vec<&str> {
+        let child = |node: &Value| {
+            let depends_on = node.pointer("/depends_on/nodes").and_then(Value::as_array);
+            node["resource_type"] != "test"
+                && node["disabled"] != true
+                && depends_on.is_some_and(|nodes| nodes.iter().any(|parent| parent == id))
+        };
+        let mut children: Vec<&str> = self
+            .latest
+            .iter()
+            .filter(|latest| self.nodes.get(*latest).is_some_and(child))
+            .map(String::as_str)
+            .collect();
+        children.sort_unstable();
+        children
     }
 
     /// The enabled models, seeds and snapshots of the last manifest named
@@ -731,6 +774,34 @@ mod tests {
         let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
         assert_eq!(ids, ["source.shop.raw.b"]);
         assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
+    }
+
+    #[test]
+    fn a_node_s_children_are_the_enabled_nodes_of_the_last_manifest_that_depend_on_it() {
+        let node = |id: &str, depends_on: &[&str]| {
+            let (kind, name) = (id.split('.').next().unwrap(), id.rsplit('.').next().unwrap());
+            json!({"unique_id": id, "name": name, "resource_type": kind, "package_name": "shop",
+                   "depends_on": {"nodes": depends_on}})
+        };
+        let (a, ab, t) = (
+            node("model.shop.a", &[]),
+            node("model.shop.ab", &["model.shop.a"]),
+            node("test.shop.t", &["model.shop.a"]),
+        );
+        // A relationships test, attached to b, depends on the model it refers to too.
+        let mut r = node("test.shop.r", &["model.shop.a", "model.shop.b"]);
+        r["attached_node"] = json!("model.shop.b");
+        let manifest = json!({"nodes": {"model.shop.a": a, "model.shop.b": node("model.shop.b", &["model.shop.a"]),
+                                        "model.shop.ab": ab, "test.shop.t": t, "test.shop.r": r},
+                              "disabled": {"model.shop.c": [node("model.shop.c", &["model.shop.a"])]}});
+        let mut index = ParseIndex::of(&manifest);
+        assert_eq!(
+            (index.children("model.shop.a"), index.children("model.shop.b")),
+            (vec!["model.shop.ab", "model.shop.b"], vec![])
+        );
+        // A failed parse's manifest, laid over, lacks b, which the index keeps.
+        index.overlay(ParseIndex::of(&json!({"nodes": {"model.shop.a": a, "model.shop.ab": ab, "test.shop.t": t}})));
+        assert_eq!(index.children("model.shop.a"), ["model.shop.ab"]);
     }
 
     #[test]

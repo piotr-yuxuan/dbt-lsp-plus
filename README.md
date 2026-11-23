@@ -64,8 +64,10 @@ check in one call, who answers what, and what to do when nothing
 answers.
 
 From a shell, `dbt-lsp-plus doctor` says which project and dbt the server
-would find and whether it would work, and `dbt-lsp-plus select SELECTOR`
-lists what a dbt selector selects ([the subcommands](docs/reference/cli.md)).
+would find and whether it would work, `dbt-lsp-plus select SELECTOR`
+lists what a dbt selector selects, and `dbt-lsp-plus node ID|PATH` gives
+what dbt says of a node and the nodes that depend on it ([the
+subcommands](docs/reference/cli.md)).
 
 ## Documentation
 
@@ -77,7 +79,7 @@ lists what a dbt selector selects ([the subcommands](docs/reference/cli.md)).
   [Troubleshoot](docs/how-to/troubleshoot.md)
 - Reference: [The features](docs/reference/features.md), by LSP method,
   then [the configuration](docs/reference/features.md#configuration), every option;
-  [The subcommands](docs/reference/cli.md), doctor and select;
+  [The subcommands](docs/reference/cli.md), doctor, select and node;
   [The release pipeline](docs/reference/release-pipeline.md)
 - Explanation: [The design](docs/explanation/design.md), what `dbt lsp`
   was observed to do, and what it would take to finish

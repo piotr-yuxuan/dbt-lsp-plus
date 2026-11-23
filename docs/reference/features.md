@@ -54,7 +54,9 @@ method:
   `show` not at all, since `dbt show` reaches the network;
 - `dbt-lsp-plus.nodeInfo` (`workspace/executeCommand`), a command that
   gives a node's resolved
-  configuration, relation and summary from the user's own `dbt parse`, and
+  configuration, relation and summary from the user's own `dbt parse`,
+  with `children`, the unique ids of the enabled nodes that depend on it,
+  every test aside, and
   that summary first in the server's hover on a `ref` or a `source`, and
   at line 1, column 1 (position 0:0) of a file that defines one node, a
   YAML file aside (a properties file, or a YAML snapshot's),
@@ -110,16 +112,18 @@ before it answers `initialize`, the proxy answers alone, as with dbt-oss,
 and a request only `dbt lsp` answers fails with `dbt lsp is lost for
 good: ...`.  When the root's `dbt_project.yml` no longer reads, a
 definition or references on a target, workspace symbols, the call
-hierarchy and, once a parse has run, a hover and a nodeInfo at a `ref`
-or a `source` fail with `no dbt project at ...`, alone and in `plus`; in
+hierarchy and, once a parse has run, a hover and a nodeInfo at a `ref`,
+a `source` or an entry's `name:` fail with `no dbt project at ...`, alone
+and in `plus`; in
 `merge` in front of `dbt lsp`, a definition, references or such a hover
 goes to `dbt lsp`, and when it gives no answer, that reason comes first,
 then `dbt lsp`'s.
 With a `dbt lsp` that cannot start, its parse runs the same dbt and
 fails, and `nodeInfo` and a hover on a node give its failure.
 
-Once a session has a project, a hover, a definition, references or a
-call hierarchy on a file of another dbt project fails with
+Once a session has a project, a hover, a definition, references, a call
+hierarchy or a nodeInfo at a position on a file of another dbt project
+fails with
 `<file> lies in the dbt project at <other>, and this session serves only
 the one at <root>`; in `merge` in front of `dbt lsp`, a hover, a
 definition or references fails only when `dbt lsp` gives no answer.

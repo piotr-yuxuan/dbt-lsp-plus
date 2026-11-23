@@ -9,12 +9,12 @@ use crate::commands;
 use crate::graph::{self, ServerNode};
 use crate::locate::{self, Probe};
 use crate::modes::{self, Mode};
-use crate::project::{self, Project, Scanned};
+use crate::project::{Project, Scanned};
 use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
-use crate::workspace::Workspace;
+use crate::workspace::{Which, Workspace};
 use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, scan, shadow,
+    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, shadow,
     sources,
 };
 use serde_json::{Value, json};
@@ -349,7 +349,7 @@ enum Kept {
 }
 
 /// The proxy's part of a merged request.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum Part {
     /// Nothing of the proxy's at the position: the request is dbt lsp's,
     /// whose answer passes as it came, and when it gives none, the client
@@ -1030,7 +1030,13 @@ impl<W: Write> Proxy<W> {
     /// The project as its files and the open documents say, if there is
     /// one: the Workspace's, looked at once an epoch.
     fn project(&self) -> Option<Rc<Project>> {
-        self.workspace.project(&cache::Open { texts: &self.documents, edits: &self.edits })
+        self.workspace.project(&self.open_documents())
+    }
+
+    /// The open documents as the Workspace reads them: their texts and the
+    /// count of each one's edits.
+    fn open_documents(&self) -> cache::Open<'_> {
+        cache::Open { texts: &self.documents, edits: &self.edits }
     }
 
     /// The outline of a document, from its open text or its file; null for a
@@ -1272,90 +1278,24 @@ impl<W: Write> Proxy<W> {
         Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, self.encoding))
     }
 
-    /// Whether the position of PARAMS names a node, and which node of INDEX:
-    /// that of the `ref` or `source` there, or of the entry whose `name:` is
-    /// there, as `navigation::Lookup::node` finds it, else, when FILE, the
-    /// one node its document defines, but never in a YAML file: there the
-    /// manifest places the generic tests a file declares beside its node, a
-    /// YAML snapshot's included, so neither the scan nor `of_file` can name
-    /// one node.  None when it names nothing, as an entry's `name:` over a
-    /// project that does not read; `Some(None)` when it names a node that
-    /// the lookup does not find, as a `ref` or a `source` over a project
-    /// that does not read once there is an index, or that, without an index,
-    /// the scan tells is named but cannot give, as any `ref` or `source`.
-    fn node_at<'a>(
-        &self,
-        index: Option<&'a config::ParseIndex>,
-        params: &Value,
-        file: bool,
-    ) -> Option<Option<&'a Value>> {
-        let (path, scanned, offset) = self.scan_at(params, None)?;
-        let yaml = path.extension().is_some_and(|extension| extension == "yml" || extension == "yaml");
-        // The calls of `sources::file_calls`, which leave out the function calls that a YAML file's scan holds too.
-        let inside = |call: &&scan::Call| {
-            call.arguments.iter().any(|range| range.start <= offset && offset <= range.end)
-                && !(yaml && call.name.kind == reference::Kind::Function)
-        };
-        if let Some(call) = scanned.calls.iter().find(inside) {
-            let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
-            // Without an index there is no node to find: the project is not read for none.
-            return named.then(|| {
-                let project = index.and_then(|_| self.project())?;
-                navigation::Lookup::new(&project, index).node(&path, &call.name)
-            });
-        }
-        // An entry's `name:` stands for its node, looked up as dbt 2.0.9 does.
-        let entry = navigation::reference_at(&path, &scanned, offset).filter(|name| {
-            matches!(
-                name.kind,
-                reference::Kind::Entry { label: "model" | "seed" | "snapshot" | "analysis" }
-                    | reference::Kind::Table { .. }
-            )
-        });
-        if let Some(name) = entry {
-            let project = self.project()?;
-            return Some(navigation::Lookup::new(&project, index).node(&path, &name));
-        }
-        let relative = path.strip_prefix(self.workspace.root.as_ref()?).ok().filter(|_| file && !yaml)?;
-        if let Some(index) = index {
-            return index.of_file(&relative.to_string_lossy()).map(Some);
-        }
-        // As `ParseIndex::of_file` reads the manifest: the kinds of resources it holds as nodes.
-        let project = self.project()?;
-        let defines = |entity: &&project::Entity| {
-            entity.path == path
-                && entity.package == project.root_package
-                && matches!(entity.resource_type, "model" | "seed" | "snapshot" | "analysis" | "test")
-        };
-        (project.entities.iter().filter(defines).count() == 1).then_some(None)
-    }
-
-    /// The information of a node, named by its id or by a position: the
-    /// manifest's node with its relation and the summary a hover shows,
-    /// none for no node; why while no parse has finished, and the reason of
-    /// a project that does not read for a node named by a `ref` or a
-    /// `source` there.
+    /// The information of a node, named by its id or by a position, as
+    /// `Workspace::node` gives it; why while no parse has finished, even
+    /// for a position on no document; empty for a position on no document
+    /// once one has; none for no argument.
     fn node_info(&self, params: &Value) -> Option<Answer> {
-        let Some(index) = &self.workspace.index else {
-            return Some(Answer::Unanswered(vec![self.workspace.unindexed()]));
-        };
-        let argument = params.pointer("/arguments/0")?;
-        let node = match argument.as_str() {
-            Some(id) => index.node(id),
+        let which = params.pointer("/arguments/0").map(|argument| match argument.as_str() {
+            Some(id) => Some(Which::Id(id.to_owned())),
             None => {
                 let position = json!({"textDocument": {"uri": argument["uri"]}, "position": argument["position"]});
-                match self.node_at(Some(index), &position, true) {
-                    Some(None) if self.project().is_none() => return Some(Answer::Unanswered(vec![self.unreadable()])),
-                    named => named.flatten(),
-                }
+                self.document_at(&position).map(Which::At)
             }
-        };
-        let summarised = |node: &Value| {
-            let mut answer = node.clone();
-            answer["summary"] = json!(index.summary(node));
-            answer
-        };
-        Some(node.map(summarised).map_or(Answer::Empty, Answer::Found))
+        });
+        match (which, self.workspace.index.is_some()) {
+            (Some(Some(which)), _) => Some(self.workspace.node(&self.open_documents(), &which)),
+            (_, false) => Some(Answer::Unanswered(vec![self.workspace.unindexed()])),
+            (Some(None), true) => Some(Answer::Empty),
+            (None, true) => None,
+        }
     }
 
     /// Lets the Workspace start a parse when the index is stale and dbt can
@@ -1825,14 +1765,14 @@ impl<W: Write> Proxy<W> {
     /// What the answer to a hover at PARAMS gets first, outside `dbt`: the
     /// summary and facts of the node named there, else a doc's or a generic
     /// test's block; else nothing, null, which a node named before any index
-    /// turns into why the proxy has none, and a node named by a `ref` or a
-    /// `source` over a project that does not read, once there is an index,
-    /// into its reason.
+    /// turns into why the proxy has none, and a node named by a `ref`, a
+    /// `source` or an entry's `name:` over a project that does not read,
+    /// once there is an index, into its reason.
     fn hover_part(&self, params: &Value) -> Part {
         let index = self.workspace.index.as_ref();
         // Line 1, column 1 of a file stands for the node it defines.
         let start = params["position"] == json!({"line": 0, "character": 0});
-        let named = self.node_at(index, params, start);
+        let named = self.workspace.node_at(&self.open_documents(), self.document_at(params).as_ref(), start);
         let summary = index
             .zip(named.flatten())
             .map(|(index, node)| (format!("{}\n{}", index.summary(node), index.facts(node)), true));
@@ -2731,6 +2671,7 @@ pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project;
 
     #[test]
     fn the_agent_page_lists_the_kinds_that_the_flag_announces() {
@@ -3292,11 +3233,23 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");
         let text = "select {{ function('f') }}(1) as v";
-        let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root));
+        let mut proxy = Proxy::new(Vec::new(), Life::default(), Some(root.clone()));
         proxy.documents.insert(path.clone(), text.to_owned());
-        let position = json!({"textDocument": {"uri": features::uri(&path)},
-                              "position": {"line": 0, "character": text.find("'f'").unwrap() + 1}});
-        assert_eq!(proxy.node_at(None, &position, false), None, "a function's argument names no node before any parse");
+        assert_eq!(
+            proxy.workspace.node_at(
+                &proxy.open_documents(),
+                Some(&(path.clone(), text.to_owned(), text.find("'f'").unwrap() + 1)),
+                false
+            ),
+            None,
+            "a function's argument names no node before any parse"
+        );
+        // No argument, or a file neither open nor on disk: why there is no index yet; once there is one, none
+        // and empty.
+        let missing = features::uri(&root.join("models/marts/missing.sql"));
+        let at_missing = json!({"arguments": [{"uri": missing, "position": {"line": 0, "character": 0}}]});
+        let unindexed = Some(Answer::Unanswered(vec![proxy.workspace.unindexed()]));
+        assert_eq!((proxy.node_info(&json!({})), proxy.node_info(&at_missing)), (unindexed.clone(), unindexed));
         let node = json!({"unique_id": "model.shop.uses_f", "name": "uses_f", "resource_type": "model",
                           "package_name": "shop", "original_file_path": "models/marts/uses_f.sql", "config": {}});
         let manifest = json!({"metadata": {"project_name": "shop"}, "nodes": {"model.shop.uses_f": node}});
@@ -3306,6 +3259,8 @@ mod tests {
         assert_eq!(proxy.node_info(&at(text.find("'f'").unwrap() + 1)), Some(Answer::Empty));
         let Some(Answer::Found(start)) = proxy.node_info(&at(0)) else { panic!("no node at the file's start") };
         assert_eq!(start["unique_id"], "model.shop.uses_f");
+        assert_eq!(proxy.node_info(&json!({})), None);
+        assert_eq!(proxy.node_info(&at_missing), Some(Answer::Empty));
     }
 
     #[test]
@@ -3417,8 +3372,26 @@ mod tests {
         assert!(proxy.hover_part(&dim) == Part::Unanswered(vec![Reason::Unreadable(broken.clone())]), "a hover's part");
         let kept = proxy.remember("textDocument/inlayHint", &json!(1), &hints(&broken)).0.kept;
         assert!(kept == Kept::Part(Part::Empty), "the hints' part");
+        // An entry's `name:` reads as a `ref` there: `dim` of `name: dim`.
+        let entry = json!({"line": 2, "character": 10});
+        let dim_yml = features::uri(&broken.join("models/_dim.yml"));
+        let (on_entry, entry_info) = (
+            json!({"textDocument": {"uri": dim_yml}, "position": entry}),
+            json!({"arguments": [{"uri": dim_yml, "position": entry}]}),
+        );
+        let unreadable = (
+            Some(Answer::Unanswered(vec![Reason::Unreadable(broken.clone())])),
+            Part::Unanswered(vec![Reason::Unreadable(broken.clone())]),
+        );
+        let entry_read = (proxy.node_info(&entry_info), proxy.hover_part(&on_entry));
         proxy.workspace.index = None;
         assert!(proxy.hover_part(&dim) == Part::Unindexed, "a hover's part before any index");
+        let entry_before = proxy.hover_part(&on_entry);
+        assert_eq!(
+            (entry_read, entry_before),
+            (unreadable, Part::Unindexed),
+            "an entry's, with an index then before any"
+        );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(broken).unwrap();
     }

@@ -60,14 +60,14 @@ src/packages.rs               whether dbt would install packages before it parse
 src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
 src/parse_log.rs              the errors and warnings of dbt parse's JSON log
 src/document.rs               folding, highlights, selection ranges, CTE rename
-src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale
+src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries
 src/proxy.rs                  the event loop; the Backend, dbt lsp's process: its life, its listings
-src/cli.rs                    the subcommands doctor and select, from a shell, on the server's resolution
+src/cli.rs                    the subcommands doctor, select and node, from a shell, on the server's resolution
 tests/proxy.rs                the binary in front of the fake server
 tests/proxy/live.rs           the binary in front of the real dbt lsp, or alone with dbt-oss, opt-in
 tests/proxy/shadow.rs         the shadow in front of the fake server
 tests/proxy/commands.rs       the commands for clients, in front of the fake and alone
-tests/proxy/cli.rs            the subcommands doctor and select, the binary run as from a shell
+tests/proxy/cli.rs            the subcommands doctor, select and node, the binary run as from a shell
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
@@ -134,13 +134,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `Cache::build`: the reads of a refresh, through `&self`, so that the
     cache changes only once the project is built;
   - `Workspace::graph`: the graph kept while what it is made of stays,
-    apart from the hierarchy's answer; `Workspace::project`,
-    `Workspace::parse`, `Workspace::parsed`, `Workspace::notice` and
-    `Workspace::stop`: the project as its files and the open texts say, a
-    parse's start when the index is stale and its end, a look at the disk
-    on behalf of a request, and a parse's stop, each the core's, public
-    for the front ends, though the LSP front end alone calls each yet (the
-    CLI's `node` in plan 051, MCP in plan 052);
+    apart from the hierarchy's answer; `Workspace::notice`: a look at the
+    disk on behalf of a request, the core's, public for the front ends,
+    though the LSP front end alone calls it yet (MCP in plan 052);
   - `Pending::merged` and `Pending::found`: what each kind of part does
     to the server's answer, and what a part found is alone, so that
     `on_server` and `unserved` stay dispatches;
@@ -180,9 +176,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `cli::named`: the rule that a subcommand is the first word, tested
     without running the binary, apart from `main.rs`, whose `cli::main` is
     the module's entry point; `cli::asked`: the decision on a
-    subcommand's words, with tests of its own; `cli::doctor` and
-    `cli::select`, one per subcommand, so that `cli::main` stays a
-    dispatch;
+    subcommand's words, with tests of its own; `cli::doctor`,
+    `cli::select` and `cli::node`, one per subcommand, each its row's run
+    in `SUBCOMMANDS`; `cli::operand`, the decision on node's operand, with
+    tests of its own; `cli::indexed`, the CLI's index, the kept manifest
+    or a parse that it keeps, apart from the question `cli::node` asks;
   - `Proxy::compare`: the shadow's work on a followed request's answer,
     once the client has it, so that `on_server_response` stays a dispatch;
   - `shadow::read` and `shadow::compare`: the decisions on dbt lsp's

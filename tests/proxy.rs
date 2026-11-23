@@ -2846,9 +2846,14 @@ fn in_front_a_change_found_on_disk_guards_the_packages_as_alone() {
     assert_eq!(parses(&log).len(), 1, "the parse that dbt lsp's compilation allows");
     // dbt lsp never heard of the write, and has not resolved the packages since.
     std::fs::write(project.join("models/marts/written.sql"), "select 1").unwrap();
-    node_info(&mut session, json!("model.shop.orders"));
+    let meanwhile = node_info(&mut session, json!("model.shop.orders"));
     session.wait_for(says_no_cut);
     parses_stay(&log, 1);
+    assert_eq!(
+        (meanwhile.get("error"), &meanwhile["result"]["unique_id"]),
+        (None, &json!("model.shop.orders")),
+        "answered from the last index meanwhile: {meanwhile}"
+    );
     // A change told, which dbt lsp compiles from the disk as it is: its resolution holds again.
     let orders = uri(&project.join("models/marts/orders.sql"));
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": orders}}));

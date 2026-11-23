@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The subcommands, `doctor` and `select`: what an agent in a shell asks
-//! without an LSP client, each answered on one line of compact JSON.  The
-//! project and its dbt are found as the server finds them.
+//! The subcommands, `doctor`, `select` and `node`: what an agent in a shell
+//! asks without an LSP client, each answered on one line of compact JSON.
+//! The project and its dbt are found as the server finds them.
 
 use crate::locate::{self, Probe, Route};
 use crate::modes::{self, Arguments, Launch};
-use crate::{commands, config, packages, proxy};
+use crate::text::{self, Encoding, LineStarts};
+use crate::workspace::{self, Which, Workspace};
+use crate::{cache, commands, config, packages, proxy};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,30 +42,92 @@ listed, 1 otherwise, \"No nodes found\" included, 2 for a usage error.
 
   -h, --help   this text";
 
+const NODE_USAGE: &str = "\
+usage: dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
+
+Gives on one line of JSON the node that the unique id ID names in the
+project of the current directory, or the one named at line LINE, column
+COLUMN (from 1, COLUMN in characters) of the file PATH, in the project of
+that file, as the command nodeInfo gives it, with its `summary` and its
+`children`: {\"error\": null, \"node\": {...}}, or `error` set.  PATH alone
+names the one node its file defines.  The operand is a PATH when such a
+file exists, else an ID.  The nodes are those of the manifest kept from
+a `dbt parse` of the project as its files lie now, else of a `dbt parse`
+run then, whose manifest is kept when it does not fail.  ARGUMENTS are
+the server's own, as for doctor.  Exit status 0 when `error` is null, 1
+otherwise, 2 for a usage error.
+
+  -h, --help   this text";
+
 /// A subcommand, named by the first word of the command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Subcommand {
     Doctor,
     Select,
+    Node,
+}
+
+/// A subcommand's run: from its operand, the server's launch and the
+/// server command, its answer and whether it worked.
+type Run = fn(Option<String>, Launch, &[String]) -> (Value, bool);
+
+/// A subcommand's row: its name, its usage, the operand it needs, if any,
+/// and its run.
+struct Row {
+    subcommand: Subcommand,
+    name: &'static str,
+    usage: &'static str,
+    needs: Option<&'static str>,
+    run: Run,
+}
+
+/// The subcommands, in `Subcommand`'s order, by which `Subcommand::row`
+/// reads them; a unit test holds each row at its subcommand's place.
+const SUBCOMMANDS: [Row; 3] = [
+    Row {
+        subcommand: Subcommand::Doctor,
+        name: "doctor",
+        usage: DOCTOR_USAGE,
+        needs: None,
+        run: |path, launch, command| doctor(Path::new(path.as_deref().unwrap_or(".")), launch, command),
+    },
+    Row {
+        subcommand: Subcommand::Select,
+        name: "select",
+        usage: SELECT_USAGE,
+        needs: Some("a SELECTOR"),
+        run: |selector, _, command| by_error(select(&selector.unwrap_or_default(), command)),
+    },
+    Row {
+        subcommand: Subcommand::Node,
+        name: "node",
+        usage: NODE_USAGE,
+        needs: Some("an ID or a PATH"),
+        run: |operand, _, command| by_error(node(&operand.unwrap_or_default(), command)),
+    },
+];
+
+impl Subcommand {
+    /// Its row of `SUBCOMMANDS`.
+    fn row(self) -> &'static Row {
+        &SUBCOMMANDS[self as usize]
+    }
 }
 
 /// The subcommand that WORDS, the command line after the program's name,
 /// name by their first word; none when it names none, and the words are the
 /// server's.
 pub fn named(words: &[String]) -> Option<Subcommand> {
-    match words.first().map(String::as_str) {
-        Some("doctor") => Some(Subcommand::Doctor),
-        Some("select") => Some(Subcommand::Select),
-        _ => None,
-    }
+    let first = words.first()?;
+    SUBCOMMANDS.iter().find(|row| row.name == first).map(|row| row.subcommand)
 }
 
 /// What a subcommand's words ask.
 #[derive(Debug, PartialEq)]
 enum Asked {
     Help,
-    /// Its OPERAND, doctor's PATH or select's SELECTOR, and the server's
-    /// launch and command.
+    /// Its OPERAND, doctor's PATH, select's SELECTOR or node's ID or PATH,
+    /// and the server's launch and command.
     Run {
         operand: Option<String>,
         launch: Launch,
@@ -71,7 +137,7 @@ enum Asked {
 
 /// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
 /// `--help` first, whatever follows; else its operand, optional for doctor and needed by
-/// select, then, after `--`, the server's arguments, as `modes::arguments`
+/// select and node, then, after `--`, the server's arguments, as `modes::arguments`
 /// reads them.  Or why they cannot be read.
 fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
@@ -87,8 +153,11 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
         [word] => return Err(format!("{word} is no option of the subcommand")),
         [_, extra, ..] => return Err(format!("{extra}: the server's arguments follow --")),
     };
-    if subcommand == Subcommand::Select && operand.is_none() {
-        return Err("select needs a SELECTOR".into());
+    let row = subcommand.row();
+    if let Some(needed) = row.needs
+        && operand.is_none()
+    {
+        return Err(format!("{} needs {needed}", row.name));
     }
     match modes::arguments(server)? {
         Arguments::Run { launch, command, .. } => Ok(Asked::Run { operand, launch, command }),
@@ -100,32 +169,28 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
 /// standard output, one line of compact JSON, or its usage; a usage error on
 /// the standard error, with status 2.
 pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
-    let usage = match subcommand {
-        Subcommand::Doctor => DOCTOR_USAGE,
-        Subcommand::Select => SELECT_USAGE,
-    };
+    let row = subcommand.row();
     let (operand, launch, command) = match asked(subcommand, words) {
         Ok(Asked::Run { operand, launch, command }) => (operand, launch, command),
         Ok(Asked::Help) => {
-            println!("{usage}");
+            println!("{}", row.usage);
             return ExitCode::SUCCESS;
         }
         Err(why) => {
-            eprintln!("dbt-lsp-plus: {why}\n\n{usage}");
+            eprintln!("dbt-lsp-plus: {why}\n\n{}", row.usage);
             return ExitCode::from(2);
         }
     };
-    let (answer, ok) = match (subcommand, operand) {
-        (Subcommand::Doctor, path) => doctor(Path::new(path.as_deref().unwrap_or(".")), launch, &command),
-        (Subcommand::Select, selector) => {
-            let answer = select(&selector.unwrap_or_default(), &command);
-            let ok = answer["error"].is_null();
-            (answer, ok)
-        }
-    };
+    let (answer, ok) = (row.run)(operand, launch, &command);
     // A reader that closed the pipe, as `| head`, wants no more and no panic.
     let _ = writeln!(std::io::stdout(), "{answer}");
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// ANSWER, and whether it worked: whether its `error` is null.
+fn by_error(answer: Value) -> (Value, bool) {
+    let ok = answer["error"].is_null();
+    (answer, ok)
 }
 
 /// Why no project was found.
@@ -254,6 +319,104 @@ fn select(selector: &str, command: &[String]) -> Value {
     result
 }
 
+/// What node's operand names: a unique id, or a place in a file, its line
+/// and column from 0, the column in characters.
+#[derive(Debug, PartialEq)]
+enum Operand {
+    Id(String),
+    Place { path: PathBuf, line: u64, column: u64 },
+}
+
+/// What OPERAND names from the directory DIR: a place when a file exists,
+/// as IS_FILE says, at its PATH, tried as `PATH:LINE:COLUMN`, `PATH:LINE`,
+/// then `PATH`, LINE and COLUMN positive integers from 1, PATH made
+/// absolute from DIR, each `..` dropping the component before it, as
+/// written; else a unique id, as written.
+fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operand {
+    let (mut path, mut numbers) = (operand, Vec::new());
+    let mut candidates = vec![(path, numbers.clone())];
+    while let Some((rest, number)) = path.rsplit_once(':').filter(|_| numbers.len() < 2)
+        && let Ok(number @ 1..) = number.parse::<u64>()
+    {
+        (path, numbers) = (rest, [vec![number - 1], numbers].concat());
+        candidates.push((path, numbers.clone()));
+    }
+    for (path, numbers) in candidates.into_iter().rev() {
+        let path = proxy::lexical(&dir.join(path));
+        if is_file(&path) {
+            let (line, column) = (numbers.first().copied().unwrap_or(0), numbers.get(1).copied().unwrap_or(0));
+            return Operand::Place { path, line, column };
+        }
+    }
+    Operand::Id(operand.to_owned())
+}
+
+/// The CLI's index of the project at ROOT, in WORKSPACE: the manifest kept
+/// for the project as it lies on disk, else that of a parse, guarded as
+/// alone, waited for, and kept when it did not fail; a parse that ended
+/// well with no manifest that reads fails here, where no server's wait
+/// could explain the missing index.
+fn indexed(workspace: &mut Workspace, root: &Path) {
+    let stamp = cache::disk(root);
+    let cache = workspace.cache_dir(root);
+    let kept = fs::read(config::kept(&cache, stamp)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    if let Some(manifest) = kept {
+        workspace.parsed(Some(config::ParseIndex::of(&manifest)), None);
+        return;
+    }
+    let (sender, outcomes) = mpsc::channel();
+    workspace.parse(true, Some(Box::new(move |outcome| drop(sender.send(outcome)))));
+    // None started: no report kept the channel open.
+    let Ok(outcome) = outcomes.recv() else { return };
+    let failure = outcome.failure.or(outcome.index.is_none().then_some("it left no manifest that reads".to_owned()));
+    let failed = failure.is_some();
+    workspace.parsed(outcome.index, failure);
+    if !failed && stamp != 0 {
+        config::keep(&cache, stamp);
+    }
+}
+
+/// The node that ASKED, node's operand, names, with the server command
+/// COMMAND, as nodeInfo gives it: by its unique id in the project of the
+/// current directory, or at a place in the project of its file; or why
+/// none, the last parse's failure among them.  Only the kept manifest
+/// outlives the run.
+fn node(asked: &str, command: &[String]) -> Value {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let place = operand(asked, &cwd, Path::is_file);
+    let from = match &place {
+        Operand::Place { path, .. } => path.clone(),
+        Operand::Id(_) => cwd,
+    };
+    let (root, route) = match project(&from, command) {
+        Ok(found) => found,
+        Err(Missing::Given(why)) => return json!({"error": why, "node": null}),
+        Err(Missing::Above) => {
+            let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
+            let why = format!("no dbt_project.yml at or above {}; {advice}", from.display());
+            return json!({"error": why, "node": null});
+        }
+    };
+    let (dbt, dir) = dbt_of(&root, route, command);
+    let mut workspace = Workspace::default();
+    (workspace.root, workspace.dbt, workspace.cut) =
+        (Some(root.clone()), config::Dbt::new(dbt.command, dir), config::can_cut());
+    indexed(&mut workspace, &root);
+    let which = match place {
+        Operand::Id(id) => Which::Id(id),
+        Operand::Place { path, line, column } => {
+            let text = text::read(&path).unwrap_or_default();
+            let offset = LineStarts::new(&text).offset(line, column, Encoding::Utf32);
+            Which::At((path, text, offset))
+        }
+    };
+    let (texts, edits) = (HashMap::new(), HashMap::new());
+    let answer = workspace.node(&cache::Open { texts: &texts, edits: &edits }, &which);
+    let (node, error) = workspace::reply(answer, workspace.failure.as_deref(), asked);
+    workspace.stop();
+    json!({"error": error, "node": node})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,18 +427,20 @@ mod tests {
 
     #[test]
     fn the_first_word_alone_names_a_subcommand() {
-        let ours: [(&[&str], Subcommand); 3] = [
+        let ours: [(&[&str], Subcommand); 4] = [
             (&["doctor"], Subcommand::Doctor),
             (&["doctor", "x"], Subcommand::Doctor),
             (&["select", "+m"], Subcommand::Select),
+            (&["node", "x"], Subcommand::Node),
         ];
         for (line, subcommand) in ours {
             assert_eq!(named(&words(line)), Some(subcommand), "{line:?}");
         }
-        let servers: [(&[&str], &[&str]); 6] = [
+        let placed = SUBCOMMANDS.iter().enumerate().all(|(at, row)| row.subcommand as usize == at);
+        assert!(placed, "each row of SUBCOMMANDS at its subcommand's place");
+        let servers: [(&[&str], &[&str]); 5] = [
             (&["--", "doctor"], &["doctor"]),
             (&["--shadow", "select", "x"], &["select", "x"]),
-            (&["node", "x"], &["node", "x"]),
             (&["dbt", "lsp"], &["dbt", "lsp"]),
             (
                 &["--backend", "never", "--", "/p/dbt", "lsp", "--project-dir", "/p"],
@@ -314,11 +479,12 @@ mod tests {
         );
         let selected = words(&["+m+", "--", "--shadow", "dbt", "lsp"]);
         assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), Launch::Auto, &default));
-        let refused: [(Subcommand, &[&str]); 7] = [
+        let refused: [(Subcommand, &[&str]); 8] = [
             (Subcommand::Doctor, &["--bogus"]),
             (Subcommand::Doctor, &["x.sql", "-h"]),
             (Subcommand::Doctor, &["a", "b"]),
             (Subcommand::Select, &[]),
+            (Subcommand::Node, &[]),
             (Subcommand::Select, &["--", "dbt", "lsp"]),
             (Subcommand::Doctor, &["--", "--mode", "x"]),
             (Subcommand::Doctor, &["--", "-V"]),
@@ -326,5 +492,27 @@ mod tests {
         for (subcommand, line) in refused {
             assert!(asked(subcommand, &words(line)).is_err(), "{subcommand:?} {line:?}");
         }
+    }
+
+    #[test]
+    fn a_node_s_operand_is_a_file_s_place_else_a_unique_id() {
+        let is_file = |path: &Path| path == Path::new("/w/shop/models/a.sql") || path == Path::new("/w/shop/x:1");
+        let place = |path: &str, line: u64, column: u64| Operand::Place { path: path.into(), line, column };
+        let a = "/w/shop/models/a.sql";
+        let places = [
+            ("models/a.sql", place(a, 0, 0)),
+            ("models/a.sql:3", place(a, 2, 0)),
+            ("models/a.sql:3:7", place(a, 2, 6)),
+            ("./models/../models/a.sql:1:1", place(a, 0, 0)),
+            ("/w/shop/models/a.sql", place(a, 0, 0)),
+            ("x:1", place("/w/shop/x:1", 0, 0)),
+        ];
+        let ids = ["model.shop.a", "models/a.sql:0", "models/a.sql:3:x", "models/a.sql:1:2:3", "models/b.sql"];
+        let expected: Vec<(&str, Operand)> =
+            places.into_iter().chain(ids.map(|id| (id, Operand::Id(id.to_owned())))).collect();
+        // Each operand asked beside what it reads as, so that a failure names it.
+        let read: Vec<(&str, Operand)> =
+            expected.iter().map(|(asked, _)| (*asked, operand(asked, Path::new("/w/shop"), is_file))).collect();
+        assert_eq!(read, expected);
     }
 }
