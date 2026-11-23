@@ -46,7 +46,7 @@ impl Case {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
         command.args(words).current_dir(at).env_clear().env("PATH", &self.path);
         command.env("HOME", &home).env("XDG_CACHE_HOME", self.dir.join("cache"));
-        command.env("FAKE_DBT_LSP_SCRIPT", &self.script).env("FAKE_DBT_LSP_LOG", &self.log);
+        command.env("FAKE_DBT_SCRIPT", &self.script).env("FAKE_DBT_LOG", &self.log);
         command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null");
         command.env("GIT_CEILING_DIRECTORIES", &self.dir);
         command
@@ -173,7 +173,7 @@ fn given(name: &str, script_value: &Value) -> (Case, PathBuf, PathBuf) {
 #[test]
 fn doctor_on_the_given_route_probes_the_command_as_written() {
     let (case, stub_log, elsewhere) = given("cli-doctor-given", &json!({}));
-    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
+    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt"), case.copy.to_str().unwrap());
     let given = ["doctor", ".", "--", fake, "lsp", "--project-dir", copy];
     let (status, answer) = case.run(&elsewhere, &given);
     let route = (&answer["route"], path_of(&answer["project"]));
@@ -190,7 +190,7 @@ fn doctor_on_the_given_route_probes_the_command_as_written() {
 #[test]
 fn doctor_finds_no_project_in_a_given_directory_without_one() {
     let (case, _, elsewhere) = given("cli-doctor-given-none", &json!({}));
-    let (fake, empty) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), elsewhere.to_str().unwrap());
+    let (fake, empty) = (env!("CARGO_BIN_EXE_fake-dbt"), elsewhere.to_str().unwrap());
     let (status, answer) = case.run(&elsewhere, &["doctor", "--", fake, "lsp", "--project-dir", empty]);
     let error = format!("no dbt_project.yml in {empty}, the server command's --project-dir");
     assert_eq!((status, &answer["project"], &answer["error"]), (Some(1), &Value::Null, &json!(error)), "{answer}");
@@ -205,7 +205,7 @@ fn doctor_probes_what_the_lookup_left_unprobed() {
     script(&venv, "echo \"Error: No such command 'lsp'.\" >&2; exit 2");
     let bin = case.dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt-lsp"), bin.join("dbt")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt"), bin.join("dbt")).unwrap();
     let system = case.path.clone();
     case.path = std::env::join_paths([bin.clone()].into_iter().chain(std::env::split_paths(&system))).unwrap();
     let (status, answer) = case.run(&case.copy, &["doctor"]);
@@ -311,7 +311,7 @@ fn doctor_guards_a_package_from_the_network_alike_on_every_route() {
 #[test]
 fn select_on_the_given_route_runs_dbt_where_it_is_run() {
     let (case, stub_log, elsewhere) = given("cli-select-given", &json!({"list": listed()}));
-    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
+    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt"), case.copy.to_str().unwrap());
     let (status, answer) = case.run(&elsewhere, &["select", "+stg_orders+", "--", fake, "lsp", "--project-dir", copy]);
     assert_eq!((status, answer), (Some(0), json!({"nodes": listed(), "error": null})));
     let starts = starts(&case.log);
@@ -380,8 +380,8 @@ fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
     let env = [
         ("HOME", home.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
-        ("FAKE_DBT_LSP_SCRIPT", case.script.as_path()),
-        ("FAKE_DBT_LSP_LOG", case.log.as_path()),
+        ("FAKE_DBT_SCRIPT", case.script.as_path()),
+        ("FAKE_DBT_LOG", case.log.as_path()),
         ("GIT_CEILING_DIRECTORIES", case.dir.as_path()),
         ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
     ];

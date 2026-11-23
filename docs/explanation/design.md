@@ -1433,7 +1433,7 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
 - Unit tests for each pure module: framing, positions and incremental
   changes, the scan of SQL and Jinja, YAML places, the project, the kept
   scan, the graph, the probe, and the shape of each answer.
-- Integration tests run the binary with `fake-dbt-lsp`, a scripted dbt
+- Integration tests run the binary with `fake-dbt`, a scripted dbt
   that refuses `lsp` as dbt-oss 2.0.11 does and plays `parse`, `compile`
   and `list` as the script says, logging each process's `argv[0]`,
   arguments and working directory.  They cover:

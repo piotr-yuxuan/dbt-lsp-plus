@@ -44,7 +44,7 @@ pub(crate) fn fake_env(dir: &Path, script_value: &Value) -> (PathBuf, PathBuf, P
 pub(crate) fn venv_fake(project: &Path) -> PathBuf {
     let dbt = project.join(".venv/bin/dbt");
     fs::create_dir_all(dbt.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt-lsp"), &dbt).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake-dbt"), &dbt).unwrap();
     dbt
 }
 
@@ -125,8 +125,8 @@ fn from_a_document(name: &str) -> (Session, PathBuf, PathBuf, PathBuf, PathBuf) 
     let (script_path, log, cache) = fake_env(&dir, &json!({"manifest": manifest()}));
     let (path, stub_log) = path_with_stub(&dir, "exit 1");
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
         ("PATH", Path::new(&path)),
         // No repository but the scratch one: the checkout of the tests is no one's.
@@ -255,8 +255,8 @@ fn from_the_folder(name: &str) -> (Session, Value, PathBuf) {
     let dbt = venv_fake(&project);
     let (script_path, log, cache) = fake_env(&dir, &json!({}));
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
         ("GIT_CEILING_DIRECTORIES", dir.as_path()),
         ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
@@ -286,11 +286,11 @@ fn given_project_dir_the_command_runs_as_written_and_one_line_says_so() {
     let dir = project.parent().unwrap().to_owned();
     let venv_log = dir.join("venv.log");
     script(&project.join(".venv/bin/dbt"), &format!("echo \"$0 $*\" >> '{}'\nexit 0", venv_log.display()));
-    let (path, stub_log) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt-lsp")));
+    let (path, stub_log) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt")));
     let (script_path, log, cache) = fake_env(&dir, &json!({"manifest": manifest()}));
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
         ("PATH", Path::new(&path)),
     ];
@@ -325,11 +325,11 @@ fn a_dbt_skipped_in_the_project_s_venv_is_named_in_the_line_before_path_s() {
     let venv = project.join(".venv/bin/dbt");
     script(&venv, "exit 0");
     std::fs::set_permissions(&venv, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
-    let (path, _) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt-lsp")));
+    let (path, _) = path_with_stub(&dir, &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_fake-dbt")));
     let (script_path, log, cache) = fake_env(&dir, &json!({}));
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
         ("PATH", Path::new(&path)),
         ("GIT_CEILING_DIRECTORIES", dir.as_path()),
@@ -353,11 +353,11 @@ fn a_project_from_a_document_runs_dbt_in_its_directory() {
     fs::rename(&copy, &project).unwrap();
     assert!(project.join("profiles.yml").is_file() && !repo.join("profiles.yml").exists());
     let script_value = json!({"manifest": manifest(), "compiled": "select 1"});
-    let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp").to_owned(), "lsp".into()];
+    let fake = [env!("CARGO_BIN_EXE_fake-dbt").to_owned(), "lsp".into()];
     let (script_path, log, cache) = fake_env(&repo.with_file_name("session"), &script_value);
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
     ];
     let mut session = Session::start(&fake, &env, Some(&repo));
@@ -393,11 +393,11 @@ fn a_project_from_a_document_reads_dbt_s_paths_from_its_directory() {
                               "compiled_relative": true});
     let (script_path, log, cache) = fake_env(&dir.join("session"), &script_value);
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
     ];
-    let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp").to_owned(), "lsp".into()];
+    let fake = [env!("CARGO_BIN_EXE_fake-dbt").to_owned(), "lsp".into()];
     let mut session = Session::start(&fake, &env, Some(&repo));
     session.initialize(&repo);
     let orders = project.join("models/marts/orders.sql");
@@ -426,8 +426,8 @@ fn a_relative_dbt_and_profiles_dir_name_what_they_named_from_the_proxy_s_directo
     let dbt = venv_fake(&repo);
     let (script_path, log, cache) = fake_env(&dir.join("session"), &json!({"manifest": manifest()}));
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script_path.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("XDG_CACHE_HOME", cache.as_path()),
     ];
     let server = [".venv/bin/dbt", "lsp", "--profiles-dir", "config"].map(str::to_owned);

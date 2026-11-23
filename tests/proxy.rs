@@ -231,12 +231,12 @@ fn a_bad_option_is_a_usage_error_and_starts_nothing() {
     let scratch = scratch("bad-option");
     let log = scratch.join("log.jsonl");
     for bad in [&["--mode", "hover=dbt"][..], &["--backend", "nevr"], &["--mode"]] {
-        let fake = env!("CARGO_BIN_EXE_fake-dbt-lsp");
+        let fake = env!("CARGO_BIN_EXE_fake-dbt");
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"))
             .args(bad)
             .args(["--", fake, "lsp"])
             .env_clear()
-            .env("FAKE_DBT_LSP_LOG", &log)
+            .env("FAKE_DBT_LOG", &log)
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{bad:?}");
@@ -252,7 +252,7 @@ fn a_dbt_without_lsp_is_served_alone_and_said_once_in_the_log() {
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
     let logged = session.wait_for(|m| m["method"] == "window/logMessage");
-    let line = format!("dbt-lsp-plus: project {}, dbt {}.", fixture().display(), env!("CARGO_BIN_EXE_fake-dbt-lsp"));
+    let line = format!("dbt-lsp-plus: project {}, dbt {}.", fixture().display(), env!("CARGO_BIN_EXE_fake-dbt"));
     assert_eq!(logged["params"]["message"], json!(line), "{logged}");
     // Past what the client would get first.
     session.request("workspace/symbol", json!({"query": "summary"}));

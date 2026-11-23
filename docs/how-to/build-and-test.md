@@ -15,7 +15,7 @@ build: dbt-oss (tested with 2.0.11), or the proprietary one (tested with
 2.0.9), whose `dbt lsp` never runs.  Where there is no `unshare`, as on a
 Mac, run the last one without it.
 
-The crate also builds `fake-dbt-lsp`, the scripted dbt of the tests; to
+The crate also builds `fake-dbt`, the scripted dbt of the tests; to
 install the server alone, run `cargo install --path . --bin dbt-lsp-plus`.
 
 The `Makefile` holds every check that CI runs, `make check` among them;

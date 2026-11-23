@@ -74,7 +74,7 @@ tests/proxy/conformance.rs    the library's resolution against dbt's manifest, o
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
 tests/proxy/plugin.rs         the Claude Code plugin's files: no path in them
-tests/support/                the test client and fake-dbt-lsp, the fake dbt
+tests/support/                the test client and fake-dbt, the fake dbt
 tests/fixtures/shop/          the fixture dbt project, on DuckDB
 tests/fixtures/conformance/   the corpus's projects, one per rule, and its divergences.txt
 Makefile                      the checks, which CI runs too

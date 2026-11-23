@@ -116,14 +116,14 @@ impl Session {
         let scratch = scratch(name);
         let (script_path, log) = (scratch.join("script.json"), scratch.join("log.jsonl"));
         std::fs::write(&script_path, script.to_string()).unwrap();
-        let fake = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp"].map(String::from);
+        let fake = [env!("CARGO_BIN_EXE_fake-dbt"), "lsp"].map(String::from);
         let arguments = arguments.iter().map(|argument| argument.to_string_lossy().into_owned());
         let server: Vec<String> = fake.into_iter().chain(arguments).collect();
         // The server keeps its parses' cache there, not in the system's.
         let cache = scratch.join("cache");
         let env = [
-            ("FAKE_DBT_LSP_SCRIPT", script_path.as_path()),
-            ("FAKE_DBT_LSP_LOG", log.as_path()),
+            ("FAKE_DBT_SCRIPT", script_path.as_path()),
+            ("FAKE_DBT_LOG", log.as_path()),
             ("XDG_CACHE_HOME", cache.as_path()),
         ];
         (Session::start(&server, &env, dir), log)

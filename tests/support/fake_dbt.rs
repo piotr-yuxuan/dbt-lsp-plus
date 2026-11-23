@@ -5,14 +5,14 @@
 //! the script plays them.
 //!
 //! Environment:
-//! - `FAKE_DBT_LSP_SCRIPT`: a JSON file, optional, with the keys
-//!   - for `fake-dbt-lsp parse ...`, as dbt-lsp-plus runs `dbt parse`:
+//! - `FAKE_DBT_SCRIPT`: a JSON file, optional, with the keys
+//!   - for `fake-dbt parse ...`, as dbt-lsp-plus runs `dbt parse`:
 //!     `manifest`, written as `manifest.json` under `--target-path`;
 //!     `parse_log`, a file whose text it writes first on its standard
 //!     output, as dbt's log;
 //!     `parse_exit`, its status (0 by default); `parse_gate`, a file it
 //!     waits for before writing; `parse_hang`, true when it never exits;
-//!   - for `fake-dbt-lsp compile ...` and `list ...`, as dbt-lsp-plus runs
+//!   - for `fake-dbt compile ...` and `list ...`, as dbt-lsp-plus runs
 //!     dbt's CLI for its commands: `compiled`, the text that a compile
 //!     writes for the file its `--select path:R` names, at
 //!     `compile_writes` under `--target-path` (`compiled/shop/R` by
@@ -23,7 +23,7 @@
 //!     one JSON line each; `run_log`, text that either prints first, as
 //!     dbt's log; `run_exit`, the status of either; `run_gate`, a file
 //!     either waits for first; `run_hang`, true when either never exits;
-//! - `FAKE_DBT_LSP_LOG`: a file name, to which a parse appends `{"parse":
+//! - `FAKE_DBT_LOG`: a file name, to which a parse appends `{"parse":
 //!   ARGUMENTS, "pid": PID}` followed by `.parses`, since two processes
 //!   appending to one file could interleave their lines, and a compile or a
 //!   list `{"run": ARGUMENTS, "pid": PID}` followed by `.runs`, and
@@ -123,7 +123,7 @@ fn run(script: &Value, arguments: &[String], mut log: Option<File>) {
 }
 
 fn main() {
-    let script: Value = std::env::var("FAKE_DBT_LSP_SCRIPT")
+    let script: Value = std::env::var("FAKE_DBT_SCRIPT")
         .ok()
         .map(|path| {
             serde_json::from_str(&std::fs::read_to_string(path).expect("read the script")).expect("parse the script")
@@ -131,7 +131,7 @@ fn main() {
         .unwrap_or(json!({}));
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let verb = arguments.first().map_or("", String::as_str);
-    let log = std::env::var("FAKE_DBT_LSP_LOG").ok();
+    let log = std::env::var("FAKE_DBT_LOG").ok();
     if let Some(log) = &log {
         let cwd = std::env::current_dir().expect("the working directory");
         let start = json!({"argv0": std::env::args().next(), "arguments": arguments, "cwd": cwd});

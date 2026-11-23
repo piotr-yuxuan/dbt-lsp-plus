@@ -3,7 +3,7 @@
 
 usage: measure.py PROXY FAKE_DBT ROOT RUNS
 
-Starts PROXY with FAKE_DBT as its dbt (the tests' fake-dbt-lsp, whose
+Starts PROXY with FAKE_DBT as its dbt (the tests' fake-dbt, whose
 parse writes no manifest) on the project ROOT.
 It times each request RUNS times, warm: median and minimum in milliseconds,
 from the request written to its answer read.  Then, for each file of SAVED

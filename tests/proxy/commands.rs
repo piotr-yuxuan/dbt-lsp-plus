@@ -276,13 +276,13 @@ fn with_no_unshare_on_path_compile_and_nodes_are_announced_and_run() {
     let node = json!({"unique_id": "model.shop.orders", "name": "orders", "resource_type": "model"});
     std::fs::write(&script, json!({"compiled": "select 1", "list": [node]}).to_string()).unwrap();
     let fixture_arg = fixture().to_string_lossy().into_owned();
-    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "lsp", "--project-dir", &fixture_arg].map(str::to_owned);
+    let server = [env!("CARGO_BIN_EXE_fake-dbt"), "lsp", "--project-dir", &fixture_arg].map(str::to_owned);
     // An empty PATH: nothing there, `unshare` included.
     let empty = dir.join("bin");
     std::fs::create_dir_all(&empty).unwrap();
     let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
+        ("FAKE_DBT_SCRIPT", script.as_path()),
+        ("FAKE_DBT_LOG", log.as_path()),
         ("PATH", empty.as_path()),
         ("XDG_CACHE_HOME", dir.as_path()),
     ];
@@ -302,12 +302,9 @@ fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
     std::fs::write(&script, json!({}).to_string()).unwrap();
     let fixture_arg = fixture().to_string_lossy().into_owned();
     // A wrapper of the user's own, whose words make no run of dbt's CLI.
-    let server = [env!("CARGO_BIN_EXE_fake-dbt-lsp"), "--project-dir", &fixture_arg].map(str::to_owned);
-    let env = [
-        ("FAKE_DBT_LSP_SCRIPT", script.as_path()),
-        ("FAKE_DBT_LSP_LOG", log.as_path()),
-        ("XDG_CACHE_HOME", dir.as_path()),
-    ];
+    let server = [env!("CARGO_BIN_EXE_fake-dbt"), "--project-dir", &fixture_arg].map(str::to_owned);
+    let env =
+        [("FAKE_DBT_SCRIPT", script.as_path()), ("FAKE_DBT_LOG", log.as_path()), ("XDG_CACHE_HOME", dir.as_path())];
     let mut session = Session::start(&server, &env, Some(&dir));
     let result = session.initialize(&fixture());
     assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
