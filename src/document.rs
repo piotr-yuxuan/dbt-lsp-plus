@@ -50,7 +50,7 @@ pub fn folding_ranges(text: &str, sql: bool) -> Value {
 
 /// The CTE of TEXT that OFFSET names, by its definition or one of its uses,
 /// with its uses.
-pub fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> {
+fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> {
     let inside = |range: &Range<usize>| range.start <= offset && offset <= range.end;
     scan::cte_uses(text).into_iter().find(|(cte, uses)| inside(&cte.name_range) || uses.iter().any(inside))
 }

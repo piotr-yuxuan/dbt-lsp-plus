@@ -305,16 +305,51 @@ fn an_unknown_request_gets_method_not_found_and_a_rename_at_nothing_null() {
 }
 
 #[test]
-fn a_command_with_no_name_is_invalid_and_the_server_s_notification_asked_is_null() {
+fn a_command_with_no_name_is_invalid_and_the_server_s_notification_asked_is_unknown() {
     let (mut session, _) = Session::fake("invalid-with-a-project", json!({}));
     session.initialize(&fixture());
     let nameless = session.request("workspace/executeCommand", json!({"arguments": []}));
     let invalid = json!({"code": -32602, "message": "invalid parameters"});
     assert_eq!((nameless.get("result"), &nameless["error"]), (None, &invalid), "{nameless}");
-    // A row that no request names, sent as one: nothing.
+    // The server's notification, sent as a request: no method of the server's.
     let orders = uri(&fixture().join("models/marts/orders.sql"));
     let published = session.request("textDocument/publishDiagnostics", json!({"uri": orders, "diagnostics": []}));
-    assert_eq!((published.get("error"), &published["result"]), (None, &Value::Null), "{published}");
+    let unknown = json!({"code": -32601, "message": "dbt-lsp-plus does not answer textDocument/publishDiagnostics"});
+    assert_eq!((published.get("result"), &published["error"]), (None, &unknown), "{published}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_command_named_as_a_method_is_unknown() {
+    let (mut session, _) = Session::fake("command-as-method", json!({}));
+    session.initialize(&fixture());
+    let unknown = |name: &str| json!({"code": -32601, "message": format!("dbt-lsp-plus does not answer {name}")});
+    let orders = uri(&fixture().join("models/marts/orders.sql"));
+    let asked = [
+        ("dbt-lsp-plus.compile", json!({"arguments": [orders]}), "dbt-lsp-plus.compile"),
+        ("workspace/executeCommand", json!({"command": "textDocument/hover", "arguments": []}), "textDocument/hover"),
+    ];
+    for (method, params, named) in asked {
+        let answer = session.request(method, params);
+        assert_eq!((answer.get("result"), &answer["error"]), (None, &unknown(named)), "{method}: {answer}");
+    }
+    assert!(session.finish().success());
+}
+
+#[test]
+fn initialization_options_are_not_read() {
+    let (mut session, _) = Session::fake("initialization-options", json!({}));
+    let root = uri(&fixture());
+    let params = json!({"processId": null, "rootUri": root, "capabilities": {},
+                        "workspaceFolders": [{"uri": root, "name": "shop"}],
+                        "initializationOptions": {"dbtLspPlus": {"defaultMode": "dbt"}}});
+    let result = session.request("initialize", params)["result"].clone();
+    session.notify("initialized", json!({}));
+    assert_eq!(result["capabilities"]["documentSymbolProvider"], json!(true), "{result}");
+    let path = fixture().join("models/marts/orders.sql");
+    let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&path)}}));
+    assert_eq!(names(&outline["result"]), ["orders", "customers", "final"]);
+    assert_eq!(show_messages(&session), 0);
     assert!(session.finish().success());
 }
 
@@ -855,14 +890,18 @@ fn leaves_the_folding_and_selection_of_yaml_to_the_client() {
 }
 
 #[test]
-fn a_yaml_document_holds_no_cte() {
+fn a_cte_in_yaml_is_renamed_as_in_sql_and_not_highlighted() {
     let (mut session, _) = Session::fake("yaml-cte", json!({}));
     session.initialize(&fixture());
     let path = fixture().join("models/staging/notes.yml");
     session.open(&path, Some("query: with x as (select 1) select * from x\n"));
     let at = json!({"textDocument": {"uri": uri(&path)}, "position": {"line": 0, "character": 12}, "newName": "y"});
-    let nothing = session.request("textDocument/rename", at.clone());
-    assert_eq!((nothing.get("error"), &nothing["result"]), (None, &Value::Null), "{nothing}");
+    let renamed = session.request("textDocument/rename", at.clone());
+    let edit = |start: u64| {
+        json!({"range": {"start": {"line": 0, "character": start}, "end": {"line": 0, "character": start + 1}},
+               "newText": "y"})
+    };
+    assert_eq!(renamed["result"]["changes"][uri(&path)], json!([edit(12), edit(42)]), "{renamed}");
     let highlight = session.request("textDocument/documentHighlight", at);
     assert_eq!(highlight.get("result"), Some(&Value::Null), "{highlight}");
     assert!(session.finish().success());
@@ -1988,6 +2027,30 @@ fn a_definition_in_yaml_leads_where_dbt_looks() {
     assert_eq!(on_source["result"], location(&project, "models/staging/_sources.yml", 3, 10, 13));
     let on_table = session.request("textDocument/definition", position_in(&sources, "name: orders", 8));
     assert_eq!(on_table["result"], location(&project, "models/staging/_sources.yml", 6, 14, 20));
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_name_anywhere_leads_where_the_lookup_resolves_it() {
+    let (mut session, _) = Session::fake("name-anywhere", json!({}));
+    let result = session.initialize(&fixture());
+    assert!(result["capabilities"].get("experimental").is_none(), "{result}");
+    // An entry's `name:` in an unsaved properties file: the model's references.
+    let models = fixture().join("models/marts/_models.yml");
+    session.open(&models, Some("models:\n  - name: orders\n"));
+    let on_entry = json!({"textDocument": {"uri": uri(&models)}, "position": {"line": 1, "character": 11},
+                          "context": {"includeDeclaration": false}});
+    let used = session.request("textDocument/references", on_entry);
+    let in_customers = location(&fixture(), "models/marts/customers.sql", 2, 17, 23);
+    assert!(used["result"].as_array().is_some_and(|found| found.contains(&in_customers)), "{used}");
+    // A `ref` in a docs block of a file that is no SQL, YAML or Python: its model.
+    let overview = fixture().join("models/overview.md");
+    let block = "{% docs overview %}{{ ref('orders') }}{% enddocs %}";
+    session.open(&overview, Some(block));
+    let at = block.find("orders").unwrap() + 2;
+    let on_ref = json!({"textDocument": {"uri": uri(&overview)}, "position": {"line": 0, "character": at}});
+    let found = session.request("textDocument/definition", on_ref);
+    assert_eq!(found["result"], location(&fixture(), "models/marts/orders.sql", 0, 0, 0), "{found}");
     assert!(session.finish().success());
 }
 

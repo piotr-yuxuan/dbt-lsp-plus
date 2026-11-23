@@ -148,51 +148,34 @@ the usage on standard error, exit status 2, nothing started.
 
 A value goes in the next word or after `=`, as `--default-mode=plus`.
 
-### Modes
+### Methods and commands
 
-Each method that dbt-lsp-plus answers has a mode: `plus` or `merge`, its
-answer, the two alike since no other server answers; `dbt`, none, the
-method left unannounced.  `ours`, `plus`'s former name, is still read as
-`plus`, with one warning a session.  Set nothing and each method takes
-its shipped default, which the table gives; a command takes no mode.  A
-definition and references are answered at the kinds of target that
-`experimental.dbtLspPlus` lists ([Where dbt-lsp-plus answers definitions
-and
-references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)),
-a rename at a source or a CTE; elsewhere each gets its nothing.
+Each method and command that dbt-lsp-plus answers; any other gets error
+-32601.  Its nothing is its answer where it finds nothing.  One that asks
+for a parse starts one first when the index is stale, so that its
+reason, if it cannot answer, is that parse's; inlay hints ask for one
+after answering, while there is no index.  One that reads the project
+fails on a document of another dbt project with the reason above; inlay
+hints get `[]` there.
 
-| Method or command | Shipped mode |
-|---|---|
-| `textDocument/documentSymbol` | plus |
-| `workspace/symbol` | plus |
-| `textDocument/prepareCallHierarchy` | plus |
-| `callHierarchy/incomingCalls` | prepareCallHierarchy's |
-| `callHierarchy/outgoingCalls` | prepareCallHierarchy's |
-| `textDocument/foldingRange` | plus |
-| `textDocument/documentHighlight` | plus |
-| `textDocument/selectionRange` | plus |
-| `textDocument/hover` | merge |
-| `textDocument/inlayHint` | merge |
-| `textDocument/definition` | merge |
-| `textDocument/references` | merge |
-| `textDocument/rename` | merge |
-| `textDocument/publishDiagnostics` | merge |
-| `dbt-lsp-plus.nodeInfo` | none |
-| `dbt-lsp-plus.compile` | none |
-| `dbt-lsp-plus.nodes` | none |
-
-Besides the command line, a client sets the modes in
-`initializationOptions`, which win method by method:
-
-```json
-{"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}
-```
-
-In Neovim that is `init_options`, not `settings`: dbt-lsp-plus reads no
-`workspace/didChangeConfiguration`, and a change applies when the client
-starts again.  A refused key is ignored and shown once in a warning.  A
-method set to `dbt` gets its nothing, null or `[]`, which does not say
-why, and a warning says so once.
+| Method or command | Its nothing | Asks for a parse | Reads the project |
+|---|---|---|---|
+| `textDocument/documentSymbol` | null | no | no |
+| `workspace/symbol` | `[]` | no | no |
+| `textDocument/prepareCallHierarchy` | null | yes | yes |
+| `callHierarchy/incomingCalls` | null | yes | no |
+| `callHierarchy/outgoingCalls` | null | yes | no |
+| `textDocument/foldingRange` | null | no | no |
+| `textDocument/documentHighlight` | null | no | no |
+| `textDocument/selectionRange` | null | no | no |
+| `textDocument/hover` | null | yes | yes |
+| `textDocument/inlayHint` | `[]` | no | yes |
+| `textDocument/definition` | null | yes | yes |
+| `textDocument/references` | `[]` | yes | yes |
+| `textDocument/rename` | null | no | no |
+| `dbt-lsp-plus.nodeInfo` | null | yes | no |
+| `dbt-lsp-plus.compile` | null | no | no |
+| `dbt-lsp-plus.nodes` | null | no | no |
 
 ### The server command
 

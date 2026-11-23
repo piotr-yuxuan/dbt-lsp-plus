@@ -6,7 +6,6 @@ use crate::answer::{Answer, Reason};
 use crate::capability;
 use crate::commands;
 use crate::locate;
-use crate::modes::{self, Mode};
 use crate::project::{Project, Scanned};
 use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
@@ -113,16 +112,6 @@ struct Proxy<W: Write> {
     /// The root with its links resolved, onto which the client's paths map.
     canonical_root: Option<PathBuf>,
     hierarchical: bool,
-    /// The user's settings, from the command line, then `initializationOptions`.
-    settings: modes::Settings,
-    /// The mode of each method, fixed when `initialize` is answered.
-    table: modes::Table,
-    /// The user's settings that `initializationOptions` held and the proxy
-    /// refused, said once `initialize` is answered.
-    refused: Vec<String>,
-    /// Whether the proxy said that it reads no `dbtLspPlus` setting of
-    /// `workspace/didChangeConfiguration`.
-    ignored: bool,
     /// Whether the client sent `initialize`, before which LSP lets the server send nothing.
     initialized: bool,
     documents: HashMap<PathBuf, String>,
@@ -166,17 +155,6 @@ pub fn lexical(path: &Path) -> PathBuf {
         }
         path
     })
-}
-
-/// The place of the file at PATH in `experimental.dbtLspPlus`, by its
-/// extension: `sql`, `yaml` or `python`.
-fn place(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("sql") => Some("sql"),
-        Some("yml" | "yaml") => Some("yaml"),
-        Some("py") => Some("python"),
-        _ => None,
-    }
 }
 
 /// The path of a `file:` URI.
@@ -232,10 +210,6 @@ impl<W: Write> Proxy<W> {
             line: None,
             canonical_root: None,
             hierarchical: false,
-            settings: modes::Settings::default(),
-            table: modes::Table::default(),
-            refused: Vec::new(),
-            ignored: false,
             initialized: false,
             documents: HashMap::new(),
             uris: HashMap::new(),
@@ -272,29 +246,6 @@ impl<W: Write> Proxy<W> {
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}));
     }
 
-    /// Says once, after `initialize` is answered, what of the user's settings
-    /// cannot take effect: each refusal, the methods set to `dbt`, which no
-    /// one answers; and a mode named by its former name.
-    fn tell_settings(&mut self) {
-        let mut said = std::mem::take(&mut self.refused);
-        if !said.is_empty() {
-            said.push(format!(
-                "the methods that take a mode are {}",
-                capability::with_mode().collect::<Vec<_>>().join(", ")
-            ));
-        }
-        said.extend(self.settings.ours.then(|| "the mode ours is now named plus, and read so".to_owned()));
-        let unanswered = self.table.unanswered();
-        if !unanswered.is_empty() {
-            said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
-        }
-        if !said.is_empty() {
-            let text = format!("dbt-lsp-plus: {}.", said.join("; "));
-            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
-                                     "params": {"type": 2, "message": text}}));
-        }
-    }
-
     /// Tells the client, once, which project and which dbt the server found,
     /// as one log line.
     fn say_found(&mut self) {
@@ -326,8 +277,6 @@ impl<W: Write> Proxy<W> {
     /// the session keeps; without a project the server stays quiet until a
     /// document names one.
     fn on_initialize(&mut self, id: &Value, params: &Value) {
-        let options = params.get("initializationOptions").unwrap_or(&Value::Null);
-        (self.settings, self.refused) = self.settings.over(options);
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
@@ -348,12 +297,10 @@ impl<W: Write> Proxy<W> {
         }
         self.workspace.warm();
         self.initialized = true;
-        self.table = modes::Table::new(&self.settings);
         self.watch_runs();
-        let result = json!({"capabilities": self.table.capabilities(),
+        let result = json!({"capabilities": capability::announced(),
                             "serverInfo": {"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")}});
         self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        self.tell_settings();
         self.say_found();
     }
 
@@ -498,63 +445,20 @@ impl<W: Write> Proxy<W> {
     /// `CAPABILITIES` it names: a name with no row gets -32601 (`shutdown`
     /// aside, null), `workspace/executeCommand` with no string `command`
     /// -32602; a row's request before a project gets null, a valid result
-    /// of every method, and after, as its mode says.
+    /// of every method, and after, its handler's answer.
     fn route(&self, method: &str, params: &Value) -> Route {
-        let row = match (method, params["command"].as_str()) {
-            ("workspace/executeCommand", Some(command)) => capability::of(command).filter(|row| row.is_command()),
-            ("workspace/executeCommand", None) => return Route::Invalid,
-            _ => capability::of(method).filter(|row| !row.is_command()),
-        };
-        let Some(row) = row else {
-            return if method == "shutdown" { Route::Answer(Answer::Empty) } else { Route::Unknown };
-        };
-        // A valid result of every method the server announces, and of each an agent was seen to send.
-        if self.workspace.root.is_none() {
-            return Route::Answer(Answer::Found(Value::Null));
+        let executes = method == "workspace/executeCommand";
+        let name = if executes { params["command"].as_str() } else { Some(method) };
+        let Some(name) = name else { return Route::Invalid };
+        let row = capability::of(name).filter(|row| row.is_command() == executes);
+        match (row.map(|row| row.name), self.workspace.root.is_some()) {
+            (None, _) if method == "shutdown" => Route::Answer(Answer::Empty),
+            (None, _) => Route::Unknown,
+            // A valid result of every method the server announces, and of each an agent was seen to send.
+            (Some(_), false) => Route::Answer(Answer::Found(Value::Null)),
+            (Some(command @ (commands::COMPILE | commands::NODES)), true) => Route::Command(command),
+            (Some(name), true) => Route::Here(name),
         }
-        if row.is_command() {
-            return if row.name == config::NODE_INFO { Route::Here(row.name) } else { Route::Command(row.name) };
-        }
-        let answered = self.table.mode(row.name) != Mode::Dbt;
-        if answered && row.whole() {
-            return Route::Here(row.name);
-        }
-        let targeted = answered.then(|| self.targeted(row.name, params)).flatten();
-        targeted.map_or(Route::Answer(Answer::Empty), Route::Here)
-    }
-
-    /// A request of a capability with kinds of target that the proxy
-    /// answers itself, by what its position holds: references and rename on
-    /// a source, a rename on a CTE of a SQL file, or a definition on a
-    /// target of `navigation`.
-    fn targeted(&self, method: &str, params: &Value) -> Option<&'static str> {
-        let method = capability::of(method).filter(|capability| !capability.kinds.is_empty())?.name;
-        let (path, scanned, offset) = self.scan_at(params, None)?;
-        let sql = path.extension().is_some_and(|extension| extension == "sql");
-        let answered = match method {
-            "textDocument/definition" => {
-                navigation::reference_at(&path, &scanned, offset).is_some_and(|name| self.claims(method, &name, &path))
-            }
-            // A CTE lives in its file; a source only the scan sees whole, and so its references.
-            "textDocument/rename" if sql && document::cte_at(&scanned.text, offset).is_some() => true,
-            // References come from the scan, whichever file of the project asks, as agreed with dbt-mode.
-            "textDocument/references" => {
-                let claimed = navigation::reference_at(&path, &scanned, offset)
-                    .is_some_and(|name| self.claims(method, &name, &path));
-                claimed && self.workspace.root.as_ref().is_some_and(|root| path.starts_with(root))
-            }
-            _ => self.source_at(params).is_some(),
-        };
-        answered.then_some(method)
-    }
-
-    /// Whether the proxy answers METHOD itself on NAME in the file at
-    /// PATH, as its capability's kinds say, when the table lists it.
-    fn claims(&self, method: &str, name: &reference::Name, path: &Path) -> bool {
-        let Some(place) = place(path) else { return false };
-        let kinds = capability::of(method).map_or(&[][..], |capability| capability.kinds);
-        let listed = |(kind, places): &&(&str, &[&str])| *kind == name.kind.flag() && places.contains(&place);
-        self.table.lists(method) && kinds.iter().any(|kind| listed(&kind))
     }
 
     /// The definition or the references, METHOD, of the target at the
@@ -935,16 +839,6 @@ impl<W: Write> Proxy<W> {
             self.on_first_project(params);
         }
         self.track(method, params);
-        // The modes are fixed with the flag that the client read at `initialize`.
-        let setting = params.pointer("/settings/dbtLspPlus").is_some();
-        if let ("workspace/didChangeConfiguration", true, false) = (method, setting, self.ignored) {
-            self.ignored = true;
-            let text =
-                "dbt-lsp-plus reads dbtLspPlus from initializationOptions and its command line only, at the start";
-            self.send_client(
-                &json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": {"type": 3, "message": text}}),
-            );
-        }
         if method == "initialized" && self.workspace.root.is_some() {
             self.register_watcher();
         }
@@ -1063,11 +957,10 @@ impl<W: Write> Proxy<W> {
     /// Why the request METHOD at PARAMS is not the session's project's: its
     /// document, named by `textDocument.uri`, lies in another project
     /// (`locate::elsewhere`), for a method that reads the project; none
-    /// before a project, in `dbt`, and for any other request.
+    /// before a project, and for any other request.
     fn outside(&self, method: &str, params: &Value) -> Option<Reason> {
         let root = self.workspace.root.as_ref()?;
-        let reads = capability::of(method).is_some_and(|capability| capability.reads_project);
-        if !reads || self.table.mode(method) == Mode::Dbt {
+        if !capability::of(method).is_some_and(|capability| capability.reads_project) {
             return None;
         }
         let document = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str))?;
@@ -1089,9 +982,6 @@ impl<W: Write> Proxy<W> {
     /// failures to the loop.
     fn watch_runs(&mut self) {
         let (Some(root), Some(events)) = (self.workspace.root.clone(), self.events.clone()) else { return };
-        if self.table.mode("textDocument/publishDiagnostics") == Mode::Dbt {
-            return;
-        }
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
         let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
         let watched: [(&str, &'static str, ReadFailures); 2] =
@@ -1171,7 +1061,7 @@ impl<W: Write> Proxy<W> {
     /// no version; the URI last published under, if another, gets none.
     /// Nothing after `shutdown`.
     fn publish(&mut self, path: &Path) {
-        if self.shutdown || self.table.mode("textDocument/publishDiagnostics") == Mode::Dbt {
+        if self.shutdown {
             return;
         }
         let uri = self.uris.get(path).cloned().unwrap_or_else(|| features::uri(path));
@@ -1232,7 +1122,7 @@ impl<W: Write> Proxy<W> {
 /// that project is said at once on the standard error, and to the client
 /// once it is initialized; else nothing runs before the client's folder or
 /// a document names the project.
-pub fn run(command: &[String], settings: modes::Settings) -> ExitCode {
+pub fn run(command: &[String]) -> ExitCode {
     let (events, inbox) = mpsc::channel();
     let reader = events.clone();
     thread::spawn(move || {
@@ -1252,7 +1142,7 @@ pub fn run(command: &[String], settings: modes::Settings) -> ExitCode {
         eprintln!("{line}");
         proxy.line = Some(line);
     }
-    (proxy.settings, proxy.events) = (settings, Some(events));
+    proxy.events = Some(events);
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
     proxy.serve(inbox);
     proxy.stop_parse();
@@ -1378,7 +1268,6 @@ mod tests {
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
         let mut proxy = Proxy::new(Vec::new(), Some(root));
-        proxy.table = modes::Table::new(&modes::Settings::default());
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
         let mut client = &proxy.client[..];
@@ -1479,7 +1368,6 @@ mod tests {
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
             let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()));
-            proxy.table = modes::Table::new(&modes::Settings::default());
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
