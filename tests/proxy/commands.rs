@@ -311,10 +311,10 @@ fn a_server_command_without_lsp_announces_compile_and_nodes_and_runs_neither() {
     let mut session = Session::start_with(&[], &server, &env, Some(&dir));
     let result = session.initialize(&fixture());
     assert!([COMPILE, NODES].iter().all(|command| announced(&result).contains(command)), "{result}");
-    let no_lsp = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
+    let no_word = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
     let compiled = execute(&mut session, COMPILE, json!([uri(&orders())]));
-    assert_eq!(compiled["result"], json!({"file_uri": null, "error": no_lsp}));
-    assert_eq!(execute(&mut session, NODES, json!(["x"]))["result"], json!({"nodes": [], "error": no_lsp}));
+    assert_eq!(compiled["result"], json!({"file_uri": null, "error": no_word}));
+    assert_eq!(execute(&mut session, NODES, json!(["x"]))["result"], json!({"nodes": [], "error": no_word}));
     assert!(runs(&log).is_empty(), "{:?}", runs(&log));
     assert!(session.finish().success());
 }

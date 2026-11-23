@@ -311,7 +311,7 @@ fn a_project_reached_through_a_link_finds_the_main_worktree_of_its_repository() 
 }
 
 #[test]
-fn a_dbt_that_cannot_run_or_has_no_lsp_subcommand_is_skipped_and_named() {
+fn a_dbt_that_cannot_run_or_is_not_a_dbt_2_is_skipped_and_named() {
     let (repo, git, log) = repository("locate-dbt-skipped");
     let (project, command) = (repo.join("dbt"), words(&COMMAND));
     let (own, top) = (project.join(".venv/bin/dbt"), repo.join(".venv/bin/dbt"));
