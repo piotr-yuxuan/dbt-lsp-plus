@@ -566,7 +566,9 @@ mod tests {
     fn a_cache_belongs_to_a_root_a_command_and_a_process() {
         let server = words(&["dbt", "lsp"]);
         let one = cache_dir(Path::new("/base"), Path::new("/a"), &server);
-        assert!(one.starts_with("/base/dbt-lsp-plus") && one.ends_with(std::process::id().to_string()));
+        assert!(
+            one.starts_with("/base/dbt-lsp-plus/4459adff89af72f0") && one.ends_with(std::process::id().to_string())
+        );
         assert_eq!(one, cache_dir(Path::new("/base"), Path::new("/a"), &server));
         assert_ne!(one, cache_dir(Path::new("/base"), Path::new("/b"), &server));
         assert_ne!(one, cache_dir(Path::new("/base"), Path::new("/a"), &words(&["dbt", "lsp", "--target", "prod"])));
