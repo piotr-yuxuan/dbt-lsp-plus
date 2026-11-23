@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-/// The files of a project that name its packages.
 const FILES: [&str; 2] = ["packages.yml", "dependencies.yml"];
 
 fn items(doc: &Tree) -> &[Tree] {

@@ -32,7 +32,6 @@ const STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// reads.
 const KEPT: [&str; 5] = ["--profiles-dir", "--profile", "--target", "--vars", "--packages-install-path"];
 
-/// The words of the proxy's `dbt parse`, as `Dbt::run` takes them.
 pub const PARSE: [&str; 3] = ["parse", "--log-format", "json"];
 
 /// The log of a parse, at its cache's root, as `remove_stale` reads it.
@@ -190,7 +189,6 @@ pub fn remove_stale(cache: &Path) {
     }
 }
 
-/// The value of FLAG in COMMAND, as `FLAG X` or `FLAG=X`.
 pub fn flag<'a>(command: &'a [String], flag: &str) -> Option<&'a str> {
     command.iter().enumerate().find_map(|(at, word)| match word.strip_prefix(flag) {
         Some("") => command.get(at + 1).map(String::as_str),
@@ -310,7 +308,6 @@ impl ParseIndex {
         latest.filter_map(|id| self.nodes.get(id)).filter(resource).collect()
     }
 
-    /// Whether the last manifest disables the node ID.
     pub fn disabled(&self, id: &str) -> bool {
         self.latest.contains(id) && self.nodes.get(id).is_some_and(|node| node["disabled"] == true)
     }

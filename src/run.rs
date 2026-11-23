@@ -64,13 +64,11 @@ impl Output {
         self.text.lines().map(str::trim).find(|line| line.starts_with("[error]")).map(str::to_owned)
     }
 
-    /// The first line that is none of dbt's events, as a launcher's own.
     pub fn line(&self) -> Option<&str> {
         self.text.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with('{'))
     }
 }
 
-/// A run under way, which its owner stops at the latest when it ends.
 pub struct Running {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,

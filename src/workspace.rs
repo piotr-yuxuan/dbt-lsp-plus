@@ -30,7 +30,6 @@ type MadeOf = (u64, u64, u64, bool);
 /// open or on disk, and a byte offset in it.
 pub type Place = (PathBuf, String, usize);
 
-/// What a query names a node by: its unique id, or a place in a document.
 pub enum Which {
     Id(String),
     At(Place),
@@ -125,7 +124,6 @@ impl Workspace {
         graph
     }
 
-    /// Why no index answers yet, as nodeInfo and a hover say it.
     pub fn unindexed(&self) -> Reason {
         let why = match (self.running.is_some(), &self.failure) {
             (true, _) => "it is running",
