@@ -50,9 +50,8 @@ size:
 test:
 	@$(CARGO_TEST) -- --test-threads=$(TEST_THREADS)
 
-# Opt-in, with DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable: the corpus
-# and the live test with either build, the proxy in front of `dbt lsp` with
-# the proprietary one, alone with dbt-oss.
+# Opt-in, with DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable, either
+# build: the corpus and the live test.
 conformance:
 	@$(CARGO_TEST) --test proxy conformance:: -- --ignored --test-threads=$(TEST_THREADS)
 

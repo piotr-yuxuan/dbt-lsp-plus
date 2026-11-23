@@ -17,8 +17,8 @@ cache, and has 30 minutes:
 | `static` | `make check-static`: fmt, clippy, `public`, Ruff and the Python tests, actionlint, `src/`'s size against its ceilings; and off `main`, `make commits BASE=origin/main` |
 | `test` | `make test` |
 | `macos` | On `macos-15`, `make test`. Its failure fails neither CI nor a release |
-| `dbt-oss` | dbt-oss 2.0.11 fetched, `unshare -rn` checked, the tests built, then `make conformance` and `make live` with no network, the proxy alone, as dbt-oss has no `dbt lsp` |
-| `dbt` | The same with the proprietary dbt 2.0.9, the proxy in front of its `dbt lsp`. Only on a push, and only when the repository's variable `DBT_LSP_PLUS_PROPRIETARY` is `true`; its failure fails neither CI nor a release |
+| `dbt-oss` | dbt-oss 2.0.11 fetched, `unshare -rn` checked, the tests built, then `make conformance` and `make live` with no network |
+| `dbt` | The same with the proprietary dbt 2.0.9, whose `dbt lsp` never runs. Only on a push, and only when the repository's variable `DBT_LSP_PLUS_PROPRIETARY` is `true`; its failure fails neither CI nor a release |
 
 Each job holds its own steps rather than a part of a matrix, since a job's `if:` cannot read a
 matrix, and the proprietary build's job must be gated on the variable. The jobs run side by side,
@@ -31,8 +31,8 @@ Each dbt job runs `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 runner's AppArmor otherwise refuses `unshare -r`, then `unshare -rn true`, so that a job that
 cannot run its tests with no network fails rather than passes. It builds the tests with the
 network, `cargo test --locked -j 4 --test proxy --no-run`, then runs the corpus and the live test
-under `unshare -rn`: whatever reaches the network fails. `dbt lsp` runs as the user's command
-gives it, with no flag of the proxy's, and so do the proxy's runs of dbt.
+under `unshare -rn`: whatever reaches the network fails. The server's runs of dbt run as the
+user's command gives it.
 
 ### dbt
 
@@ -83,10 +83,9 @@ for neither CI nor CD. Its permission is `contents: read`.
 
 What a weekly run shows beyond CI: the latest dbt's resolution, as new and stale divergences;
 a changed error code, through a case's `expected-error`; the proxy's parse flags still
-accepted; a need of the network; dbt writing into the project; and with the
-proprietary build, the drift of what the live test checks of dbt lsp's protocol, and with
-dbt-oss, of its refusal of `lsp` and its JSON log. Not: rules
-that the corpus has no case for, whether the fake server is still faithful, macOS and other
+accepted; a need of the network; dbt writing into the project; and with either build, the
+drift of what the live test checks, its answer to `lsp --help` and its JSON log among them. Not:
+rules that the corpus has no case for, whether the fake dbt is still faithful, macOS and other
 targets, other adapters, builds released and superseded within a week, dbt-mode's side.
 
 To move CI's pins to a new build, one commit changes `scripts/fetch-dbt`'s URL and SHA-256

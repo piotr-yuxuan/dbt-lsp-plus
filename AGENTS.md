@@ -15,10 +15,10 @@ tracked; the checks are the `Makefile`'s, run in `nix develop`:
 make check
 ```
 
-and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming a
-dbt 2 executable, once with the proprietary build, which has `dbt lsp`, and
-once with dbt-oss, which has none and runs the proxy alone; built with the
-network, then run with none, as CI runs them:
+and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming
+dbt-oss, and again naming the proprietary build where it is at hand, as
+CI's opt-in job runs it; built with the network, then run with none, as CI
+runs them:
 
 ```
 cargo test --locked -j 4 --test proxy --no-run
