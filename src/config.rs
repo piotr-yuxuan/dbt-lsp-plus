@@ -296,6 +296,26 @@ impl ParseIndex {
         self.nodes.get(id)
     }
 
+    /// The unique ids, sorted, of the enabled nodes of the last manifest
+    /// laid whose `depends_on.nodes` names the node ID, every test aside,
+    /// by its `resource_type`.
+    pub fn children(&self, id: &str) -> Vec<&str> {
+        let child = |node: &Value| {
+            let depends_on = node.pointer("/depends_on/nodes").and_then(Value::as_array);
+            node["resource_type"] != "test"
+                && node["disabled"] != true
+                && depends_on.is_some_and(|nodes| nodes.iter().any(|parent| parent == id))
+        };
+        let mut children: Vec<&str> = self
+            .latest
+            .iter()
+            .filter(|latest| self.nodes.get(*latest).is_some_and(child))
+            .map(String::as_str)
+            .collect();
+        children.sort_unstable();
+        children
+    }
+
     /// The enabled models, seeds and snapshots of the last manifest named
     /// NAME in PACKAGE, each version of a versioned model apart.
     pub fn resources(&self, package: &str, name: &str) -> Vec<&Value> {
@@ -731,6 +751,34 @@ mod tests {
         let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
         assert_eq!(ids, ["source.shop.raw.b"]);
         assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
+    }
+
+    #[test]
+    fn a_node_s_children_are_the_enabled_nodes_of_the_last_manifest_that_depend_on_it() {
+        let node = |id: &str, depends_on: &[&str]| {
+            let (kind, name) = (id.split('.').next().unwrap(), id.rsplit('.').next().unwrap());
+            json!({"unique_id": id, "name": name, "resource_type": kind, "package_name": "shop",
+                   "depends_on": {"nodes": depends_on}})
+        };
+        let (a, ab, t) = (
+            node("model.shop.a", &[]),
+            node("model.shop.ab", &["model.shop.a"]),
+            node("test.shop.t", &["model.shop.a"]),
+        );
+        // A relationships test, attached to b, depends on the model it refers to too.
+        let mut r = node("test.shop.r", &["model.shop.a", "model.shop.b"]);
+        r["attached_node"] = json!("model.shop.b");
+        let manifest = json!({"nodes": {"model.shop.a": a, "model.shop.b": node("model.shop.b", &["model.shop.a"]),
+                                        "model.shop.ab": ab, "test.shop.t": t, "test.shop.r": r},
+                              "disabled": {"model.shop.c": [node("model.shop.c", &["model.shop.a"])]}});
+        let mut index = ParseIndex::of(&manifest);
+        assert_eq!(
+            (index.children("model.shop.a"), index.children("model.shop.b")),
+            (vec!["model.shop.ab", "model.shop.b"], vec![])
+        );
+        // A failed parse's manifest, laid over, lacks b, which the index keeps.
+        index.overlay(ParseIndex::of(&json!({"nodes": {"model.shop.a": a, "model.shop.ab": ab, "test.shop.t": t}})));
+        assert_eq!(index.children("model.shop.a"), ["model.shop.ab"]);
     }
 
     #[test]
