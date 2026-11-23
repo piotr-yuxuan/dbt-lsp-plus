@@ -122,7 +122,7 @@ impl Workspace {
         let why = match (self.running.is_some(), &self.failure) {
             (true, _) => "it is running",
             (false, Some(failure)) => failure,
-            (false, None) => "waiting for dbt lsp to compile the project",
+            (false, None) => "it has not run, or left no manifest",
         };
         Reason::Unindexed(why.to_owned())
     }

@@ -1338,8 +1338,8 @@ mod tests {
             ("dbt parse has not finished: it is running", r#"(true, _) => "it is running""#),
             ("dbt parse has not finished:", r#"write!(f, "dbt parse has not finished: {why}")"#),
             (
-                "dbt parse has not finished: waiting for dbt lsp to compile the project",
-                r#"(false, None) => "waiting for dbt lsp to compile the project""#,
+                "dbt parse has not finished: it has not run, or left no manifest",
+                r#"(false, None) => "it has not run, or left no manifest""#,
             ),
             ("dbt parse has not finished: dbt parse failed:", r#"format!("dbt parse failed: {failure}")"#),
             // The arm that puts a failure after the prefix, which the quotes of a failure rest on.

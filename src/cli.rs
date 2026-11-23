@@ -3,7 +3,7 @@
 //! asks without an LSP client, each answered on one line of compact JSON.
 //! The project and its dbt are found as the server finds them.
 
-use crate::locate::{self, Probe, Route};
+use crate::locate::{self, Route};
 use crate::modes::{self, Arguments};
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{self, Which, Workspace};
@@ -246,13 +246,7 @@ fn doctor(path: &Path, command: &[String]) -> (Value, bool) {
     };
     let (dbt, dir) = dbt_of(&project, route, command);
     // What `locate::dbt` left unprobed is probed as it probes a candidate.
-    let probed = match dbt.lsp {
-        Some(_) => Ok(()),
-        None => match locate::probe(&dbt.command, dir.as_deref()) {
-            Probe::Lsp | Probe::NoLsp => Ok(()),
-            Probe::Other(why) => Err(why),
-        },
-    };
+    let probed = if dbt.probed { Ok(()) } else { locate::probe(&dbt.command, dir.as_deref()) };
     // With the server command as given, as select asks it: finding the dbt
     // changes only a bare `dbt`, and the guard reads none of it.
     let packages = packages::refused(&project, command);

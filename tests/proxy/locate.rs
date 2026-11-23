@@ -217,9 +217,9 @@ fn repository(name: &str) -> (PathBuf, Git, PathBuf) {
 const COMMAND: [&str; 3] = ["dbt", "lsp", "--no-send-anonymous-usage-stats"];
 
 /// The dbt that FOUND runs, its links resolved, where it was found, and
-/// whether it has `lsp`.
-fn taken(found: &Located) -> (PathBuf, &'static str, Option<bool>) {
-    (fs::canonicalize(&found.command[0]).unwrap(), found.source, found.lsp)
+/// whether its probe found it a dbt 2.
+fn taken(found: &Located) -> (PathBuf, &'static str, bool) {
+    (fs::canonicalize(&found.command[0]).unwrap(), found.source, found.probed)
 }
 
 fn resolved(path: &Path) -> PathBuf {
@@ -234,11 +234,11 @@ fn dbt_is_the_project_s_before_the_repository_s() {
     stub(&own, HAS_LSP, &log);
     stub(&top, NO_LSP, &log);
     let found = locate::dbt(&project, &command, &git);
-    assert_eq!(taken(&found), (resolved(&own), "the project's .venv", Some(true)));
+    assert_eq!(taken(&found), (resolved(&own), "the project's .venv", true));
     assert_eq!((&found.command[1..], found.named.as_str()), (&command[1..], own.to_str().unwrap()));
     fs::remove_file(&own).unwrap();
     let found = locate::dbt(&project, &command, &git);
-    assert_eq!(taken(&found), (resolved(&top), "the repository's .venv", Some(false)), "dbt-oss, with no lsp");
+    assert_eq!(taken(&found), (resolved(&top), "the repository's .venv", true), "dbt-oss, with no lsp");
 }
 
 #[test]
@@ -249,10 +249,10 @@ fn from_a_linked_worktree_dbt_is_the_main_worktree_s_project_s_then_its_own() {
     stub(&main_project, HAS_LSP, &log);
     stub(&main, HAS_LSP, &log);
     let found = locate::dbt(&linked, &command, &git);
-    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", Some(true)));
+    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", true));
     fs::remove_file(&main_project).unwrap();
     let found = locate::dbt(&linked, &command, &git);
-    assert_eq!(taken(&found), (resolved(&main), "the main worktree's .venv", Some(true)));
+    assert_eq!(taken(&found), (resolved(&main), "the main worktree's .venv", true));
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn a_git_that_names_the_common_directory_from_where_it_ran_finds_the_main_worktr
     );
     script(&old_git, &answers);
     let found = locate::dbt(&linked, &command, &Git { program: old_git.into(), env: git.env });
-    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", Some(true)));
+    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", true));
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn a_main_worktree_whose_git_directory_is_a_link_is_found() {
     let top = repo.join(".worktree/x");
     script(&old_git, &format!("echo '{}'; echo ../../../.git", top.display()));
     let found = locate::dbt(&linked, &command, &Git { program: old_git.into(), env: git.env });
-    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", Some(true)));
+    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", true));
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn a_project_reached_through_a_link_finds_the_main_worktree_of_its_repository() 
     let top = resolved(&repo.join(".worktree/x"));
     script(&old_git, &format!("echo '{}'; echo ../../../.git", top.display()));
     let found = locate::dbt(&linked, &command, &Git { program: old_git.into(), env: git.env });
-    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", Some(true)));
+    assert_eq!(taken(&found), (resolved(&main_project), "the main worktree's project .venv", true));
 }
 
 #[test]
@@ -319,7 +319,7 @@ fn a_dbt_that_cannot_run_or_has_no_lsp_subcommand_is_skipped_and_named() {
     fs::set_permissions(&own, fs::Permissions::from_mode(0o644)).unwrap();
     stub(&top, DBT_CORE, &log);
     let found = locate::dbt(&project, &command, &git);
-    assert_eq!((found.source, found.lsp, &found.command), ("PATH", None, &command));
+    assert_eq!((found.source, found.probed, &found.command), ("PATH", false, &command));
     // The reason of a program that cannot run is the system's, after a fixed prefix.
     let reason = |why: &str| if why.starts_with("cannot run: ") { "cannot run: " } else { why }.to_owned();
     let skipped: Vec<(&PathBuf, String)> = found.skipped.iter().map(|(path, why)| (path, reason(why))).collect();
@@ -348,7 +348,7 @@ fn a_first_word_other_than_dbt_is_kept_and_nothing_probed() {
     stub(&project.join(".venv/bin/dbt"), HAS_LSP, &log);
     let launcher = words(&["uvx", "dbt", "lsp"]);
     let found = locate::dbt(&project, &launcher, &git);
-    assert_eq!((&found.command, found.source, found.lsp), (&launcher, "the server command", None));
+    assert_eq!((&found.command, found.source, found.probed), (&launcher, "the server command", false));
     assert_eq!(found.named, "uvx dbt");
     assert!(!log.exists(), "a stub ran");
 }

@@ -241,10 +241,9 @@ By what the agent reads:
   in order.  Ask again with one letter of a model's name, then run
   `dbt-lsp-plus doctor` on the file.
 - `dbt parse has not finished: it is running`: ask again.
-- `dbt parse has not finished: waiting for dbt lsp to compile the
-  project`: in front of `dbt lsp`, whose first compilation is under way;
-  ask again.  When `dbt lsp` gave no answer either, followed by `; ` and
-  why.
+- `dbt parse has not finished: it has not run, or left no manifest`: no
+  parse has started yet, or the last one ended well and wrote no
+  manifest; ask again, then run `dbt-lsp-plus doctor` on the file.
 - `dbt parse has not finished: dbt parse failed: ...`: dbt's first error;
   its log is the path in parentheses.
 - `dbt parse has not finished:` then `... run dbt deps`: a package is

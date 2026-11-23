@@ -2,8 +2,7 @@
 //! Where a session's project and its dbt are when the server command names
 //! no `--project-dir`: the project of a document, from its path; the dbt of
 //! a project, from its `.venv`, its repository's, its main worktree's, then
-//! `PATH`; and the probe that tells a dbt 2 with `lsp`, one without, and
-//! anything else apart.
+//! `PATH`; and the probe that tells a dbt 2 from anything else.
 
 use crate::{config, packages, project, run};
 use std::collections::HashSet;
@@ -143,8 +142,8 @@ pub struct Located {
     pub named: String,
     /// Where it was found.
     pub source: &'static str,
-    /// Whether it has `lsp`, by its probe; none when it was not probed.
-    pub lsp: Option<bool>,
+    /// Whether its probe found it a dbt 2.
+    pub probed: bool,
     /// Each place skipped, and why.
     pub skipped: Vec<(PathBuf, String)>,
 }
@@ -158,7 +157,7 @@ impl Located {
             command: command.to_vec(),
             named: before,
             source: "the server command",
-            lsp: None,
+            probed: false,
             skipped: Vec::new(),
         }
     }
@@ -166,8 +165,8 @@ impl Located {
 
 /// The dbt of the project at PROJECT for the server command COMMAND.  When
 /// COMMAND's first word is `dbt`, the first of the `candidates` that is a
-/// file and answers its `probe`, in the project, as a dbt 2 does, with
-/// `lsp` or without; one that answers otherwise is skipped; else `dbt`
+/// file and answers its `probe`, in the project, as a dbt 2 does; one that
+/// answers otherwise is skipped; else `dbt`
 /// stays, for `PATH`, unprobed, named by the first file of that name
 /// there.  Any other first word is the user's choice, kept and unprobed.
 /// GIT runs once, to find the project's repository.
@@ -180,10 +179,10 @@ pub fn dbt(project: &Path, command: &[String], git: &Git) -> Located {
         let mut words = command.to_vec();
         words[0] = path.to_string_lossy().into_owned();
         match probe(&words, Some(project)) {
-            Probe::Other(why) => found.skipped.push((path, why)),
-            answer => {
+            Err(why) => found.skipped.push((path, why)),
+            Ok(()) => {
                 let named = path.display().to_string();
-                return Located { command: words, named, source, lsp: Some(answer == Probe::Lsp), ..found };
+                return Located { command: words, named, source, probed: true, ..found };
             }
         }
     }
@@ -201,26 +200,17 @@ pub enum Route {
     Document,
 }
 
-/// What a dbt answers to `lsp --help`.
-#[derive(Debug, PartialEq)]
-pub enum Probe {
-    /// Status 0, as dbt 2.0.9 prints its help.
-    Lsp,
-    /// Status 2 with "unrecognized subcommand 'lsp'" on the standard error,
-    /// as dbt-oss 2.0.11 refuses it.
-    NoLsp,
-    /// Anything else, and how it went.
-    Other(String),
-}
-
-/// What the dbt of COMMAND, a server command, answers: the words before
-/// its `lsp` word, then `lsp --help`, with `NO_COLOR`, in DIR when given,
-/// killed past `PROBE_DEADLINE`.  A launcher's own failure (`uvx dbt`
-/// offline exits 2 too), dbt-core 1.x's "No such command 'lsp'", a
-/// program that cannot run, a command with no word before `lsp`: other.
-pub fn probe(command: &[String], dir: Option<&Path>) -> Probe {
+/// Whether the dbt of COMMAND, a server command, is a dbt 2, by what it
+/// answers to the words before its `lsp` word, then `lsp --help`, with
+/// `NO_COLOR`, in DIR when given, killed past `PROBE_DEADLINE`: status 0,
+/// as dbt 2.0.9 prints its help, or status 2 with "unrecognized subcommand
+/// 'lsp'" on the standard error, as dbt-oss 2.0.11 refuses it.  Else how
+/// it went: a launcher's own failure (`uvx dbt` offline exits 2 too),
+/// dbt-core 1.x's "No such command 'lsp'", a program that cannot run, a
+/// command with no word before `lsp`.
+pub fn probe(command: &[String], dir: Option<&Path>) -> Result<(), String> {
     let Some(at) = command.iter().position(|word| word == "lsp").filter(|at| *at > 0) else {
-        return Probe::Other("the command has no word before lsp".into());
+        return Err("the command has no word before lsp".into());
     };
     let mut probe = Command::new(&command[0]);
     probe.args(&command[1..at]).args(["lsp", "--help"]).env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
@@ -229,7 +219,7 @@ pub fn probe(command: &[String], dir: Option<&Path>) -> Probe {
     }
     let mut child = match probe.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() {
         Ok(child) => child,
-        Err(error) => return Probe::Other(format!("cannot run: {error}")),
+        Err(error) => return Err(format!("cannot run: {error}")),
     };
     let stderr = child.stderr.take().expect("piped stderr");
     let (sender, read) = mpsc::channel();
@@ -244,10 +234,10 @@ pub fn probe(command: &[String], dir: Option<&Path>) -> Probe {
     let stderr = read.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
     let refused = String::from_utf8_lossy(&stderr).contains("unrecognized subcommand 'lsp'");
     match (status, status.and_then(|status| status.code())) {
-        (_, Some(0)) => Probe::Lsp,
-        (_, Some(2)) if refused => Probe::NoLsp,
-        (Some(status), _) => Probe::Other(format!("lsp --help gives {status}")),
-        (None, _) => Probe::Other(format!("no answer to lsp --help within {} s", config::PROBE_DEADLINE.as_secs())),
+        (_, Some(0)) => Ok(()),
+        (_, Some(2)) if refused => Ok(()),
+        (Some(status), _) => Err(format!("lsp --help gives {status}")),
+        (None, _) => Err(format!("no answer to lsp --help within {} s", config::PROBE_DEADLINE.as_secs())),
     }
 }
 
@@ -260,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn only_dbt_s_own_answers_tell_whether_it_has_lsp() {
+    fn only_dbt_s_own_answers_make_a_dbt_2() {
         let refused = "echo \"error: unrecognized subcommand 'lsp'\" >&2";
         // dbt-oss 2.0.11 colours the word under CLICOLOR_FORCE, unless NO_COLOR is set.
         let coloured = format!(
@@ -271,19 +261,15 @@ mod tests {
         let words = format!("[ \"$0 $1\" = 'lsp --help' ] && [ $# -eq 1 ] && {{ {refused}; exit 2; }}");
         // `sh -c SCRIPT lsp --help` runs SCRIPT, as a dbt answering its probe.
         let cases = [
-            ("dbt-oss 2.0.11", format!("{refused}; exit 2"), "no lsp"),
-            ("2.0.9 prints its help", "echo 'Start the dbt language server'; exit 0".into(), "lsp"),
+            ("dbt-oss 2.0.11", format!("{refused}; exit 2"), "dbt 2"),
+            ("2.0.9 prints its help", "echo 'Start the dbt language server'; exit 0".into(), "dbt 2"),
             ("a launcher offline", "echo 'error: Failed to fetch the index' >&2; exit 2".into(), "other"),
             ("another status", format!("{refused}; exit 1"), "other"),
             ("dbt-core 1.x", "echo \"Error: No such command 'lsp'.\" >&2; exit 2".into(), "other"),
-            ("only the words before lsp", words, "no lsp"),
-            ("in colour unless asked not to", coloured, "no lsp"),
+            ("only the words before lsp", words, "dbt 2"),
+            ("in colour unless asked not to", coloured, "dbt 2"),
         ];
-        let kind = |probed: Probe| match probed {
-            Probe::Lsp => "lsp",
-            Probe::NoLsp => "no lsp",
-            Probe::Other(_) => "other",
-        };
+        let kind = |probed: Result<(), String>| if probed.is_ok() { "dbt 2" } else { "other" };
         for (name, script, expected) in cases {
             let command = args(&["sh", "-c", &script, "lsp", "--project-dir", "/p"]);
             assert_eq!(kind(probe(&command, None)), expected, "{name}");
@@ -297,7 +283,7 @@ mod tests {
             assert_eq!(kind(probe(&args(command), None)), "other", "{name}");
         }
         let in_root = args(&["sh", "-c", "[ \"$(pwd)\" = / ] && exit 0; exit 1", "lsp"]);
-        assert_eq!(kind(probe(&in_root, Some(Path::new("/")))), "lsp", "in the directory given");
+        assert_eq!(kind(probe(&in_root, Some(Path::new("/")))), "dbt 2", "in the directory given");
     }
 
     #[test]
