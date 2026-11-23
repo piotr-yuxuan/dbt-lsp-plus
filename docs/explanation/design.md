@@ -2331,13 +2331,16 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it; each
   week, the same on the latest stable dbt-oss, and on the latest
   proprietary build when allowed: see `docs/reference/release-pipeline.md`.
-- The conformance corpus, opt-in as the live test (see "Conformance"):
-  `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance
-  -- --ignored`.
+- The conformance corpus, opt-in as the live test (see "Conformance"),
+  built with the network, `cargo test --locked -j 4 --test proxy
+  --no-run`, then run with none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
+  unshare -rn cargo test --test proxy conformance -- --ignored`.
 - One opt-in live test runs the real `dbt lsp` on a copy of the fixture,
   from an empty environment with a scratch home, in the copy, and checks
-  what this note records of `dbt.listNodes` and of `positionEncoding`:
-  `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored`.
+  what this note records of `dbt.listNodes` and of `positionEncoding`,
+  built as the corpus is, then run with none:
+  `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy
+  -- --ignored`.
   As an editor that honours dbt lsp's watcher, whose glob it checks, it
   sends a model's watched change, after which come dbt lsp's own
   compilation, the proxy's two listings' and a full background one

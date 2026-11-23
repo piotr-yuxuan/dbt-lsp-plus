@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy's resolution against dbt's.  Opt-in, since it needs dbt 2:
+//! The proxy's resolution against dbt's.  Opt-in, since it needs dbt 2;
+//! built with the network, then run with none, as CI runs it:
 //!
-//!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy conformance -- --ignored
+//!     cargo test --locked -j 4 --test proxy --no-run
+//!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy conformance -- --ignored
 //!
 //! Each project of `tests/fixtures/conformance/` is parsed by that dbt as
 //! the proxy parses, offline, and what the proxy's library resolves in it

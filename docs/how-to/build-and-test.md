@@ -4,13 +4,16 @@
 nix develop
 cargo build --release
 cargo test
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
+cargo test --locked -j 4 --test proxy --no-run
+DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy -- --ignored
 ```
 
-The last command runs the opt-in live tests against a real dbt 2, on a copy
-of `tests/fixtures/shop` with a scratch home: the proxy in front of `dbt
-lsp` with the proprietary build (tested with 2.0.9), alone with dbt-oss
-(tested with 2.0.11).
+The last two commands build the opt-in tests with the network, then run
+them with none, as CI does: the corpus, and the live tests against a real
+dbt 2, on a copy of `tests/fixtures/shop` with a scratch home: the proxy in
+front of `dbt lsp` with the proprietary build (tested with 2.0.9), alone
+with dbt-oss (tested with 2.0.11).  Where there is no `unshare`, as on a
+Mac, run the last one without it.
 
 The crate also builds `fake-dbt-lsp`, the scripted server of the tests; to
 install the proxy alone, run `cargo install --path . --bin dbt-lsp-plus`.

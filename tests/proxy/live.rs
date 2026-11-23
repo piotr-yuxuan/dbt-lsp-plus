@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The proxy in front of the real dbt lsp, or alone with a dbt that has
-//! none.  Opt-in, since it needs dbt 2:
+//! none.  Opt-in, since it needs dbt 2; built with the network, then run
+//! with none, as CI runs it:
 //!
-//!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt cargo test --test proxy -- --ignored
+//!     cargo test --locked -j 4 --test proxy --no-run
+//!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy -- --ignored
 //!
 //! It runs on a copy of the fixture, from an empty environment with a
 //! scratch home, so that dbt writes nothing into the repository nor the

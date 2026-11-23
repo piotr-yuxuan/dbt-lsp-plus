@@ -17,7 +17,7 @@ cache, and has 30 minutes:
 | `static` | `make check-static`: fmt, clippy, `public`, Ruff and the Python tests, actionlint, `src/`'s size against its ceilings; and off `main`, `make commits BASE=origin/main` |
 | `test` | `make test` |
 | `macos` | On `macos-15`, `make test`. Its failure fails neither CI nor a release |
-| `dbt-oss` | dbt-oss 2.0.11 fetched, the network cut checked, then `make conformance`, then `make live` with the network cut, the proxy alone, as dbt-oss has no `dbt lsp` |
+| `dbt-oss` | dbt-oss 2.0.11 fetched, `unshare -rn` checked, the tests built, then `make conformance` and `make live` with no network, the proxy alone, as dbt-oss has no `dbt lsp` |
 | `dbt` | The same with the proprietary dbt 2.0.9, the proxy in front of its `dbt lsp`. Only on a push, and only when the repository's variable `DBT_LSP_PLUS_PROPRIETARY` is `true`; its failure fails neither CI nor a release |
 
 Each job holds its own steps rather than a part of a matrix, since a job's `if:` cannot read a
@@ -25,17 +25,18 @@ matrix, and the proprietary build's job must be gated on the variable. The jobs 
 and none stops the others. The `Makefile`'s cap of four workers stays, as GitHub's runners have
 no more.
 
-### The network cut
+### Run with no network
 
 Each dbt job runs `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, as that
-runner's AppArmor otherwise refuses `unshare -r`, then `unshare -rn true`, so that a job without
-the cut fails rather than passes: the corpus runs each parse under `unshare -rn` when it can, and
-says "network namespace: no" when it cannot. The `test` job runs the same `sysctl`, as the proxy
-cuts its own parse off the network and from writing the project where it can, and a test fails on
-Linux when it cannot. The
-live test is built with the network, then runs
-under `unshare -rn`, as `dbt lsp` runs as the user's command gives it, with no flag of the proxy's;
-the proxy's own parse cuts itself again, a namespace within that one.
+runner's AppArmor otherwise refuses `unshare -r`, then `unshare -rn true`, so that a job that
+cannot run its tests with no network fails rather than passes. It builds the tests with the
+network, `cargo test --locked -j 4 --test proxy --no-run`, then runs the corpus and the live test
+under `unshare -rn`: whatever reaches the network fails. `dbt lsp` runs as the user's command
+gives it, with no flag of the proxy's. The corpus runs each parse under `unshare -rn` again when
+it can, and says "network namespace: no" when it cannot. The `test` job runs the same `sysctl`, as
+the proxy cuts its own parse off the network and from writing the project where it can, and a test
+fails on Linux when it cannot; the proxy's own parse cuts itself again, a namespace within the
+job's.
 
 ### dbt
 
@@ -62,7 +63,7 @@ for neither CI nor CD. Its permission is `contents: read`.
 
 | Job | Runs |
 |---|---|
-| `dbt-oss` | `scripts/fetch-dbt --latest oss`: the highest release `vX.Y.Z` of GitHub's `dbt-labs/dbt`, compared as numbers, not a draft nor a pre-release, that holds the Linux archive, checked by GitHub's SHA-256 of it; then the network cut, the corpus, and the live test built, then run with the network cut |
+| `dbt-oss` | `scripts/fetch-dbt --latest oss`: the highest release `vX.Y.Z` of GitHub's `dbt-labs/dbt`, compared as numbers, not a draft nor a pre-release, that holds the Linux archive, checked by GitHub's SHA-256 of it; then `unshare -rn` checked and the tests built, then the corpus and the live test run with no network |
 | `dbt` | `scripts/fetch-dbt --latest proprietary`: the stable tag of dbt Labs' `versions.json`, as dbt Labs' installer reads it, checked by the `.sha256` that dbt Labs publishes beside the archive; then the same. Only when the repository's variable `DBT_LSP_PLUS_PROPRIETARY` is `true` |
 
 - No `continue-on-error`: a drift fails the run, and GitHub tells the user who last changed
@@ -75,7 +76,7 @@ for neither CI nor CD. Its permission is `contents: read`.
   line, and the corpus's failure whole: what drifted (the divergences to register, and those
   registered that no longer diverge, a changed answer showing in both), or which parse failed
   and how; and the live test's result and failure. The live test runs whatever the corpus
-  said, once the build is fetched and the network cut.
+  said, once the build is fetched and `unshare -rn` works.
 - dbt-oss's latest is trusted through GitHub's digest of its asset; a newer release that holds
   the Linux archive without one fails the run rather than being skipped. The proprietary
   latest is trusted through TLS to dbt Labs' CDN and the digest dbt Labs publishes on the same

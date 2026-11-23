@@ -17,11 +17,15 @@ make check
 
 and, before a merge, the opt-in tests with `DBT_LSP_PLUS_TEST_DBT` naming a
 dbt 2 executable, once with the proprietary build, which has `dbt lsp`, and
-once with dbt-oss, which has none and runs the proxy alone:
+once with dbt-oss, which has none and runs the proxy alone; built with the
+network, then run with none, as CI runs them:
 
 ```
-make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
+cargo test --locked -j 4 --test proxy --no-run
+unshare -rn make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 ```
+
+Where there is no `unshare`, as on a Mac, the second runs unwrapped.
 
 Each runs four workers at most (`CARGO_JOBS`, `TEST_THREADS`), and two
 test runs in one checkout take turns.

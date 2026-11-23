@@ -50,16 +50,16 @@ jobs:
         run: python3 scripts/fetch-dbt --latest oss "$RUNNER_TEMP/dbt" | tee "$RUNNER_TEMP/fetch.log"
         env:
           GH_TOKEN: ${{ github.token }}
-      # That runner's AppArmor otherwise refuses `unshare -r`, which cuts each parse off
-      # the network; and a job without the cut fails rather than pass.
+      # That runner's AppArmor otherwise refuses `unshare -r`, by which the tests run with
+      # no network; and a job that cannot run them so fails rather than pass.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - id: cut
         run: unshare -rn true
-      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
-      # Built with the network, then the live test with none, whatever the corpus said: the
-      # proxy alone, as dbt-oss has no `dbt lsp`.
+      # Built with the network, then the corpus with none, then the live test with none,
+      # whatever the corpus said: the proxy alone, as dbt-oss has no `dbt lsp`.
       - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
-        run: nix develop -c cargo test --locked --test proxy --no-run
+        run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
+      - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
       - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
         run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/live.log"
       # Whatever came before: the build, the corpus's line, the live test's, and each
@@ -103,11 +103,12 @@ jobs:
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - id: cut
         run: unshare -rn true
-      - run: nix develop -c make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
-      # Built with the network, then the live test with none, whatever the corpus said, so
-      # that a drift of the protocol shows beside a drift of the resolution.
+      # Built with the network, then the corpus with none, then the live test with none,
+      # whatever the corpus said, so that a drift of the protocol shows beside a drift of
+      # the resolution.
       - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
-        run: nix develop -c cargo test --locked --test proxy --no-run
+        run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
+      - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
       - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
         run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/live.log"
       - if: always()
