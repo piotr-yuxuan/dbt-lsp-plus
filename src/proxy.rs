@@ -14,8 +14,7 @@ use crate::rpc::{self, Frame};
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{Which, Workspace};
 use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, shadow,
-    sources,
+    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, sources,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -44,8 +43,8 @@ const INTERNAL_ERROR: i64 = -32603;
 enum Route {
     /// Itself, as this method.
     Here(&'static str),
-    /// Itself, with this answer: null before a project, the shadow's
-    /// counts, or the method's nothing.
+    /// Itself, with this answer: null before a project, or the method's
+    /// nothing.
     Answer(Answer),
     /// By the server: `forward`, which also says what the request gets
     /// when none runs.
@@ -338,9 +337,6 @@ enum Kept {
     /// Answered with the proxy's part alone once the server was late: its
     /// answer, when it comes, is dropped.
     Answered,
-    /// A definition or references that the shadow follows: its parameters,
-    /// and the count of the client's changes when it came.
-    Shadow(Value, u64),
 }
 
 /// The proxy's part of a merged request.
@@ -555,12 +551,6 @@ struct Proxy<W: Write> {
     /// it, and the count so far.
     edits: HashMap<PathBuf, u64>,
     edited: u64,
-    /// The count of the client's changes and closes of a document, after
-    /// which the shadow compares no answer to an earlier request.
-    changes: u64,
-    /// The shadow, on from the server's answer to `initialize` when the user
-    /// set it.
-    shadow: Option<shadow::Shadow>,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
     /// waiting, with the client's id and their run, and the one under way.
     runs: VecDeque<(Value, commands::Job, run::Run)>,
@@ -697,8 +687,6 @@ impl<W: Write> Proxy<W> {
             workspace: Workspace::default(),
             edits: HashMap::new(),
             edited: 0,
-            changes: 0,
-            shadow: None,
             runs: VecDeque::new(),
             run: None,
         };
@@ -780,18 +768,16 @@ impl<W: Write> Proxy<W> {
         self.backend.commands = listed.map(str::to_owned).collect();
         let clients = commands::announced(&|dbt| self.backend.commands.contains(dbt));
         let plus = CAPABILITIES.iter().filter(|c| c.is_command() && c.providers == [Provider::Plus]).map(|c| c.name);
-        let own = plus.chain(self.shadow.as_ref().map(|_| shadow::SUMMARY));
         if let Some(commands) = provider.as_object_mut().map(|provider| provider.entry("commands").or_insert(json!([])))
         {
-            let own: Vec<Value> = own.chain(clients).map(|command| json!(command)).collect();
+            let own: Vec<Value> = plus.chain(clients).map(|command| json!(command)).collect();
             commands.as_array_mut().into_iter().for_each(|commands| commands.extend(own.iter().cloned()));
         }
     }
 
     /// Says once, after `initialize` is answered, what of the user's settings
     /// cannot take effect: each refusal, the methods set to `dbt` that no
-    /// backend answers, a shadow with no dbt lsp to compare with, or with
-    /// nothing to follow; and a mode named by its former name.
+    /// backend answers; and a mode named by its former name.
     fn tell_settings(&mut self) {
         let mut said = std::mem::take(&mut self.refused);
         if !said.is_empty() {
@@ -805,14 +791,6 @@ impl<W: Write> Proxy<W> {
         if !unanswered.is_empty() {
             said.push(format!("no dbt lsp answers {}, set to dbt: they get nothing", unanswered.join(", ")));
         }
-        let off = self.settings.shadow && self.shadow.is_none();
-        said.extend(off.then(|| "the shadow compares with dbt lsp, which does not run: it is off".to_owned()));
-        let followed = ["textDocument/definition", "textDocument/references"].map(|method| self.table.mode(method));
-        let idle = self.shadow.is_some() && !followed.contains(&Mode::Dbt);
-        said.extend(idle.then(|| {
-            "the shadow follows definitions and references in dbt only: with neither in dbt it has nothing to follow"
-                .to_owned()
-        }));
         if !said.is_empty() {
             let text = format!("dbt-lsp-plus: {}.", said.join("; "));
             self.send_client(&json!({"jsonrpc": "2.0", "method": "window/showMessage",
@@ -992,7 +970,6 @@ impl<W: Write> Proxy<W> {
             }
             "textDocument/didChange" => {
                 self.replay.versions.insert(path.clone(), params["textDocument"]["version"].clone());
-                self.changes += 1;
                 self.edited += 1;
                 self.edits.insert(path.clone(), self.edited);
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
@@ -1002,7 +979,6 @@ impl<W: Write> Proxy<W> {
             }
             "textDocument/didClose" => {
                 // An unsaved text gives way to the file's.
-                self.changes += 1;
                 self.replay.languages.remove(&path);
                 self.replay.versions.remove(&path);
                 self.documents.remove(&path);
@@ -1110,9 +1086,6 @@ impl<W: Write> Proxy<W> {
             return Route::Here(owned);
         }
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
-        if let (Some(shadow::SUMMARY), Some(shadow)) = (command, &self.shadow) {
-            return Route::Answer(Answer::Found(shadow.counts.summary()));
-        }
         // A command of the proxy's alone is answered here, one of dbt's goes by `commands::route`.
         if let Some(own) = command.and_then(capability::of).filter(|own| own.is_command()) {
             return if own.providers == [Provider::Plus] { Route::Here(own.name) } else { Route::Command(own.name) };
@@ -1782,12 +1755,11 @@ impl<W: Write> Proxy<W> {
     /// What the proxy keeps of the client's request METHOD, and the lifecycle
     /// it starts: the client's `initialize` and `shutdown`, a listing that the
     /// proxy must not cancel, the summary that a hover's answer gets, the
-    /// locations that a united one's gets, a request that the shadow
-    /// follows, the nothing that a merged request falls back to; and
-    /// whether, once routed, it asks for a fresh index: a hover keeps the
-    /// index fresh, an inlay hint only makes one, and in `dbt` neither; a
-    /// united request at a position the proxy claims wants what its answer
-    /// reads, and a shadowed one what `plus` reads.
+    /// locations that a united one's gets, the nothing that a merged request
+    /// falls back to; and whether, once routed, it asks for a fresh index: a
+    /// hover keeps the index fresh, an inlay hint only makes one, and in
+    /// `dbt` neither; a united request at a position the proxy claims wants
+    /// what its answer reads.
     fn remember(&mut self, method: &str, id: &Value, params: &Value) -> (Pending, bool) {
         let command = params["command"].as_str().filter(|_| method == "workspace/executeCommand");
         let name = command.unwrap_or(method).to_owned();
@@ -1828,12 +1800,8 @@ impl<W: Write> Proxy<W> {
                 let fresh = part.is_some() && capability::of(method).is_some_and(|capability| capability.wants_index);
                 (Kept::Part(part.unwrap_or(Part::Nothing)), fresh)
             }
-            // Followed in `dbt` only: one the proxy answers or unites is no one's to compare.
             "textDocument/definition" | "textDocument/references" => {
-                let (changes, dbt) = (self.changes, self.table.mode(method) == Mode::Dbt);
-                let shadowed = self.shadow.as_ref().filter(|_| dbt).map(|_| Kept::Shadow(params.clone(), changes));
-                let fresh = shadowed.is_some();
-                (shadowed.unwrap_or(if dbt { Kept::Plain } else { empty }), fresh)
+                (if self.table.mode(method) == Mode::Dbt { Kept::Plain } else { empty }, false)
             }
             _ => (Kept::Plain, false),
         };
@@ -2056,104 +2024,24 @@ impl<W: Write> Proxy<W> {
             let mut message = message.clone();
             let encoding = message.pointer("/result/capabilities/positionEncoding").and_then(Value::as_str);
             self.encoding = Encoding::parse(encoding);
-            // The shadow follows the server that answered; its log is under the user's cache, if any.
-            self.shadow = self.settings.shadow.then(|| {
-                let log = config::cache_base()
-                    .zip(self.workspace.root.as_ref())
-                    .map(|(base, root)| shadow::Log::open(&base, root));
-                shadow::Shadow::new(log)
-            });
             if let Some(capabilities) = message.pointer_mut("/result/capabilities").and_then(Value::as_object_mut) {
                 self.add_capabilities(capabilities);
             }
             self.send_client(&message);
             self.tell_settings();
             self.say_found();
-            self.shadow_line(&shadow::start(&message["result"]["serverInfo"], &self.table));
             return self.watch_runs();
         }
         self.send_client_body(body);
-        if let Some((_, Pending { name, kept: Kept::Shadow(params, changes) })) = pending {
-            self.compare(&name, &params, changes, message);
-        }
     }
 
-    /// Compares dbt lsp's answer MESSAGE, which the client already has, to a
-    /// request that the shadow follows, METHOD with PARAMS after CHANGES
-    /// changes, with what the proxy answers there whatever the flag lists,
-    /// but for references outside the root, which it never answers; then
-    /// counts it and logs it.  A panic costs the comparison alone.
-    fn compare(&mut self, method: &str, params: &Value, changes: u64, message: &Value) {
-        let record = panic::catch_unwind(AssertUnwindSafe(|| {
-            let root = self.workspace.root.as_deref().unwrap_or(Path::new(""));
-            let path_of = |uri: &str| self.path_of(uri);
-            let file = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
-            let inside = file.as_deref().is_some_and(|file| file.starts_with(root));
-            let compared = match shadow::read(message, self.changes != changes, &path_of, &|path| path.is_file()) {
-                shadow::Response::Apart(relation) => {
-                    shadow::Compared { relation, ours_only: Vec::new(), dbt_only: Vec::new(), both: 0 }
-                }
-                shadow::Response::Locations(dbt) => {
-                    let ours = match method {
-                        "textDocument/references" if inside => self.on_references(params),
-                        "textDocument/references" => None,
-                        _ => self.on_definition(params),
-                    };
-                    // The proxy's nothing and its failure hold no location, as null.
-                    let ours = match ours {
-                        Some(Answer::Found(found)) => found,
-                        _ => Value::Null,
-                    };
-                    shadow::compare(&shadow::locations(&ours, &path_of), &dbt)
-                }
-            };
-            let project = self.project();
-            let read = self.scan_at(params, project.as_deref());
-            let name = read.and_then(|(path, scanned, offset)| navigation::reference_at(&path, &scanned, offset));
-            let relative = file.as_deref().and_then(|file| file.strip_prefix(root).ok());
-            let known = self.workspace.index.as_ref().zip(project).zip(relative.zip(name.as_ref()));
-            let oracle = known.and_then(|((index, project), (relative, name))| {
-                shadow::oracle(index, &project, &relative.to_string_lossy(), name)
-            });
-            let workspace = &self.workspace;
-            let index = json!({"present": workspace.index.is_some(), "fresh": workspace.fresh,
-                               "running": workspace.running.is_some()});
-            shadow::Record {
-                method: method.trim_start_matches("textDocument/").to_owned(),
-                kind: name.as_ref().map_or("none", |name| name.kind.flag()),
-                place: file.as_deref().and_then(place).unwrap_or("other"),
-                target: name.as_ref().map_or(Value::Null, shadow::target),
-                file,
-                compared,
-                index,
-                oracle,
-            }
-        }));
-        let Ok(record) = record else { return };
-        let line = record.line(self.workspace.root.as_deref().unwrap_or(Path::new("")));
-        if let Some(shadow) = &mut self.shadow {
-            shadow.counts.add(&record);
-        }
-        self.shadow_line(&line);
-    }
-
-    /// The path of URI as both answers of a comparison or a union read it:
-    /// under the root as the client spells it, resolved elsewhere, where
-    /// each side may spell a file its own way.
+    /// The path of URI as both answers of a union read it: under the root
+    /// as the client spells it, resolved elsewhere, where each side may
+    /// spell a file its own way.
     fn path_of(&self, uri: &str) -> Option<PathBuf> {
         let root = self.workspace.root.as_deref().unwrap_or(Path::new(""));
         let path = self.local_path(Some(uri))?;
         Some(if path.starts_with(root) { path } else { fs::canonicalize(&path).unwrap_or(path) })
-    }
-
-    /// Logs LINE in the shadow, if on; a log that cannot be written is said
-    /// once, out of the user's way, and the shadow goes on counting.
-    fn shadow_line(&mut self, line: &str) {
-        let failed = self.shadow.as_mut().and_then(|shadow| shadow.write(line));
-        if let (Some(text), false) = (failed, self.shutdown) {
-            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage",
-                                     "params": {"type": 2, "message": text}}));
-        }
     }
 
     /// The server's diagnostics of a file, BODY as it came: forwarded as
@@ -2621,10 +2509,6 @@ pub fn run(command: &[String], settings: modes::Settings, launch: modes::Launch)
     (proxy.never, proxy.settings) = (never, settings);
     (proxy.parsing, proxy.workspace.dbt) = (parsing, dbt);
     proxy.serve(inbox);
-    // The shadow's last line: the session's counts.
-    if let Some(end) = proxy.shadow.as_ref().map(|shadow| shadow.counts.end()) {
-        proxy.shadow_line(&end);
-    }
     proxy.stop_parse();
     proxy.stop_server();
     if proxy.shutdown { ExitCode::SUCCESS } else { ExitCode::FAILURE }

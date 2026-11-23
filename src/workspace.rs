@@ -298,7 +298,7 @@ impl Workspace {
     pub fn cache_dir(&mut self, root: &Path) -> PathBuf {
         let server = self.dbt.command();
         let cache = self.cache_dir.get_or_insert_with(|| {
-            let cache = config::cache_dir(&config::cache_base().unwrap_or_else(std::env::temp_dir), root, server);
+            let cache = config::cache_dir(&config::cache_base(), root, server);
             config::remove_stale(&cache);
             cache
         });

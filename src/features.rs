@@ -9,7 +9,6 @@ use crate::project::Project;
 use crate::properties;
 use crate::reference;
 use crate::scan::{self, Kind, Symbol};
-use crate::shadow;
 use crate::text::{Encoding, LineStarts};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -254,28 +253,52 @@ pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -
     Some(merged)
 }
 
+/// A location as the union compares it: its file, and its range from a
+/// (line, character) to another.
+struct Location {
+    path: PathBuf,
+    start: (u64, u64),
+    end: (u64, u64),
+}
+
 /// The server's answer to a definition or references, MESSAGE, with as its
 /// result the proxy's locations FOUND first, then each of the server's
 /// entries that matches none before it, URIs read as paths by PATH_OF.
 /// An entry is a location by its shape alone, a `uri` or a `targetUri`
 /// that is a string, a `range` or a `targetSelectionRange` whose start and
 /// end each have a line and a character, and written as a `Location`, a
-/// link's of its target's selection; any other is dropped.  One whose URI
+/// link's of its target's selection; any other is dropped.  Two match in
+/// one file when the range of one holds the other's; one whose URI
 /// PATH_OF cannot read matches none but itself, given again.  When the
 /// server adds nothing, the result is FOUND as it is, else an array.
 pub fn merge_locations(message: &Value, found: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Value {
-    let written = |entry: &&Value| {
+    let written = |entry: &Value| {
         let uri = entry.get("uri").or_else(|| entry.get("targetUri")).filter(|uri| uri.is_string())?;
         let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
         let at = |end: &str| ["line", "character"].iter().all(|key| range[end][*key].is_u64());
         (at("start") && at("end")).then(|| json!({"uri": uri, "range": range}))
     };
-    let mut united: Vec<Value> = shadow::entries(found).into_iter().cloned().collect();
+    let entries = |result: &Value| match result {
+        Value::Null => Vec::new(),
+        Value::Array(entries) => entries.clone(),
+        entry => vec![entry.clone()],
+    };
+    let location = |entry: &Value| {
+        let uri = entry.get("uri").or_else(|| entry.get("targetUri"))?.as_str()?;
+        let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
+        let position = |at: &str| Some((range[at]["line"].as_u64()?, range[at]["character"].as_u64()?));
+        Some(Location { path: path_of(uri)?, start: position("start")?, end: position("end")? })
+    };
+    let matches = |one: &Location, other: &Location| {
+        let holds = |outer: &Location, inner: &Location| outer.start <= inner.start && inner.end <= outer.end;
+        one.path == other.path && (holds(one, other) || holds(other, one))
+    };
+    let mut united = entries(found);
     let own = united.len();
-    let mut seen: Vec<shadow::Location> = united.iter().filter_map(|entry| shadow::location(entry, path_of)).collect();
-    for entry in shadow::entries(&message["result"]).iter().filter_map(written) {
-        let location = shadow::location(&entry, path_of);
-        let matched = location.as_ref().is_some_and(|location| seen.iter().any(|before| before.matches(location)));
+    let mut seen: Vec<Location> = united.iter().filter_map(location).collect();
+    for entry in entries(&message["result"]).iter().filter_map(written) {
+        let location = location(&entry);
+        let matched = location.as_ref().is_some_and(|location| seen.iter().any(|before| matches(before, location)));
         if matched || united.contains(&entry) {
             continue;
         }
