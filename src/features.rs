@@ -16,7 +16,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-/// At most this many workspace symbols per answer.
 pub const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 
 /// LSP's `SymbolKind` and a label of each kind of block or CTE of the
