@@ -100,8 +100,8 @@ jobs:
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-
       - run: nix develop -c make test
 
-  # The corpus on dbt-oss, then the live test, which has the proxy alone since dbt-oss has
-  # no `dbt lsp`.  The binary is fetched outside the checkout and no cache holds it.
+  # The corpus on dbt-oss, then the live test.  The binary is fetched outside the checkout
+  # and no cache holds it.
   dbt-oss:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-24.04
@@ -164,8 +164,8 @@ jobs:
       - run: python3 scripts/fetch-dbt proprietary "$RUNNER_TEMP/dbt"
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: unshare -rn true
-      # Built with the network, then the corpus and the live test with none: dbt lsp runs
-      # as the user's command gives it, with no flag of the proxy's.
+      # Built with the network, then the corpus and the live test with none: the server
+      # alone with the proprietary build too, whose `dbt lsp` never runs.
       - run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
       - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"
       - run: nix develop -c unshare -rn make live DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt"

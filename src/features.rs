@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The answers of the features the proxy adds, as LSP JSON.  Pure: the
-//! texts, the project and the graph are inputs.
+//! The answers of the features, as LSP JSON.  Pure: the texts, the project
+//! and the graph are inputs.
 
 use crate::graph::{Edge, Graph, Item};
 use crate::navigation::Lookup;
@@ -13,7 +13,7 @@ use crate::text::{Encoding, LineStarts};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use url::Url;
 
 pub const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
@@ -204,111 +204,12 @@ pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encodin
     Value::Array(answer.collect())
 }
 
-/// The line that names the server's part of a merged hover, in markdown.
-const SERVER_PART: &str = "**dbt lsp**";
-
-/// The server's answer to a hover, MESSAGE, with SUMMARY put first and the
-/// server's text after it under a line that names it: before a rule and
-/// `SERVER_PART` in markdown, above a blank line and `dbt lsp:` in plain
-/// text, as the first item of an array of marked strings, `SERVER_PART`
-/// the second.  A null result, or a server's text that is empty or blank,
-/// becomes the summary alone, in markdown when MARKDOWN for a null result;
-/// an error, or contents of a shape LSP does not define, gives none, so
-/// that the answer passes as it came.  In markdown, the summary's line
-/// breaks are hard when HARD, else as written.
-pub fn merge_hover(message: &Value, summary: &str, hard: bool, markdown: bool) -> Option<Value> {
-    let mut merged = message.clone();
-    let result = merged.get_mut("result")?;
-    // A line break in markdown needs two spaces before it.
-    let marked = if hard { summary.replace('\n', "  \n") } else { summary.to_owned() };
-    let kind = result.pointer("/contents/kind").and_then(Value::as_str).map(str::to_owned);
-    let kind = kind.or_else(|| result.is_null().then(|| if markdown { "markdown" } else { "plaintext" }.to_owned()));
-    let contents = result.get("contents").cloned().unwrap_or(Value::Null);
-    let blank =
-        |item: &Value| item.as_str().or_else(|| item["value"].as_str()).is_some_and(|text| text.trim().is_empty());
-    let joined = match (kind.as_deref(), contents) {
-        (Some(kind), contents) => {
-            let (first, heading) = match kind {
-                "markdown" => (marked, format!("---\n\n{SERVER_PART}\n\n")),
-                _ => (summary.to_owned(), "dbt lsp:\n".to_owned()),
-            };
-            let text = contents["value"].as_str().filter(|value| !value.trim().is_empty());
-            let rest = text.map_or_else(String::new, |value| format!("\n\n{heading}{value}"));
-            json!({"kind": kind, "value": format!("{first}{rest}")})
-        }
-        (None, Value::Array(items)) if items.iter().all(blank) => json!([marked]),
-        (None, Value::Array(items)) => {
-            json!([json!(marked), json!(SERVER_PART)].into_iter().chain(items).collect::<Vec<_>>())
-        }
-        (None, item) if blank(&item) => json!(marked),
-        (None, Value::String(text)) => json!(format!("{marked}\n\n---\n\n{SERVER_PART}\n\n{text}")),
-        (None, item @ Value::Object(_)) => json!([marked, SERVER_PART, item]),
-        _ => return None,
-    };
-    if result.is_null() {
-        *result = json!({});
-    }
-    result["contents"] = joined;
-    Some(merged)
-}
-
-/// A location as the union compares it: its file, and its range from a
-/// (line, character) to another.
-struct Location {
-    path: PathBuf,
-    start: (u64, u64),
-    end: (u64, u64),
-}
-
-/// The entries of RESULT, an answer to a definition or references: none
-/// for null, the one location or link, or each of a list.
-fn entries(result: &Value) -> Vec<&Value> {
-    match result {
-        Value::Null => Vec::new(),
-        Value::Array(entries) => entries.iter().collect(),
-        entry => vec![entry],
-    }
-}
-
-/// ENTRY as the union reads it, by its shape alone: none unless it has a
-/// `uri` or a `targetUri` that is a string and a `range` or a
-/// `targetSelectionRange` whose start and end each have a line and a
-/// character; else written as a `Location`, a link's of its target's
-/// selection, and its location, if PATH_OF reads its URI.
-fn location(entry: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Option<(Value, Option<Location>)> {
-    let uri = entry.get("uri").or_else(|| entry.get("targetUri"))?.as_str()?;
-    let range = entry.get("range").or_else(|| entry.get("targetSelectionRange"))?;
-    let position = |at: &str| range[at]["line"].as_u64().zip(range[at]["character"].as_u64());
-    let (start, end) = (position("start")?, position("end")?);
-    Some((json!({"uri": uri, "range": range}), path_of(uri).map(|path| Location { path, start, end })))
-}
-
-/// The server's answer to a definition or references, MESSAGE, with as its
-/// result the proxy's locations FOUND first, then each of the server's
-/// entries, as `location` reads it, that matches none before it; any other
-/// is dropped.  Two match in one file when the range of one holds the
-/// other's; one whose URI PATH_OF cannot read matches none but itself,
-/// given again.  When the server adds nothing, the result is FOUND as it
-/// is, else an array.
-pub fn merge_locations(message: &Value, found: &Value, path_of: &dyn Fn(&str) -> Option<PathBuf>) -> Value {
-    let matches = |one: &Location, other: &Location| {
-        let holds = |outer: &Location, inner: &Location| outer.start <= inner.start && inner.end <= outer.end;
-        one.path == other.path && (holds(one, other) || holds(other, one))
-    };
-    let mut united: Vec<Value> = entries(found).into_iter().cloned().collect();
-    let own = united.len();
-    let mut seen: Vec<Location> = united.iter().filter_map(|entry| location(entry, path_of)?.1).collect();
-    for (entry, place) in entries(&message["result"]).into_iter().filter_map(|entry| location(entry, path_of)) {
-        let matched = place.as_ref().is_some_and(|place| seen.iter().any(|before| matches(before, place)));
-        if matched || united.contains(&entry) {
-            continue;
-        }
-        seen.extend(place);
-        united.push(entry);
-    }
-    let mut merged = message.clone();
-    merged["result"] = if united.len() == own { found.clone() } else { Value::Array(united) };
-    merged
+/// A hover's result of TEXT: markdown when MARKDOWN, its line breaks hard
+/// when HARD, as markdown needs two spaces before each; else plain text, as
+/// given.
+pub fn hover(text: &str, hard: bool, markdown: bool) -> Value {
+    let value = if markdown && hard { text.replace('\n', "  \n") } else { text.to_owned() };
+    json!({"contents": {"kind": if markdown { "markdown" } else { "plaintext" }, "value": value}})
 }
 
 /// The relation hints of TEXT, the file at PATH, whose calls are CALLS:
@@ -351,21 +252,6 @@ pub fn inlay_hints(
                     "paddingLeft": true, "tooltip": node["unique_id"]}))
     };
     calls.into_iter().filter_map(hint).collect()
-}
-
-/// The server's answer to an inlay hint request, MESSAGE, with HINTS after
-/// its own: appended to an array, alone in place of null; an error, or a
-/// result of another shape, gives none, so that the answer passes as it
-/// came.
-pub fn merge_hints(message: &Value, hints: &[Value]) -> Option<Value> {
-    let mut merged = message.clone();
-    let result = merged.get_mut("result")?;
-    match result {
-        Value::Array(own) => own.extend_from_slice(hints),
-        Value::Null => *result = Value::Array(hints.to_vec()),
-        _ => return None,
-    }
-    Some(merged)
 }
 
 #[cfg(test)]
@@ -713,45 +599,6 @@ mod tests {
         assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), None);
     }
 
-    #[test]
-    fn puts_the_summary_first_in_every_shape_of_hover() {
-        let summary = "model table, x\ntags a";
-        let marked = "model table, x  \ntags a";
-        let headed = format!("{marked}\n\n---\n\n**dbt lsp**\n\nServer");
-        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let markdown = json!({"contents": {"kind": "markdown", "value": "Server"}, "range": "kept"});
-        let code = json!({"language": "sql", "value": "select 1"});
-        // Each shape, whether the client reads markdown, and the contents merged.
-        let shapes = [
-            (markdown, true, json!({"kind": "markdown", "value": headed})),
-            (
-                json!({"contents": {"kind": "plaintext", "value": "Server"}}),
-                true,
-                json!({"kind": "plaintext", "value": "model table, x\ntags a\n\ndbt lsp:\nServer"}),
-            ),
-            (json!({"contents": "Server"}), true, json!(headed)),
-            (json!({"contents": code}), true, json!([marked, "**dbt lsp**", code])),
-            (json!({"contents": ["a", "b"]}), true, json!([marked, "**dbt lsp**", "a", "b"])),
-            (Value::Null, false, json!({"kind": "plaintext", "value": summary})),
-            // A server's blank text is no section: the summary by itself.
-            (
-                json!({"contents": {"kind": "markdown", "value": " \n"}}),
-                true,
-                json!({"kind": "markdown", "value": marked}),
-            ),
-            (json!({"contents": ""}), true, json!(marked)),
-            (json!({"contents": [" "]}), true, json!([marked])),
-        ];
-        for (result, markdown, expected) in shapes {
-            let merged = merge_hover(&answer(result.clone()), summary, true, markdown).unwrap();
-            assert_eq!(merged["result"]["contents"], expected, "{result}");
-            assert_eq!(merged["result"].get("range"), result.get("range"), "kept: {result}");
-        }
-        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
-        assert_eq!(merge_hover(&error, summary, true, true), None);
-        assert_eq!(merge_hover(&answer(json!({"contents": 3})), summary, true, true), None);
-    }
-
     fn index() -> ParseIndex {
         let model = |name: &str, materialized: &str, relation: Value| {
             json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
@@ -876,66 +723,16 @@ mod tests {
     }
 
     #[test]
-    fn hints_follow_the_server_s_own() {
-        let hint = json!({"label": "x"});
-        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let merged = merge_hints(&answer(json!([{"label": "server"}])), std::slice::from_ref(&hint));
-        assert_eq!(merged, Some(answer(json!([{"label": "server"}, {"label": "x"}]))));
-        assert_eq!(
-            merge_hints(&answer(Value::Null), std::slice::from_ref(&hint)),
-            Some(answer(json!([{"label": "x"}])))
-        );
-        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
-        assert_eq!(merge_hints(&error, std::slice::from_ref(&hint)), None);
-        assert_eq!(merge_hints(&answer(json!({"odd": 1})), std::slice::from_ref(&hint)), None);
-    }
-
-    #[test]
-    fn unites_the_server_s_locations_after_the_proxy_s() {
-        let at = |file: &str, start: (u64, u64), end: (u64, u64)| {
-            json!({"uri": format!("file:///p/{file}"),
-                   "range": {"start": {"line": start.0, "character": start.1}, "end": {"line": end.0, "character": end.1}}})
-        };
-        let path_of = |uri: &str| uri.strip_prefix("file://").map(PathBuf::from);
-        let answer = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
-        let united = |found: &Value, result: Value| merge_locations(&answer(result), found, &path_of)["result"].clone();
-        let ours = at("a.sql", (0, 0), (0, 0));
-        let echo = json!({"echo": "textDocument/definition", "params": {}});
-        let no_range = json!({"uri": "file:///p/b.sql", "range": {}});
-        for nothing in [Value::Null, json!([]), json!(3), echo, json!([{"range": ours["range"]}]), no_range] {
-            assert_eq!(united(&ours, nothing.clone()), ours, "one location stays one: {nothing}");
-        }
-        let (holding, name) = (at("a.sql", (0, 0), (14, 0)), at("a.sql", (1, 2), (1, 9)));
-        let (block, crossing) = (at("a.sql", (0, 0), (5, 0)), at("a.sql", (4, 0), (7, 0)));
-        let elsewhere = at("b.sql", (0, 0), (0, 0));
-        let matched = [
-            (&ours, &holding, ours.clone(), "one range holds the other"),
-            (&holding, &name, holding.clone(), "the proxy's range holds the server's"),
-            (&block, &crossing, json!([block, crossing]), "ranges that only cross"),
-            (&ours, &elsewhere, json!([ours, elsewhere]), "one range in another file"),
+    fn a_hover_is_markdown_with_hard_breaks_or_plain_text() {
+        let text = "model table, x\ntags a";
+        let cases = [
+            (true, true, json!({"kind": "markdown", "value": "model table, x  \ntags a"})),
+            (false, true, json!({"kind": "markdown", "value": text})),
+            (true, false, json!({"kind": "plaintext", "value": text})),
+            (false, false, json!({"kind": "plaintext", "value": text})),
         ];
-        for (found, server, expected, why) in matched {
-            assert_eq!(united(found, json!([server])), expected, "{why}");
+        for (hard, markdown, contents) in cases {
+            assert_eq!(hover(text, hard, markdown), json!({"contents": contents}), "hard {hard}, markdown {markdown}");
         }
-        let other = at("b.sql", (1, 2), (1, 4));
-        assert_eq!(united(&ours, json!([other])), json!([ours, other]));
-        let link = json!({"targetUri": "file:///p/c.sql", "targetRange": at("c.sql", (0, 0), (9, 0))["range"],
-                          "targetSelectionRange": at("c.sql", (0, 0), (0, 3))["range"]});
-        assert_eq!(united(&ours, link), json!([ours, at("c.sql", (0, 0), (0, 3))]), "a link as its target's selection");
-        let unread = json!({"uri": "untitled:x", "range": ours["range"]});
-        assert_eq!(united(&ours, json!([unread, unread])), json!([ours, unread]), "a URI the reader cannot read");
-        assert_eq!(united(&ours, json!([other, other])), json!([ours, other]), "given twice, once");
-        let uses = json!([at("a.sql", (4, 26), (4, 36)), at("s.sql", (2, 22), (2, 32))]);
-        let server = json!([at("s.sql", (2, 22), (2, 32)), other, at("a.sql", (4, 21), (4, 38))]);
-        assert_eq!(united(&uses, server), json!([uses[0], uses[1], other]), "references: the proxy's, then the new");
-    }
-
-    #[test]
-    fn keeps_a_markdown_text_s_line_breaks_as_written() {
-        // A paragraph that a docs block wraps in its source stays one.
-        let text = "One sentence\nwrapped.";
-        let null = json!({"jsonrpc": "2.0", "id": 1, "result": null});
-        let merged = merge_hover(&null, text, false, true).unwrap();
-        assert_eq!(merged["result"]["contents"], json!({"kind": "markdown", "value": text}));
     }
 }

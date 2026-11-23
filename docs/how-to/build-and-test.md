@@ -10,13 +10,13 @@ DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy -- --igno
 
 The last two commands build the opt-in tests with the network, then run
 them with none, as CI does: the corpus, and the live tests against a real
-dbt 2, on a copy of `tests/fixtures/shop` with a scratch home: the proxy in
-front of `dbt lsp` with the proprietary build (tested with 2.0.9), alone
-with dbt-oss (tested with 2.0.11).  Where there is no `unshare`, as on a
+dbt 2, on a copy of `tests/fixtures/shop` with a scratch home, with either
+build: dbt-oss (tested with 2.0.11), or the proprietary one (tested with
+2.0.9), whose `dbt lsp` never runs.  Where there is no `unshare`, as on a
 Mac, run the last one without it.
 
-The crate also builds `fake-dbt-lsp`, the scripted server of the tests; to
-install the proxy alone, run `cargo install --path . --bin dbt-lsp-plus`.
+The crate also builds `fake-dbt-lsp`, the scripted dbt of the tests; to
+install the server alone, run `cargo install --path . --bin dbt-lsp-plus`.
 
 The `Makefile` holds every check that CI runs, `make check` among them;
 [the release pipeline](../reference/release-pipeline.md) describes how CI

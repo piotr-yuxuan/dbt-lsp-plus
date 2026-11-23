@@ -6,7 +6,7 @@
 //! no message, no position, no URI.
 
 use crate::answer::{Answer, Reason};
-use crate::graph::{Graph, ServerNode};
+use crate::graph::Graph;
 use crate::project::{self, Project, Scanned};
 use crate::{cache, config, locate, navigation, packages, reference, run, scan};
 use serde_json::Value;
@@ -22,9 +22,8 @@ use std::thread;
 /// them, as `cache::fill` gives them.
 type Filled = Vec<(PathBuf, cache::Key, Arc<project::Scanned>)>;
 
-/// The generations of the project, the server's nodes and the index a
-/// graph was made of, and whether it took the index's edges, alone.
-type MadeOf = (u64, u64, u64, bool);
+/// The generations of the project and of the index a graph was made of.
+type MadeOf = (u64, u64);
 
 /// A place in a document: its path, its text as the front end holds it,
 /// open or on disk, and a byte offset in it.
@@ -102,22 +101,17 @@ impl Workspace {
         }
     }
 
-    /// The graph of PROJECT with SERVER's nodes once listed, SERVER the
-    /// generation of dbt lsp's nodes and its listing's nodes; with none,
-    /// alone, the last parse's: made again only when the project, the nodes
-    /// or the index changed, as the call hierarchy asks for it at each step.
-    /// Its calls are looked up with the last parse's index.
-    pub fn graph(&self, project: &Project, server: Option<(u64, Option<&[ServerNode]>)>) -> Rc<Graph> {
-        let nodes_generation = server.map_or(0, |(generation, _)| generation);
-        let made_of = (self.cache.borrow().generation, nodes_generation, self.generation, server.is_none());
+    /// The graph of PROJECT with the last parse's nodes, made again only
+    /// when the project or the index changed, as the call hierarchy asks for
+    /// it at each step.  Its calls are looked up with the last parse's index.
+    pub fn graph(&self, project: &Project) -> Rc<Graph> {
+        let made_of = (self.cache.borrow().generation, self.generation);
         if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
             return graph.clone();
         }
         let scanned = Graph::scanned(project, self.index.as_ref());
-        let parsed = self.index.as_ref().filter(|_| server.is_none()).map(config::ParseIndex::listed);
-        let listed = server.and_then(|(_, nodes)| nodes);
-        let graph = Rc::new(match parsed.as_deref().or(listed) {
-            Some(nodes) => scanned.with_server(nodes, project),
+        let graph = Rc::new(match self.index.as_ref().map(config::ParseIndex::listed) {
+            Some(nodes) => scanned.with_server(&nodes, project),
             None => scanned,
         });
         *self.graph.borrow_mut() = Some((made_of, graph.clone()));
@@ -128,7 +122,7 @@ impl Workspace {
         let why = match (self.running.is_some(), &self.failure) {
             (true, _) => "it is running",
             (false, Some(failure)) => failure,
-            (false, None) => "waiting for dbt lsp to compile the project",
+            (false, None) => "it has not run, or left no manifest",
         };
         Reason::Unindexed(why.to_owned())
     }
@@ -432,7 +426,7 @@ mod tests {
         let mut workspace = Workspace { root: Some(root.clone()), cache_dir: Some(cache_dir), ..Workspace::default() };
         let (texts, edits) = (HashMap::new(), HashMap::new());
         let project = workspace.project(&cache::Open { texts: &texts, edits: &edits }).unwrap();
-        let graph = workspace.graph(&project, None);
+        let graph = workspace.graph(&project);
         let held = project.files.contains_key(&root.join("models/a.sql")) && graph.items.contains_key("model.shop.a");
         assert!(held, "the project's file and the graph's item");
         let (sender, outcomes) = mpsc::channel();

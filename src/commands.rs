@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy's commands for clients, `dbt-lsp-plus.compile`, `.show` and
-//! `.nodes`: done by dbt lsp's own commands when it runs, else, for two of
-//! them, by dbt's CLI.  How each request goes, the words of a run, and what
-//! its output answers, in dbt lsp 2.0.9's shapes.
+//! The commands for clients `dbt-lsp-plus.compile` and `.nodes`, done by
+//! dbt's CLI: the words of a run, and what its output answers, in the
+//! shapes that the table of design.md's "Commands for clients" holds as
+//! their contract.
 
-use crate::capability::{self, CAPABILITIES, Provider};
 use crate::run::{self, Ending, Output, Run, Running};
 use crate::{packages, project::Project, yaml::Tree};
 use serde_json::{Value, json};
@@ -13,73 +12,23 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 pub const COMPILE: &str = "dbt-lsp-plus.compile";
-pub const SHOW: &str = "dbt-lsp-plus.show";
 pub const NODES: &str = "dbt-lsp-plus.nodes";
-
-/// The rows of a show whose client names no limit: `dbt show`'s default.
-const LIMIT: u64 = 10;
 
 /// Why a server command with no `lsp` word runs no command: dbt's words
 /// are those before it.
 pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus runs no dbt";
 
-/// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
+/// The error of a compile that finds no compiled file, in the contract's
+/// words.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
-
-/// The commands that `initialize` announces, in the table's order: each
-/// with a provider of dbt's present, dbt lsp when the server LISTS its
-/// command.
-pub fn announced(lists: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
-    let done = |own: &&capability::Capability| {
-        own.is_command() && route(own.name, lists).is_ok_and(|provider| provider != Provider::Plus)
-    };
-    CAPABILITIES.iter().filter(done).map(|own| own.name).collect()
-}
-
-/// Who answers a request of COMMAND: the first of its providers present,
-/// dbt lsp only when SERVES says that a server runs that listed its
-/// command; else the failure that says why none is.  A run of dbt's CLI
-/// may still refuse, as `NO_LSP_WORD` says.
-pub fn route(command: &str, serves: &dyn Fn(&str) -> bool) -> Result<Provider, Value> {
-    let own = capability::of(command).filter(|own| own.is_command());
-    let providers = own.map_or(&[][..], |own| own.providers);
-    let present = |provider: &&Provider| match provider {
-        Provider::Plus | Provider::DbtCli => true,
-        Provider::DbtLsp => own.and_then(|own| own.server).is_some_and(serves),
-    };
-    providers.iter().find(present).copied().ok_or_else(|| failure(command, "dbt-lsp-plus.show needs dbt lsp"))
-}
 
 /// COMMAND's answer that fails for WHY: `error` set, the rest null, or `[]`
 /// for nodes.
 pub fn failure(command: &str, why: &str) -> Value {
     match command {
         COMPILE => json!({"file_uri": null, "error": why}),
-        SHOW => json!({"columns": null, "data": null, "error": why}),
         _ => json!({"nodes": [], "error": why}),
     }
-}
-
-/// The arguments of a request of COMMAND, from its PARAMS, as dbt lsp takes
-/// them: a URI for a compile; for a show, an object with a `uri` or an
-/// `inline` text, and a positive `limit`, `LIMIT` when it has none; a
-/// selector for nodes.  None when they cannot be read.
-pub fn arguments(command: &str, params: &Value) -> Option<Vec<Value>> {
-    let first = params.pointer("/arguments/0")?;
-    let shown = |object: &serde_json::Map<String, Value>| {
-        let mut object = object.clone();
-        let limit = object.entry("limit").or_insert(json!(LIMIT));
-        limit.as_u64().filter(|limit| *limit > 0)?;
-        Some(Value::Object(object))
-    };
-    let named = |object: &&serde_json::Map<String, Value>| {
-        ["uri", "inline"].iter().any(|key| object.get(*key).is_some_and(Value::is_string))
-    };
-    let argument = match command {
-        SHOW => first.as_object().filter(named).and_then(shown),
-        _ => first.as_str().map(|_| first.clone()),
-    };
-    argument.map(|argument| vec![argument])
 }
 
 /// A run of dbt for a request of a command: the command, the words after
@@ -198,8 +147,8 @@ pub fn nodes_job(selector: &str) -> Job {
 }
 
 /// The nodes in TEXT, `dbt list --output json`'s output: each line that is
-/// a JSON object with a `unique_id`; "No nodes found" for none, as dbt lsp
-/// 2.0.9 answers.
+/// a JSON object with a `unique_id`; "No nodes found" for none, as the
+/// contract has it.
 pub fn listed(text: &str) -> Value {
     let nodes = text.lines().filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok());
     let nodes: Vec<Value> = nodes.filter(|node| node["unique_id"].is_string()).collect();
@@ -225,62 +174,10 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    fn served(listed: &'static [&'static str]) -> impl Fn(&str) -> bool {
-        move |dbt: &str| listed.contains(&dbt)
-    }
-
-    #[test]
-    fn a_request_goes_to_dbt_lsp_when_it_listed_the_command_else_to_the_cli() {
-        let all = served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"]);
-        let server = |command: &str| capability::of(command).and_then(|own| own.server);
-        assert_eq!(
-            [COMPILE, SHOW, NODES].map(server),
-            [Some("dbt.compileFile"), Some("dbt.show"), Some("dbt.listNodes")]
-        );
-        assert_eq!(route(COMPILE, &all), Ok(Provider::DbtLsp));
-        assert_eq!(route(SHOW, &all), Ok(Provider::DbtLsp));
-        assert_eq!(route(NODES, &all), Ok(Provider::DbtLsp));
-        let none = served(&[]);
-        assert_eq!(route(COMPILE, &none), Ok(Provider::DbtCli));
-        assert_eq!(route(NODES, &none), Ok(Provider::DbtCli));
-        assert_eq!(route(NODES, &served(&["dbt.compileFile"])), Ok(Provider::DbtCli), "not listed");
-        assert_eq!(route(SHOW, &none), Err(failure(SHOW, "dbt-lsp-plus.show needs dbt lsp")), "never alone");
-    }
-
-    #[test]
-    fn initialize_announces_what_the_server_lists_and_what_the_cli_can_do() {
-        assert_eq!(announced(&served(&["dbt.compileFile", "dbt.show", "dbt.listNodes"])), [COMPILE, SHOW, NODES]);
-        assert_eq!(announced(&served(&[])), [COMPILE, NODES]);
-        assert_eq!(announced(&served(&["dbt.show"])), [COMPILE, SHOW, NODES]);
-        let providers = |name: &str| capability::of(name).map(|own| own.providers);
-        let dbt: &[Provider] = &[Provider::DbtLsp, Provider::DbtCli];
-        let plus: &[Provider] = &[Provider::Plus];
-        assert_eq!(
-            (providers(COMPILE), providers("dbt.compileFile"), providers(config::NODE_INFO)),
-            (Some(dbt), None, Some(plus))
-        );
-    }
-
     #[test]
     fn a_failure_has_its_command_s_shape() {
         assert_eq!(failure(COMPILE, "no"), json!({"file_uri": null, "error": "no"}));
-        assert_eq!(failure(SHOW, "no"), json!({"columns": null, "data": null, "error": "no"}));
         assert_eq!(failure(NODES, "no"), json!({"nodes": [], "error": "no"}));
-    }
-
-    #[test]
-    fn arguments_are_read_as_dbt_lsp_takes_them_a_show_s_limit_ten_when_none() {
-        let read = |command: &str, arguments: Value| super::arguments(command, &json!({"arguments": arguments}));
-        assert_eq!(read(COMPILE, json!(["file:///p/a.sql"])), Some(vec![json!("file:///p/a.sql")]));
-        assert_eq!(read(NODES, json!(["+orders+"])), Some(vec![json!("+orders+")]));
-        let uri = json!({"uri": "file:///p/a.sql", "limit": 3});
-        assert_eq!(read(SHOW, json!([uri])), Some(vec![uri]));
-        assert_eq!(read(SHOW, json!([{"inline": "select 1"}])), Some(vec![json!({"inline": "select 1", "limit": 10})]));
-        for bad in [json!([]), json!([3]), json!([{"limit": 3}]), json!([{"inline": "x", "limit": 0}]), json!("x")] {
-            assert_eq!(read(SHOW, bad.clone()), None, "{bad}");
-        }
-        assert_eq!(read(COMPILE, json!([7])), None);
-        assert_eq!(super::arguments(NODES, &Value::Null), None);
     }
 
     fn project(root: &Path) -> Project {

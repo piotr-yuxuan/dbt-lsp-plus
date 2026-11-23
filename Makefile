@@ -16,8 +16,8 @@ export PYTHONDONTWRITEBYTECODE := 1
 # reduction chain lowers to its own figures.  A commit that raises one, or
 # changes how they are checked, says why in a line of its body:
 # "Raises the size ceilings: WHY".
-SIZE_LINES := 6501
-SIZE_TYPES := 97
+SIZE_LINES := 5345
+SIZE_TYPES := 79
 
 .PHONY: check check-static fmt clippy public python test-python workflows size test conformance live commits
 
@@ -50,9 +50,8 @@ size:
 test:
 	@$(CARGO_TEST) -- --test-threads=$(TEST_THREADS)
 
-# Opt-in, with DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable: the corpus
-# and the live test with either build, the proxy in front of `dbt lsp` with
-# the proprietary one, alone with dbt-oss.
+# Opt-in, with DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable, either
+# build: the corpus and the live test.
 conformance:
 	@$(CARGO_TEST) --test proxy conformance:: -- --ignored --test-threads=$(TEST_THREADS)
 

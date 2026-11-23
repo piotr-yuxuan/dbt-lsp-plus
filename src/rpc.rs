@@ -7,16 +7,10 @@ use std::io::{self, BufRead, Write};
 /// A body larger than this is refused: the frame is lost, the stream must stop.
 pub const MAX_BODY: usize = 64 * 1024 * 1024;
 
-/// One message as it arrived. `body` is forwarded byte for byte; `value` is
-/// `None` when the body is not JSON, which the proxy forwards all the same.
-pub struct Frame {
-    pub body: Vec<u8>,
-    pub value: Option<Value>,
-}
-
-/// Reads the next frame, or `Ok(None)` at the end of the stream.  An error
-/// means the frame boundary is lost and the caller must stop reading.
-pub fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<Frame>> {
+/// Reads the next message, null for a body that is not JSON, or `Ok(None)`
+/// at the end of the stream.  An error means the frame boundary is lost and
+/// the caller must stop reading.
+pub fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
     let mut length = None;
     let mut line = String::new();
     loop {
@@ -39,8 +33,7 @@ pub fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<Frame>> {
         .ok_or_else(|| io::Error::other("no Content-Length, or one above the limit"))?;
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    let value = serde_json::from_slice(&body).ok();
-    Ok(Some(Frame { body, value }))
+    Ok(Some(serde_json::from_slice(&body).unwrap_or(Value::Null)))
 }
 
 /// Writes BODY as one frame and flushes it.
@@ -62,29 +55,17 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn keeps_the_bytes_of_a_body() {
-        let body = br#"{"b":1, "a":  2.50}"#;
-        let mut buffer = Vec::new();
-        write_body(&mut buffer, body).unwrap();
-        let frame = read_frame(&mut Cursor::new(buffer)).unwrap().unwrap();
-        assert_eq!(frame.body, body);
-        assert_eq!(frame.value, Some(json!({"a": 2.5, "b": 1})));
-    }
-
-    #[test]
     fn reads_headers_in_any_case_and_order() {
         let raw = "content-type: application/vscode-jsonrpc\r\ncontent-LENGTH: 2\r\n\r\n{}";
-        let frame = read_frame(&mut Cursor::new(raw)).unwrap().unwrap();
-        assert_eq!(frame.value, Some(json!({})));
+        assert_eq!(read_frame(&mut Cursor::new(raw)).unwrap(), Some(json!({})));
     }
 
     #[test]
     fn passes_a_body_that_is_not_json() {
         let raw = "Content-Length: 3\r\n\r\nnopContent-Length: 2\r\n\r\n{}";
         let mut reader = Cursor::new(raw);
-        let first = read_frame(&mut reader).unwrap().unwrap();
-        assert_eq!((first.body.as_slice(), first.value), (&b"nop"[..], None));
-        assert!(read_frame(&mut reader).unwrap().unwrap().value.is_some());
+        assert_eq!(read_frame(&mut reader).unwrap(), Some(Value::Null));
+        assert_eq!(read_frame(&mut reader).unwrap(), Some(json!({})));
         assert!(read_frame(&mut reader).unwrap().is_none());
     }
 

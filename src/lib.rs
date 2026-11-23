@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! dbt-lsp-plus: a proxy in front of `dbt lsp` that adds what it lacks.
+//! dbt-lsp-plus: a language server for dbt projects, from their files and
+//! the user's `dbt parse`.
 
 pub mod answer;
 pub mod cache;

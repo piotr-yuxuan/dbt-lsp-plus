@@ -1,54 +1,32 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy in front of the real dbt lsp, or alone with a dbt that has
-//! none.  Opt-in, since it needs dbt 2; built with the network, then run
-//! with none, as CI runs it:
+//! The server with the real dbt, whichever build: dbt-oss, or the
+//! proprietary one, whose `dbt lsp` never runs.  Opt-in, since it needs
+//! dbt 2; built with the network, then run with none, as CI runs it:
 //!
 //!     cargo test --locked -j 4 --test proxy --no-run
 //!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy -- --ignored
 //!
 //! It runs on a copy of the fixture, from an empty environment with a
 //! scratch home, so that dbt writes nothing into the repository nor the
-//! user's home.  Each test says, past the harness's capture, when the dbt
-//! given is not the kind it needs, and passes.
+//! user's home.
 
 use crate::support::{Session, copy_fixture, uri};
-use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::process::Command;
+use std::time::Duration;
 
-/// Whether DBT has `lsp`, as the proprietary build has and dbt-oss has not,
-/// run with HOME as its home.
-fn lsp_of(dbt: &str, home: &Path) -> bool {
-    let mut probe = Command::new(dbt);
-    probe.args(["lsp", "--help"]).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
-    probe.env("HOME", home).stdout(Stdio::null()).stderr(Stdio::null());
-    probe.status().is_ok_and(|status| status.success())
-}
-
-/// Whether DBT has `lsp`, run with HOME as its home; when it is not
-/// WANTED, says that the test NAME does not apply.
-fn has_lsp(dbt: &str, home: &Path, wanted: bool, name: &str) -> bool {
-    let has = lsp_of(dbt, home);
-    if has != wanted {
-        let _ = writeln!(std::io::stderr(), "{name}: {dbt} has {}lsp: nothing to test", if has { "" } else { "no " });
-    }
-    has
-}
-
+/// With the dbt given: the server's own features, its node information,
+/// hover and graph from the user's own `dbt parse`, that parse's errors and
+/// the last run's failures as diagnostics, and the commands by dbt's CLI.
 #[test]
 #[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
-fn in_front_of_the_real_dbt_lsp() {
+fn with_the_real_dbt() {
     let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
     let project = copy_fixture("live");
     let home = project.with_file_name("home");
     std::fs::create_dir_all(&home).unwrap();
-    if !has_lsp(&dbt, &home, true, "in_front_of_the_real_dbt_lsp") {
-        return;
-    }
     std::fs::write(project.join("models/marts/_models.yml"), LIVE_MODELS).unwrap();
     // The files of a build whose relationships test failed, as dbt 2.0.9 writes them.
     std::fs::create_dir_all(project.join("target")).unwrap();
@@ -60,201 +38,29 @@ fn in_front_of_the_real_dbt_lsp() {
     // DO_NOT_TRACK does not stop the telemetry of dbt 2.0.9; this flag does.
     let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
     let before = paths(&project);
-    // An empty environment but for PATH and these, run in the project: dbt
-    // writes nowhere else.
+    // An empty environment but for PATH and these, run in the project: dbt writes nowhere else.
     let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
     let mut session = Session::start(&server, &env, Some(&project));
     session.timeout = Duration::from_secs(180);
-
-    // As an editor that lets dbt lsp register its file watcher.
+    // As an editor with a hierarchical outline that lets the server register its file watcher.
     let capabilities = json!({"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}},
                               "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
     let result = session.initialize_as(&project, capabilities);
-    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "{result}");
-    let announced = [
-        "documentSymbolProvider",
-        "callHierarchyProvider",
-        "hoverProvider",
-        "foldingRangeProvider",
-        "referencesProvider",
-        "renameProvider",
-    ];
-    for capability in announced {
-        assert_eq!(result["capabilities"][capability], json!(true), "{capability}");
-    }
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
+    session.wait_for(|m| m["method"] == "client/registerCapability");
     document_features(&mut session, &project);
     navigation(&mut session, &project);
     last_run(&mut session, &project);
-    lineage(&mut session, &project);
-    watcher(&mut session, &project);
-    let symbols = session.request("workspace/symbol", json!({"query": "events.page"}));
-    assert_eq!(symbols["result"][0]["name"], "events.page_views");
-    recorded_observations(&mut session, &result);
-    node_information(&mut session, &project);
-    facts_in_the_hover(&mut session, &project);
-    commands(&mut session, &project);
-    rename_a_source_table_and_compile(&mut session, &project);
-    // The fixture's compilations compile, its standing warning aside, and end within a second.
-    let compiling = |m: &&Value| {
-        let text = m["params"]["message"].as_str().unwrap_or_default();
-        m["method"] == "window/showMessage"
-            && (text.starts_with("dbt lsp compiled nothing") || text.starts_with("dbt lsp has been compiling"))
-    };
-    let said: Vec<&Value> = session.received.iter().filter(compiling).collect();
-    assert!(said.is_empty(), "{said:?}");
-    restart(&mut session, &project);
-    assert!(session.finish().success());
-    let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
-    assert!(added.is_empty(), "the project gained {added:?}");
-}
-
-/// A compilation that compiled nothing, as dbt lsp 2.0.9's is when the
-/// profile names a missing `env_var`: said once, with dbt's error and dbt
-/// lsp's log, and not again after a save and its compilation; a listing
-/// meanwhile answered `Compilation failed`.
-#[test]
-#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
-fn a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp() {
-    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
-    let project = copy_fixture("live-compiled-nothing");
-    let home = project.with_file_name("home");
-    std::fs::create_dir_all(&home).unwrap();
-    if !has_lsp(&dbt, &home, true, "a_compilation_that_compiled_nothing_is_said_in_front_of_the_real_dbt_lsp") {
-        return;
-    }
-    let profile = std::fs::read_to_string(project.join("profiles.yml")).unwrap();
-    let missing = profile.replace("'target/shop.duckdb'", "\"{{ env_var('DBT_LSP_PLUS_TEST_MISSING') }}\"");
-    assert_ne!(missing, profile, "the fixture's profile names its database");
-    std::fs::write(project.join("profiles.yml"), missing).unwrap();
-    let project_arg = project.to_string_lossy().into_owned();
-    let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
-    let server = [&server[..], &["--no-send-anonymous-usage-stats".to_owned()]].concat();
-    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1"))];
-    let mut session = Session::start(&server, &env, Some(&project));
-    session.timeout = Duration::from_secs(180);
-    session.initialize(&project);
-    let orders = project.join("models/marts/orders.sql");
-    // dbt lsp 2.0.9 compiles nothing on this didOpen, but the proxy's listing does.
-    session.open(&orders, None);
-    let compiled_nothing = |m: &Value| {
-        let text = m["params"]["message"].as_str().unwrap_or_default();
-        m["method"] == "window/showMessage" && text.starts_with("dbt lsp compiled nothing")
-    };
-    let shown = session.wait_for(compiled_nothing);
-    let text = shown["params"]["message"].as_str().unwrap();
-    let quoted = text.starts_with("dbt lsp compiled nothing: [InvalidConfig (dbt1005)]: Jinja render error");
-    assert!(quoted && text.contains("DBT_LSP_PLUS_TEST_MISSING") && text.contains("logs/dbt-lsp.log"), "{text}");
-    assert_eq!(shown["params"]["type"], 1, "{shown}");
-    // A foreground completion, then its background one, which says the same failure: 2.0.9 sends
-    // the two at once where nothing compiled, so every foreground one has its background one.
-    let completed = |session: &Session| {
-        let count = |method: &str| session.received.iter().filter(|m| m["method"] == method).count();
-        (count("dbt/lspCompileComplete"), count("dbt/lspBackgroundCompileComplete"))
-    };
-    let before = completed(&session);
-    session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&orders)}}));
-    let waited = Instant::now() + Duration::from_secs(60);
-    let both = |(foreground, background): (usize, usize)| foreground > before.0 && background >= foreground;
-    while !both(completed(&session)) && Instant::now() < waited {
-        session.request("workspace/symbol", json!({"query": "orders"}));
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(both(completed(&session)), "no compilation after a save, or not both completions");
-    let said = session.received.iter().filter(|m| compiled_nothing(m)).count();
-    assert_eq!(said, 1, "said once");
-    // A listing of the client's, which the fake answers alike in a project that compiles nothing.
-    let listed = session.request("workspace/executeCommand", json!({"command": "dbt.listNodes", "arguments": ["*"]}));
-    let failed = (&listed["result"]["error"], &listed["result"]["error_kind"]);
-    assert_eq!(failed, (&json!("Compilation failed"), &json!("compilation_failed")), "{listed}");
-    assert!(session.finish().success());
-}
-
-/// The union in front of the real dbt lsp, by what dbt lsp received: in
-/// `merge`, a definition and references at a position the proxy claims go
-/// to dbt lsp too, and the client gets the proxy's answer, dbt lsp 2.0.9's
-/// locations all within it.  `tee` in the server command records dbt lsp's
-/// input, the fixture's texts and the requests; the proxy takes the words
-/// before `lsp` as dbt's, so its probe and its parse run through it too,
-/// with no input.
-#[test]
-#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
-fn the_union_in_front_of_the_real_dbt_lsp() {
-    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
-    let project = copy_fixture("live-union");
-    let home = project.with_file_name("home");
-    std::fs::create_dir_all(&home).unwrap();
-    if !has_lsp(&dbt, &home, true, "the_union_in_front_of_the_real_dbt_lsp") {
-        return;
-    }
-    let record = project.with_file_name("dbt-lsp-input");
-    let project_arg = project.to_string_lossy().into_owned();
-    let tee = r#"tee -a "$DBT_LSP_INPUT" | "$0" "$@""#;
-    let server = ["sh".into(), "-c".into(), tee.into(), dbt, "lsp".into(), "--project-dir".into(), project_arg.clone()];
-    let flags = ["--profiles-dir".into(), project_arg, "--no-send-anonymous-usage-stats".into()];
-    let env = [("HOME", home.as_path()), ("DO_NOT_TRACK", Path::new("1")), ("DBT_LSP_INPUT", record.as_path())];
-    let mut session = Session::start(&[&server[..], &flags[..]].concat(), &env, Some(&project));
-    session.timeout = Duration::from_secs(180);
-    let result = session.initialize(&project);
-    assert_eq!(result["serverInfo"]["name"], "dbt-lsp", "probed through tee: {result}");
-    let orders = project.join("models/marts/orders.sql");
-    session.open(&orders, None);
-    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
-    let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
-    let found = session.request("textDocument/definition", on_ref.clone());
-    let start = json!({"line": 0, "character": 0});
-    let stg_orders = uri(&project.join("models/staging/stg_orders.sql"));
-    assert_eq!(found["result"], json!({"uri": stg_orders, "range": {"start": start, "end": start}}), "{found}");
-    let mut references = on_ref;
-    references["context"] = json!({"includeDeclaration": false});
-    let used = session.request("textDocument/references", references);
-    let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
-    assert_eq!(json!(files), json!([uri(&orders), uri(&project.join("snapshots/orders_snapshot.sql"))]), "{used}");
-    let request =
-        ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
-    let parsed = session.poll(Duration::from_secs(120), request, |result| result.is_object());
-    assert_eq!(parsed["relation"], "\"shop\".\"main\".\"orders\"", "parsed through tee: {parsed}");
-    assert!(session.finish().success());
-    let input = std::fs::read(&record).unwrap();
-    let mut frames = &input[..];
-    let mut methods = Vec::new();
-    while let Ok(Some(frame)) = rpc::read_frame(&mut frames) {
-        methods.extend(frame.value.and_then(|message| message["method"].as_str().map(str::to_owned)));
-    }
-    let asked = ["textDocument/definition", "textDocument/references"]
-        .map(|method| methods.iter().filter(|m| *m == method).count());
-    assert_eq!(asked, [1, 1], "what dbt lsp received: {methods:?}");
-}
-
-/// With a dbt that has no `lsp`, such as dbt-oss: the proxy alone, its
-/// node information, hover and graph from the user's own `dbt parse`, and
-/// that parse's errors as diagnostics.
-#[test]
-#[ignore = "needs DBT_LSP_PLUS_TEST_DBT naming a dbt 2 executable"]
-fn alone_with_a_dbt_without_lsp() {
-    let dbt = std::env::var("DBT_LSP_PLUS_TEST_DBT").expect("DBT_LSP_PLUS_TEST_DBT names a dbt 2 executable");
-    let project = copy_fixture("live-alone");
-    let home = project.with_file_name("home");
-    std::fs::create_dir_all(&home).unwrap();
-    if has_lsp(&dbt, &home, false, "alone_with_a_dbt_without_lsp") {
-        return;
-    }
-    std::fs::write(project.join("models/marts/_models.yml"), LIVE_MODELS).unwrap();
-    let project_arg = project.to_string_lossy().into_owned();
-    let server = [dbt, "lsp".into(), "--project-dir".into(), project_arg.clone(), "--profiles-dir".into(), project_arg];
-    let before = paths(&project);
-    let mut session = Session::start(&server, &[("HOME", home.as_path())], Some(&project));
-    session.timeout = Duration::from_secs(120);
-    let capabilities = json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}});
-    let result = session.initialize_as(&project, capabilities);
-    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
-    session.wait_for(|m| m["method"] == "client/registerCapability");
     alone_from_the_parse(&mut session, &project);
+    lineage(&mut session, &project);
+    node_information(&mut session, &project);
     facts_in_the_hover(&mut session, &project);
     alone_navigates_sql(&mut session, &project);
     alone_the_parse_s_errors(&mut session, &project);
     alone_commands(&mut session, &project);
+    rename_a_source_table_and_compile(&mut session, &project);
     let shown = session.received.iter().filter(|m| m["method"] == "window/showMessage").count();
-    assert_eq!(shown, 0, "a dbt without lsp is no failure");
+    assert_eq!(shown, 0, "no warning");
     assert!(session.finish().success());
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
@@ -277,9 +83,8 @@ fn the_project_and_its_dbt_found_without_project_dir() {
     std::os::unix::fs::symlink(&dbt, &venv).unwrap();
     let before = paths(&project);
     found_from_a_document(&project, &venv);
-    let lsp = lsp_of(&dbt, &home);
-    found_from_the_folder(&project, lsp);
-    from_a_shell(&project, lsp);
+    found_from_the_folder(&project);
+    from_a_shell(&project);
     let added: Vec<PathBuf> = paths(&project).difference(&before).cloned().collect();
     assert!(added.is_empty(), "the project gained {added:?}");
 }
@@ -304,7 +109,7 @@ fn without_project_dir(project: &Path) -> Session {
 }
 
 /// The client's folder above the project: the first model opened names it,
-/// and the proxy answers alone from the parse of the `.venv`'s dbt, VENV.
+/// and the server answers from the parse of the `.venv`'s dbt, VENV.
 fn found_from_a_document(project: &Path, venv: &Path) {
     let mut session = without_project_dir(project);
     session.initialize(project.parent().unwrap());
@@ -323,32 +128,25 @@ fn found_from_a_document(project: &Path, venv: &Path) {
     assert!(session.finish().success());
 }
 
-/// The client's folder the project: with a dbt that has `lsp` (LSP), dbt
-/// lsp behind the proxy, which answers the definition of a ref; else the
-/// proxy alone.
-fn found_from_the_folder(project: &Path, lsp: bool) {
-    let route = if lsp { "dbt lsp behind the proxy" } else { "the proxy alone, the dbt having no lsp" };
-    let _ = writeln!(std::io::stderr(), "found_from_the_folder: {route}");
+/// The client's folder the project: the server answers the definition of a
+/// ref, once the parse has run.
+fn found_from_the_folder(project: &Path) {
     let mut session = without_project_dir(project);
     let result = session.initialize(project);
-    let expected = if lsp { "dbt-lsp" } else { "dbt-lsp-plus" };
-    assert_eq!(result["serverInfo"]["name"], expected, "{result}");
+    assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus", "{result}");
     let orders = project.join("models/marts/orders.sql");
     session.open(&orders, None);
     let at = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
-    // dbt lsp answers once it has compiled; alone, once the parse has run.
-    let defined =
-        |result: &Value| [&result["uri"], &result[0]["uri"], &result[0]["targetUri"]].iter().any(|uri| uri.is_string());
-    let found = session.poll(Duration::from_secs(120), ("textDocument/definition", at), defined);
-    let stg_orders = json!(uri(&project.join("models/staging/stg_orders.sql")));
-    assert!([&found["uri"], &found[0]["uri"], &found[0]["targetUri"]].contains(&&stg_orders), "{found}");
+    let found =
+        session.poll(Duration::from_secs(120), ("textDocument/definition", at), |result| result["uri"].is_string());
+    assert_eq!(found["uri"], uri(&project.join("models/staging/stg_orders.sql")), "{found}");
     assert!(session.finish().success());
 }
 
 /// doctor from the parent of the copy PROJECT, on a model, and node and
 /// select in PROJECT, as an agent runs them in a shell, with the default
-/// server command; LSP whether the dbt has `lsp`.
-fn from_a_shell(project: &Path, lsp: bool) {
+/// server command.
+fn from_a_shell(project: &Path) {
     let dir = project.parent().unwrap();
     let run = |at: &Path, words: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
@@ -367,10 +165,10 @@ fn from_a_shell(project: &Path, lsp: bool) {
         (output.status.code(), answer)
     };
     let (status, doctor) = run(dir, &["doctor", "shop/models/marts/orders.sql"]);
-    let found = (&doctor["route"], &doctor["dbt"]["source"], &doctor["dbt"]["lsp"]);
+    let found = (&doctor["route"], &doctor["dbt"]["source"], &doctor["dbt"]["why"]);
     assert_eq!(
         (status, found),
-        (Some(0), (&json!("document"), &json!("the project's .venv"), &json!(lsp))),
+        (Some(0), (&json!("document"), &json!("the project's .venv"), &Value::Null)),
         "{doctor}"
     );
     assert_eq!(doctor["packages"], Value::Null, "{doctor}");
@@ -419,9 +217,9 @@ fn alone_from_the_parse(session: &mut Session, project: &Path) {
     assert_eq!(callees, ["model.shop.orders"]);
 }
 
-/// Navigation in SQL once the parse has run, which dbt lsp would answer: a
-/// `ref` to its model's file, a package's macro call to its block, and the
-/// references of a model across files.
+/// Navigation in SQL once the parse has run: a `ref` to its model's file, a
+/// package's macro call to its block, and the references of a model across
+/// files.
 fn alone_navigates_sql(session: &mut Session, project: &Path) {
     let orders = project.join("models/marts/orders.sql");
     let at = |line: u64, character: u64| json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": line, "character": character}});
@@ -457,22 +255,9 @@ fn alone_the_parse_s_errors(session: &mut Session, project: &Path) {
     assert_eq!(session.wait_for(on_broken)["params"]["diagnostics"], json!([]));
 }
 
-/// The proxy's commands for clients, by dbt lsp's own: a compile whose file
-/// dbt lsp writes in the project's target, and the nodes of a selector.
-/// No show: it would fetch the warehouse's driver.
-fn commands(session: &mut Session, project: &Path) {
-    let orders = project.join("models/marts/orders.sql");
-    let compiled = execute(session, "dbt-lsp-plus.compile", json!([uri(&orders)]));
-    let (file, text) = compiled_file(&compiled);
-    assert_eq!(file, project.join("target/compiled/shop/models/marts/orders.sql"), "{compiled}");
-    assert!(!text.contains("{{"), "{text}");
-    let nodes = execute(session, "dbt-lsp-plus.nodes", json!(["+stg_orders+"]));
-    assert!(ids(&nodes).contains(&"model.shop.orders".to_owned()), "{nodes}");
-}
-
-/// Alone, the proxy's commands for clients by dbt's CLI: a model's
-/// compiled file in its cache, a snapshot's in the directory named after
-/// its file, and the nodes of a selector.
+/// The commands for clients by dbt's CLI: a model's compiled file in the
+/// server's cache, a snapshot's in the directory named after its file, and
+/// the nodes of a selector.
 fn alone_commands(session: &mut Session, project: &Path) {
     let compile =
         |session: &mut Session, file: &str| execute(session, "dbt-lsp-plus.compile", json!([uri(&project.join(file))]));
@@ -508,8 +293,7 @@ fn ids(answer: &Value) -> Vec<String> {
     nodes.filter_map(|node| node["unique_id"].as_str()).map(str::to_owned).collect()
 }
 
-/// Every path under DIR, relative to it, but dbt lsp's own `target/` and
-/// `logs/`.
+/// Every path under DIR, relative to it, but dbt's `target/` and `logs/`.
 pub(crate) fn paths(dir: &Path) -> BTreeSet<PathBuf> {
     let mut found = BTreeSet::new();
     let mut pending = vec![dir.to_owned()];
@@ -528,8 +312,8 @@ pub(crate) fn paths(dir: &Path) -> BTreeSet<PathBuf> {
     found
 }
 
-/// The proxy's own `dbt parse`: a node's information and the summary on a
-/// hover of its ref.
+/// The server's own `dbt parse`: a node's information, the summary alone on
+/// a hover of its ref, and the relations as hints.
 fn node_information(session: &mut Session, project: &Path) {
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
@@ -537,15 +321,10 @@ fn node_information(session: &mut Session, project: &Path) {
     assert_eq!(orders["config"]["materialized"], "table", "{orders}");
     assert_eq!(orders["relation"], "\"shop\".\"main\".\"orders\"");
     let on_ref = json!({"textDocument": {"uri": uri(&project.join("models/marts/orders.sql"))}, "position": {"line": 4, "character": 28}});
-    // Once dbt lsp has compiled: during a compilation, its hover may miss the deadline, the summary alone.
-    let heading = "\n\n---\n\n**dbt lsp**\n\n";
-    let merged = |result: &Value| result["contents"]["value"].as_str().is_some_and(|value| value.contains(heading));
-    let hover = json!({"result": session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), merged)});
+    let hover = session.request("textDocument/hover", on_ref);
     let value = hover["result"]["contents"]["value"].as_str().unwrap_or_default();
     assert!(value.starts_with("model view, \"shop\".\"main\".\"stg_orders\""), "{hover}");
-    let kept = value.split_once(heading).map(|(_, server)| server.trim());
-    assert!(kept.is_some_and(|server| !server.is_empty()), "the server's text is gone: {hover}");
-    // Inlay hints: dbt lsp 2.0.9 answers [] on a model; the proxy's relations follow.
+    assert!(!value.contains("**dbt lsp**"), "no section of another server's: {hover}");
     let range = json!({"start": {"line": 0, "character": 0}, "end": {"line": 100, "character": 0}});
     let orders = uri(&project.join("models/marts/orders.sql"));
     let hints = session.request("textDocument/inlayHint", json!({"textDocument": {"uri": orders}, "range": range}));
@@ -553,12 +332,11 @@ fn node_information(session: &mut Session, project: &Path) {
     let expected = ["\"shop\".\"main\".\"stg_orders\"", "\"shop\".\"main\".\"stg_customers\""];
     assert_eq!(labels, expected, "{hints}");
     assert_eq!(hints["result"][0]["position"], json!({"line": 4, "character": 38}), "{hints}");
-    // The server's own answers, observed: null on a macro file and on a
-    // properties file without a ref, where the proxy has nothing to add.
+    // None on a macro file and on a properties file without a ref.
     for file in ["macros/money.sql", "models/staging/_sources.yml"] {
         let params = json!({"textDocument": {"uri": uri(&project.join(file))}, "range": range});
         let hints = session.request("textDocument/inlayHint", params);
-        assert_eq!(hints["result"], Value::Null, "{file}: {hints}");
+        assert_eq!(hints["result"], json!([]), "{file}: {hints}");
     }
 }
 
@@ -580,51 +358,16 @@ fn facts_in_the_hover(session: &mut Session, project: &Path) {
     }
 }
 
-/// The server killed: the proxy restarts it, whose first compilation
-/// publishes again, dbt's warning on the models' file among them, and which
-/// answers a hover.  Its registration of the file watcher, which the client
-/// holds, stays with the proxy.
-fn restart(session: &mut Session, project: &Path) {
-    let registration = |m: &&Value| m["method"] == "client/registerCapability";
-    assert_eq!(session.received.iter().filter(registration).count(), 1, "dbt lsp registers its watcher");
-    let proxy = session.child.id().to_string();
-    let children = std::process::Command::new("pgrep").args(["-P", &proxy, "-f", " lsp "]).output().expect("run pgrep");
-    let servers: Vec<String> =
-        String::from_utf8_lossy(&children.stdout).split_whitespace().map(str::to_owned).collect();
-    assert_eq!(servers.len(), 1, "one dbt lsp among the proxy's children: {servers:?}");
-    session.received.clear();
-    let killed = std::process::Command::new("kill").args(["-KILL", &servers[0]]).status().expect("run kill");
-    assert!(killed.success());
-    let shown = session.wait_for(|m| m["method"] == "window/showMessage");
-    assert!(shown["params"]["message"].as_str().unwrap().ends_with("restarting it in 1 s."), "{shown}");
-    // Meanwhile, the proxy's summary rather than a failure.
-    let orders = uri(&project.join("models/marts/orders.sql"));
-    let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
-    let meanwhile = session.request("textDocument/hover", on_ref.clone());
-    let text = meanwhile["result"]["contents"]["value"].as_str().unwrap_or_default();
-    assert!(meanwhile.get("error").is_none() && text.starts_with("model view, \"shop\""), "{meanwhile}");
-    let models = uri(&project.join("models/marts/_models.yml"));
-    session.wait_for(|message| {
-        let diagnostics = message["params"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
-        message["method"] == "textDocument/publishDiagnostics"
-            && message["params"]["uri"] == models.as_str()
-            && diagnostics.iter().any(|d| d["source"] == "dbt")
-    });
-    session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
-    assert_eq!(session.received.iter().filter(registration).count(), 0, "the second registration");
-}
-
-/// The proxy's outline and folding of a model, the outline of a properties
-/// file, and the server's hover through it.
+/// The outline and folding of a model, the outline of a properties file,
+/// the highlights of a CTE, and a hover at the model's start before any
+/// index.
 fn document_features(session: &mut Session, project: &Path) {
     let orders = project.join("models/marts/orders.sql");
-    // dbt lsp 2.0.9 compiles nothing until a document opens or a request comes.
     session.open(&orders, None);
-    session.wait_for(|m| m["method"] == "dbt/lspCompileComplete");
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&orders)}}));
     let names: Vec<&str> = outline["result"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["orders", "customers", "final"], "the proxy's outline, not the server's tokens");
-    // dbt lsp 2.0.9 answers [] on a properties file: the proxy's are its sources and their tables.
+    assert_eq!(names, ["orders", "customers", "final"]);
+    // A properties file's: its sources and their tables.
     let properties = project.join("models/staging/_sources.yml");
     session.open(&properties, None);
     let outline = session.request("textDocument/documentSymbol", json!({"textDocument": {"uri": uri(&properties)}}));
@@ -640,20 +383,24 @@ fn document_features(session: &mut Session, project: &Path) {
     assert_eq!(sources, expected, "{outline}");
     let folding = session.request("textDocument/foldingRange", json!({"textDocument": {"uri": uri(&orders)}}));
     assert_eq!(folding["result"].as_array().map(Vec::len), Some(4), "{folding}");
-    // dbt lsp 2.0.9 announces no highlights: the proxy's are the CTE's definition and its three uses.
+    // The CTE's definition and its three uses.
     let on_orders = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 17, "character": 10}});
     let highlights = session.request("textDocument/documentHighlight", on_orders);
     assert_eq!(highlights["result"].as_array().map(Vec::len), Some(4), "{highlights}");
-    // Before any request asked for an index, a hover at the model's start is dbt lsp's text, or why the proxy
-    // has no index; a null, or dbt lsp's reason alone, only once the parse that the hover starts has ended in
-    // between, which nodeInfo, asked at once, then shows.
+    // The CTE's use, then outward.
+    let at = json!({"textDocument": {"uri": uri(&orders)}, "positions": [{"line": 17, "character": 11}]});
+    let selection = session.request("textDocument/selectionRange", at);
+    let used = json!({"start": {"line": 17, "character": 9}, "end": {"line": 17, "character": 15}});
+    assert_eq!(selection["result"][0]["range"], used, "{selection}");
+    // At the model's start, the summary, or why there is no index before the parse the open started has
+    // ended: never null.
     let start = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 0, "character": 0}});
     let first = session.request("textDocument/hover", start);
-    let indexed = crate::node_info(session, json!("model.shop.orders"));
     let message = first["error"]["message"].as_str().unwrap_or_default();
     let unindexed = first["error"]["code"] == -32803 && message.starts_with("dbt parse has not finished: ");
-    assert!(unindexed || !first["result"].is_null() || indexed["result"].is_object(), "{first}, {indexed}");
-    // The server's hover passes through: on ref('stg_orders'), line 4.
+    let summary = first["result"]["contents"]["value"].as_str().is_some_and(|value| value.starts_with("model table"));
+    assert!(unindexed || summary, "{first}");
+    // On ref('stg_orders'), line 4, once parsed.
     let on_ref = json!({"textDocument": {"uri": uri(&orders)}, "position": {"line": 4, "character": 28}});
     session.poll(Duration::from_secs(60), ("textDocument/hover", on_ref), |hover| !hover.is_null());
 }
@@ -691,21 +438,26 @@ const LIVE_FRESHNESS: &str = r#"{"results": [{"unique_id": "source.shop.raw.orde
   "max_loaded_at": "2018-01-02T00:00:00Z", "max_loaded_at_time_ago_in_s": 279704850.0,
   "criteria": {"warn_after": {"count": 1, "period": "day"}, "error_after": {"count": null, "period": null}}}]}"#;
 
-/// The last run's failure beside dbt lsp's own diagnostic on the properties
-/// file: dbt lsp 2.0.9 warns of the unknown doc there.
+/// The last run's failure at its entry in the properties file, a warning of
+/// `dbt parse` possibly beside it, of the unknown doc there.
 fn last_run(session: &mut Session, project: &Path) {
     let models = uri(&project.join("models/marts/_models.yml"));
-    let both = |message: &Value| {
+    let failed = |message: &Value| {
         let diagnostics = message["params"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
         message["method"] == "textDocument/publishDiagnostics"
             && message["params"]["uri"] == models.as_str()
-            && diagnostics.iter().any(|d| d["source"] == "dbt")
             && diagnostics.iter().any(|d| d["code"] == "last-run")
     };
-    let published = session.wait_for(both);
-    let failed =
-        published["params"]["diagnostics"].as_array().unwrap().iter().find(|d| d["code"] == "last-run").cloned();
-    assert_eq!(failed.unwrap()["message"], "dbt build: relationships failed: 3 rows", "{published}");
+    let published = session.wait_for(failed);
+    let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
+    let ours = |d: &&Value| d["source"] == "dbt-lsp-plus" || d["source"] == "dbt parse";
+    assert!(diagnostics.iter().all(|d| ours(&d)), "{published}");
+    let failure = diagnostics.iter().find(|d| d["code"] == "last-run").unwrap();
+    assert_eq!(
+        (&failure["message"], &failure["source"]),
+        (&json!("dbt build: relationships failed: 3 rows"), &json!("dbt-lsp-plus")),
+        "{published}"
+    );
     // The last freshness check's stale table, at its name in the sources' file.
     let sources = uri(&project.join("models/staging/_sources.yml"));
     let stale = |message: &Value| {
@@ -720,8 +472,7 @@ fn last_run(session: &mut Session, project: &Path) {
     assert_eq!(warning.unwrap()["range"]["start"], json!({"line": 6, "character": 14}), "{published}");
 }
 
-/// The proxy's definitions and hover in a properties file, where dbt lsp
-/// 2.0.9 answers null.
+/// Definitions and a hover in a properties file, then of a ref in SQL.
 fn navigation(session: &mut Session, project: &Path) {
     let yml = project.join("models/marts/_models.yml");
     session.open(&yml, None);
@@ -733,41 +484,30 @@ fn navigation(session: &mut Session, project: &Path) {
     assert_eq!(file(&session.request("textDocument/definition", at("ref('customers')", 6))), "customers.sql");
     assert_eq!(file(&session.request("textDocument/definition", at("order_status", 2))), "docs.md");
     assert_eq!(file(&session.request("textDocument/definition", at("name: orders", 8))), "orders.sql");
-    // The server's null, observed: the proxy's text alone, and a position
-    // without a target forwarded and answered null by dbt lsp itself, in
-    // time: no deadline passed for it.
+    // A doc's text, and null for a definition at a position without a target.
     let hover = session.request("textDocument/hover", at("order_status", 2));
     let text = "The status of an order: placed, shipped or returned.";
     assert_eq!(hover["result"]["contents"]["value"], text, "{hover}");
     let on_column = session.request("textDocument/definition", at("customer_id", 2));
     assert_eq!(on_column["result"], Value::Null, "{on_column}");
-    // A ref in SQL is the proxy's in front of dbt lsp too, and its references
-    // hold the snapshot's, which dbt lsp 2.0.9 leaves out: one location, and
-    // two.  That dbt lsp is asked too is `the_union_in_front_of_the_real_dbt_lsp`'s.
+    // A ref in SQL: one location, and its references, the snapshot's among them.
     let orders = uri(&project.join("models/marts/orders.sql"));
     let on_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
     let found = session.request("textDocument/definition", on_ref.clone());
     let start = json!({"line": 0, "character": 0});
     let stg_orders =
         json!({"uri": uri(&project.join("models/staging/stg_orders.sql")), "range": {"start": start, "end": start}});
-    assert_eq!(found["result"], stg_orders, "one location, the proxy's");
+    assert_eq!(found["result"], stg_orders, "one location");
     let mut references = on_ref;
     references["context"] = json!({"includeDeclaration": false});
     let used = session.request("textDocument/references", references);
     let uses = [json!(orders), json!(uri(&project.join("snapshots/orders_snapshot.sql")))];
     let files: Vec<&Value> = used["result"].as_array().into_iter().flatten().map(|l| &l["uri"]).collect();
     assert_eq!(files, uses.iter().collect::<Vec<_>>(), "{used}");
-    // An answer of the proxy's own, after which a log of those deadlines would have come; its container the id.
+    // Workspace symbols, each with its id as its container.
     let symbols = session.request("workspace/symbol", json!({"query": "orders"}));
     let model = |s: &Value| s["name"] == "orders" && s["containerName"] == "model.shop.orders";
     assert!(symbols["result"].as_array().is_some_and(|found| found.iter().any(model)), "{symbols}");
-    let late = |m: &&Value| {
-        m["method"] == "window/logMessage"
-            && m["params"]["type"] == 4
-            && m["params"]["message"].as_str().is_some_and(|text| text.contains("textDocument/definition"))
-    };
-    let said: Vec<&Value> = session.received.iter().filter(late).collect();
-    assert!(said.is_empty(), "dbt lsp was late on a definition: {said:?}");
 }
 
 /// A call hierarchy item for the node ID at PATH of PROJECT.
@@ -777,7 +517,7 @@ fn item(project: &Path, path: &str, id: &str) -> Value {
            "range": zero, "selectionRange": zero, "data": {"uniqueId": id}})
 }
 
-/// The call hierarchy on the server's graph: only the server resolves
+/// The call hierarchy on the manifest's graph: only dbt resolves
 /// order_summary's ref(var('summary_upstream')) to orders.
 fn lineage(session: &mut Session, project: &Path) {
     let orders = json!({"item": item(project, "models/marts/orders.sql", "model.shop.orders")});
@@ -798,141 +538,6 @@ fn lineage(session: &mut Session, project: &Path) {
     assert_eq!(callees, ["source.shop.raw.customers"]);
 }
 
-/// Five seconds as an editor that honours dbt lsp's watcher of `**/*`: one
-/// event a round for each file created, changed or deleted under the
-/// project, `.git` aside.  dbt lsp writes `target/` and `logs/` at each
-/// compilation: were the proxy to list on those events, it would never stop.
-fn watcher(session: &mut Session, project: &Path) {
-    let look = || {
-        let mut found: BTreeMap<PathBuf, (SystemTime, u64)> = BTreeMap::new();
-        let mut pending = vec![project.to_owned()];
-        while let Some(next) = pending.pop() {
-            for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
-                let (path, Ok(meta)) = (entry.path(), entry.metadata()) else { continue };
-                if path.file_name().is_some_and(|name| name == ".git") {
-                    continue;
-                }
-                if meta.is_dir() {
-                    pending.push(path.clone());
-                }
-                found.insert(path, (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()));
-            }
-        }
-        found
-    };
-    let registered = session.wait_for(|m| m["method"] == "client/registerCapability");
-    let watchers = &registered["params"]["registrations"][0]["registerOptions"]["watchers"];
-    assert_eq!(watchers, &json!([{"globPattern": "**/*"}]), "{registered}");
-    // A model's change makes dbt lsp compile, then the proxy list twice, each
-    // listing a compilation, and dbt lsp's background compilation follows
-    // them, about 1.1 s after the last: what they all write, the window's
-    // first round reports.
-    let compile_once = |session: &mut Session| {
-        let mark = session.received.len();
-        let seen = |session: &Session| {
-            let since = &session.received[mark..];
-            let completed = since.iter().filter(|m| m["method"] == "dbt/lspCompileComplete").count();
-            let first = since.iter().position(|m| m["method"] == "dbt/lspCompileComplete").unwrap_or(since.len());
-            let full =
-                |m: &Value| m["method"] == "dbt/lspBackgroundCompileStart" && m["params"]["compile_type"] == "full";
-            let background = since[first..].iter().position(full).map_or(since.len(), |at| first + at);
-            let paired = since[background..].iter().any(|m| m["method"] == "dbt/lspBackgroundCompileComplete");
-            completed >= 3 && paired
-        };
-        let model = json!({"changes": [{"uri": uri(&project.join("models/marts/orders.sql")), "type": 2}]});
-        session.notify("workspace/didChangeWatchedFiles", model);
-        let waited = Instant::now() + Duration::from_secs(60);
-        while !seen(session) && Instant::now() < waited {
-            session.request("workspace/symbol", json!({"query": "orders"}));
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let compiling =
-            session.received[mark..].iter().filter(|m| m["method"].as_str().is_some_and(|m| m.contains("Compile")));
-        let compiling: Vec<(&Value, &Value)> =
-            compiling.map(|m| (&m["method"], &m["params"]["compile_type"])).collect();
-        assert!(seen(session), "not dbt lsp's own, two listings' and a full background compilation: {compiling:#?}");
-    };
-    let mut seen = look();
-    compile_once(session);
-    let start = session.received.len();
-    let mut sent = 0;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let now = look();
-        let mut changes = Vec::new();
-        for (path, stamp) in &now {
-            match seen.get(path) {
-                None => changes.push(json!({"uri": uri(path), "type": 1})),
-                Some(before) if before != stamp => changes.push(json!({"uri": uri(path), "type": 2})),
-                Some(_) => {}
-            }
-        }
-        let deleted = seen.keys().filter(|path| !now.contains_key(*path));
-        changes.extend(deleted.map(|path| json!({"uri": uri(path), "type": 3})));
-        if !changes.is_empty() {
-            session.notify("workspace/didChangeWatchedFiles", json!({"changes": changes}));
-            sent += 1;
-        }
-        seen = now;
-        // Answered by the proxy itself: what the server sent meanwhile has been read.
-        session.request("workspace/symbol", json!({"query": "orders"}));
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_secs(1));
-    session.request("workspace/symbol", json!({"query": "orders"}));
-    assert!(sent > 0, "dbt lsp wrote nothing under the project within the window");
-    let compiled = session.received[start..].iter().filter(|m| m["method"] == "dbt/lspCompileStart").count();
-    assert!(compiled <= 2, "{compiled} compilations in five seconds as a watcher of dbt lsp's own output");
-}
-
-/// What design.md records of dbt lsp 2.0.9, and the fake models, from the
-/// server's initialize RESULT, its compilations and its listings.
-fn recorded_observations(session: &mut Session, result: &Value) {
-    assert!(result["capabilities"].get("positionEncoding").is_none(), "{result}");
-    let completion = session.received.iter().find(|m| m["method"] == "dbt/lspCompileComplete").unwrap();
-    let mut keys: Vec<&str> = completion["params"].as_object().unwrap().keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    let o4 = [
-        "adapter_type",
-        "adapter_unique_id",
-        "cause",
-        "compile_type",
-        "dbt_version",
-        "duration_ms",
-        "errors",
-        "models_count",
-        "project_id",
-    ];
-    assert_eq!(keys, o4, "{completion}");
-    // A compilation's progress counts in percent, from its begin on.
-    let progress = |kind: &str| {
-        let of = |m: &&Value| m["method"] == "$/progress" && m["params"]["value"]["kind"] == kind;
-        session.received.iter().filter(of).map(|m| &m["params"]).collect::<Vec<_>>()
-    };
-    let analyzing = |p: &&&Value| p["value"]["message"] == "Analyzing" && p["value"]["percentage"].is_number();
-    let begun: Vec<&Value> = progress("begin").iter().filter(analyzing).map(|p| &p["token"]).collect();
-    assert!(!begun.is_empty(), "no Analyzing begin with a percentage");
-    let counted = |p: &&Value| begun.contains(&&p["token"]) && p["value"]["percentage"].is_number();
-    assert!(progress("report").iter().any(counted), "no report with a percentage of an Analyzing token");
-    let listing = |selectors: &[&str]| json!({"command": "dbt.listNodes", "arguments": selectors});
-    let types = |answer: &Value| -> Vec<String> {
-        let nodes = answer["result"]["nodes"].as_array().unwrap_or_else(|| panic!("no nodes in {answer}"));
-        nodes.iter().map(|node| node["resource_type"].as_str().unwrap().to_owned()).collect()
-    };
-    let all = types(&session.request("workspace/executeCommand", listing(&["*"])));
-    assert!(!all.is_empty() && !all.iter().any(|t| t == "source"), "`*` lists no sources: {all:?}");
-    let first_only = types(&session.request("workspace/executeCommand", listing(&["source:*", "*"])));
-    assert!(!first_only.is_empty() && first_only.iter().all(|t| t == "source"), "{first_only:?}");
-    for id in ["first", "second"] {
-        let request =
-            json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": listing(&["*"])});
-        session.send(&request);
-    }
-    let first = session.wait_for(|m| m["id"] == "first");
-    assert_eq!(first["result"]["error"], "Operation cancelled", "{first}");
-    session.wait_for(|m| m["id"] == "second");
-}
-
 /// Writes the edits of a `WorkspaceEdit`'s CHANGES to disk.
 fn apply(changes: &serde_json::Map<String, Value>) {
     for (file, edits) in changes {
@@ -951,17 +556,13 @@ fn apply(changes: &serde_json::Map<String, Value>) {
 }
 
 /// Renames `events.page_views`, which has no `identifier:`, through the
-/// proxy; once dbt has read the files again, the model that selects from it
-/// must still compile to the relation `page_views`.
+/// server; once applied, dbt lists the new table, and the model that
+/// selects from it still compiles to the relation `page_views`.
 fn rename_a_source_table_and_compile(session: &mut Session, project: &Path) {
     let model = project.join("models/staging/stg_page_views.sql");
     session.open(&model, None);
-    let compiled = |session: &mut Session| {
-        let compile = json!({"command": "dbt.compileFile", "arguments": [uri(&model)]});
-        let answer = session.request("workspace/executeCommand", compile);
-        let file = answer["result"]["file_uri"].as_str().unwrap_or_else(|| panic!("no compiled file: {answer}"));
-        url::Url::parse(file).unwrap().to_file_path().unwrap()
-    };
+    let compiled =
+        |session: &mut Session| compiled_file(&execute(session, "dbt-lsp-plus.compile", json!([uri(&model)]))).0;
     // A compiled file left from before the rename must not answer for after it.
     let before = compiled(session);
     let at =
@@ -977,7 +578,7 @@ fn rename_a_source_table_and_compile(session: &mut Session, project: &Path) {
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&model)}}));
     let yaml = uri(&project.join("models/staging/_sources.yml"));
     session.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": yaml, "type": 2}]}));
-    let list = json!({"command": "dbt.listNodes", "arguments": ["source:*"]});
+    let list = json!({"command": "dbt-lsp-plus.nodes", "arguments": ["source:*"]});
     let renamed = |result: &Value| {
         result["nodes"]
             .as_array()

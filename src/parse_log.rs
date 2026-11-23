@@ -22,7 +22,7 @@ pub struct Problem {
     /// dbt's code, the bare number, as `1048`.
     pub code: String,
     /// dbt's message without its `[error] ` or `[warning] ` prefix, its
-    /// spot included, as dbt lsp 2.0.9 shows it.
+    /// spot included.
     pub message: String,
     pub spot: Option<Spot>,
 }

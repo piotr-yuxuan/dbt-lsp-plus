@@ -1,7 +1,7 @@
 # Features
 
-What dbt-lsp-plus adds to `dbt lsp`, the language server of dbt 2, by LSP
-method:
+What dbt-lsp-plus answers, from the project's files and the user's own
+`dbt parse`, by LSP method:
 
 - `textDocument/documentSymbol`: the CTEs of a model and its Jinja blocks
   (macro, test, snapshot, materialization, docs, set, by their name; if,
@@ -19,39 +19,35 @@ method:
 - the call hierarchy (`textDocument/prepareCallHierarchy`,
   `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`): what a
   model, source, macro or function is used by, and what it
-  uses, macros and functions included, with the place of each call.  The dependencies of
-  the nodes are those of `dbt.listNodes` once the server has compiled, so
-  that `ref(var('x'))` resolves; the edges of macros come from the files;
+  uses, macros and functions included, with the place of each call.  The
+  dependencies of the nodes are those of the last parse's manifest once
+  there is one, so that `ref(var('x'))` resolves; the edges of macros
+  come from the files;
 - references and renames of sources (`textDocument/references`,
-  `textDocument/rename`), which dbt lsp answers with nothing:
-  every `source()` call, in SQL, YAML, `dbt_project.yml` and Python models,
-  and the declarations.  A rename keeps the warehouse relation, inserting
-  `identifier:` or `schema:` with the old name, and is refused rather than
-  applied in part;
-- go to definition (`textDocument/definition`) from a properties file,
-  where dbt lsp answers nothing: a
+  `textDocument/rename`): every `source()` call, in SQL, YAML,
+  `dbt_project.yml` and Python models, and the declarations.  A rename
+  keeps the warehouse relation, inserting `identifier:` or `schema:` with
+  the old name, and is refused rather than applied in part;
+- go to definition (`textDocument/definition`) from a properties file: a
   `ref` to its model, a `source` to its table's entry, a `doc` to its docs
   block, a model's or a function's `name:` to its file, a generic test's
   name to its test block, by dbt 2.0.9's lookup across packages, versions
   included; and from a `source()` in SQL; and, with references
   (`textDocument/references`), from a `ref` in SQL or a Python model, a
-  macro call and a `function()`, where dbt lsp misses a package's `ref`,
-  a version and the references in other files; hover
-  (`textDocument/hover`) there shows the docs text, the test's signature,
-  the node's summary;
-- the last run's failures as diagnostics
-  (`textDocument/publishDiagnostics`), beside dbt lsp's own: after a
-  `dbt build` from anywhere, a model's error at its file, a test's
-  failure at its name in YAML; after `dbt source freshness`, each stale
-  source table at its name;
-- inlay hints (`textDocument/inlayHint`) after the server's: the relation
-  dbt builds, after each `ref` and `source`;
-- `dbt-lsp-plus.compile`, `dbt-lsp-plus.show` and `dbt-lsp-plus.nodes`
-  (`workspace/executeCommand`), commands for clients that do what dbt
-  lsp's `dbt.compileFile`, `dbt.show` and `dbt.listNodes` do, in their
-  shapes: by them when dbt lsp runs; without it, `compile` and `nodes` by
-  dbt's CLI, as the user runs dbt, and `show` not at all, since `dbt
-  show` reaches the warehouse.  A compile is refused where a package may
+  macro call and a `function()`, a package's `ref`, a version and the
+  references in other files included; hover (`textDocument/hover`) there
+  shows the docs text, the test's signature, the node's summary;
+- diagnostics (`textDocument/publishDiagnostics`): the last run's
+  failures, after a `dbt build` from anywhere, a model's error at its
+  file, a test's failure at its name in YAML, and after `dbt source
+  freshness`, each stale source table at its name; and the errors and
+  warnings of the last `dbt parse` (source `dbt parse`);
+- inlay hints (`textDocument/inlayHint`): the relation dbt builds, after
+  each `ref` and `source`;
+- `dbt-lsp-plus.compile` and `dbt-lsp-plus.nodes`
+  (`workspace/executeCommand`), commands for clients in the shapes of dbt
+  lsp 2.0.9's `dbt.compileFile` and `dbt.listNodes`, by dbt's CLI, as the
+  user runs dbt.  A compile is refused where a package may
   have `on-run-start` or `on-run-end` hooks, which `dbt compile` runs
   against the warehouse; a compile of a model that introspects the
   warehouse, by `run_query` under `execute` or a macro such as
@@ -62,17 +58,17 @@ method:
   configuration, relation and summary from the user's own `dbt parse`,
   with `children`, the unique ids of the enabled nodes that depend on it,
   every test aside, and
-  that summary first in the server's hover on a `ref` or a `source`, and
+  that summary as the hover on a `ref` or a `source`, and
   at line 1, column 1 (position 0:0) of a file that defines one node, a
   YAML file aside (a properties file, or a YAML snapshot's),
   followed by the node's facts, a line each, each value a code span: its
   unique id and properties file, then its declared columns with their
-  types.  A line break inside a value is given as a space.  A package's file is written `<package>://<path>`, as dbt writes
-  `patch_path`: the path is relative to the package's directory, under
-  `dbt_packages/` by default.  Where the proxy
-  answers the hover itself (alone, or in `plus`), a hover on a node
-  before the first parse has given an index is error -32803 with
-  nodeInfo's reason, `dbt parse has not finished: ...`;
+  types.  A line break inside a value is given as a space.  A package's
+  file is written `<package>://<path>`, as dbt writes `patch_path`: the
+  path is relative to the package's directory, under `dbt_packages/` by
+  default.  A hover on a node before the first parse has given an index
+  is error -32803 with nodeInfo's reason, `dbt parse has not finished:
+  ...`;
 - within a document: folding (`textDocument/foldingRange`) of Jinja
   blocks, CTEs, tags and comments; highlights
   (`textDocument/documentHighlight`) of a CTE's uses and of a block's tags;
@@ -81,60 +77,27 @@ method:
   when a string in a Jinja tag names it, since a macro may render it as
   SQL.
 
-Every other message passes unchanged, byte for byte.  A feature that the
-server announces stays the server's, but for the rename of a source or
-a CTE, and the definitions and references at the kinds of target that
+Definitions and references are answered at the kinds of target that
 [Where dbt-lsp-plus answers definitions and
 references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)
 lists; the initialize result names those, per kind of target and kind of
-file, under `experimental.dbtLspPlus`.  In `merge`, the default, with
-`dbt lsp` running, a definition or references there goes to `dbt lsp`
-too, and its locations that match none of the proxy's (in one file,
-the range of one holding the other's) follow the proxy's, in one array.
-`dbt lsp` 2.0.9's answers on the fixture add nothing; it reads a
-versioned `ref` in SQL without its version, so its location there may
-follow the proxy's.  A definition, references, hover or inlay hints
-that go to `dbt lsp` in `merge` get its answer when it comes within
-300 ms where the proxy adds something (locations, a summary, hints),
-within 2 s where it adds nothing; else, and when `dbt lsp` fails, exits
-or is not running, the proxy's own: its part; else its empty, null or
-`[]`, at a position it claims and for hints; else, where only `dbt lsp`
-could answer, error -32803 with why, such as `dbt lsp did not answer
-within 2 s` (followed by `: it is compiling the project` while it
-compiles), `dbt lsp failed: ...`, `dbt lsp exited (...)` or `dbt lsp is
-not running`.  A hover on a node before the proxy's first index gets
-`dbt lsp`'s answer when it is not null, else error -32803 with
-nodeInfo's reason, `dbt parse has not finished: ...`, then, when `dbt
-lsp` gave none, why.  A hover's text from `dbt lsp` follows the
-proxy's part under a line `**dbt lsp**`, or `dbt lsp:` in plain text.
-The mode `plus` gives the proxy's answer by itself, at once.
-When `dbt lsp` crashes, the proxy starts it again, at most three times in
-ten minutes, and gives it the open documents as they stand; while it
-restarts, the proxy keeps serving its own features, and
-`dbt-lsp-plus.nodeInfo`, the summary and the hints too, from its own
-parse.  After a fourth crash, and when `dbt lsp` cannot start or exits
-before it answers `initialize`, the proxy answers alone, as with dbt-oss,
-and a request only `dbt lsp` answers fails with `dbt lsp is lost for
-good: ...`.  When the root's `dbt_project.yml` no longer reads, a
+file, under `experimental.dbtLspPlus`.  Elsewhere they get their
+nothing, null or `[]`, and a rename at no source and no CTE gets null.
+A method or a command that dbt-lsp-plus does not answer, such as
+`textDocument/completion`, gets error -32601 `dbt-lsp-plus does not
+answer <name>`.  When the root's `dbt_project.yml` no longer reads, a
 definition or references on a target, workspace symbols, the call
 hierarchy and, once a parse has run, a hover and a nodeInfo at a `ref`,
-a `source` or an entry's `name:` fail with `no dbt project at ...`, alone
-and in `plus`; in
-`merge` in front of `dbt lsp`, a definition, references or such a hover
-goes to `dbt lsp`, and when it gives no answer, that reason comes first,
-then `dbt lsp`'s.
-With a `dbt lsp` that cannot start, its parse runs the same dbt and
-fails, and `nodeInfo` and a hover on a node give its failure.
+a `source` or an entry's `name:` fail with `no dbt project at ...`.
+With a dbt that cannot run, its parse fails, and `nodeInfo` and a hover
+on a node give its failure.
 
 Once a session has a project, a hover, a definition, references, a call
 hierarchy or a nodeInfo at a position on a file of another dbt project
 fails with
 `<file> lies in the dbt project at <other>, and this session serves only
-the one at <root>`; in `merge` in front of `dbt lsp`, a hover, a
-definition or references fails only when `dbt lsp` gives no answer.
+the one at <root>`.
 
-With a dbt that has no `dbt lsp`, such as dbt-oss, the proxy answers alone:
-see [Use it with dbt-oss alone](../how-to/use-with-dbt-oss.md).
 [The design](../explanation/design.md) says how each answer is made.
 
 ## Configuration
@@ -162,7 +125,7 @@ Most setups need far less: `dbt-lsp-plus -- dbt lsp --project-dir
 /path/to/project`, or nothing after `dbt-lsp-plus` when the editor starts
 it in the project.
 
-### The proxy's arguments
+### The arguments
 
 ```
 dbt-lsp-plus [OPTION...] [--] [SERVER COMMAND...]
@@ -176,61 +139,47 @@ the usage on standard error, exit status 2, nothing started.
 - `--mode METHOD=MODE`: who answers the LSP method METHOD, by its full
   name, such as `textDocument/hover`: `plus`, `dbt` or `merge` (see
   "Modes").  Repeatable.
-- `--default-mode MODE`: the mode of every method the proxy answers but
+- `--default-mode MODE`: the mode of every method the server answers but
   those `--mode` sets.
-- `--backend auto|never`: `never` starts no `dbt lsp`, and the proxy
-  answers alone, as with dbt-oss.  Default: `auto`.
-- `--`: ends the proxy's own arguments; needed only before a server
+- `--`: ends dbt-lsp-plus's own arguments; needed only before a server
   command that starts with a dash.
 - `-h`, `--help`: prints the usage and exits.
 - `-V`, `--version`: prints `dbt-lsp-plus X.Y.Z` and exits.
 
-A value goes in the next word or after `=`, as `--backend=never`.
+A value goes in the next word or after `=`, as `--default-mode=plus`.
 
 ### Modes
 
-Each method the proxy answers has a mode: `plus`, the proxy alone; `dbt`,
-`dbt lsp` alone, its answer passed as it is; `merge`, both.  `ours`,
-`plus`'s former name, is still read as `plus`, with one warning a
-session.  Set nothing and each method takes its shipped default.  The
-table says, for each method and command the proxy takes part in, who
-can answer it, its shipped mode, how the answers combine in `merge`, and
-how long a request of it in `merge` waits for `dbt lsp`; any other
-method is `dbt lsp`'s, and a command takes no mode.  Where the proxy's
-answer stands alone, `dbt-lsp-plus's`, `dbt lsp` is not asked in
-`merge`, even when the proxy finds nothing: the methods it adds, the
-call hierarchy's two others and `dbt-lsp-plus.nodeInfo`.  A rename is
-the proxy's at its kinds of target, else `dbt lsp`'s; a command goes to
-the first of its providers present, `dbt lsp` when it runs and lists
-the command, else dbt's CLI.  A definition and references
-are the proxy's at the kinds of target that `experimental.dbtLspPlus`
-lists ([Where dbt-lsp-plus answers definitions and
+Each method that dbt-lsp-plus answers has a mode: `plus` or `merge`, its
+answer, the two alike since no other server answers; `dbt`, none, the
+method left unannounced.  `ours`, `plus`'s former name, is still read as
+`plus`, with one warning a session.  Set nothing and each method takes
+its shipped default, which the table gives; a command takes no mode.  A
+definition and references are answered at the kinds of target that
+`experimental.dbtLspPlus` lists ([Where dbt-lsp-plus answers definitions
+and
 references](../how-to/use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references)),
-with `dbt lsp`'s other locations after them, and `dbt lsp`'s elsewhere.
-A wait is 300 ms where the proxy has something of its own, 2 s where it
-has nothing; `no` is no deadline: the proxy's answer at once, or `dbt
-lsp`'s however long it takes.
+a rename at a source or a CTE; elsewhere each gets its nothing.
 
-| Method or command | Answered by | Shipped mode | Combined | Waits for dbt lsp |
-|---|---|---|---|---|
-| `textDocument/documentSymbol` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `workspace/symbol` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/prepareCallHierarchy` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `callHierarchy/incomingCalls` | dbt-lsp-plus, dbt lsp | prepareCallHierarchy's | dbt-lsp-plus's | no |
-| `callHierarchy/outgoingCalls` | dbt-lsp-plus, dbt lsp | prepareCallHierarchy's | dbt-lsp-plus's | no |
-| `textDocument/foldingRange` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/documentHighlight` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/selectionRange` | dbt-lsp-plus, dbt lsp | plus, or dbt where dbt lsp announces it | dbt-lsp-plus's | no |
-| `textDocument/hover` | dbt-lsp-plus, dbt lsp | merge | dbt-lsp-plus's text, then dbt lsp's under its name | 300 ms, 2 s with nothing |
-| `textDocument/inlayHint` | dbt-lsp-plus, dbt lsp | merge | dbt lsp's, then dbt-lsp-plus's | 300 ms, 2 s with nothing |
-| `textDocument/definition` | dbt-lsp-plus, dbt lsp | merge | the union, dbt-lsp-plus's first | 300 ms, 2 s with nothing |
-| `textDocument/references` | dbt-lsp-plus, dbt lsp | merge | the union, dbt-lsp-plus's first | 300 ms, 2 s with nothing |
-| `textDocument/rename` | dbt-lsp-plus, dbt lsp | merge | dbt-lsp-plus's at its kinds, else dbt lsp's | no |
-| `textDocument/publishDiagnostics` | dbt-lsp-plus, dbt lsp | merge | both, per file | no |
-| `dbt-lsp-plus.nodeInfo` | dbt-lsp-plus | none | dbt-lsp-plus's | no |
-| `dbt-lsp-plus.compile` | dbt lsp, dbt's CLI | none | the first present | no |
-| `dbt-lsp-plus.show` | dbt lsp | none | the first present | no |
-| `dbt-lsp-plus.nodes` | dbt lsp, dbt's CLI | none | the first present | no |
+| Method or command | Shipped mode |
+|---|---|
+| `textDocument/documentSymbol` | plus |
+| `workspace/symbol` | plus |
+| `textDocument/prepareCallHierarchy` | plus |
+| `callHierarchy/incomingCalls` | prepareCallHierarchy's |
+| `callHierarchy/outgoingCalls` | prepareCallHierarchy's |
+| `textDocument/foldingRange` | plus |
+| `textDocument/documentHighlight` | plus |
+| `textDocument/selectionRange` | plus |
+| `textDocument/hover` | merge |
+| `textDocument/inlayHint` | merge |
+| `textDocument/definition` | merge |
+| `textDocument/references` | merge |
+| `textDocument/rename` | merge |
+| `textDocument/publishDiagnostics` | merge |
+| `dbt-lsp-plus.nodeInfo` | none |
+| `dbt-lsp-plus.compile` | none |
+| `dbt-lsp-plus.nodes` | none |
 
 Besides the command line, a client sets the modes in
 `initializationOptions`, which win method by method:
@@ -239,68 +188,56 @@ Besides the command line, a client sets the modes in
 {"dbtLspPlus": {"modes": {"textDocument/hover": "dbt"}, "defaultMode": "merge"}}
 ```
 
-For the methods the proxy adds (the outline, workspace symbols, the call
-hierarchy, folding, highlights and selection ranges), `merge` is the
-proxy's answer, as `plus` is, until a later version merges them; `dbt`
-leaves the capability as `dbt lsp` announced it, so that a method it
-announces as absent is never asked.
-
-In Neovim that is `init_options`, not `settings`: the proxy reads no
+In Neovim that is `init_options`, not `settings`: dbt-lsp-plus reads no
 `workspace/didChangeConfiguration`, and a change applies when the client
-starts again.  A refused key is ignored and shown once in a warning.
-`dbt lsp` gets `initializationOptions` without `dbtLspPlus`.  With no
-`dbt lsp`, a method set to `dbt` gets its nothing, null or `[]`, which
-does not say why, and a warning says so once.
+starts again.  A refused key is ignored and shown once in a warning.  A
+method set to `dbt` gets its nothing, null or `[]`, which does not say
+why, and a warning says so once.
 
 ### The server command
 
-- `SERVER COMMAND...`: the command that runs the language server behind
-  the proxy.  Default: `dbt lsp`.  The proxy speaks LSP on its standard
-  input and output, and runs this command with the same streams behind
-  it.
+- `SERVER COMMAND...`: the user's dbt and the flags of its parse, as
+  `dbt lsp` would take them.  Default: `dbt lsp`.  It never runs as such:
+  dbt-lsp-plus speaks LSP itself on its standard input and output.
 - The words before `lsp` are how dbt is launched: `dbt`, a path to a dbt
-  executable, `uvx dbt`, or `env X=1 dbt`.  Before it spawns the server,
-  the proxy runs these words then `lsp --help`, for at most 10 s.  If dbt
-  answers that it has no `lsp` subcommand, as dbt-oss does, the proxy
-  answers alone, from the files and its own `dbt parse` (see [Use it with
-  dbt-oss alone](../how-to/use-with-dbt-oss.md)).
+  executable, `uvx dbt`, or `env X=1 dbt`.
 - Without `--project-dir`, when the first word is the bare `dbt` (the
-  default included), the proxy runs the project's dbt: the first of the
+  default included), dbt-lsp-plus runs the project's dbt: the first of the
   project's `.venv/bin/dbt`, the repository's, and, from a linked
   worktree, the main worktree's project's and the main worktree's own,
-  that answers `lsp --help` as dbt 2 does, with `lsp` or without; one that
-  answers otherwise, as dbt-core 1.x does, or cannot run, is skipped.
-  Else the `dbt` on `PATH`.  Any other first word is kept as written.
-  The proxy says once, on its standard error and in a `window/logMessage`,
-  `dbt-lsp-plus: project <root>, dbt <path> (<where it was found>)`, with
-  each place skipped and, when it answers alone, why.  With
-  `--project-dir`, the command runs as written.
-- A server command without the word `lsp` is run as it is, as a wrapper
-  of the user's own: the proxy then runs no `dbt parse`.
+  that answers `lsp --help`, run for at most 10 s, as dbt 2 does, with its
+  help or dbt-oss's refusal of `lsp`; one that answers otherwise, as
+  dbt-core 1.x does, or cannot run, is skipped.  Else the `dbt` on
+  `PATH`.  Any other first word is kept as written.  It says once, on its
+  standard error and in a `window/logMessage`, `dbt-lsp-plus: project
+  <root>, dbt <path> (<where it was found>).`, with each place skipped.
+  With `--project-dir`, the command runs as written, and the line is
+  `dbt-lsp-plus: project <root>, dbt <words before lsp>.`.
+- A server command without the word `lsp` is kept as it is, as a wrapper
+  of the user's own: dbt-lsp-plus then runs no dbt.
 
 ### The flags its `dbt parse` keeps
 
-The proxy runs its own `dbt parse` for what it answers from the manifest.
-It builds that command from the server command: the same launcher, then
-these flags when the server command has them, as `--flag X` or
-`--flag=X`.  `dbt lsp` reads them too.
+dbt-lsp-plus runs its own `dbt parse` for what it answers from the
+manifest.  It builds that command from the server command: the same
+launcher, then these flags when the server command has them, as `--flag
+X` or `--flag=X`.
 
 - `--project-dir DIR`: the dbt project.  A relative `DIR` is taken from
-  the proxy's working directory.  Default: the client's first workspace
+  the server's working directory.  Default: the client's first workspace
   folder or `rootUri`, when it holds a `dbt_project.yml`; else the
   project of the first file opened in one: the nearest directory above it
   holding a `dbt_project.yml` that lies in no package, installed or local,
-  of a project above it.  Before that the proxy runs nothing and answers
-  every request with null, and for such a project it runs no `dbt lsp`:
-  it answers alone, as with dbt-oss.  The working directory never names
-  the project.
+  of a project above it.  Before that the server runs nothing, answers
+  each request of its own with null, and any other with -32601.  The
+  working directory never names the project.
 - `--profiles-dir DIR`: where `profiles.yml` is.  Default, as dbt's:
   dbt's working directory, then `~/.dbt`.  dbt runs in the project when
   the client's folder or a file named it, so a `profiles.yml` beside
-  `dbt_project.yml` is found; with `--project-dir`, in the proxy's
-  working directory, not the project's: an editor that starts the proxy
+  `dbt_project.yml` is found; with `--project-dir`, in the server's
+  working directory, not the project's: an editor that starts the server
   in a subdirectory of the project needs it.  A relative `DIR`, as a
-  relative path to dbt in the server command, is taken from the proxy's
+  relative path to dbt in the server command, is taken from the server's
   working directory, wherever dbt runs.
 - `--profile NAME`: the profile.  Default: the `profile` of
   `dbt_project.yml`.
@@ -312,8 +249,8 @@ these flags when the server command has them, as `--flag X` or
   Default: `DBT_PACKAGES_INSTALL_PATH`, else the
   `packages-install-path` of `dbt_project.yml`, else `dbt_packages`.
 
-Every other flag goes to `dbt lsp` alone.  The parse also gets
-`--target-path` and `--log-path` in the proxy's cache, `--write-json`,
+Every other flag is not read.  The parse also gets
+`--target-path` and `--log-path` in the server's cache, `--write-json`,
 `--log-format json`, `--quiet`, `--no-version-check`,
 `--no-send-anonymous-usage-stats` and `--no-manage-state`; none of these
 can be changed.
@@ -322,19 +259,18 @@ can be changed.
 
 - `DBT_PACKAGES_INSTALL_PATH`: where the packages are installed, below
   `--packages-install-path` and above `dbt_project.yml`.  Read from the
-  proxy's environment, or from a word `DBT_PACKAGES_INSTALL_PATH=DIR`
+  server's environment, or from a word `DBT_PACKAGES_INSTALL_PATH=DIR`
   before `lsp` in the server command, which wins.  An empty value counts
   as unset.
-- `DBT_TARGET_PATH`: where the proxy watches the user's last run
+- `DBT_TARGET_PATH`: where the server watches the user's last run
   (`run_results.json`, `sources.json` and `manifest.json`), relative to
   the project.  Default: `target`.
-- `XDG_CACHE_HOME`: where the proxy keeps its parses, under
+- `XDG_CACHE_HOME`: where the server keeps its parses, under
   `dbt-lsp-plus/`.  Default: `$HOME/.cache`, else the system's temporary
   directory.  A relative value counts as unset.  A cache that no parse
-  wrote for a day is removed.  A `shadow/` folder there, which a former
-  option wrote, is no longer read nor removed: it may be deleted.
+  wrote for a day is removed.
 
-The server command, `dbt lsp` and the proxy's `dbt parse` inherit the
+The server's runs of dbt, its `dbt parse` and the commands', inherit the
 whole environment.
 
 ### Fixed limits
@@ -345,12 +281,12 @@ These are not configurable.
 - The probe of `lsp --help` is stopped after 10 s.
 - `workspace/symbol` answers at most 20 000 symbols.
 - A message larger than 64 MiB stops the session.
-- The proxy's runs of dbt, its `dbt parse` and the commands', run as the
+- The server's runs of dbt, its `dbt parse` and the commands', run as the
   user runs dbt, with dbt's flags against its statistics and its version
   check.  The guard on packages refuses such a run where a local or a
   locked package is not installed, a package from the network is not in
   a lock as recent as the files naming it, or a file naming packages, or
   `dbt_project.yml`, does not read.  A lock as recent but stale in
   content passes, and dbt then installs anew, rewriting the install path
-  ([how the proxy runs
-  dbt](../explanation/design.md#how-the-proxy-runs-it)).
+  ([how the server runs
+  dbt](../explanation/design.md#how-the-server-runs-it)).

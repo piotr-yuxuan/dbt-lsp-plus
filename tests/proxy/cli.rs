@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The subcommands `doctor`, `select` and `node`, the binary run as an agent
-//! runs it in a shell, in front of the fake dbt, in scratch directories.
+//! runs it in a shell, with the fake dbt, in scratch directories.
 
 use crate::live::paths;
 use crate::logged;
@@ -130,10 +130,9 @@ fn doctor_finds_a_document_s_project_and_runs_only_its_dbt_s_probe() {
     let orders = case.copy.join("models/marts/orders.sql");
     assert_eq!(taken, [&orders, &case.copy, &venv, &venv].map(|path| spelt(path)));
     let dbt = json!({"command": [null, "lsp"], "named": null, "source": "the project's .venv", "skipped": [],
-                     "lsp": true, "why": null});
+                     "why": null});
     let expected = json!({"version": env!("CARGO_PKG_VERSION"), "path": null, "project": null, "route": "document",
-        "dbt": dbt, "alone": "dbt lsp is not started for a project found from a file",
-        "packages": null});
+        "dbt": dbt, "packages": null});
     assert_eq!((status, answer), (Some(0), expected));
     assert!(!stub_log.exists(), "PATH's dbt ran: {}", fs::read_to_string(&stub_log).unwrap_or_default());
     let starts = starts(&case.log);
@@ -150,11 +149,13 @@ fn doctor_on_the_folder_s_route() {
     let case = Case::new("cli-doctor-folder", &json!({}));
     venv_fake(&case.copy);
     let (status, answer) = case.run(&case.copy, &["doctor", "."]);
-    assert_eq!((status, &answer["route"], &answer["alone"]), (Some(0), &json!("folder"), &Value::Null), "{answer}");
+    assert_eq!(
+        (status, &answer["route"], &answer["dbt"]["why"]),
+        (Some(0), &json!("folder"), &Value::Null),
+        "{answer}"
+    );
     assert_eq!(path_of(&answer["project"]), resolved(&case.copy));
-    case.rescript(&json!({"no_lsp": true}));
-    let (status, answer) = case.run(&case.copy, &["doctor", "."]);
-    assert_eq!((status, &answer["dbt"]["lsp"], &answer["alone"]), (Some(0), &json!(false), &json!("it has no lsp")));
+    assert!(answer.get("alone").is_none() && answer["dbt"].get("lsp").is_none(), "{answer}");
 }
 
 /// The case NAME for the given route, the fake playing SCRIPT: the copy's
@@ -173,20 +174,16 @@ fn given(name: &str, script_value: &Value) -> (Case, PathBuf, PathBuf) {
 fn doctor_on_the_given_route_probes_the_command_as_written() {
     let (case, stub_log, elsewhere) = given("cli-doctor-given", &json!({}));
     let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt-lsp"), case.copy.to_str().unwrap());
-    let never = ["doctor", ".", "--", "--backend", "never", "--", fake, "lsp", "--project-dir", copy];
-    let (status, answer) = case.run(&elsewhere, &never);
-    let route = (&answer["route"], &answer["alone"], path_of(&answer["project"]));
-    assert_eq!((status, route), (Some(0), (&json!("given"), &json!("the backend is never"), resolved(&case.copy))));
+    let given = ["doctor", ".", "--", fake, "lsp", "--project-dir", copy];
+    let (status, answer) = case.run(&elsewhere, &given);
+    let route = (&answer["route"], path_of(&answer["project"]));
+    assert_eq!((status, route), (Some(0), (&json!("given"), resolved(&case.copy))));
     let dbt = &answer["dbt"];
     let words = json!([fake, "lsp", "--project-dir", copy]);
     assert_eq!((&dbt["command"], &dbt["source"]), (&words, &json!("the server command")));
-    // Under never the server probes nothing; doctor probes once, for itself.
+    // The server probes nothing on the given route; doctor probes once, for itself.
     let probes: Vec<Value> = starts(&case.log).iter().map(|start| start["arguments"].clone()).collect();
-    assert_eq!((&dbt["lsp"], probes), (&json!(true), vec![json!(["lsp", "--help"])]), "{answer}");
-    case.rescript(&json!({"no_lsp": true}));
-    let auto = ["doctor", ".", "--", "--backend", "auto", "--", fake, "lsp", "--project-dir", copy];
-    let (_, answer) = case.run(&elsewhere, &auto);
-    assert_eq!((&answer["dbt"]["lsp"], &answer["alone"]), (&json!(false), &json!("it has no lsp")), "{answer}");
+    assert_eq!((&dbt["why"], probes), (&Value::Null, vec![json!(["lsp", "--help"])]), "{answer}");
     assert!(!stub_log.exists(), "the .venv's dbt ran on the given route");
 }
 
@@ -217,8 +214,8 @@ fn doctor_probes_what_the_lookup_left_unprobed() {
     assert_eq!(dbt["skipped"], json!([{"path": venv.to_str().unwrap(), "why": "lsp --help gives exit status: 2"}]));
     let named = bin.join("dbt");
     assert_eq!(
-        (&dbt["source"], &dbt["lsp"], spelt(Path::new(dbt["named"].as_str().unwrap()))),
-        (&json!("PATH"), &json!(true), spelt(&named))
+        (&dbt["source"], &dbt["why"], spelt(Path::new(dbt["named"].as_str().unwrap()))),
+        (&json!("PATH"), &Value::Null, spelt(&named))
     );
     assert_eq!(dbt["command"], json!(["dbt", "lsp"]), "a bare dbt stays for PATH");
 
@@ -227,7 +224,7 @@ fn doctor_probes_what_the_lookup_left_unprobed() {
     fs::create_dir_all(&empty).unwrap();
     case.path = empty.into_os_string();
     let (status, answer) = case.run(&case.copy, &["doctor"]);
-    assert_eq!((status, &answer["dbt"]["lsp"]), (Some(1), &Value::Null), "{answer}");
+    assert_eq!(status, Some(1), "{answer}");
     assert!(answer["dbt"]["why"].as_str().unwrap().starts_with("cannot run"), "{answer}");
 
     // The user's own first word, which the lookup keeps unprobed.
@@ -236,8 +233,8 @@ fn doctor_probes_what_the_lookup_left_unprobed() {
     script(&own, &format!("echo \"$*\" >> '{}'; echo 'Start the dbt language server'", own_log.display()));
     let (status, answer) = case.run(&case.copy, &["doctor", ".", "--", own.to_str().unwrap(), "lsp"]);
     assert_eq!(
-        (status, &answer["dbt"]["source"], &answer["dbt"]["lsp"]),
-        (Some(0), &json!("the server command"), &json!(true))
+        (status, &answer["dbt"]["source"], &answer["dbt"]["why"]),
+        (Some(0), &json!("the server command"), &Value::Null)
     );
     assert_eq!(fs::read_to_string(&own_log).unwrap(), "lsp --help\n", "probed once");
 }
@@ -388,8 +385,8 @@ fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
         ("GIT_CEILING_DIRECTORIES", case.dir.as_path()),
         ("GIT_CONFIG_NOSYSTEM", Path::new("1")),
     ];
-    // The proxy on the folder's route, with the default server command, as select runs.
-    let mut session = Session::start_with(&["--backend", "never"], &[], &env, Some(&case.copy));
+    // The server on the folder's route, with the default server command, as select runs.
+    let mut session = Session::start(&[], &env, Some(&case.copy));
     session.initialize(&case.copy);
     session.open(&case.copy.join("models/marts/orders.sql"), None);
     let parents = || -> Vec<PathBuf> {
@@ -398,7 +395,7 @@ fn select_and_a_proxy_on_one_project_keep_their_runs_under_one_parent() {
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while parents().is_empty() {
-        assert!(std::time::Instant::now() < deadline, "the proxy's parse made no cache");
+        assert!(std::time::Instant::now() < deadline, "the server's parse made no cache");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let proxy = parents();

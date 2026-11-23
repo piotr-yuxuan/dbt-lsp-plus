@@ -56,7 +56,7 @@ jobs:
       - id: cut
         run: unshare -rn true
       # Built with the network, then the corpus with none, then the live test with none,
-      # whatever the corpus said: the proxy alone, as dbt-oss has no `dbt lsp`.
+      # whatever the corpus said.
       - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
         run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
       - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"
@@ -104,8 +104,8 @@ jobs:
       - id: cut
         run: unshare -rn true
       # Built with the network, then the corpus with none, then the live test with none,
-      # whatever the corpus said, so that a drift of the protocol shows beside a drift of
-      # the resolution.
+      # whatever the corpus said, so that a drift of what the live test checks shows beside
+      # a drift of the resolution.
       - if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.cut.outcome == 'success' }}
         run: nix develop -c cargo test --locked -j 4 --test proxy --no-run
       - run: nix develop -c unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT="$RUNNER_TEMP/dbt/dbt" 2>&1 | tee "$RUNNER_TEMP/corpus.log"

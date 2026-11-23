@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! The proxy's children but dbt lsp, which is the Backend's (`proxy.rs`):
-//! one run of dbt, the model's Run, the parse's and the commands' alike,
+//! The server's children: one run of dbt, the model's Run, the parse's and
+//! the commands' alike,
 //! with its command line, working directory, deadline, log and target, and
 //! one reader whose outcome is reported once; and `finish`, which waits for
 //! a child and kills it past its deadline: a Run's dbt, dbt's probe of

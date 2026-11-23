@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-"""Times dbt-lsp-plus alone on a project that generate.py made.
+"""Times dbt-lsp-plus on a project that generate.py made.
 
 usage: measure.py PROXY FAKE_DBT ROOT RUNS
 
-Starts PROXY in front of FAKE_DBT (the tests' fake-dbt-lsp, which refuses
-`lsp` as dbt-oss does, so that the proxy answers alone) on the project ROOT.
+Starts PROXY with FAKE_DBT as its dbt (the tests' fake-dbt-lsp, whose
+parse writes no manifest) on the project ROOT.
 It times each request RUNS times, warm: median and minimum in milliseconds,
 from the request written to its answer read.  Then, for each file of SAVED
 and each request of the budget, it changes the file on disk, tells the
@@ -122,14 +122,11 @@ def saved(root: Path) -> list[Path]:
 
 
 def start(proxy: str, fake: str, root: Path, scratch: Path) -> Client:
-    """PROXY started alone in front of FAKE on ROOT, initialized."""
-    script = scratch / "script.json"
-    script.write_text(json.dumps({"no_lsp": True}))
+    """PROXY started with FAKE as its dbt on ROOT, initialized."""
     env = {
         "PATH": os.environ["PATH"],
         "HOME": str(scratch),
         "XDG_CACHE_HOME": str(scratch / "cache"),
-        "FAKE_DBT_LSP_SCRIPT": str(script),
     }
     client = Client([proxy, fake, "lsp", "--project-dir", str(root)], env)
     capabilities = {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}

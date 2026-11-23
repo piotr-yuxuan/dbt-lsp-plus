@@ -35,9 +35,9 @@ quiet where there is no dbt project.  It holds only a `.lsp.json` that
 names the command, with no version and no path: to update, run the
 `cargo install` line again.
 
-The plugin runs the default `dbt lsp`, with which dbt 2.0.9 sends its
-anonymous usage statistics.  To stop them, install a plugin of your own
-in place of this one, since an extension goes to one server.  A
+The plugin passes no argument: the server command is the default `dbt
+lsp`.  To give flags of your own, such as a target, install a plugin of
+your own in place of this one, since an extension goes to one server.  A
 directory `my-plugins` holds `.claude-plugin/marketplace.json`:
 
 ```json
@@ -55,7 +55,7 @@ directory `my-plugins` holds `.claude-plugin/marketplace.json`:
 {
   "dbt": {
     "command": "dbt-lsp-plus",
-    "args": ["--", "dbt", "lsp", "--no-send-anonymous-usage-stats"],
+    "args": ["--", "dbt", "lsp", "--target", "dev"],
     "extensionToLanguage": {".sql": "sql", ".yml": "yaml", ".yaml": "yaml"}
   }
 }
@@ -67,7 +67,7 @@ claude plugin marketplace add ./my-plugins
 claude plugin install dbt@my-plugins
 ```
 
-The proxy runs the dbt it finds in a repository's `.venv`s as soon as a
+dbt-lsp-plus runs the dbt it finds in a repository's `.venv`s as soon as a
 file of a dbt project opens.  In a repository you do not trust, a
 server command that names a dbt by its absolute path is run as written,
 in place of the lookup; that form was not tried in Claude Code.
@@ -85,9 +85,7 @@ server starts at that call.  The answer says:
   LSP request 'textDocument/hover' failed for server
   'plugin:dbt-lsp-plus:dbt': dbt parse has not finished: it is
   running`.  Ask again: three seconds later, the fixture's project gave
-  the summary.  In front of `dbt lsp`, the reason may be `waiting for dbt
-  lsp to compile the project`, and may end with `; ` and why `dbt lsp`
-  gave no answer either.
+  the summary.
 - **The project and its dbt are found, the parse fails or is
   refused**: `dbt parse has not finished:` then other words, such as
   `dbt parse failed: ...` with dbt's first error and the path of its
@@ -108,58 +106,39 @@ server starts at that call.  The answer says:
 
 ## Who answers what
 
-A session is **alone** with a dbt that has no `lsp` (dbt-oss), on a
-project found from a file (with no `--project-dir`, a session whose
-directory holds no `dbt_project.yml`, as at a repository's or a
-worktree's root over a nested `dbt/`), or with `--backend never`; it is
-**in front of dbt lsp** with a dbt that has `lsp`, the session opened in
-the project's folder, a worktree's whose root holds `dbt_project.yml`
-included, or given `--project-dir`.  Without `--project-dir`, Claude
-Code's debug log tells them apart: alone, the proxy's line ends
-`dbt-lsp-plus answers alone.`; with it, the log says neither.
-`dbt-lsp-plus doctor` tells them apart in every case, with no PATH, run
-in the session's own
-directory, before any `cd`, given after `--` the arguments that the
-plugin's `.lsp.json` passes; this plugin passes none.  A non-null
-`alone`, or the error `no dbt_project.yml at or above ...`, means the
-session is alone; `"alone":null` with `"lsp":true` means it is in
-front of dbt lsp, and with `"lsp":null` its `why` says why no dbt lsp
-starts.
-doctor on a file takes the file's route unless the arguments after `--`
-name `--project-dir`.  A session in front of dbt lsp turns alone when
-`dbt lsp` cannot start, exits before it answers `initialize`, or is lost
-for good after a fourth crash in ten minutes, which the proxy says by a
-`window/showMessage` ending `dbt-lsp-plus answers alone.`; Claude Code
-does not show it, but a request that only dbt lsp answers then fails
-with `dbt lsp is lost for good:` and why.
+dbt-lsp-plus answers every request itself, from the files and the last
+parse's index, whichever dbt 2 the session runs; a method it does not
+answer gets error -32601 at once.  `dbt-lsp-plus doctor` says which
+project and which dbt a session takes, with no PATH, run in the
+session's own directory, before any `cd`, given after `--` the arguments
+that the plugin's `.lsp.json` passes; this plugin passes none.  A
+non-null `dbt.why` means its dbt does not answer as a dbt 2 does; the
+error `no dbt_project.yml at or above ...` means no project.  doctor on a
+file takes the file's route unless the arguments after `--` name
+`--project-dir`.
 
-| Operation | LSP method | Alone | In front of dbt lsp |
-|-----------|------------|-------|---------------------|
-| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else why, as an error |
-| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` | dbt-lsp-plus at the kinds below, then dbt lsp's other locations within 300 ms, or dbt lsp's answer within 2 s where dbt-lsp-plus finds nothing; elsewhere dbt lsp's answer within 2 s, else why, as an error |
-| hover | `textDocument/hover` | dbt-lsp-plus: a node's summary and facts, a docs block, a test's signature; before the first parse, the error above | dbt lsp's answer within 300 ms, under dbt-lsp-plus's summary and a line `**dbt lsp**` where it has one, else within 2 s; past that, dbt-lsp-plus's summary, else why, as an error; on a node before the first parse, dbt lsp's answer unless null, else the error above |
-| documentSymbol | `textDocument/documentSymbol` | dbt-lsp-plus | dbt-lsp-plus, since dbt lsp 2.0.9 does not announce it; not observed |
-| workspaceSymbol | `workspace/symbol` | dbt-lsp-plus | dbt-lsp-plus |
-| goToImplementation | `textDocument/implementation` | none: `dbt lsp is not running` | dbt lsp; 2.0.9 answers `No such method textDocument/implementation` |
-| prepareCallHierarchy, incomingCalls, outgoingCalls | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls` | dbt-lsp-plus | dbt-lsp-plus for prepareCallHierarchy; incomingCalls and outgoingCalls not observed |
+| Operation | LSP method | Answer |
+|-----------|------------|--------|
+| goToDefinition | `textDocument/definition` | dbt-lsp-plus at the kinds below, else null |
+| findReferences | `textDocument/references` | dbt-lsp-plus at the kinds below, else `[]` |
+| hover | `textDocument/hover` | a node's summary and facts, a docs block, a test's signature; before the first parse, the error above |
+| documentSymbol | `textDocument/documentSymbol` | dbt-lsp-plus |
+| workspaceSymbol | `workspace/symbol` | dbt-lsp-plus |
+| goToImplementation | `textDocument/implementation` | none: `dbt-lsp-plus does not answer textDocument/implementation` |
+| prepareCallHierarchy, incomingCalls, outgoingCalls | `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls` | dbt-lsp-plus |
 
 dbt-lsp-plus's answers carry a node's unique id: a symbol reads
 `orders (Class) - Line 1 in model.shop.orders`, a call hierarchy item
-ends `[model.shop.orders]`.  The default, `merge`, gives dbt-lsp-plus's
-answer wherever it has one, with dbt lsp's other locations after it;
-the mode `plus` gives dbt-lsp-plus's alone, at once, where `merge`
-waits for dbt lsp up to 300 ms, 2 s where dbt-lsp-plus finds nothing,
-and none of dbt lsp's locations, such as its unversioned one on a
-versioned `ref` in SQL ([the modes](../reference/features.md#modes)).
+ends `[model.shop.orders]`.  The modes `merge`, the default, and `plus`
+give the same answers; `dbt` leaves a method unanswered ([the
+modes](../reference/features.md#modes)).
 
 ### Where dbt-lsp-plus answers definitions and references
 
 In the modes `merge`, the default, and `plus`, at these kinds of
-target, by the file the position is in, dbt-lsp-plus answers itself,
-with dbt lsp or without; the answer to `initialize` lists them under
-`capabilities.experimental.dbtLspPlus`.  In `merge` in front of dbt
-lsp, dbt lsp is asked too, and its locations that match none of
-dbt-lsp-plus's follow them.  A request set to `dbt` lists none.
+target, by the file the position is in, dbt-lsp-plus answers; the answer
+to `initialize` lists them under `capabilities.experimental.dbtLspPlus`.
+A request set to `dbt` lists none.
 
 | request | kind | places | meaning |
 |---------|------|--------|---------|
@@ -190,7 +169,7 @@ lists nodes with their configuration (below).
 
 `dbt-lsp-plus doctor PATH` says, in one line of JSON, what the server
 would do for the file PATH: `route`, `project`, `dbt` (`command`,
-`named`, `source`, `skipped`, `lsp`, `why`), `alone` and `packages`;
+`named`, `source`, `skipped`, `why`) and `packages`;
 with no PATH, for the current directory.  `dbt-lsp-plus select
 SELECTOR`, run in the project, gives `{"error":null,"nodes":[...]}`,
 each node as `dbt list` prints it.  `dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]]` gives what
@@ -207,9 +186,8 @@ a project and a dbt 2, select and node when `error` is null; 1
 otherwise; 2 for a usage error ([the subcommands](../reference/cli.md)).
 
 From a repository's root over `dbt/`, doctor on a model's file gave
-`"route":"document"`, `"source":"the project's .venv"` and
-`"alone":"dbt lsp is not started for a project found from a file"`, and
-with no PATH, `no dbt_project.yml at or above <root>; give a path within
+`"route":"document"` and `"source":"the project's .venv"`, and with no
+PATH, `no dbt_project.yml at or above <root>; give a path within
 the project`.  Run select in the project:
 
 ```
@@ -241,41 +219,23 @@ By what the agent reads:
   in order.  Ask again with one letter of a model's name, then run
   `dbt-lsp-plus doctor` on the file.
 - `dbt parse has not finished: it is running`: ask again.
-- `dbt parse has not finished: waiting for dbt lsp to compile the
-  project`: in front of `dbt lsp`, whose first compilation is under way;
-  ask again.  When `dbt lsp` gave no answer either, followed by `; ` and
-  why.
+- `dbt parse has not finished: it has not run, or left no manifest`: no
+  parse has started yet, or the last one ended well and wrote no
+  manifest; ask again, then run `dbt-lsp-plus doctor` on the file.
 - `dbt parse has not finished: dbt parse failed: ...`: dbt's first error;
   its log is the path in parentheses.
 - `dbt parse has not finished:` then `... run dbt deps`: a package is
-  missing or its lock is stale, and the proxy will not let its parse
+  missing or its lock is stale, and the server will not let its parse
   install it.  Run `dbt deps`.
-- `dbt lsp did not answer within 2 s`: ask again.  Followed by `: it is
-  compiling the project`: ask again once it has compiled, in a few
-  seconds on a small project.
-- `dbt lsp failed: ...`: `dbt lsp`'s own error, its message after the
-  colon; dbt-lsp-plus had nothing of its own there.
-- `dbt lsp is lost for good: ...`: `dbt lsp` could not start, exited
-  before it answered `initialize`, or crashed four times in ten minutes;
-  the reason after the colon says which.  Run `dbt-lsp-plus doctor` on
-  the file, then start the session again.
 - `no dbt project at <root>: its dbt_project.yml is missing, is not
   YAML, or names no project`: the project's file no longer reads, as
-  mid-edit; fix it, and the next request reads it again.  In front of
-  `dbt lsp`, a hover on a `ref`, a `source` or an entry's `name:` once a
-  parse has run, and a
-  definition or references at a kind listed in [Where dbt-lsp-plus
-  answers definitions and
-  references](#where-dbt-lsp-plus-answers-definitions-and-references),
-  give it only when `dbt lsp` gave no answer either, followed by `; `
-  and why; workspace symbols and the call hierarchy give it alone; at a
-  kind not listed, the request is `dbt lsp`'s and never gives it.
+  mid-edit; fix it, and the next request reads it again.
 - `<file> lies in the dbt project at <other>, and this session serves
   only the one at <root>`: a session serves the first project it finds;
   for that file's answers, start a session in its project's directory.
   A nodeInfo at a position in that file gives it too.
-- goToImplementation's `dbt lsp is not running`, alone: only `dbt lsp`
-  answers it; nothing to fix.
+- `dbt-lsp-plus does not answer textDocument/implementation`, or another
+  method: no server of this session answers it; nothing to fix.
 - Answers older than an `Edit`: an `Edit` of a file the server has not
   opened, other than the first, opens it without saving it.  The next
   hover, or definition or references at a kind listed in [Where

@@ -10,175 +10,115 @@ answers](use-with-an-agent.md#when-nothing-answers).
 First, from a shell, run `dbt-lsp-plus doctor PATH -- ARGUMENTS`, PATH a
 file of the project and ARGUMENTS those the editor gives the server: it
 says which project and which dbt the server would take, whether that dbt
-has `lsp`, whether the proxy would answer alone and why, and why a parse
-would be refused
+answers as a dbt 2 does, and why a parse would be refused
 ([the subcommands](../reference/cli.md)).  A given `--project-dir`
 without `dbt_project.yml` is no project to doctor, where the server
-takes the directory all the same, and dbt
-fails there (its dbt lsp, else the proxy's parse).
+takes the directory all the same, and its parse fails there.
 
 ## Who answers a request
 
 - **dbt-lsp-plus** answers the outline, workspace symbols, the call
   hierarchy, folding, highlights, selection ranges, the rename of a CTE,
-  inlay hints and `dbt-lsp-plus.nodeInfo`; references and renames on a
-  source; definitions and references of the kinds of target in [Where
-  dbt-lsp-plus answers definitions and
+  hovers, inlay hints and `dbt-lsp-plus.nodeInfo`; references and renames
+  on a source; definitions and references of the kinds of target in
+  [Where dbt-lsp-plus answers definitions and
   references](use-with-an-agent.md#where-dbt-lsp-plus-answers-definitions-and-references).
   The answer to `initialize` names those kinds, per request, under
-  `capabilities.experimental.dbtLspPlus`.  In the default mode, `merge`,
-  with `dbt lsp` running, it asks `dbt lsp` there too, and `dbt lsp`'s
-  locations that match none of its own follow them.  For each operation
-  of an agent's LSP tool, see [Who answers
+  `capabilities.experimental.dbtLspPlus`.  For each operation of an
+  agent's LSP tool, see [Who answers
   what](use-with-an-agent.md#who-answers-what); for each method, [the
   modes](../reference/features.md#modes).
-- **`dbt lsp`** answers everything else: the proxy forwards the request
-  and the answer unchanged, byte for byte.  In the default mode, `merge`,
-  a definition, references, hover or inlay hints that go to `dbt lsp`
-  wait for it 300 ms where the proxy has something to add (its
-  locations, a summary, hints), 2 s where it has nothing; past that, or
-  when `dbt lsp` fails, exits or is not running, the proxy answers with
-  its part, else its empty where it claims the position and for hints,
-  else error -32803 with why (`dbt lsp did not answer within 2 s`,
-  `dbt lsp failed: ...`), and logs that `dbt lsp` was late
-  once per method, deadline and what the client got
-  (`window/logMessage`, type 4).
-  Set a method to `dbt` (`--mode textDocument/hover=dbt`) to wait for
-  `dbt lsp` however long it takes.  Any other slow answer is the
-  server's.
-- **Alone**, with dbt-oss, references at a position the proxy does not
-  claim are `[]` and a definition there null; the proxy fails every other
-  request it does not answer at once, with -32803, rather than leave it
-  waiting: `dbt lsp is not running`; or, alone once `dbt lsp` could not
-  start or was lost, `dbt lsp is lost for good: ...` and why.
+- At a position that holds none of its kinds, references are `[]`, a
+  definition and a rename null.
+- **No one else**: a method or a command that dbt-lsp-plus does not
+  answer, completion and formatting among them, gets error -32601
+  `dbt-lsp-plus does not answer <name>` at once.
 
 ## A request times out
 
 A client gives up after a while: lsp-mode after `lsp-response-timeout`
-seconds, 10 by default.
+seconds, 10 by default.  dbt-lsp-plus answers each request at once, from
+the files and the last parse's index; a request that reads the index
+asks for a parse first when the index is stale, and answers from the
+last one meanwhile, or says why there is none.
 
-1. Find who was asked, from the method, its mode and the position: in
-   `merge` with `dbt lsp` running, a definition, references, hover or
-   inlay hints go to `dbt lsp`, at the kinds that
-   `experimental.dbtLspPlus` lists too, and never wait for it more than
-   2 s; in `plus`, `dbt lsp` is not asked for these methods at all.
-2. `dbt lsp` answers once it has compiled the project.  A large project
-   may take longer than the client's timeout to compile, after the server
-   starts or the project changes; the server reports its progress, in
-   percent, then sends `dbt/lspCompileComplete`.  Ask again after it, or
-   raise the client's timeout.  A compilation with no end 60 s after it
-   started is said once a session, `dbt lsp has been compiling for 60 s
-   with no end yet (its log: …)`, and one that compiled nothing once for
-   each first error, `dbt lsp compiled nothing: …`: see "Common
-   problems".
-3. Read the client's log of messages: whether the request went out,
+1. Read the client's log of messages: whether the request went out,
    whether an answer came back, and when.
-4. Start `dbt lsp` directly in place of the proxy, and ask again.  A
-   request that times out there too is the server's; one that answers
-   only without the proxy is a fault of dbt-lsp-plus: report it.
+2. Run `dbt-lsp-plus doctor` on the file: a dbt that does not run, or a
+   parse that the guard on packages refuses, leaves the requests that
+   read the index without one.
+3. A request that times out with an answer on its way is a fault of
+   dbt-lsp-plus: report it.
 
-## Where the proxy says what went wrong
+## Where the server says what went wrong
 
 - **Its standard error**, for what happens before a client can be told:
-  `dbt-lsp-plus: cannot start ...` when the server command does not run;
-  without `--project-dir`, which project and which dbt it found, the line
-  that `window/logMessage` repeats.
+  which project and which dbt it found, the line that
+  `window/logMessage` repeats.
 - **`window/logMessage`**, once per reason, each prefixed
-  `dbt-lsp-plus:`: that the dbt has no `lsp` and the proxy answers alone;
-  that `dbt lsp` ended and restarts in so many seconds, at most three
-  times in ten minutes; why its `dbt parse` failed or was refused.
+  `dbt-lsp-plus:`: which project and which dbt it found; why its `dbt
+  parse` failed or was refused; a problem of the parse in no file of the
+  project.
 - **`window/showMessage`**, which an editor shows at once and Claude
-  Code does not show at all: that a compilation of `dbt lsp`'s compiled
-  nothing, with dbt's first error, once for each first error, and that
-  one has no end 60 s after it started, once a session; each names `dbt
-  lsp`'s own log, `logs/dbt-lsp.log` under the project.
+  Code does not show at all: what of the settings cannot take effect.
 
 ## Common problems
 
-- **No hover summary, inlay hints or node information.**  The proxy's `dbt
-  parse` failed: most often dbt found no `profiles.yml`, which, with
-  `--project-dir`, it looks for in the proxy's working directory and in
+- **No hover summary, inlay hints or node information.**  The server's
+  `dbt parse` failed: most often dbt found no `profiles.yml`, which, with
+  `--project-dir`, it looks for in the server's working directory and in
   `~/.dbt`, not in the project.  Pass `--profiles-dir` in the server
   command (see [the
   configuration](../reference/features.md#configuration)).
-- **A hover is an error, "dbt parse has not finished: ...".**  The proxy
-  answers the hover itself (alone, or in `plus`) and has no index yet:
-  "it is running", ask again once the parse has ended; "waiting for dbt
-  lsp to compile the project", ask again once `dbt lsp` has compiled;
-  any other reason is the parse's failure, which the entry above, or the
+- **A hover is an error, "dbt parse has not finished: ...".**  There is
+  no index yet: "it is running", ask again once the parse has ended; "it
+  has not run, or left no manifest", ask again, then run doctor; any
+  other reason is the parse's failure, which the entry above, or the
   log's `dbt-lsp-plus: dbt parse failed: ...`, says how to fix.
 - **Every answer null, and nothing in the log.**  Without `--project-dir`,
   neither the client's folder nor any file opened lies in a dbt project:
   open a model, or pass `--project-dir`.
-- **Usage statistics sent with dbt 2.0.9.**  The default command, the
-  Claude Code plugin's, is `dbt lsp` with no flag; pass
-  `--no-send-anonymous-usage-stats` in the server command (see [Use it
-  with an agent](use-with-an-agent.md)).
 - **Not the dbt expected.**  The line `dbt-lsp-plus: project ..., dbt ...`
   says which it took and which it skipped, and why: a `.venv` whose `dbt`
   is dbt-core 1.x is skipped.  A path in the server command, in place of
   the bare `dbt`, is run as written.
 - **"dbt parse would install it, rewriting the install path; run dbt
   deps".**  A package is missing, or the lock is older than the files that
-  name it: the proxy will not let its parse install packages.  Run `dbt
+  name it: the server will not let its parse install packages.  Run `dbt
   deps`.
-- **"cannot read …/dbt_project.yml as YAML", and no parse.**  The proxy
+- **"cannot read …/dbt_project.yml as YAML", and no parse.**  The server
   refuses a project file that its YAML reader cannot read, a tab after a
   key perhaps, which dbt may read and install packages from.  Fix the
   file.
-- **"has no lsp: dbt-lsp-plus answers alone".**  The dbt is dbt-oss: the
-  proxy's own features work, and compiled SQL by `dbt-lsp-plus.compile`;
-  formatting, completion and previews do not (see [Use it with dbt-oss
-  alone](use-with-dbt-oss.md)).
-- **"...: dbt-lsp-plus answers alone." after restarts, or at the start.**
-  `dbt lsp` ended four times in ten minutes, could not start, or exited
-  before it answered `initialize`.  The message names why: its exit
-  status, why it could not start, or that it did not answer or refused its
-  `initialize`; when it ran, its standard error, in the client's log, says
-  more.  The proxy then answers as with dbt-oss
-  (see [Use it with dbt-oss alone](use-with-dbt-oss.md)).
-- **"dbt lsp compiled nothing: …".**  `dbt lsp` compiled none of the
-  project, so it has nothing to answer from (a listing answers
-  `Compilation failed`); the text after the colon is dbt's first error,
-  also published as a diagnostic, often on `dbt_project.yml` or on
-  `<RUN_OPERATION>`, a file that does not exist.  Read
-  `logs/dbt-lsp.log`, which the message names: a profile's field, or an
-  `env_var` the editor's environment lacks (a GUI editor on macOS may
-  not get the shell's); a hook (`on-run-start`) that fails; a package
-  that is not installed; the warehouse's connection or authentication.
-  Once a file is fixed (`profiles.yml`, `dbt_project.yml`, a hook, a
-  package), save it: `dbt lsp` compiles again.  A file outside the
-  project, as dbt's default `~/.dbt/profiles.yml` is, brings `dbt lsp` no
-  save nor watched change: save any model of the project then.  Once an
-  environment variable is set where the editor gets its environment,
-  restart the editor's language server: `dbt lsp` and the proxy keep the
-  environment they started with, and the proxy restarts a lost `dbt lsp`
-  with its own.  An error in one model is no such case: the other models
-  compile, and the diagnostic on that model says it; nor is a first
-  compilation that a save cuts short, which reports no count and no
-  error, says nothing, and is followed by the next.
-- **"dbt lsp has been compiling for 60 s with no end yet".**  `dbt lsp`
-  started a compilation and has not finished it; a merged request gets
-  the proxy's answer alone at its deadline (see "Who answers a request").
-  Read `logs/dbt-lsp.log`: a first compilation of a large project on a
-  warehouse can take that long, and its progress, in percent, keeps
-  moving; a connection or an authentication that hangs does not.  The
-  message comes once a session.
+- **"dbt-lsp-plus does not answer textDocument/completion".**  Completion,
+  formatting and previews are none of dbt-lsp-plus's.
+
+## With dbt Labs' build
+
+dbt-lsp-plus runs no `dbt lsp`, whichever build the server command names:
+its `lsp` word only names the user's dbt.  A user of dbt Labs' build who
+wants what only `dbt lsp` gives, completion, formatting, its own compile
+diagnostics or column-level features, may run `dbt lsp` beside
+dbt-lsp-plus, as a second server of the editor's.  It then shows its own
+diagnostics, under the source `dbt`, beside those of dbt-lsp-plus, and
+writes in the project's `target/` and `logs/` at each compilation, its
+log `logs/dbt-lsp.log` among them; dbt-lsp-plus starts no parse for a
+change in either directory.
 
 ## Run it by hand
 
 ```sh
 dbt-lsp-plus --version
 dbt --version
-dbt lsp --help            # fails on dbt-oss, which has no lsp
+dbt lsp --help            # dbt-oss refuses it, which is no failure
 dbt parse --project-dir /path/to/project --profiles-dir /path/to/project
 ```
 
-The last one shows the errors that the proxy's own parse meets.
+The last one shows the errors that the server's own parse meets.
 
 ## Report a problem
 
 Open an [issue](https://github.com/piotr-yuxuan/dbt-lsp-plus/issues) with
 the versions of dbt-lsp-plus, dbt and the editor, the server command, the
-lines the proxy wrote (standard error and log messages), and the client's
-log of the messages around the request.
+lines the server wrote (standard error and log messages), and the
+client's log of the messages around the request.
