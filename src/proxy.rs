@@ -75,10 +75,6 @@ enum Event {
     Ran(Value, Value),
 }
 
-/// What a watched file and the manifest give: its failures, or none to keep
-/// those known.
-type ReadFailures = fn(&Value, &Value) -> Option<Vec<runs::Failure>>;
-
 /// How often the files of the last run are looked at.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
 
@@ -952,9 +948,13 @@ impl<W: Write> Proxy<W> {
         let Some(root) = self.workspace.root.clone() else { return };
         let events = self.events.clone();
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
-        let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
-        let watched: [(&str, &'static str, ReadFailures); 2] =
-            [("run_results.json", runs::LAST_RUN, runs::failures), ("sources.json", runs::STALE_SOURCE, stale)];
+        // What a watched file and the manifest give: its failures, or none to keep those known.  The first entry
+        // gives the array its type, which the second's closure takes.
+        let failures: fn(&Value, &Value) -> Option<Vec<runs::Failure>> = runs::failures;
+        let watched = [
+            ("run_results.json", runs::LAST_RUN, failures),
+            ("sources.json", runs::STALE_SOURCE, |found, index| Some(runs::stale(found, index))),
+        ];
         for (file, code, read_failures) in watched {
             let (results, manifest, events) = (target.join(file), target.join("manifest.json"), events.clone());
             thread::spawn(move || {

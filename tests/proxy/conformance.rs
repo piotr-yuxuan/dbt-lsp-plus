@@ -49,7 +49,8 @@ fn corpus() {
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         let (copy, manifest) = parse(&dbt, case);
         versions.insert(manifest["metadata"]["dbt_version"].as_str().unwrap_or("of no version").to_owned());
-        let project = project::scan(&copy, &HashMap::new()).expect("scan the case");
+        let project =
+            dbt_lsp_plus::cache::Cache::default().project(&copy, 0, &HashMap::new(), &[]).expect("scan the case");
         // Navigation as the proxy runs it once a parse exists.
         let index = config::ParseIndex::of(&manifest);
         let lookup = navigation::Lookup::new(&project, Some(&index));

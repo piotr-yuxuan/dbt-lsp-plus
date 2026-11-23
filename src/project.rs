@@ -533,11 +533,9 @@ pub fn find(root: &Path, server: &[String]) -> Option<Inventory> {
     Some(Inventory { packages: packages.into_iter().map(|(name, dir, _)| (name, dir)).collect(), files: found })
 }
 
-/// How a scan reads a file it found: its text and what the text gives.
-pub type Read<'a> = dyn FnMut(&File) -> Arc<Scanned> + 'a;
-
-/// The project that INVENTORY finds, each file as READ gives it.
-pub fn assemble(inventory: &Inventory, read: &mut Read) -> Project {
+/// The project that INVENTORY finds, each file as READ gives it: its text
+/// and what the text gives.
+pub fn assemble(inventory: &Inventory, read: &mut dyn FnMut(&File) -> Arc<Scanned>) -> Project {
     let packages = &inventory.packages;
     let mut project = Project {
         root_package: packages.first().map(|(name, _)| name.clone()).unwrap_or_default(),
@@ -605,34 +603,37 @@ pub fn assemble(inventory: &Inventory, read: &mut Read) -> Project {
     project
 }
 
-/// The project at ROOT and the packages installed in it, or `None` when ROOT
-/// has no named `dbt_project.yml`.  OPEN holds the text of the documents the
-/// editor has open, which wins over the file on disk.
-pub fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
-    let inventory = find(root, &[])?;
-    let mut read =
-        |file: &File| Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default());
-    Some(assemble(&inventory, &mut read))
-}
-
-/// A project of FILES, each a path under it and its text, in a fresh
-/// directory of the system's for test NAME; the caller removes it.
 #[cfg(test)]
-pub(crate) fn scratch_project(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    for (path, text) in files {
-        let path = dir.join(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
-    }
-    dir
-}
+pub(crate) use tests::{scan, scratch_project};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::reference::Name;
+
+    /// The project at ROOT and the packages installed in it, or `None` when
+    /// ROOT has no named `dbt_project.yml`.  OPEN holds the text of the
+    /// documents the editor has open, which wins over the file on disk.
+    pub(crate) fn scan(root: &Path, open: &HashMap<PathBuf, String>) -> Option<Project> {
+        let inventory = find(root, &[])?;
+        let mut read = |file: &File| {
+            Arc::new(Scanned::read(&file.path, open.get(&file.path).map(String::as_str)).unwrap_or_default())
+        };
+        Some(assemble(&inventory, &mut read))
+    }
+
+    /// A project of FILES, each a path under it and its text, in a fresh
+    /// directory of the system's for test NAME; the caller removes it.
+    pub(crate) fn scratch_project(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (path, text) in files {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        dir
+    }
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop")

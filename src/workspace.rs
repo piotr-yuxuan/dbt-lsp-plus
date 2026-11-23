@@ -20,11 +20,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 /// The project's files that a thread reads before the first request needs
-/// them, as `cache::fill` gives them.
-type Filled = Vec<(PathBuf, cache::Key, Arc<project::Scanned>)>;
-
-/// The generations of the project and of the index a graph was made of.
-type MadeOf = (u64, u64);
+/// them, as `cache::fill` gives them: a name that clippy's type complexity
+/// asks for, the field that holds them being three types deep.
+type Filled = Vec<(PathBuf, cache::Key, Arc<Scanned>)>;
 
 /// A place in a document: its path, its text as the front end holds it,
 /// open or on disk, and a byte offset in it.
@@ -73,7 +71,9 @@ pub struct Workspace {
     /// done: nothing waits for it, and a request that comes before reads
     /// the files itself.
     filling: RefCell<Option<Receiver<Filled>>>,
-    graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
+    /// The generations of the project and of the index that the graph was
+    /// made of, and the graph.
+    graph: RefCell<Option<(u64, u64, Rc<Graph>)>>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
     cache_dir: Option<PathBuf>,
@@ -115,7 +115,9 @@ impl Workspace {
     /// it at each step.  Its calls are looked up with the last parse's index.
     pub fn graph(&self, project: &Project) -> Rc<Graph> {
         let made_of = (self.cache.borrow().generation, self.generation);
-        if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
+        if let Some((.., graph)) =
+            self.graph.borrow().as_ref().filter(|(project, index, _)| (*project, *index) == made_of)
+        {
             return graph.clone();
         }
         let scanned = Graph::scanned(project, self.index.as_ref());
@@ -123,7 +125,7 @@ impl Workspace {
             Some(index) => scanned.with_index(index, project),
             None => scanned,
         });
-        *self.graph.borrow_mut() = Some((made_of, graph.clone()));
+        *self.graph.borrow_mut() = Some((made_of.0, made_of.1, graph.clone()));
         graph
     }
 
