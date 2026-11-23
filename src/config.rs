@@ -201,8 +201,9 @@ pub struct ParseIndex {
     groups: HashMap<String, Value>,
     /// The ids of the nodes of each name, so that a lookup reads a few.
     named: HashMap<String, Vec<String>>,
-    /// The ids of the last manifest laid, whose nodes alone make a listing:
-    /// a failed parse's lacks those deleted since, which the index keeps.
+    /// The ids of the last manifest laid, whose nodes alone give the
+    /// dependencies: a failed parse's lacks those deleted since, which the
+    /// index keeps.
     latest: HashSet<String>,
 }
 

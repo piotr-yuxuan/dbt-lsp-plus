@@ -89,7 +89,6 @@ pub struct Scanned {
 }
 
 impl Scanned {
-    /// What TEXT, the content of the file at PATH, gives.
     pub fn of(path: &Path, text: String) -> Scanned {
         let mut calls = sources::file_calls(path, &text);
         if !sources::is_yaml(path) {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The scan of a project kept between requests: each file's text and what
-//! it gives, reused while the file's metadata, read before its content, is
-//! the same; the project built again only when a file or a package changed,
-//! else shared.
+//! it gives, reused while the file's metadata, read before its content, or
+//! an open document's text is the same; the project built again only when a
+//! file or a package changed, else shared.
 
 use crate::project::{self, File, Inventory, Project, Scanned};
 use std::collections::HashMap;
@@ -25,7 +25,6 @@ pub enum Key {
 }
 
 impl Key {
-    /// The key of a file on disk whose metadata is METADATA.
     pub fn of(metadata: &Metadata) -> Key {
         Key::Disk {
             modified: (metadata.mtime(), metadata.mtime_nsec()),

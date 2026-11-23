@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The core as the front ends see it, the model's Workspace: the session's
-//! project (one, plan 049), its dbt, the scan kept between requests and its
-//! first fill, the last parse's index and the parse under way, the call
-//! hierarchy's graph, and when the index is stale.  It speaks no protocol:
+//! project (one, plan 049), its dbt, the open texts, the scan kept between
+//! requests and its first fill, the last parse's index and the parse under
+//! way, the call hierarchy's graph, and when the index is stale.  It speaks no protocol:
 //! no message, no position, no URI.
 
 use crate::answer::{Answer, Reason};
@@ -34,10 +34,10 @@ pub enum Which {
 }
 
 /// The core's state of the session's project.  A front end owes it: `epoch`
-/// bumped at each of its events, `fresh` set false at a change told,
-/// `notice` called before the parse a request asks for, each outcome a parse
-/// reports handed to `parsed`, and `stop` called last, once the runs that
-/// write in its cache have stopped.  Only the Workspace writes `index`,
+/// bumped at each of its events, the texts of its open documents in `open`,
+/// `fresh` set false at a change told, `parse` asked to look on behalf of a
+/// request, each outcome a parse reports handed to `parsed`, and `stop`
+/// called last, once the runs that write in its cache have stopped.  Only the Workspace writes `index`,
 /// `failure` and `running`.
 #[derive(Default)]
 pub struct Workspace {
@@ -57,7 +57,8 @@ pub struct Workspace {
     /// The last parse's index: `parsed` alone writes it, as it moves the
     /// graph's generation with it.
     pub index: Option<config::ParseIndex>,
-    /// Whether no change was told, nor found on disk by `notice`, since the last parse started.
+    /// Whether no change was told, nor found on disk by a `parse` that
+    /// looked, since the last parse started.
     pub fresh: bool,
     /// Why the last parse failed, or none could start, as logged.
     pub failure: Option<String>,
