@@ -8,9 +8,10 @@
 use crate::answer::{Answer, Reason};
 use crate::graph::Graph;
 use crate::project::{self, Project, Scanned};
-use crate::{cache, config, locate, navigation, packages, reference, run, scan};
+use crate::{cache, config, locate, navigation, packages, reference, run, scan, text};
 use serde_json::Value;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -52,6 +53,9 @@ pub struct Workspace {
     pub dbt: config::Dbt,
     /// The front end's count of its events: the scan looks at the files once an epoch.
     pub epoch: u64,
+    /// The documents the front end has open, by path: the text of each,
+    /// which wins over its file.
+    pub open: HashMap<PathBuf, String>,
     /// The last parse's index: `parsed` alone writes it, as it moves the
     /// graph's generation with it.
     pub index: Option<config::ParseIndex>,
@@ -78,9 +82,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// The project as its files and the open texts OPEN say, if there is
+    /// The project as its files and the open documents say, if there is
     /// one: the cache's, looked at once an epoch.
-    pub fn project(&self, open: &cache::Open) -> Option<Rc<Project>> {
+    pub fn project(&self) -> Option<Rc<Project>> {
         let mut cache = self.cache.borrow_mut();
         let filling = self.filling.take();
         match filling.as_ref().map(Receiver::try_recv) {
@@ -88,7 +92,12 @@ impl Workspace {
             Some(Err(TryRecvError::Empty)) => drop(self.filling.replace(filling)),
             Some(Err(TryRecvError::Disconnected)) | None => {}
         }
-        cache.project(self.root.as_deref()?, self.epoch, open, self.dbt.command())
+        cache.project(self.root.as_deref()?, self.epoch, &self.open, self.dbt.command())
+    }
+
+    /// The text of the document at PATH: open, else on disk.
+    pub fn text(&self, path: &Path) -> Option<String> {
+        self.open.get(path).cloned().or_else(|| text::read(path))
     }
 
     /// The first scan of the project, read on a thread meanwhile, so that
@@ -132,16 +141,15 @@ impl Workspace {
     /// `navigation::Lookup::node` finds it, else, when FILE, the one node its
     /// document defines, but never in a YAML file: there the manifest places
     /// the generic tests a file declares beside its node, a YAML snapshot's
-    /// included, so neither the scan nor `of_file` can name one node.  The
-    /// project is read with the open texts OPEN.  None for no PLACE, or when
-    /// it names nothing; `Some(None)` when it names a node that the lookup
-    /// does not find: without an index, any that the scan tells is named but
-    /// cannot give (a `ref`, a `source`, an entry's `name:`, a file's one
-    /// node); with one, a node the index lacks, or a `ref`, a `source` or an
-    /// entry's `name:` over a project that does not read, which
-    /// `Workspace::node` tells from a node the index lacks by asking for the
-    /// project again.
-    pub fn node_at(&self, open: &cache::Open, place: Option<&Place>, file: bool) -> Option<Option<&Value>> {
+    /// included, so neither the scan nor `of_file` can name one node.  None
+    /// for no PLACE, or when it names nothing; `Some(None)` when it names a
+    /// node that the lookup does not find: without an index, any that the
+    /// scan tells is named but cannot give (a `ref`, a `source`, an entry's
+    /// `name:`, a file's one node); with one, a node the index lacks, or a
+    /// `ref`, a `source` or an entry's `name:` over a project that does not
+    /// read, which `Workspace::node` tells from a node the index lacks by
+    /// asking for the project again.
+    pub fn node_at(&self, place: Option<&Place>, file: bool) -> Option<Option<&Value>> {
         let (path, text, offset) = place?;
         let index = self.index.as_ref();
         let scanned = Scanned::of(path, text.clone());
@@ -155,7 +163,7 @@ impl Workspace {
             let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
             // Without an index there is no node to find: the project is not read for none.
             return named.then(|| {
-                let project = index.and_then(|_| self.project(open))?;
+                let project = index.and_then(|_| self.project())?;
                 navigation::Lookup::new(&project, index).node(path, &call.name)
             });
         }
@@ -168,7 +176,7 @@ impl Workspace {
             )
         });
         if let Some(name) = entry {
-            let Some(project) = self.project(open) else { return Some(None) };
+            let Some(project) = self.project() else { return Some(None) };
             return Some(navigation::Lookup::new(&project, index).node(path, &name));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
@@ -176,7 +184,7 @@ impl Workspace {
             return index.of_file(&relative.to_string_lossy()).map(Some);
         }
         // As `ParseIndex::of_file` reads the manifest: the kinds of resources it holds as nodes.
-        let project = self.project(open)?;
+        let project = self.project()?;
         let defines = |entity: &&project::Entity| {
             entity.path == *path
                 && entity.package == project.root_package
@@ -189,8 +197,8 @@ impl Workspace {
     /// give it: the manifest's node with its summary and `children`; else
     /// why none: a place in another project's document, no index yet, or a
     /// project that does not read where the place names a node; `Empty` for
-    /// no such node.  The project is read with the open texts OPEN.
-    pub fn node(&self, open: &cache::Open, which: &Which) -> Answer {
+    /// no such node.
+    pub fn node(&self, which: &Which) -> Answer {
         if let (Which::At((document, ..)), Some(root)) = (which, &self.root)
             && let Some(project) = locate::elsewhere(document, root, self.dbt.command())
         {
@@ -200,8 +208,8 @@ impl Workspace {
         let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
         let node = match which {
             Which::Id(id) => index.node(id),
-            Which::At(place) => match self.node_at(open, Some(place), true) {
-                Some(None) if self.project(open).is_none() => {
+            Which::At(place) => match self.node_at(Some(place), true) {
+                Some(None) if self.project().is_none() => {
                     return Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())]);
                 }
                 named => named.flatten(),
@@ -322,7 +330,6 @@ pub fn reply(answer: Answer, failure: Option<&str>, asked: &str) -> (Value, Opti
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -342,8 +349,6 @@ mod tests {
             &[("dbt_project.yml", "name: other\n"), ("models/m.sql", b_sql)],
         );
         let mut workspace = Workspace { root: Some(root.clone()), ..Workspace::default() };
-        let (texts, edits) = (HashMap::new(), HashMap::new());
-        let open = cache::Open { texts: &texts, edits: &edits };
         let id = |id: &str| Which::Id(id.to_owned());
         let at = |path: PathBuf, offset: usize| Which::At((path.clone(), fs::read_to_string(&path).unwrap(), offset));
         let (in_ref, in_name) = (b_sql.find("'a'").unwrap() + 1, a_yml.find("name: a").unwrap() + 6);
@@ -352,7 +357,7 @@ mod tests {
         // Each step, what the query gave, as a node's id, else as the Answer.
         let mut seen = Vec::new();
         let mut look = |step: &str, workspace: &Workspace, which: Which| {
-            let answer = match workspace.node(&open, &which) {
+            let answer = match workspace.node(&which) {
                 Answer::Found(node) => Answer::Found(node["unique_id"].clone()),
                 other => other,
             };
@@ -373,7 +378,7 @@ mod tests {
         look("a file's start", &workspace, at(root.join("models/a.sql"), 0));
         look("an entry's name", &workspace, at(root.join("models/_a.yml"), in_name));
         look("no such id", &workspace, id("model.shop.x"));
-        let (a_node, b_node) = (workspace.node(&open, &id("model.shop.a")), workspace.node(&open, &id("model.shop.b")));
+        let (a_node, b_node) = (workspace.node(&id("model.shop.a")), workspace.node(&id("model.shop.b")));
         fs::write(root.join("dbt_project.yml"), "name: [").unwrap();
         workspace.epoch += 1;
         look("an entry's name, unreadable", &workspace, at(root.join("models/_a.yml"), in_name));
@@ -424,8 +429,7 @@ mod tests {
         // Not the user's cache.
         let cache_dir = project::scratch_project("workspace-cache", &[]);
         let mut workspace = Workspace { root: Some(root.clone()), cache_dir: Some(cache_dir), ..Workspace::default() };
-        let (texts, edits) = (HashMap::new(), HashMap::new());
-        let project = workspace.project(&cache::Open { texts: &texts, edits: &edits }).unwrap();
+        let project = workspace.project().unwrap();
         let graph = workspace.graph(&project);
         let held = project.files.contains_key(&root.join("models/a.sql")) && graph.items.contains_key("model.shop.a");
         assert!(held, "the project's file and the graph's item");
