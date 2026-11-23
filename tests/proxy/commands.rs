@@ -232,6 +232,27 @@ fn alone_a_failing_compile_never_answers_an_earlier_file() {
 }
 
 #[test]
+fn alone_compile_is_refused_where_a_package_of_the_server_s_install_path_has_hooks() {
+    // As dbt-oss 2.0.11 was seen to start the hook: the packages under the server command's install path.
+    let name = "commands-alone-hooked";
+    let project = copy_fixture(&format!("{name}-project"));
+    std::fs::rename(project.join("dbt_packages"), project.join("vendor")).unwrap();
+    std::fs::write(project.join("packages.yml"), "packages:\n  - local: vendor/shop_utils\n").unwrap();
+    std::fs::create_dir_all(project.join("vendor/hookpkg")).unwrap();
+    let hooks = "name: hookpkg\non-run-start: \"select * from hook_probe_ran\"\n";
+    std::fs::write(project.join("vendor/hookpkg/dbt_project.yml"), hooks).unwrap();
+    let arguments = [Path::new("--project-dir"), &project, Path::new("--packages-install-path"), Path::new("vendor")];
+    let script = json!({"no_lsp": true, "compiled": "select 1"});
+    let (mut session, log) = Session::fake_options(name, script, &[], &arguments, Some(&scratch_of(name)));
+    session.initialize(&project);
+    let answer = execute(&mut session, COMPILE, json!([uri(&project.join("models/marts/orders.sql"))]));
+    let why = "hookpkg has on-run hooks, which dbt compile would run against the warehouse";
+    assert_eq!(answer["result"], json!({"file_uri": null, "error": why}));
+    assert!(runs(&log).is_empty(), "{:?}", runs(&log));
+    assert!(session.finish().success());
+}
+
+#[test]
 fn alone_compile_says_what_it_cannot_select() {
     let (mut session, log, _) = alone("commands-alone-refused", json!({}));
     let error = |session: &mut Session, path: &Path| {

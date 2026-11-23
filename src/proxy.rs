@@ -1347,23 +1347,19 @@ impl<W: Write> Proxy<W> {
 
     /// Queues the run of COMMAND by dbt's CLI for the client's request ID
     /// with ARGUMENT; or answers why it cannot run: a file it cannot
-    /// compile, packages that dbt would install, a server command with no
-    /// `lsp`.
+    /// compile, packages that dbt would install, a compile where a package
+    /// may have on-run hooks, a server command with no `lsp`.
     fn run_command(&mut self, command: &'static str, id: &Value, argument: &Value) {
         let root = self.workspace.root.clone().unwrap_or_default();
-        let job = match command {
+        let (job, hooks) = match command {
             commands::COMPILE => {
-                let cwd = self.dbt_dir().unwrap_or_default();
-                commands::compile_job(
-                    self.local_path(argument.as_str()).as_deref(),
-                    &root,
-                    self.project().as_deref(),
-                    cwd,
-                )
+                let (cwd, path) = (self.dbt_dir().unwrap_or_default(), self.local_path(argument.as_str()));
+                let job = commands::compile_job(path.as_deref(), &root, self.project().as_deref(), cwd);
+                (job, commands::hooked(&root, self.workspace.dbt.command()))
             }
-            _ => Ok(commands::nodes_job(argument.as_str().unwrap_or_default())),
+            _ => (Ok(commands::nodes_job(argument.as_str().unwrap_or_default())), None),
         };
-        let refused = packages::refused(&root, self.workspace.dbt.command());
+        let refused = packages::refused(&root, self.workspace.dbt.command()).or(hooks);
         let dir = self.workspace.cache_dir(&root).join("run");
         let run = job.as_ref().ok().and_then(|job| self.workspace.dbt.run(&job.words, &root, dir, config::RUN_LOG));
         let failure = match (job, refused, run) {

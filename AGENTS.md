@@ -131,7 +131,8 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `cache::unchanged`: the decision whether a project is built again,
     free of the file system, with tests of its own;
   - `commands::hooked`: the decision whether `dbt compile` would run a
-    package's on-run hooks, its reads given, with tests of its own;
+    package's on-run hooks, the packages read where dbt installs them,
+    with tests of its own, apart from `compile_job`'s words;
   - `project::versions_of`: the decision which versions a model's file
     is, free of the file system, with tests of its own, once every
     properties file of its package is read;

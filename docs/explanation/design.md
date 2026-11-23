@@ -493,12 +493,14 @@ root's own path never counted; a file outside the root, in a package, or
 whose R holds a space or a comma (dbt's selector would split it) is
 refused.  So is a compile where a package may have on-run hooks, which
 `dbt compile` runs against the warehouse, even for one model (below):
-`commands::hooked` reads the `dbt_project.yml` of each package of the
-project, the root's first, then the others by name, and names the first
-whose `on-run-start` or `on-run-end` is anything but an empty value or
-`[]`, the forms seen harmless, or that has a top-level merge key, which
-may bring one: `NAME has on-run hooks, which dbt compile would run
-against the warehouse`.  Its answer is the `compiled_path` of the node of the root package
+`commands::hooked` reads the `dbt_project.yml` of the root, then of each
+package under the install path that the guard takes (the server
+command's `--packages-install-path`, else `DBT_PACKAGES_INSTALL_PATH`,
+else the project's), by directory, as dbt loads them once the guard lets
+it run, and names the first whose `on-run-start`, `on-run-end` or
+top-level merge key, which may bring one, holds anything but a null, `""`
+or `[]`, the forms seen harmless: `NAME has on-run hooks, which dbt
+compile would run against the warehouse`.  Its answer is the `compiled_path` of the node of the root package
 whose `original_file_path` is R, a test's never (as of a properties file),
 in the manifest the run wrote, resolved from the working directory; none
 answers dbt lsp's "Compiled file path not
@@ -573,6 +575,11 @@ alike unless said:
   Snowflake trial account with dbt 2.0.9: `dbt compile`, also with
   `--select` of one model, ran the `on-run-start` and `on-run-end` hooks
   against the warehouse; `dbt parse` and `dbt list` sent no query.
+  Observed on 2026-11-23, by plan 056's review, with dbt-oss 2.0.11
+  offline: `on-run-end: ~` and `on-run-start: null` ran nothing, as no
+  value does; a package with an `on-run-start` hook under the server
+  command's `--packages-install-path` made `dbt compile` start the hook
+  (dbt1308, `in <RUN_OPERATION>`).
 
 ## Root
 
@@ -1885,8 +1892,7 @@ over the manifest that node keeps, checked against dbt (plan 058);
   introspective macro or a Python model may reach the warehouse, and dbt
   may download a driver.  A compile is refused where a package may have
   on-run hooks, but an installed package whose `dbt_project.yml`
-  yaml-rust2 cannot read is in no `Project::packages`, so its hooks
-  escape the refusal.  A file of a package, or whose path from the root
+  yaml-rust2 cannot read is not seen, so its hooks escape the refusal.  A file of a package, or whose path from the root
   holds a space or a comma, does not compile; `show` needs dbt lsp.
 - `docs-paths` is ignored: docs blocks are read from every resource path.
 - JSON-RPC batches are forwarded as they are; a batched `exit` does not stop
@@ -2322,7 +2328,8 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   - the guard on packages: each layout in which dbt was seen to rewrite
     the install path, alike on every route;
   - the commands for clients: a compile refused where a package may have
-    on-run hooks, each form seen harmless let through.
+    on-run hooks, under the server command's install path too, each form
+    seen harmless let through.
 - CI runs the same checks on GitHub Actions, and the corpus and the live
   test on dbt-oss 2.0.11, and on dbt 2.0.9 once the owner allows it; each
   week, the same on the latest stable dbt-oss, and on the latest

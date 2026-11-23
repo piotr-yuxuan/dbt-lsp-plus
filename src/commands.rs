@@ -5,6 +5,7 @@
 //! its output answers, in dbt lsp 2.0.9's shapes.
 
 use crate::capability::{self, CAPABILITIES, Provider};
+use crate::packages;
 use crate::project::{self, Project};
 use crate::run::{self, Ending, Output, Run, Running};
 use crate::yaml::Tree;
@@ -26,6 +27,10 @@ pub const NO_LSP_WORD: &str = "the server command has no lsp, so dbt-lsp-plus ru
 
 /// What dbt lsp 2.0.9 answers a compile that finds no compiled file.
 pub const NOT_FOUND: &str = "Compiled file path not found.";
+
+/// The plain scalars that YAML reads as null, the empty one, no value,
+/// included: an `on-run-*` key holding one is no hook to dbt.
+const NULLS: [&str; 5] = ["", "~", "null", "Null", "NULL"];
 
 /// The commands that `initialize` announces, in the table's order: each
 /// with a provider of dbt's present, dbt lsp when the server LISTS its
@@ -109,8 +114,7 @@ fn first_error(output: &Output, logged: fn(&Output) -> Option<String>) -> Option
 /// holds: `dbt compile --select path:R`, R the file's path from the root;
 /// its answer, `compiled`'s, from the working directory CWD.  Refused for a
 /// file outside the root, in a package, or whose R holds a space or a
-/// comma, which dbt's selector would split; and where a package may have
-/// on-run hooks, as `hooked` reads them from the disk.
+/// comma, which dbt's selector would split.
 pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, cwd: PathBuf) -> Result<Job, Value> {
     let refused = |why: String| failure(COMPILE, &why);
     let path = path.ok_or_else(|| refused("the document is no file".into()))?;
@@ -130,10 +134,6 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
     if relative.contains(|c: char| c == ',' || c.is_whitespace()) {
         return Err(refused(format!("{relative} holds a space or a comma, which dbt's selector would split")));
     }
-    let config = |dir: &Path| project::package_config(dir).map(|(_, config)| config);
-    if let Some(why) = project.and_then(|project| hooked(project, config)) {
-        return Err(refused(why));
-    }
     let words = ["compile", "--select", &format!("path:{relative}"), "--log-format", "json"].map(str::to_owned);
     let read = move |output: &Output| match first_error(output, Output::error_event) {
         Some(why) => failure(COMPILE, &why),
@@ -142,25 +142,29 @@ pub fn compile_job(path: Option<&Path>, root: &Path, project: Option<&Project>, 
     Ok(Job { command: COMPILE, words: words.into(), read: Box::new(read) })
 }
 
-/// Why `dbt compile` is refused in PROJECT, if it is: the first package,
-/// the root first, then the others by name, whose `dbt_project.yml`, as
-/// CONFIG reads it from the package's directory, may have `on-run-start`
+/// Why `dbt compile` of the project at ROOT, with the server command
+/// SERVER, is refused, if it is: the first package, the root, then each
+/// under the install path, by directory, as dbt loads them once the guard
+/// on packages lets it run, whose `dbt_project.yml` may have `on-run-start`
 /// or `on-run-end` hooks, which dbt compile runs against the warehouse,
-/// even for one model.  Only an empty value and `[]` were seen harmless;
-/// any other, or a top-level merge key, which may bring one, refuses.
-fn hooked(project: &Project, config: impl Fn(&Path) -> Option<Tree>) -> Option<String> {
-    let mut packages: Vec<(&String, &PathBuf)> = project.packages.iter().collect();
-    packages.sort_by_key(|&(name, _)| (*name != project.root_package, name));
-    let harmless = |value: &Tree| match value {
-        Tree::Scalar { value, .. } => value.is_empty(),
-        Tree::Seq(items) => items.is_empty(),
-        Tree::Map { .. } | Tree::Alias => false,
+/// even for one model, or a top-level merge key, which may bring one.  A
+/// null, `""` or `[]` is none; any other value is one.  A package whose
+/// `dbt_project.yml` does not read is not seen.
+pub fn hooked(root: &Path, server: &[String]) -> Option<String> {
+    let install = packages::install_path(root, server).unwrap_or_default();
+    let mut installed: Vec<fs::DirEntry> = fs::read_dir(install).into_iter().flatten().flatten().collect();
+    installed.sort_by_key(fs::DirEntry::path);
+    let dirs: Vec<PathBuf> = std::iter::once(root.to_owned()).chain(installed.iter().map(fs::DirEntry::path)).collect();
+    let hooks = |(_, config): &(String, Tree)| {
+        let mut values = ["<<", "on-run-start", "on-run-end"].into_iter().filter_map(|key| config.get(key));
+        values.any(|value| match value {
+            Tree::Scalar { value, plain: true, .. } => !NULLS.contains(&value.as_str()),
+            Tree::Scalar { value, .. } => !value.is_empty(),
+            Tree::Seq(items) => !items.is_empty(),
+            Tree::Map { .. } | Tree::Alias => true,
+        })
     };
-    let hooks = |config: Tree| {
-        let hook = |key: &&str| config.get(key).is_some_and(|value| !harmless(value));
-        config.get("<<").is_some() || ["on-run-start", "on-run-end"].iter().any(hook)
-    };
-    let (name, _) = packages.into_iter().find(|(_, dir)| config(dir).is_some_and(hooks))?;
+    let (name, _) = dirs.iter().map(PathBuf::as_path).filter_map(project::package_config).find(hooks)?;
     Some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"))
 }
 
@@ -313,37 +317,44 @@ mod tests {
 
     #[test]
     fn a_compile_is_refused_where_a_package_has_on_run_hooks() {
-        let root = Path::new("/p");
-        let dirs = [root.to_owned(), root.join("dbt_packages/b_utils"), root.join("dbt_packages/a_utils")];
-        let names = ["shop", "b_utils", "a_utils"].map(str::to_owned);
-        let shop = Project { packages: names.into_iter().zip(dirs.clone()).collect(), ..project(root) };
-        // The root's, b_utils's and a_utils's dbt_project.yml.
-        let hooked = |configs: [&str; 3]| {
-            let texts: HashMap<PathBuf, &str> = dirs.clone().into_iter().zip(configs).collect();
-            super::hooked(&shop, |dir| crate::yaml::parse(texts.get(dir)?))
+        let dir = scratch_project("hooked", &[("dbt_project.yml", "name: shop\n")]);
+        // The root's dbt_project.yml, then b_utils's and a_utils's under the default install path.
+        let packages = [(".", "shop"), ("dbt_packages/b_utils", "b_utils"), ("dbt_packages/a_utils", "a_utils")];
+        let hooked = |configs: [&str; 3], server: &[String]| {
+            for ((at, name), config) in packages.iter().zip(configs) {
+                fs::create_dir_all(dir.join(at)).unwrap();
+                fs::write(dir.join(at).join("dbt_project.yml"), format!("name: {name}\n{config}")).unwrap();
+            }
+            super::hooked(&dir, server)
         };
         let refused =
             |name: &str| Some(format!("{name} has on-run hooks, which dbt compile would run against the warehouse"));
-        for harmless in ["name: x\n", "on-run-start: []\n", "on-run-end: \"\"\n", "on-run-end:\n"] {
-            assert_eq!(hooked([harmless; 3]), None, "{harmless:?}");
+        let harmless = ["", "on-run-start: []\n", "on-run-end: \"\"\n", "on-run-end:\n", "on-run-end: ~\n"];
+        for config in harmless.into_iter().chain(["on-run-start: null\n", "on-run-end: NULL\n"]) {
+            assert_eq!(hooked([config; 3], &[]), None, "{config:?}");
         }
         let hook = "on-run-start: \"select 1\"\n";
-        assert_eq!(hooked([hook; 3]), refused("shop"), "the root first");
-        assert_eq!(hooked(["name: shop\n", hook, hook]), refused("a_utils"), "then by name");
+        assert_eq!(hooked([hook; 3], &[]), refused("shop"), "the root first");
+        assert_eq!(hooked(["", hook, hook], &[]), refused("a_utils"), "then by directory");
         let forms = [
             "on-run-end: \"{{ '' }}\"\n",
-            "on-run-end: ~\n",
+            "on-run-end: \"null\"\n",
             "on-run-start:\n  - select 1\n",
             "on-run-end:\n  sql: select 1\n",
             "hooks: &hooks select 1\non-run-end: *hooks\n",
             "base: &base\n  on-run-end: select 1\n<<: *base\n",
         ];
         for form in forms {
-            assert_eq!(hooked([form, "name: b_utils\n", "name: a_utils\n"]), refused("shop"), "{form:?}");
+            assert_eq!(hooked([form, "", ""], &[]), refused("shop"), "{form:?}");
         }
-        let dir = scratch_project("hooked", &[("dbt_project.yml", "name: shop\non-run-start: \"select 1\"\n")]);
-        let job = compile_job(Some(&dir.join("models/a.sql")), &dir, Some(&project(&dir)), dir.clone());
-        assert_eq!(Some(refusal(job)), refused("shop"), "from the disk");
+        // As dbt-oss 2.0.11 was seen to start the hook: a package under the server command's install path.
+        fs::create_dir_all(dir.join("vendor/hookpkg")).unwrap();
+        fs::write(dir.join("vendor/hookpkg/dbt_project.yml"), format!("name: hookpkg\n{hook}")).unwrap();
+        assert_eq!(hooked(["", "", ""], &[]), None, "outside the install path");
+        let flagged = ["dbt", "lsp", "--packages-install-path", "vendor"].map(str::to_owned);
+        assert_eq!(hooked(["", "", ""], &flagged), refused("hookpkg"), "under the server's");
+        let assigned = ["env", "DBT_PACKAGES_INSTALL_PATH=vendor", "dbt", "lsp"].map(str::to_owned);
+        assert_eq!(hooked(["", "", ""], &assigned), refused("hookpkg"), "set before the server's dbt");
         fs::remove_dir_all(&dir).unwrap();
     }
 
