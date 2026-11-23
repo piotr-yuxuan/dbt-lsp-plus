@@ -283,11 +283,11 @@ compilation on the fixture; on a project of 2,000 models from
 the whole compilation, 1.9 s; every other one took under 1 ms.  It ignores `$/cancelRequest`: a hover cancelled at once
 during its compilation was answered with its result 110 ms later.
 
-With the union (plan 042), a definition on `ref('stg_orders')` and on
-`shop_utils.is_positive(...)` in `orders.sql`, and references on that
-`ref`, get the proxy's answer in `merge`, observed on 2026-11-22 on the
-fixture: dbt lsp 2.0.9's locations all match the proxy's, its reference
-`'stg_orders'` (4:25-37, the quotes included) holding the proxy's name.
+With the union (plan 042), a definition and references on
+`ref('stg_orders')` in `orders.sql` get the proxy's answer in `merge`,
+observed on 2026-11-22 on the fixture: dbt lsp 2.0.9's locations all
+match the proxy's, its reference `'stg_orders'` (4:25-37, the quotes
+included) holding the proxy's name.
 Once it has compiled, it answers a definition within 20 ms; but it took
 1.2 s over the first references of the session, past the deadline, where
 the proxy answers alone and logs it, then 2 ms over each later one.  One
