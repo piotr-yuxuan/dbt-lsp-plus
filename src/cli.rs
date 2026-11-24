@@ -11,7 +11,7 @@ use crate::{cache, commands, config, packages};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
@@ -276,20 +276,12 @@ fn select(selector: &str, command: &[String]) -> Value {
     result
 }
 
-/// What node's operand names: a unique id, or a place in a file, its line
-/// and column from 0, the column in characters.
-#[derive(Debug, PartialEq)]
-enum Operand {
-    Id(String),
-    Place { path: PathBuf, line: u64, column: u64 },
-}
-
-/// What OPERAND names from the directory DIR: a place when a file exists,
-/// as IS_FILE says, at its PATH, tried as `PATH:LINE:COLUMN`, `PATH:LINE`,
-/// then `PATH`, LINE and COLUMN positive integers from 1, PATH made
-/// absolute from DIR, each `..` dropping the component before it, as
-/// written; else a unique id, as written.
-fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operand {
+/// What OPERAND names from the directory DIR: a place where READ gives the
+/// text of a file at its PATH, tried as `PATH:LINE:COLUMN`, `PATH:LINE`,
+/// then `PATH`, LINE and COLUMN positive integers from 1, COLUMN in
+/// characters, PATH made absolute from DIR, each `..` dropping the
+/// component before it, as written; else a unique id, as written.
+fn operand(operand: &str, dir: &Path, read: impl Fn(&Path) -> Option<String>) -> Which {
     let (mut path, mut numbers) = (operand, Vec::new());
     let mut candidates = vec![(path, numbers.clone())];
     while let Some((rest, number)) = path.rsplit_once(':').filter(|_| numbers.len() < 2)
@@ -300,12 +292,13 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
     }
     for (path, numbers) in candidates.into_iter().rev() {
         let path = locate::lexical(&dir.join(path));
-        if is_file(&path) {
+        if let Some(text) = read(&path) {
             let (line, column) = (numbers.first().copied().unwrap_or(0), numbers.get(1).copied().unwrap_or(0));
-            return Operand::Place { path, line, column };
+            let offset = LineStarts::new(&text).offset(line, column, Encoding::Utf32);
+            return Which::At((path, text, offset));
         }
     }
-    Operand::Id(operand.to_owned())
+    Which::Id(operand.to_owned())
 }
 
 /// The CLI's index of the project at ROOT, in WORKSPACE: the manifest kept
@@ -340,13 +333,14 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
 /// outlives the run.
 fn node(asked: &str, command: &[String]) -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let place = operand(asked, &cwd, Path::is_file);
-    let from = match &place {
-        Operand::Place { path, .. } => path.clone(),
-        Operand::Id(_) => cwd,
+    // An unreadable file reads as empty.
+    let which = operand(asked, &cwd, |path| path.is_file().then(|| text::read(path).unwrap_or_default()));
+    let from = match &which {
+        Which::At((path, ..)) => path,
+        Which::Id(_) => &cwd,
     };
     let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
-    let (root, route) = match locate::project(&from, command, advice) {
+    let (root, route) = match locate::project(from, command, advice) {
         Ok(found) => found,
         Err(why) => return json!({"error": why, "node": null}),
     };
@@ -354,14 +348,6 @@ fn node(asked: &str, command: &[String]) -> Value {
     let mut workspace = Workspace::default();
     (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
     indexed(&mut workspace, &root);
-    let which = match place {
-        Operand::Id(id) => Which::Id(id),
-        Operand::Place { path, line, column } => {
-            let text = text::read(&path).unwrap_or_default();
-            let offset = LineStarts::new(&text).offset(line, column, Encoding::Utf32);
-            Which::At((path, text, offset))
-        }
-    };
     let answer = workspace.node(&which);
     let (node, error) = workspace::reply(answer, workspace.failure.as_deref(), asked);
     workspace.stop();
@@ -465,23 +451,31 @@ mod tests {
 
     #[test]
     fn a_node_s_operand_is_a_file_s_place_else_a_unique_id() {
-        let is_file = |path: &Path| path == Path::new("/w/shop/models/a.sql") || path == Path::new("/w/shop/x:1");
-        let place = |path: &str, line: u64, column: u64| Operand::Place { path: path.into(), line, column };
+        // Three lines, the third with a character of two UTF-16 units and three bytes before its column 3.
+        const A: &str = "select 1\nfrom x\n\u{1F600}é z";
+        let read = |path: &Path| match path.to_str() {
+            Some("/w/shop/models/a.sql") => Some(A.to_owned()),
+            Some("/w/shop/x:1") => Some(String::new()),
+            _ => None,
+        };
+        let place = |path: &str, text: &str, offset: usize| Which::At((path.into(), text.to_owned(), offset));
         let a = "/w/shop/models/a.sql";
+        let third = A.find('\u{1F600}').unwrap();
         let places = [
-            ("models/a.sql", place(a, 0, 0)),
-            ("models/a.sql:3", place(a, 2, 0)),
-            ("models/a.sql:3:7", place(a, 2, 6)),
-            ("./models/../models/a.sql:1:1", place(a, 0, 0)),
-            ("/w/shop/models/a.sql", place(a, 0, 0)),
-            ("x:1", place("/w/shop/x:1", 0, 0)),
+            ("models/a.sql", place(a, A, 0)),
+            ("models/a.sql:2", place(a, A, 9)),
+            ("models/a.sql:2:4", place(a, A, 12)),
+            ("models/a.sql:3:3", place(a, A, third + 4 + 2)),
+            ("./models/../models/a.sql:1:1", place(a, A, 0)),
+            ("/w/shop/models/a.sql", place(a, A, 0)),
+            ("x:1", place("/w/shop/x:1", "", 0)),
         ];
         let ids = ["model.shop.a", "models/a.sql:0", "models/a.sql:3:x", "models/a.sql:1:2:3", "models/b.sql"];
-        let expected: Vec<(&str, Operand)> =
-            places.into_iter().chain(ids.map(|id| (id, Operand::Id(id.to_owned())))).collect();
+        let expected: Vec<(&str, Which)> =
+            places.into_iter().chain(ids.map(|id| (id, Which::Id(id.to_owned())))).collect();
         // Each operand asked beside what it reads as, so that a failure names it.
-        let read: Vec<(&str, Operand)> =
-            expected.iter().map(|(asked, _)| (*asked, operand(asked, Path::new("/w/shop"), is_file))).collect();
-        assert_eq!(read, expected);
+        let found: Vec<(&str, Which)> =
+            expected.iter().map(|(asked, _)| (*asked, operand(asked, Path::new("/w/shop"), read))).collect();
+        assert_eq!(found, expected);
     }
 }

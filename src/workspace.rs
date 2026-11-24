@@ -28,6 +28,7 @@ type Filled = Vec<(PathBuf, cache::Key, Arc<Scanned>)>;
 /// open or on disk, and a byte offset in it.
 pub type Place = (PathBuf, String, usize);
 
+#[derive(Debug, PartialEq)]
 pub enum Which {
     Id(String),
     At(Place),
