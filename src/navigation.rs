@@ -427,15 +427,13 @@ pub fn references<'a>(lookup: &Lookup<'a, '_>, path: &Path, name: &Name, declara
     found
 }
 
-/// What a hover on a `doc` or a generic test, NAME, shows of FOUND, the
-/// block it leads to in PROJECT: a docs block's text between its tags, as
-/// written, if any; a test's opening tag and its package, in a code block
-/// and code spans when MARKDOWN.
-pub fn hover(project: &Project, name: &Name, found: &Target, markdown: bool) -> Option<String> {
-    if !matches!(name.kind, Kind::Doc | Kind::Test) {
-        return None;
-    }
-    let text = project.text(&found.path)?;
+/// What a hover on a `doc` or a generic test, NAME, in the file at PATH,
+/// shows of the first block it leads to by LOOKUP: a docs block's text
+/// between its tags, as written, if any; a test's opening tag and its
+/// package, in a code block and code spans when MARKDOWN.
+pub fn hover(lookup: &Lookup, path: &Path, name: &Name, markdown: bool) -> Option<String> {
+    let found = resolve(lookup, path, name).into_iter().next()?;
+    let text = lookup.project.text(&found.path)?;
     let block = scan::blocks(text).into_iter().find(|block| block.name_range == found.range)?;
     if name.kind == Kind::Doc {
         return Some(text[block.inner].trim().to_owned()).filter(|docs| !docs.is_empty());
@@ -1244,11 +1242,8 @@ models:
         let root = shop("navigation-hover", "name: shop\n");
         let project = project::scan(&root, &HashMap::new()).unwrap();
         let path = root.join("models/_models.yml");
-        let shown = |target: Option<Name>, markdown| {
-            let target = target.unwrap();
-            let found = resolve(&Lookup::new(&project, None), &path, &target);
-            hover(&project, &target, &found[0], markdown)
-        };
+        let shown =
+            |target: Option<Name>, markdown| hover(&Lookup::new(&project, None), &path, &target.unwrap(), markdown);
         assert_eq!(shown(named(Kind::Doc, None, "order_status"), true).as_deref(), Some("The root's."));
         // An empty docs block shows nothing, so that the server's answer passes.
         assert_eq!(shown(named(Kind::Doc, None, "empty"), true), None);

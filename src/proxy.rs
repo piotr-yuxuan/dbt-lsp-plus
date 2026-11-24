@@ -322,7 +322,9 @@ impl<W: Write> Proxy<W> {
     /// The answer to the call hierarchy's METHOD, on the graph of the files
     /// with the last parse's nodes.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Answer> {
-        let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = self.workspace.project() else {
+            return Some(Answer::Unanswered(vec![self.workspace.unreadable()]));
+        };
         let graph = self.workspace.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
@@ -397,7 +399,7 @@ impl<W: Write> Proxy<W> {
         let project = self.workspace.project();
         let Some((path, scanned, at)) = self.scan_at(params, project.as_deref()) else { return Some(Answer::Empty) };
         let Some(name) = navigation::reference_at(&path, &scanned, at) else { return Some(Answer::Empty) };
-        let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = project else { return Some(Answer::Unanswered(vec![self.workspace.unreadable()])) };
         let lookup = || navigation::Lookup::new(&project, self.workspace.index.as_ref());
         if !references {
             let locations = self.locations(&project, &navigation::resolve(&lookup(), &path, &name));
@@ -414,12 +416,6 @@ impl<W: Write> Proxy<W> {
         }
         let found = navigation::references(&lookup(), &path, &name, declaration);
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
-    }
-
-    /// Why the server cannot answer from the project: the root's
-    /// `dbt_project.yml` does not read, which the scan needs.
-    fn unreadable(&self) -> Reason {
-        Reason::Unreadable(self.workspace.root.clone().unwrap_or_default())
     }
 
     /// The URI of the file at PATH, as the client spelt it if it opened it.
@@ -740,7 +736,9 @@ impl<W: Write> Proxy<W> {
     /// over a project that does not read.
     fn symbols(&self, params: &Value) -> Option<Answer> {
         let query = params.get("query")?.as_str()?;
-        let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = self.workspace.project() else {
+            return Some(Answer::Unanswered(vec![self.workspace.unreadable()]));
+        };
         Some(Answer::Found(features::workspace_symbols(&project, query)))
     }
 
@@ -816,9 +814,12 @@ impl<W: Write> Proxy<W> {
         // Line 1, column 1 of a file stands for the node it defines.
         let start = params["position"] == json!({"line": 0, "character": 0});
         let named = self.workspace.node_at(self.document_at(params).as_ref(), start);
-        let summary = index
-            .zip(named.flatten())
-            .map(|(index, node)| (format!("{}\n{}", index.summary(node), index.facts(node)), true));
+        let summary = match (index, named.flatten()) {
+            (Some(index), Some(node)) => {
+                Some(features::hover(&format!("{}\n{}", index.summary(node), index.facts(node)), true, self.markdown))
+            }
+            _ => None,
+        };
         // A doc's or a generic test's block, from the project's scan, which the cache keeps between requests, as
         // for `node_at`'s entry and file's start.
         let block = || {
@@ -826,16 +827,10 @@ impl<W: Write> Proxy<W> {
             let name = navigation::reference_at(&path, &scanned, offset)
                 .filter(|name| matches!(name.kind, reference::Kind::Doc | reference::Kind::Test))?;
             let project = self.workspace.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
-            navigation::hover(&project, &name, found.first()?, self.markdown).map(|text| (text, false))
+            let text = navigation::hover(&navigation::Lookup::new(&project, index), &path, &name, self.markdown)?;
+            Some(features::hover(&text, false, self.markdown))
         };
-        let nothing = match (named, index) {
-            (Some(_), None) => Answer::Unanswered(vec![self.workspace.unindexed()]),
-            (Some(None), Some(_)) if self.workspace.project().is_none() => Answer::Unanswered(vec![self.unreadable()]),
-            _ => Answer::Empty,
-        };
-        let found = summary.or_else(block);
-        found.map_or(nothing, |(text, hard)| Answer::Found(features::hover(&text, hard, self.markdown)))
+        summary.or_else(block).map_or_else(|| self.workspace.why(named), Answer::Found)
     }
 
     /// The relation hints of the request's range: `[]` with no index, no

@@ -210,14 +210,9 @@ impl Workspace {
             return Answer::Unanswered(vec![elsewhere]);
         }
         let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
-        let node = match which {
-            Which::Id(id) => index.node(id),
-            Which::At(place) => match self.node_at(Some(place), true) {
-                Some(None) if self.project().is_none() => {
-                    return Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())]);
-                }
-                named => named.flatten(),
-            },
+        let named = match which {
+            Which::Id(id) => index.node(id).map(Some),
+            Which::At(place) => self.node_at(Some(place), true),
         };
         let described = |node: &Value| {
             let mut described = node.clone();
@@ -225,7 +220,24 @@ impl Workspace {
             described["children"] = index.children(node["unique_id"].as_str().unwrap_or_default()).into();
             described
         };
-        node.map(described).map_or(Answer::Empty, Answer::Found)
+        named.flatten().map(described).map_or_else(|| self.why(named), Answer::Found)
+    }
+
+    /// Why a place that NAMED, as `node_at` gives it, gives no node: no
+    /// index yet, where it names one; a project that does not read, where it
+    /// names one the lookup does not find; else nothing to look up.
+    pub fn why(&self, named: Option<Option<&Value>>) -> Answer {
+        match (named, &self.index) {
+            (Some(_), None) => Answer::Unanswered(vec![self.unindexed()]),
+            (Some(None), Some(_)) if self.project().is_none() => Answer::Unanswered(vec![self.unreadable()]),
+            _ => Answer::Empty,
+        }
+    }
+
+    /// Why the core cannot answer from the project: the root's
+    /// `dbt_project.yml` does not read, which the scan needs.
+    pub fn unreadable(&self) -> Reason {
+        Reason::Unreadable(self.root.clone().unwrap_or_default())
     }
 
     /// Starts a parse when the index is stale and dbt can parse: no parse
@@ -421,6 +433,31 @@ mod tests {
         assert_eq!(replies, said);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
+    fn why_a_place_names_a_node_it_cannot_give() {
+        let root = project::scratch_project("workspace-why", &[("dbt_project.yml", "name: shop\n")]);
+        let mut workspace = Workspace { root: Some(root.clone()), ..Workspace::default() };
+        let node = json!({"unique_id": "model.shop.a"});
+        let unindexed = Answer::Unanswered(vec![workspace.unindexed()]);
+        let before = [workspace.why(Some(None)), workspace.why(Some(Some(&node))), workspace.why(None)];
+        assert_eq!(before, [unindexed.clone(), unindexed, Answer::Empty], "before any index");
+        workspace.parsed(Some(config::ParseIndex::of(&json!({"metadata": {"project_name": "shop"}}))), None);
+        assert_eq!(
+            [workspace.why(Some(None)), workspace.why(None)],
+            [Answer::Empty, Answer::Empty],
+            "a project that reads"
+        );
+        fs::remove_file(root.join("dbt_project.yml")).unwrap();
+        workspace.epoch += 1;
+        let unreadable = Answer::Unanswered(vec![Reason::Unreadable(root.clone())]);
+        assert_eq!(
+            [workspace.why(Some(None)), workspace.why(None)],
+            [unreadable, Answer::Empty],
+            "dbt_project.yml gone"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
