@@ -405,7 +405,8 @@ mod tests {
 
     #[test]
     fn a_node_s_operand_is_a_file_s_place_else_a_unique_id() {
-        // Three lines, the third with a character of two UTF-16 units and three bytes before its column 3.
+        // Three lines; the third opens with a character of two UTF-16 units and four bytes, then one of two
+        // bytes: its column 3 lies six bytes in.
         const A: &str = "select 1\nfrom x\n\u{1F600}é z";
         let read = |path: &Path| match path.to_str() {
             Some("/w/shop/models/a.sql") => Some(A.to_owned()),
