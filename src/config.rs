@@ -294,8 +294,9 @@ impl ParseIndex {
 
     /// `{"upstream": {ID: HOPS}, "downstream": {ID: HOPS}}`: the nodes up and
     /// down from the node ID within DEPTH hops, as `dependencies` reads the
-    /// graph, each at its fewest hops, ID in neither; a test is upstream of
-    /// what it tests and, as in `children`, downstream of nothing.  None
+    /// graph, each at its fewest hops, ID in neither; what a test tests is
+    /// upstream of it, and a test is in no node's downstream, as in
+    /// `children`.  None
     /// when ID names no enabled node of the last manifest, as a disabled or
     /// a deleted one.  No walk is longer than the index, whatever DEPTH.
     pub fn lineage(&self, id: &str, depth: usize) -> Option<Value> {
@@ -760,9 +761,10 @@ mod tests {
             "test.shop.t",
             "seed.shop.z",
         );
-        // c depends on a and on b, a's child: from o, c lies at 3 hops through a, not 4 through b.
+        // c depends on b, then on a, b's parent: from o, c lies at 3 hops through a, not 4 through b, which a
+        // walk depth first in that order would give.
         let manifest = json!({
-            "nodes": {s: node(s, &[o]), a: node(a, &[s]), b: node(b, &[a]), c: node(c, &[a, b]), t: node(t, &[c]),
+            "nodes": {s: node(s, &[o]), a: node(a, &[s]), b: node(b, &[a]), c: node(c, &[b, a]), t: node(t, &[c]),
                       z: node(z, &[])},
             "sources": {o: node(o, &[])},
             "disabled": {"model.shop.d": [node("model.shop.d", &[c])]}});
@@ -784,6 +786,12 @@ mod tests {
         // Each question beside its answer, so that a failure names it.
         let found: Vec<_> = asked.iter().map(|&(id, depth)| ((id, depth), index.lineage(id, depth))).collect();
         assert_eq!(found, asked.into_iter().zip(expected).collect::<Vec<_>>());
+        // At one hop, the downstream is `children`, c's test aside in both.
+        for id in [o, s, a, b, c, t, z] {
+            let near: Vec<String> =
+                index.lineage(id, 1).unwrap()["downstream"].as_object().unwrap().keys().cloned().collect();
+            assert_eq!(near, index.children(id), "{id}");
+        }
     }
 
     #[test]

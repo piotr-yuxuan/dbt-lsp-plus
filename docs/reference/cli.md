@@ -225,9 +225,10 @@ project of the current directory, within N hops, N a whole number from
 ```
 
 `upstream` follows `depends_on.nodes`, `downstream` the nodes that depend
-on it, each a map of unique id to its fewest hops, ID in neither.  A
-test is upstream of what it tests and downstream of nothing, as in
-node's `children`; only the enabled nodes of the last manifest count.
+on it, each a map of unique id to its fewest hops, ID in neither.  What
+a test tests is upstream of the test, and a test is in no node's
+downstream, as in node's `children`: a model's lineage lists none of its
+tests.  Only the enabled nodes of the last manifest count.
 
 The nodes are those of node's index: the manifest kept for the files as
 they lie, else a parse, waited for, kept when it does not fail.  On a
