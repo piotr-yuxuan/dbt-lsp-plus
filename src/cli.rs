@@ -176,9 +176,8 @@ fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     }
 }
 
-/// ROW's arguments from WORDS, those before `--`: the operand under its
-/// name, or its default, beside the row's option, as `option` reads it.
-/// Or why they cannot be read.
+/// The arguments that a tool's call would give ROW's run, from WORDS, those
+/// before `--`; or why they cannot be read, a usage error.
 fn operands(row: &Row, words: &[String]) -> Result<Value, String> {
     let (words, mut arguments) = option(row, words);
     let (name, default) = row.operand;
@@ -193,9 +192,9 @@ fn operands(row: &Row, words: &[String]) -> Result<Value, String> {
     Ok(arguments)
 }
 
-/// WORDS without the row's option after the operand, `--NAME N`, and that
-/// option as arguments: N a whole number, else its text, which the run
-/// refuses.
+/// The option stands after the operand alone.  An N that is no whole
+/// number stays its text, for the run to refuse as it refuses a tool's
+/// call.
 fn option<'a>(row: &Row, words: &'a [String]) -> (&'a [String], Value) {
     match (row.option, words) {
         (Some(name), [operand, flag, value]) if flag.strip_prefix("--") == Some(name) => {
@@ -374,9 +373,9 @@ fn answered(
     json!({"error": error, key: found})
 }
 
-/// The node that ARGUMENTS' `node` names, as nodeInfo gives it: by its
-/// unique id in the project of the current directory, or at a place in the
-/// project of its file.
+/// Arguments that do not read are refused in the answer, not as a usage
+/// error, since a tool's call brings them unchecked.  An id's project is the
+/// current directory's, a place's that of its file.
 fn node(arguments: &Value, command: &[String]) -> Value {
     let Some(asked) = arguments["node"].as_str() else {
         return json!({"error": "node needs a string `node`", "node": null});
@@ -391,8 +390,8 @@ fn node(arguments: &Value, command: &[String]) -> Value {
     answered("node", from, asked, command, |workspace| workspace.node(&which))
 }
 
-/// The lineage that ARGUMENTS ask, of the node `id` in the project of the
-/// current directory, within `depth` hops, every hop without one.
+/// Arguments that do not read are refused in the answer, as node's are;
+/// without `depth`, every hop, as dbt's `+model+`.
 fn lineage(arguments: &Value, command: &[String]) -> Value {
     let depth = match &arguments["depth"] {
         Value::Null => Some(u64::MAX),

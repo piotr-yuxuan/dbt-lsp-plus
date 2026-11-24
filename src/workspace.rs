@@ -285,8 +285,8 @@ impl Workspace {
         named.flatten().map(described).map_or_else(|| self.why(named), Answer::Found)
     }
 
-    /// The lineage of the node ID within DEPTH hops, as `ParseIndex::lineage`
-    /// gives it; else why none, no index yet; `Empty` for no such node.
+    /// `Empty`, not a reason, for an id that names no enabled node of the
+    /// index, which `workspace::reply` words as naming no node.
     pub fn lineage(&self, id: &str, depth: usize) -> Answer {
         let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
         index.lineage(id, depth).map_or(Answer::Empty, Answer::Found)
