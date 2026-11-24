@@ -515,14 +515,17 @@ fn node_says_why_when_a_parse_fails_and_keeps_no_manifest() {
 }
 
 /// COMMAND, as `Case::command` makes it, given INPUT a line at a time as
-/// a client gives it: after each line but a notification, its answer is
-/// read within 10 s while the input stays open; then the input is closed.
-/// Its exit status, each line of its standard output read as JSON, and its
-/// standard error.
+/// a client gives it: after each line that is a request, an id and a string
+/// method, or no JSON, its answer is read within 10 s while the input stays
+/// open.  The last line goes unterminated, as an input may end, and its
+/// answer is read once the input is closed; the server then ends within
+/// 10 s, or is killed.  Its exit status, each line of its standard output
+/// read as JSON, and its standard error.
 fn served(mut command: Command, input: &[impl AsRef<[u8]>]) -> (Option<i32>, Vec<Value>, String) {
     use std::io::{BufRead, Write};
     use std::process::Stdio;
     use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::{Duration, Instant};
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let (mut stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
     let (sender, written) = mpsc::channel();
@@ -530,13 +533,15 @@ fn served(mut command: Command, input: &[impl AsRef<[u8]>]) -> (Option<i32>, Vec
         std::io::BufReader::new(stdout).lines().map_while(Result::ok).try_for_each(|line| sender.send(line))
     });
     let mut lines = Vec::new();
-    for line in input.iter().map(AsRef::as_ref) {
+    let (last, before) = input.split_last().map(|(last, before)| (last.as_ref(), before)).unwrap();
+    for line in before.iter().map(AsRef::as_ref) {
         // A server that ended early closed its input: what it wrote tells why.
         let _ = stdin.write_all(&[line, b"\n"].concat());
-        if serde_json::from_slice::<Value>(line).is_ok_and(|message| message.get("id").is_none()) {
+        let request = |message: Value| message.get("id").is_some() && message["method"].is_string();
+        if serde_json::from_slice(line).is_ok_and(|message| !request(message)) {
             continue;
         }
-        match written.recv_timeout(std::time::Duration::from_secs(10)) {
+        match written.recv_timeout(Duration::from_secs(10)) {
             Ok(answer) => lines.push(answer),
             Err(RecvTimeoutError::Timeout) => {
                 panic!("no answer within 10 s, the input open: {}", String::from_utf8_lossy(line))
@@ -544,8 +549,19 @@ fn served(mut command: Command, input: &[impl AsRef<[u8]>]) -> (Option<i32>, Vec
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
+    let _ = stdin.write_all(last);
     drop(stdin);
-    lines.extend(written.iter());
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        match written.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(answer) => lines.push(answer),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                panic!("the server did not end within 10 s of its input's end");
+            }
+        }
+    }
     let _ = reader.join();
     let output = child.wait_with_output().unwrap();
     let lines = lines.iter().map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("{line}"))).collect();
@@ -593,17 +609,25 @@ fn mcp_serves_node_and_lineage_as_the_cli_does_from_its_path() {
         tool_call(json!(7), "node", json!({"node": "model.shop.nowhere"})),
         "not json".to_owned(),
     ];
-    // Then a line that is no UTF-8, and a request after it, answered all the same.
-    let ping = json!({"jsonrpc": "2.0", "id": 8, "method": "ping"}).to_string();
-    let input: Vec<Vec<u8>> = input.into_iter().chain([ping]).map(String::into_bytes).collect();
-    let input = [&input[..10], &[b"\xff\xfe".to_vec()], &input[10..]].concat();
+    // Then raw lines: no UTF-8, blank, a client's response, which gets nothing, a request ended by CRLF, and a
+    // last request with no line end, each answered as the documentation says.
+    let raw: [&[u8]; 5] = [
+        b"\xff\xfe",
+        b"",
+        br#"{"jsonrpc": "2.0", "id": 10, "result": {}}"#,
+        b"{\"jsonrpc\": \"2.0\", \"id\": 9, \"method\": \"ping\"}\r",
+        br#"{"jsonrpc": "2.0", "id": 8, "method": "ping"}"#,
+    ];
+    let input: Vec<Vec<u8>> = input.into_iter().map(String::into_bytes).chain(raw.map(<[u8]>::to_vec)).collect();
     let copy = case.copy.to_str().unwrap();
     let (status, lines, stderr) = served(case.command(&case.dir, &["mcp", copy]), &input);
     assert_eq!((status, stderr.as_str()), (Some(0), ""), "{lines:?}");
     let ids: Vec<&Value> = lines.iter().map(|line| &line["id"]).collect();
     let expected = [json!("server-discover-probe-1"), json!(1), json!(2), json!(3), json!(4), json!(4294967296u64)];
-    let expected: Vec<Value> =
-        expected.into_iter().chain([json!(6), json!(7), Value::Null, Value::Null, json!(8)]).collect();
+    let expected: Vec<Value> = expected
+        .into_iter()
+        .chain([json!(6), json!(7), Value::Null, Value::Null, Value::Null, json!(9), json!(8)])
+        .collect();
     assert_eq!(ids, expected.iter().collect::<Vec<_>>(), "one line per request and per line that is no JSON");
     assert!(lines.iter().all(|line| line["jsonrpc"] == "2.0"), "{lines:?}");
     let handshake =
@@ -629,8 +653,12 @@ fn mcp_serves_node_and_lineage_as_the_cli_does_from_its_path() {
     let (nowhere, failed) = tool_answer(&lines[7]);
     let none = json!({"error": "model.shop.nowhere names no node", "node": null});
     let no_json = json!({"code": -32700, "message": "a line that is no JSON"});
-    let after = (&lines[8]["error"], &lines[9]["error"], &lines[10]["result"]);
-    assert_eq!((nowhere, failed, after), (none, &json!(true), (&no_json, &no_json, &json!({}))));
+    let after = [8, 9, 10].map(|at| &lines[at]["error"]).into_iter().chain([11, 12].map(|at| &lines[at]["result"]));
+    let pong = json!({});
+    assert_eq!(
+        (nowhere, failed, after.collect::<Vec<_>>()),
+        (none, &json!(true), vec![&no_json, &no_json, &no_json, &pong, &pong])
+    );
     let parsed = crate::parses(&case.log).len();
     // From a shell in the copy, the same answer from the manifest kept: one parse in all.
     let (status, answer) = case.run(&case.copy, &["lineage", "model.shop.orders", "--depth", "5"]);
@@ -669,6 +697,10 @@ fn mcp_says_why_without_a_project_and_fails_on_a_path_that_is_no_directory() {
         served(case.command(&case.dir, &["mcp", "--", fake, "lsp", "--project-dir", copy]), &input);
     let (given, failed) = tool_answer(&lines[0]);
     assert_eq!((status, failed, &given["node"]["unique_id"]), (Some(0), &json!(false), &json!("model.shop.orders")));
+    // A relative server command is read from PATH, the server's directory, not from where it was started.
+    let (status, lines, _) = served(case.command(&case.dir, &["mcp", copy, "--", ".venv/bin/dbt", "lsp"]), &input);
+    let (relative, failed) = tool_answer(&lines[0]);
+    assert_eq!((status, failed, &relative["node"]["unique_id"]), (Some(0), &json!(false), &json!("model.shop.orders")));
     let (status, lines, stderr) = served(case.command(&case.dir, &["mcp", "nowhere"]), &input);
     assert_eq!((status, lines), (Some(1), Vec::new()), "nothing on the standard output: {stderr}");
     assert!(stderr.starts_with("dbt-lsp-plus: nowhere: "), "{stderr}");
