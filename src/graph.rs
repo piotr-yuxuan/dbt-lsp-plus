@@ -128,7 +128,8 @@ mod tests {
 
     #[test]
     fn scanned_edges_follow_refs_sources_and_macros_across_packages() {
-        let graph = Graph::scanned(&shop(), None);
+        let project = shop();
+        let graph = Graph::scanned(&project, None);
         let edges = pairs(&graph);
         for expected in [
             ("model.shop.orders", "model.shop.stg_orders"),
@@ -145,6 +146,9 @@ mod tests {
         // The commented ref('raw_customers') of stg_customers is no edge; the dynamic ref is unknown.
         assert!(!edges.contains(&("model.shop.stg_customers", "seed.shop.raw_customers")));
         assert!(!edges.iter().any(|(from, _)| *from == "model.shop.order_summary"));
+        // The calls are the edges' alone: no item keeps a copy.
+        assert!(project.entities.iter().any(|entity| !entity.calls.is_empty()));
+        assert!(graph.items.values().all(|item| item.calls.is_empty()));
     }
 
     #[test]
@@ -231,9 +235,13 @@ mod tests {
             ("model.shop.order_summary", "models/marts/order_summary.sql", &["model.shop.orders"]),
             ("model.shop.orders", "models/marts/orders.sql", &["model.shop.stg_orders"]),
             ("test.shop.not_null_orders_id.abc", "models/marts/_marts.yml", &["model.shop.orders"]),
+            // A hook, of a kind that `dbt list` does not list.
+            ("operation.shop.shop-on-run-start-0", "./dbt_project.yml", &["model.shop.orders"]),
         ]);
         let graph = Graph::scanned(&project, None).with_index(&index, &project);
         let edges = pairs(&graph);
+        let hook = "operation.shop.shop-on-run-start-0";
+        assert!(!graph.items.contains_key(hook) && !edges.iter().any(|(from, _)| *from == hook), "no hook");
         assert!(edges.contains(&("model.shop.order_summary", "model.shop.orders")));
         assert!(edges.contains(&("test.shop.not_null_orders_id.abc", "model.shop.orders")));
         assert!(edges.contains(&("model.shop.orders", "macro.shop_utils.is_positive")));
@@ -245,6 +253,9 @@ mod tests {
         let text = project.text(&graph.items["model.shop.orders"].path).unwrap();
         assert_eq!(&text[stg[0].clone()], "ref('stg_orders'");
         assert!(graph.items["test.shop.not_null_orders_id.abc"].path.ends_with("models/marts/_marts.yml"));
+        // An item the index gives too keeps no calls, which its edges hold.
+        let scanned = project.entities.iter().find(|entity| entity.id == "model.shop.orders").unwrap();
+        assert!(!scanned.calls.is_empty() && graph.items["model.shop.orders"].calls.is_empty());
     }
 
     #[test]
