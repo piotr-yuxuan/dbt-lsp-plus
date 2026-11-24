@@ -15,107 +15,59 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
-const DOCTOR_USAGE: &str = "\
-usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
-
-Says on one line of JSON what the server would find from PATH, by default
-the current directory: the project and by which route; the dbt, where from,
-what was skipped, and why it does not answer as a dbt 2 does, if it does
-not; why a parse would be refused, if it would.  It runs only git and `lsp
---help` of the dbt.  ARGUMENTS are the server's own, as an editor gives
-them: `dbt lsp --project-dir DIR`.  Exit status 0 when a project is found
-whose dbt answers as a dbt 2 does, 1 otherwise, 2 for a usage error.
-
-  -h, --help   this text";
-
-const SELECT_USAGE: &str = "\
-usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
-
-Lists on one line of JSON the nodes that the dbt selector SELECTOR selects in
-the project of the current directory, as `dbt list` gives them:
-{\"nodes\": [...], \"error\": null}, or `error` set and no node.
-ARGUMENTS are the server's own, as for doctor.  Exit status 0 when nodes are
-listed, 1 otherwise, \"No nodes found\" included, 2 for a usage error.
-
-  -h, --help   this text";
-
-const NODE_USAGE: &str = "\
-usage: dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
-
-Gives on one line of JSON the node that the unique id ID names in the
-project of the current directory, or the one named at line LINE, column
-COLUMN (from 1, COLUMN in characters) of the file PATH, in the project of
-that file, as the command nodeInfo gives it, with its `summary` and its
-`children`: {\"error\": null, \"node\": {...}}, or `error` set.  PATH alone
-names the one node its file defines.  The operand is a PATH when such a
-file exists, else an ID.  The nodes are those of the manifest kept from
-a `dbt parse` of the project as its files lie now, else of a `dbt parse`
-run then, whose manifest is kept when it does not fail.  ARGUMENTS are
-the server's own, as for doctor.  Exit status 0 when `error` is null, 1
-otherwise, 2 for a usage error.
-
-  -h, --help   this text";
-
-/// A subcommand, named by the first word of the command line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Subcommand {
-    Doctor,
-    Select,
-    Node,
-}
-
-/// A subcommand's run: from its operand and the server command, its answer
+/// A subcommand: its name, its usage, the operand it needs, if any, and
+/// its run, which from its operand and the server command gives its answer
 /// and whether it worked.
-type Run = fn(Option<String>, &[String]) -> (Value, bool);
-
-/// A subcommand's row: its name, its usage, the operand it needs, if any,
-/// and its run.
-struct Row {
-    subcommand: Subcommand,
+pub struct Row {
     name: &'static str,
     usage: &'static str,
     needs: Option<&'static str>,
-    run: Run,
+    run: fn(Option<String>, &[String]) -> (Value, bool),
 }
 
-/// The subcommands, in `Subcommand`'s order, by which `Subcommand::row`
-/// reads them; a unit test holds each row at its subcommand's place.
 const SUBCOMMANDS: [Row; 3] = [
     Row {
-        subcommand: Subcommand::Doctor,
         name: "doctor",
-        usage: DOCTOR_USAGE,
+        usage: "\
+usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
+
+Which project and dbt the server would find from PATH, on one line of JSON.
+Exit status 0 when it finds a dbt 2, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
         needs: None,
         run: |path, command| doctor(Path::new(path.as_deref().unwrap_or(".")), command),
     },
     Row {
-        subcommand: Subcommand::Select,
         name: "select",
-        usage: SELECT_USAGE,
+        usage: "\
+usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
+
+The nodes that SELECTOR, a dbt selector, selects, on one line of JSON.
+Exit status 0 when nodes are listed, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
         needs: Some("a SELECTOR"),
         run: |selector, command| by_error(select(&selector.unwrap_or_default(), command)),
     },
     Row {
-        subcommand: Subcommand::Node,
         name: "node",
-        usage: NODE_USAGE,
+        usage: "\
+usage: dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
+
+What nodeInfo gives of the node that ID, or a place in PATH, names, on one
+line of JSON; LINE and COLUMN from 1, COLUMN in characters.
+Exit status 0 when `error` is null, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
         needs: Some("an ID or a PATH"),
         run: |operand, command| by_error(node(&operand.unwrap_or_default(), command)),
     },
 ];
 
-impl Subcommand {
-    fn row(self) -> &'static Row {
-        &SUBCOMMANDS[self as usize]
-    }
-}
-
 /// The subcommand that WORDS, the command line after the program's name,
 /// name by their first word; none when it names none, and the words are the
 /// server's.
-pub fn named(words: &[String]) -> Option<Subcommand> {
+pub fn named(words: &[String]) -> Option<&'static Row> {
     let first = words.first()?;
-    SUBCOMMANDS.iter().find(|row| row.name == first).map(|row| row.subcommand)
+    SUBCOMMANDS.iter().find(|row| row.name == first)
 }
 
 /// What the server's command line asks.
@@ -155,11 +107,11 @@ enum Asked {
     },
 }
 
-/// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
+/// What WORDS, after ROW's name, ask: its usage, by `-h` or
 /// `--help` first, whatever follows; else its operand, optional for
 /// doctor and needed by select and node, then, after `--`, the server's
 /// arguments, as `arguments` reads them.  Or why they cannot be read.
-fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
+fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
         && (first == "-h" || first == "--help")
     {
@@ -173,7 +125,6 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
         [word] => return Err(format!("{word} is no option of the subcommand")),
         [_, extra, ..] => return Err(format!("{extra}: the server's arguments follow --")),
     };
-    let row = subcommand.row();
     if let Some(needed) = row.needs
         && operand.is_none()
     {
@@ -185,12 +136,11 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
     }
 }
 
-/// Runs SUBCOMMAND with WORDS, those after its name: its answer on the
+/// Runs ROW's subcommand with WORDS, those after its name: its answer on the
 /// standard output, one line of compact JSON, or its usage; a usage error on
 /// the standard error, with status 2.
-pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
-    let row = subcommand.row();
-    let (operand, command) = match asked(subcommand, words) {
+pub fn main(row: &Row, words: &[String]) -> ExitCode {
+    let (operand, command) = match asked(row, words) {
         Ok(Asked::Run { operand, command }) => (operand, command),
         Ok(Asked::Help) => {
             println!("{}", row.usage);
@@ -364,17 +314,15 @@ mod tests {
 
     #[test]
     fn the_first_word_alone_names_a_subcommand() {
-        let ours: [(&[&str], Subcommand); 4] = [
-            (&["doctor"], Subcommand::Doctor),
-            (&["doctor", "x"], Subcommand::Doctor),
-            (&["select", "+m"], Subcommand::Select),
-            (&["node", "x"], Subcommand::Node),
+        let ours: [(&[&str], &str); 4] = [
+            (&["doctor"], "doctor"),
+            (&["doctor", "x"], "doctor"),
+            (&["select", "+m"], "select"),
+            (&["node", "x"], "node"),
         ];
-        for (line, subcommand) in ours {
-            assert_eq!(named(&words(line)), Some(subcommand), "{line:?}");
+        for (line, name) in ours {
+            assert_eq!(named(&words(line)).map(|row| row.name), Some(name), "{line:?}");
         }
-        let placed = SUBCOMMANDS.iter().enumerate().all(|(at, row)| row.subcommand as usize == at);
-        assert!(placed, "each row of SUBCOMMANDS at its subcommand's place");
         let servers: [(&[&str], &[&str]); 4] = [
             (&["--", "doctor"], &["doctor"]),
             (&["dbt", "lsp"], &["dbt", "lsp"]),
@@ -382,12 +330,13 @@ mod tests {
             (&[], &["dbt", "lsp"]),
         ];
         for (line, server) in servers {
-            assert_eq!(named(&words(line)), None, "{line:?}");
+            assert!(named(&words(line)).is_none(), "{line:?}");
             let Ok(Arguments::Run(command)) = arguments(&words(line)) else { panic!("{line:?}") };
             assert_eq!(command, words(server), "{line:?}");
         }
         let version = words(&["-V", "select"]);
-        assert_eq!((named(&version), arguments(&version)), (None, Ok(Arguments::Version)), "an option first");
+        assert!(named(&version).is_none(), "an option first");
+        assert_eq!(arguments(&version), Ok(Arguments::Version), "an option first");
     }
 
     #[test]
@@ -418,34 +367,34 @@ mod tests {
             Ok(Asked::Run { operand: operand.map(str::to_owned), command: words(command) })
         };
         let default = ["dbt", "lsp"];
-        assert_eq!(asked(Subcommand::Doctor, &[]), run(None, &default));
-        assert_eq!(asked(Subcommand::Doctor, &words(&["x.sql"])), run(Some("x.sql"), &default));
-        let helped: [(Subcommand, &[&str]); 4] = [
-            (Subcommand::Doctor, &["-h"]),
-            (Subcommand::Select, &["--help"]),
-            (Subcommand::Doctor, &["--help", "--", "dbt", "lsp"]),
-            (Subcommand::Select, &["-h", "x"]),
+        assert_eq!(asked(&SUBCOMMANDS[0], &[]), run(None, &default));
+        assert_eq!(asked(&SUBCOMMANDS[0], &words(&["x.sql"])), run(Some("x.sql"), &default));
+        let helped: [(&Row, &[&str]); 4] = [
+            (&SUBCOMMANDS[0], &["-h"]),
+            (&SUBCOMMANDS[1], &["--help"]),
+            (&SUBCOMMANDS[0], &["--help", "--", "dbt", "lsp"]),
+            (&SUBCOMMANDS[1], &["-h", "x"]),
         ];
-        for (subcommand, line) in helped {
-            assert_eq!(asked(subcommand, &words(line)), Ok(Asked::Help), "{subcommand:?} {line:?}");
+        for (row, line) in helped {
+            assert_eq!(asked(row, &words(line)), Ok(Asked::Help), "{} {line:?}", row.name);
         }
         let given = words(&["--", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
-        assert_eq!(asked(Subcommand::Doctor, &given), run(None, &["uvx", "dbt", "lsp", "--target", "prod"]));
+        assert_eq!(asked(&SUBCOMMANDS[0], &given), run(None, &["uvx", "dbt", "lsp", "--target", "prod"]));
         let selected = words(&["+m+", "--", "dbt", "lsp"]);
-        assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), &default));
-        let refused: [(Subcommand, &[&str]); 9] = [
-            (Subcommand::Doctor, &["--bogus"]),
-            (Subcommand::Doctor, &["x.sql", "-h"]),
-            (Subcommand::Doctor, &["a", "b"]),
-            (Subcommand::Select, &[]),
-            (Subcommand::Node, &[]),
-            (Subcommand::Select, &["--", "dbt", "lsp"]),
-            (Subcommand::Doctor, &["--", "--mode", "x"]),
-            (Subcommand::Doctor, &["--", "-V"]),
-            (Subcommand::Doctor, &["--", "--backend", "never"]),
+        assert_eq!(asked(&SUBCOMMANDS[1], &selected), run(Some("+m+"), &default));
+        let refused: [(&Row, &[&str]); 9] = [
+            (&SUBCOMMANDS[0], &["--bogus"]),
+            (&SUBCOMMANDS[0], &["x.sql", "-h"]),
+            (&SUBCOMMANDS[0], &["a", "b"]),
+            (&SUBCOMMANDS[1], &[]),
+            (&SUBCOMMANDS[2], &[]),
+            (&SUBCOMMANDS[1], &["--", "dbt", "lsp"]),
+            (&SUBCOMMANDS[0], &["--", "--mode", "x"]),
+            (&SUBCOMMANDS[0], &["--", "-V"]),
+            (&SUBCOMMANDS[0], &["--", "--backend", "never"]),
         ];
-        for (subcommand, line) in refused {
-            assert!(asked(subcommand, &words(line)).is_err(), "{subcommand:?} {line:?}");
+        for (row, line) in refused {
+            assert!(asked(row, &words(line)).is_err(), "{} {line:?}", row.name);
         }
     }
 
