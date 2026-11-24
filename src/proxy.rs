@@ -85,6 +85,9 @@ struct Diagnostics {
 }
 
 struct Proxy {
+    /// The proxy sends on it; its receiver is read by `run` alone, by the
+    /// handshake, then by the forwarding thread through a clone: a read
+    /// here would take messages from that thread.
     client: Connection,
     /// Where the session's threads report: the one that hands on the
     /// client's messages, the parse, the runs and their watchers.
@@ -222,8 +225,9 @@ impl Proxy {
         self.set_root(root);
     }
 
-    /// The result of the client's `initialize`, learning from its PARAMS what
-    /// the session keeps; without a project the server stays quiet until a
+    /// The result of the client's `initialize`, which the crate's handshake
+    /// sends; its PARAMS are read here alone, so what the session keeps of
+    /// them is kept here.  Without a project the server stays quiet until a
     /// document names one.
     fn on_initialize(&mut self, params: &Value) -> Value {
         self.hierarchical = params
@@ -775,9 +779,10 @@ impl Proxy {
         self.start_project();
     }
 
-    /// The start of the session's project, once the client is initialized:
-    /// the first scan, the watcher of runs, the watcher of files, the line
-    /// that says which project and which dbt.
+    /// Runs once per session: after `initialized`, LSP's first moment for
+    /// the server's own requests, or at the first document of a project
+    /// when none was found before; nothing without a project, so that the
+    /// server stays quiet.
     fn start_project(&mut self) {
         if self.workspace.root.is_none() {
             return;
@@ -851,7 +856,7 @@ impl Proxy {
         if self.shutdown {
             return self.reply_error(id, ErrorCode::InvalidRequest, "the client asked for shutdown");
         }
-        self.shutdown = method == "shutdown";
+        self.shutdown |= method == "shutdown";
         if let Some(why) = self.outside(method, params) {
             return self.on_elsewhere(method, id, why);
         }

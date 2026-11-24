@@ -508,7 +508,8 @@ none, the server answers `initialize` before it can know it.
     kept files, since a file's resources depend on its package and
     layout.  The call hierarchy's graph is kept while the project and the
     last parse's index stay.
-  - `initialize` starts a thread that reads every file once, whose files
+  - The start of the project, at `initialized` or at the first document
+    of a project, starts a thread that reads every file once, whose files
     the cache takes once it is done.  Nothing waits for it: a request
     that comes before reads the files itself.
   - Measured on synthetic projects (`scripts/bench/`) of 3,000 and 6,000
