@@ -285,6 +285,13 @@ impl Workspace {
         named.flatten().map(described).map_or_else(|| self.why(named), Answer::Found)
     }
 
+    /// The lineage of the node ID within DEPTH hops, as `ParseIndex::lineage`
+    /// gives it; else why none, no index yet; `Empty` for no such node.
+    pub fn lineage(&self, id: &str, depth: usize) -> Answer {
+        let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
+        index.lineage(id, depth).map_or(Answer::Empty, Answer::Found)
+    }
+
     /// Why a place that NAMED, as `node_at` gives it, gives no node: no
     /// index yet, where it names one; a project that does not read, where it
     /// names one the lookup does not find; else nothing to look up.
@@ -406,6 +413,23 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn a_lineage_is_unanswered_before_any_index_then_found_or_empty() {
+        let mut workspace = Workspace::default();
+        assert_eq!(workspace.lineage("model.shop.b", 3), Answer::Unanswered(vec![workspace.unindexed()]));
+        let node = |name: &str, depends_on: &[&str]| {
+            json!({"unique_id": format!("model.shop.{name}"), "name": name, "resource_type": "model",
+                   "package_name": "shop", "depends_on": {"nodes": depends_on}})
+        };
+        let manifest = json!({"nodes": {"model.shop.a": node("a", &[]), "model.shop.b": node("b", &["model.shop.a"])}});
+        workspace.parsed(Some(config::ParseIndex::of(&manifest)), None);
+        let found = json!({"upstream": {"model.shop.a": 1}, "downstream": {}});
+        assert_eq!(
+            (workspace.lineage("model.shop.b", 3), workspace.lineage("model.shop.x", 3)),
+            (Answer::Found(found), Answer::Empty)
+        );
+    }
 
     #[test]
     fn a_node_by_its_id_or_a_place_with_its_children_or_why_none() {

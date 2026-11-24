@@ -164,6 +164,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     in `SUBCOMMANDS`; `cli::operand`, the decision on node's operand, a
     `Which`, with tests of its own; `cli::indexed`, the CLI's index, the kept manifest
     or a parse that it keeps, apart from the question `cli::node` asks;
+  - `ParseIndex::lineage`, the walks of the index, with tests of its own;
+    `Workspace::lineage`, the core's node queries in one place, beside
+    `Workspace::node`;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
     which `Running::stop` ends, a resource's start;
   - `Proxy::on_source`, `Proxy::on_rename`, `Proxy::on_navigation` and
