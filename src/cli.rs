@@ -7,7 +7,7 @@
 
 use crate::locate;
 use crate::text::{self, Encoding, LineStarts};
-use crate::workspace::{self, Which, Workspace};
+use crate::workspace::{self, Answer, Which, Workspace};
 use crate::{cache, commands, config, packages};
 use serde_json::{Value, json};
 use std::fs;
@@ -16,16 +16,18 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
-/// A subcommand: its name, its usage, its operand, and its run, which
-/// from its operand and the server command gives its answer and whether
-/// it worked.
+/// A subcommand: its run, from the arguments that its words give and the
+/// server command, gives its answer and whether it worked; an answer of
+/// null writes nothing, the run having written its own lines.
 pub struct Row {
     name: &'static str,
     usage: &'static str,
-    /// Without an operand: its default, else what it needs, said in the
-    /// usage error.
-    operand: Result<&'static str, &'static str>,
-    run: fn(String, &[String]) -> (Value, bool),
+    /// The operand's name among the arguments, and, without one, its
+    /// default, else what it needs, said in the usage error.
+    operand: (&'static str, Result<&'static str, &'static str>),
+    /// The option of a whole number, `--NAME N`, after the operand.
+    option: Option<&'static str>,
+    run: fn(&Value, &[String]) -> (Value, bool),
 }
 
 const SUBCOMMANDS: [Row; 3] = [
@@ -37,8 +39,9 @@ usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
 Which project and dbt the server would find from PATH, on one line of JSON.
 Exit status 0 when it finds a dbt 2, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
-        operand: Ok("."),
-        run: |path, command| doctor(Path::new(&path), command),
+        operand: ("path", Ok(".")),
+        option: None,
+        run: |arguments, command| doctor(Path::new(arguments["path"].as_str().unwrap_or_default()), command),
     },
     Row {
         name: "select",
@@ -48,8 +51,9 @@ usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
 The nodes that SELECTOR, a dbt selector, selects, on one line of JSON.
 Exit status 0 when nodes are listed, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
-        operand: Err("a SELECTOR"),
-        run: |selector, command| by_error(select(&selector, command)),
+        operand: ("selector", Err("a SELECTOR")),
+        option: None,
+        run: |arguments, command| by_error(select(arguments["selector"].as_str().unwrap_or_default(), command)),
     },
     Row {
         name: "node",
@@ -60,8 +64,9 @@ What nodeInfo gives of the node that ID, or a place in PATH, names, on one
 line of JSON; LINE and COLUMN from 1, COLUMN in characters.
 Exit status 0 when `error` is null, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
-        operand: Err("an ID or a PATH"),
-        run: |operand, command| by_error(node(&operand, command)),
+        operand: ("node", Err("an ID or a PATH")),
+        option: None,
+        run: |arguments, command| by_error(node(arguments, command)),
     },
 ];
 
@@ -102,18 +107,17 @@ pub fn arguments(words: &[String]) -> Result<Arguments, String> {
 #[derive(Debug, PartialEq)]
 enum Asked {
     Help,
-    /// Its OPERAND, doctor's PATH, select's SELECTOR or node's ID or PATH,
-    /// and the server command.
+    /// Its arguments, as `operands` reads them, and the server command.
     Run {
-        operand: String,
+        arguments: Value,
         command: Vec<String>,
     },
 }
 
 /// What WORDS, after ROW's name, ask: its usage, by `-h` or `--help`
-/// first, whatever follows; else its operand, or the row's default, then,
-/// after `--`, the server's arguments, as `arguments` reads them.  Or why
-/// they cannot be read.
+/// first, whatever follows; else its arguments, as `operands` reads them,
+/// then, after `--`, the server's, as `arguments` reads them.  Or why they
+/// cannot be read.
 fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
         && (first == "-h" || first == "--help")
@@ -122,16 +126,40 @@ fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     }
     let split = words.iter().position(|word| word == "--").unwrap_or(words.len());
     let server = words.get(split + 1..).unwrap_or_default();
-    let operand = match (&words[..split], row.operand) {
+    let asked = operands(row, &words[..split])?;
+    match arguments(server)? {
+        Arguments::Run(command) => Ok(Asked::Run { arguments: asked, command }),
+        _ => Err("-h and -V are not the server's arguments here".into()),
+    }
+}
+
+/// ROW's arguments from WORDS, those before `--`: the operand under its
+/// name, or its default, beside the row's option, as `option` reads it.
+/// Or why they cannot be read.
+fn operands(row: &Row, words: &[String]) -> Result<Value, String> {
+    let (words, mut arguments) = option(row, words);
+    let (name, default) = row.operand;
+    let operand = match (words, default) {
         ([], Ok(default)) => default.to_owned(),
         ([], Err(needed)) => return Err(format!("{} needs {needed}", row.name)),
         ([word], _) if !word.starts_with('-') => word.clone(),
         ([word], _) => return Err(format!("{word} is no option of the subcommand")),
         ([_, extra, ..], _) => return Err(format!("{extra}: the server's arguments follow --")),
     };
-    match arguments(server)? {
-        Arguments::Run(command) => Ok(Asked::Run { operand, command }),
-        _ => Err("-h and -V are not the server's arguments here".into()),
+    arguments[name] = json!(operand);
+    Ok(arguments)
+}
+
+/// WORDS without the row's option after the operand, `--NAME N`, and that
+/// option as arguments: N a whole number, else its text, which the run
+/// refuses.
+fn option<'a>(row: &Row, words: &'a [String]) -> (&'a [String], Value) {
+    match (row.option, words) {
+        (Some(name), [operand, flag, value]) if flag.strip_prefix("--") == Some(name) => {
+            let value = value.parse::<u64>().map_or_else(|_| json!(value), Value::from);
+            (std::slice::from_ref(operand), json!({name: value}))
+        }
+        _ => (words, json!({})),
     }
 }
 
@@ -139,8 +167,8 @@ fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
 /// standard output, one line of compact JSON, or its usage; a usage error on
 /// the standard error, with status 2.
 pub fn main(row: &Row, words: &[String]) -> ExitCode {
-    let (operand, command) = match asked(row, words) {
-        Ok(Asked::Run { operand, command }) => (operand, command),
+    let (arguments, command) = match asked(row, words) {
+        Ok(Asked::Run { arguments, command }) => (arguments, command),
         Ok(Asked::Help) => {
             println!("{}", row.usage);
             return ExitCode::SUCCESS;
@@ -150,10 +178,12 @@ pub fn main(row: &Row, words: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (answer, ok) = (row.run)(operand, &command);
+    let (answer, ok) = (row.run)(&arguments, &command);
     // A reader that closed the pipe, as `| head`, wants no more and no panic.
-    let _ = writeln!(std::io::stdout(), "{answer}");
-    if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if !answer.is_null() {
+        let _ = writeln!(std::io::stdout(), "{answer}");
+    }
+    ExitCode::from(u8::from(!ok))
 }
 
 fn by_error(answer: Value) -> (Value, bool) {
@@ -275,12 +305,39 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
     }
 }
 
-/// The node that ASKED, node's operand, names, with the server command
-/// COMMAND, as nodeInfo gives it: by its unique id in the project of the
-/// current directory, or at a place in the project of its file; or why
-/// none, the last parse's failure among them.  Only the kept manifest
-/// outlives the run.
-fn node(asked: &str, command: &[String]) -> Value {
+/// KEY's answer to QUESTION, asked of the Workspace of the project found
+/// from FROM with the server command COMMAND, its index the CLI's:
+/// `{"error": E, KEY: V}`, V what it found, else null, E why, or the last
+/// parse's failure beside V, as `workspace::reply` words them for ASKED.
+/// Only the kept manifest outlives the call.
+fn answered(
+    key: &str,
+    from: &Path,
+    asked: &str,
+    command: &[String],
+    question: impl FnOnce(&Workspace) -> Answer,
+) -> Value {
+    let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
+    let (root, route) = match locate::project(from, command, advice) {
+        Ok(found) => found,
+        Err(why) => return json!({"error": why, key: null}),
+    };
+    let (dbt, dir) = locate::dbt_of(&root, route, command);
+    let mut workspace = Workspace::default();
+    (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
+    indexed(&mut workspace, &root);
+    let (found, error) = workspace::reply(question(&workspace), workspace.failure.as_deref(), asked);
+    workspace.stop();
+    json!({"error": error, key: found})
+}
+
+/// The node that ARGUMENTS' `node` names, as nodeInfo gives it: by its
+/// unique id in the project of the current directory, or at a place in the
+/// project of its file.
+fn node(arguments: &Value, command: &[String]) -> Value {
+    let Some(asked) = arguments["node"].as_str() else {
+        return json!({"error": "node needs a string `node`", "node": null});
+    };
     let cwd = std::env::current_dir().unwrap_or_default();
     // An unreadable file reads as empty.
     let which = operand(asked, &cwd, |path| path.is_file().then(|| text::read(path).unwrap_or_default()));
@@ -288,19 +345,7 @@ fn node(asked: &str, command: &[String]) -> Value {
         Which::At((path, ..)) => path,
         Which::Id(_) => &cwd,
     };
-    let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
-    let (root, route) = match locate::project(from, command, advice) {
-        Ok(found) => found,
-        Err(why) => return json!({"error": why, "node": null}),
-    };
-    let (dbt, dir) = locate::dbt_of(&root, route, command);
-    let mut workspace = Workspace::default();
-    (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
-    indexed(&mut workspace, &root);
-    let answer = workspace.node(&which);
-    let (node, error) = workspace::reply(answer, workspace.failure.as_deref(), asked);
-    workspace.stop();
-    json!({"error": error, "node": node})
+    answered("node", from, asked, command, |workspace| workspace.node(&which))
 }
 
 #[cfg(test)]
@@ -362,11 +407,10 @@ mod tests {
 
     #[test]
     fn a_subcommand_reads_its_operand_then_the_server_s_arguments_after_dashes() {
-        let run =
-            |operand: &str, command: &[&str]| Ok(Asked::Run { operand: operand.to_owned(), command: words(command) });
+        let run = |arguments: Value, command: &[&str]| Ok(Asked::Run { arguments, command: words(command) });
         let default = ["dbt", "lsp"];
-        assert_eq!(asked(&SUBCOMMANDS[0], &[]), run(".", &default), "doctor's default");
-        assert_eq!(asked(&SUBCOMMANDS[0], &words(&["x.sql"])), run("x.sql", &default));
+        assert_eq!(asked(&SUBCOMMANDS[0], &[]), run(json!({"path": "."}), &default), "doctor's default");
+        assert_eq!(asked(&SUBCOMMANDS[0], &words(&["x.sql"])), run(json!({"path": "x.sql"}), &default));
         let helped: [(&Row, &[&str]); 4] = [
             (&SUBCOMMANDS[0], &["-h"]),
             (&SUBCOMMANDS[1], &["--help"]),
@@ -377,9 +421,12 @@ mod tests {
             assert_eq!(asked(row, &words(line)), Ok(Asked::Help), "{} {line:?}", row.name);
         }
         let given = words(&["--", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
-        assert_eq!(asked(&SUBCOMMANDS[0], &given), run(".", &["uvx", "dbt", "lsp", "--target", "prod"]));
+        assert_eq!(
+            asked(&SUBCOMMANDS[0], &given),
+            run(json!({"path": "."}), &["uvx", "dbt", "lsp", "--target", "prod"])
+        );
         let selected = words(&["+m+", "--", "dbt", "lsp"]);
-        assert_eq!(asked(&SUBCOMMANDS[1], &selected), run("+m+", &default));
+        assert_eq!(asked(&SUBCOMMANDS[1], &selected), run(json!({"selector": "+m+"}), &default));
         let refused: [(&Row, &[&str]); 9] = [
             (&SUBCOMMANDS[0], &["--bogus"]),
             (&SUBCOMMANDS[0], &["x.sql", "-h"]),
@@ -398,10 +445,11 @@ mod tests {
 
     #[test]
     fn a_row_without_its_operand_takes_its_default_or_says_what_it_needs() {
-        let operands: Vec<(&str, Result<&str, &str>)> = SUBCOMMANDS.iter().map(|row| (row.name, row.operand)).collect();
+        let operands: Vec<(&str, Result<&str, &str>)> =
+            SUBCOMMANDS.iter().map(|row| (row.name, row.operand.1)).collect();
         assert_eq!(operands, [("doctor", Ok(".")), ("select", Err("a SELECTOR")), ("node", Err("an ID or a PATH"))]);
         let none: Vec<Result<Asked, String>> = SUBCOMMANDS.iter().map(|row| asked(row, &[])).collect();
-        let doctor = Asked::Run { operand: ".".into(), command: words(&["dbt", "lsp"]) };
+        let doctor = Asked::Run { arguments: json!({"path": "."}), command: words(&["dbt", "lsp"]) };
         assert_eq!(none, [Ok(doctor), Err("select needs a SELECTOR".into()), Err("node needs an ID or a PATH".into())]);
     }
 

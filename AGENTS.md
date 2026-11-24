@@ -158,12 +158,13 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     command, its words and its reader;
   - `cli::named`: the rule that a subcommand is the first word, its row,
     tested without running the binary, apart from `main.rs`, whose
-    `cli::main` is the module's entry point; `cli::asked`: the decision on a
-    subcommand's words, with tests of its own; `cli::doctor`,
-    `cli::select` and `cli::node`, one per subcommand, each its row's run
-    in `SUBCOMMANDS`; `cli::operand`, the decision on node's operand, a
-    `Which`, with tests of its own; `cli::indexed`, the CLI's index, the kept manifest
-    or a parse that it keeps, apart from the question `cli::node` asks;
+    `cli::main` is the module's entry point; `cli::asked`, the decision on
+    a subcommand's words, and `cli::operands` and `cli::option`, its
+    operand and its option, each with the tests of `asked`;
+    `cli::doctor`, `cli::select` and `cli::node`, one per row, its run;
+    `cli::operand`, the decision on node's operand, a `Which`, with tests
+    of its own; `cli::indexed`, the CLI's index, the kept manifest or a
+    parse that it keeps, apart from the question `cli::answered` asks;
   - `ParseIndex::lineage`, the walks of the index, with tests of its own;
     `Workspace::lineage`, the core's node queries in one place, beside
     `Workspace::node`;
