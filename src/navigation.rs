@@ -433,7 +433,8 @@ pub fn references<'a>(lookup: &Lookup<'a, '_>, path: &Path, name: &Name, declara
 /// What a hover on a `doc` or a generic test, NAME, in the file at PATH,
 /// shows of the first block it leads to by LOOKUP: a docs block's text
 /// between its tags, as written, if any; a test's opening tag and its
-/// package, in a code block and code spans when MARKDOWN.
+/// package, in a code block and code spans when MARKDOWN.  The caller
+/// checks NAME's kind: another's target may be a block too, a snapshot's.
 pub fn hover(lookup: &Lookup, path: &Path, name: &Name, markdown: bool) -> Option<String> {
     let found = resolve(lookup, path, name).into_iter().next()?;
     let text = lookup.project.text(&found.path)?;
@@ -1254,6 +1255,7 @@ models:
         assert_eq!(shown(named(Kind::Test, None, "is_even"), true).as_deref(), Some(signature));
         let plain = "test is_even(model, column_name)\n\nin package shop";
         assert_eq!(shown(named(Kind::Test, None, "is_even"), false).as_deref(), Some(plain));
+        // A model's file holds no block.
         assert_eq!(shown(called(None, "orders"), true), None);
         std::fs::remove_dir_all(root).unwrap();
     }

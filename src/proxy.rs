@@ -1214,6 +1214,27 @@ mod tests {
     }
 
     #[test]
+    fn a_hover_shows_the_block_of_a_doc_or_a_test_alone() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let path = root.join("models/marts/orders.sql");
+        let line = fs::read_to_string(&path).unwrap().lines().nth(16).unwrap().to_owned();
+        let at = json!({"line": 16, "character": line.find("is_positive").unwrap() + 2});
+        let on_macro = json!({"textDocument": {"uri": features::uri(&path)}, "position": at});
+        // A ref to the snapshot, whose block's name its target is.
+        let (scratch, text) = (root.join("models/marts/scratch.sql"), "select * from {{ ref('orders_snapshot') }}");
+        let at = json!({"line": 0, "character": text.find("orders_snapshot").unwrap() + 2});
+        let on_ref = json!({"textDocument": {"uri": features::uri(&scratch)}, "position": at});
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
+        proxy.workspace.open.insert(scratch, text.to_owned());
+        let unindexed = Answer::Unanswered(vec![proxy.workspace.unindexed()]);
+        let before = (proxy.on_hover(&on_macro), proxy.on_hover(&on_ref));
+        assert_eq!(before, (Answer::Empty, unindexed), "before an index: no block, but why there is no index");
+        proxy.workspace.index = Some(config::ParseIndex::of(&json!({"metadata": {"project_name": "shop"}})));
+        assert_eq!(proxy.on_hover(&on_macro), Answer::Empty, "{line}");
+    }
+
+    #[test]
     fn a_request_reads_the_held_scan_until_the_open_text_differs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/orders.sql");
