@@ -94,6 +94,8 @@ const NOT_LOCKED: &str = "a package from the network is not in a lock as recent 
 #[test]
 fn a_subcommand_s_usage_error_says_its_usage_on_the_standard_error_alone() {
     let case = Case::new("cli-usage", &json!({}));
+    // cli.md, where an installed binary has no docs/.
+    let reference = format!("\n{}/blob/main/docs/reference/cli.md\n", env!("CARGO_PKG_REPOSITORY"));
     for (words, usage) in [
         (&["doctor", "--bogus"][..], "usage: dbt-lsp-plus doctor"),
         (&["select"], "usage: dbt-lsp-plus select"),
@@ -103,6 +105,10 @@ fn a_subcommand_s_usage_error_says_its_usage_on_the_standard_error_alone() {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!((output.status.code(), output.stdout), (Some(2), Vec::new()), "{words:?}");
         assert!(stderr.contains(usage), "{words:?}: {stderr}");
+        let statuses = ["\nExit status 0 when ", ", 1 otherwise, 2 for a usage error.\n"];
+        assert!(statuses.iter().all(|words| stderr.contains(words)) && stderr.ends_with(&reference), "{stderr}");
+        let units = "LINE and COLUMN from 1, COLUMN in characters";
+        assert_eq!(stderr.contains(units), words == ["node"], "node's units: {stderr}");
     }
     let output = case.command(&case.copy, &["doctor", "-h"]).output().unwrap();
     assert!(

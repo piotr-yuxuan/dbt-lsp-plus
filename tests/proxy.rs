@@ -254,6 +254,8 @@ fn help_and_version_are_printed() {
     };
     let (status, usage) = run("--help");
     assert!(status == Some(0) && usage.starts_with("usage: dbt-lsp-plus [--] [SERVER COMMAND...]\n"), "{usage}");
+    let reference = format!("\n{}/blob/main/docs/reference/cli.md\n", env!("CARGO_PKG_REPOSITORY"));
+    assert!(usage.ends_with(&reference), "cli.md, where an installed binary has no docs/: {usage}");
     assert_eq!(run("-V"), (Some(0), format!("dbt-lsp-plus {}\n", env!("CARGO_PKG_VERSION"))));
 }
 
