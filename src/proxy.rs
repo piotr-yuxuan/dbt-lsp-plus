@@ -1075,6 +1075,7 @@ pub fn run(command: &[String]) -> ExitCode {
         let _ = reader.send(Event::ClientClosed);
     });
     let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), events);
+    // The server command, which `take_project` reads here on every route, then replaces with its dbt's.
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
     if let Some(root) = locate::project_dir(command) {
         proxy.take_project(root, locate::Route::Given);
