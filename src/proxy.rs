@@ -73,7 +73,6 @@ const RUNS_EVERY: Duration = Duration::from_secs(1);
 /// root maps it.
 #[derive(Default)]
 struct Diagnostics {
-    /// The failures of the last run.
     failures: HashMap<PathBuf, Vec<runs::Failure>>,
     /// The errors and warnings of the last parse that ran to its end.
     parsed: HashMap<PathBuf, Vec<run::Problem>>,
@@ -563,8 +562,6 @@ impl Proxy {
         self.run = Some(commands::start(job, run, report));
     }
 
-    /// A run's RESULT, the answer to the client's request ID; then the next
-    /// run.
     fn on_ran(&mut self, id: RequestId, result: Value) {
         if let Some(run) = self.run.take() {
             run.stop();
@@ -668,8 +665,8 @@ impl Proxy {
         self.ask_client("workspace/inlayHint/refresh", Value::Null);
     }
 
-    /// Sends the client the server's request METHOD, with PARAMS if any,
-    /// under an id of `OWN_ID`'s, whose answer `on_client` drops.
+    /// Sends the client the server's request METHOD, with PARAMS, left out
+    /// when null, under an id of `OWN_ID`'s, whose answer `on_client` drops.
     fn ask_client(&mut self, method: &str, params: Value) {
         self.next_id += 1;
         let id = RequestId::from(format!("{OWN_ID}{}", self.next_id));
@@ -736,8 +733,8 @@ impl Proxy {
         Some(Answer::Found(features::workspace_symbols(&project, query)))
     }
 
-    /// A message of the client's: a request, a notification, or the answer
-    /// to a request of the server's, which is dropped, as anything else.
+    /// A message of the client's; the answer to a request of the server's
+    /// is dropped.
     fn on_client(&mut self, message: Message) {
         match message {
             Message::Request(request) => self.on_request(&request.method, request.id, &request.params),
@@ -778,9 +775,9 @@ impl Proxy {
         self.start_project();
     }
 
-    /// The start of the session's project, once the client is initialized: the
-    /// first scan, the watcher of runs, the watcher of files, the line that
-    /// says which project and which dbt.
+    /// The start of the session's project, once the client is initialized:
+    /// the first scan, the watcher of runs, the watcher of files, the line
+    /// that says which project and which dbt.
     fn start_project(&mut self) {
         if self.workspace.root.is_none() {
             return;
