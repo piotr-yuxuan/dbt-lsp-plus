@@ -137,7 +137,8 @@ option is a usage error: the reason and the usage on standard error,
 exit status 2, nothing started.
 
 - `--`: ends dbt-lsp-plus's own arguments; needed only before a server
-  command that starts with a dash.
+  command that starts with a dash, or whose first word is `doctor`,
+  `select` or `node`, which [name a subcommand](cli.md).
 - `-h`, `--help`: prints the usage and exits.
 - `-V`, `--version`: prints `dbt-lsp-plus X.Y.Z` and exits.
 
@@ -189,7 +190,8 @@ there.
   standard error and in a `window/logMessage`, `dbt-lsp-plus: project
   <root>, dbt <path> (<where it was found>).`, with each place skipped.
   With `--project-dir`, the command runs as written, and the line is
-  `dbt-lsp-plus: project <root>, dbt <words before lsp>.`.
+  `dbt-lsp-plus: project <root>, dbt <words before lsp> (the server
+  command).`.
 - A server command without the word `lsp` is kept as it is, as a wrapper
   of the user's own: dbt-lsp-plus then runs no dbt.
 

@@ -4,7 +4,7 @@
 //! dbt 2; built with the network, then run with none, as CI runs it:
 //!
 //!     cargo test --locked -j 4 --test proxy --no-run
-//!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy -- --ignored
+//!     unshare -rn make live DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 //!
 //! It runs on a copy of the fixture, from an empty environment with a
 //! scratch home, so that dbt writes nothing into the repository nor the
@@ -549,7 +549,7 @@ fn apply(changes: &serde_json::Map<String, Value>) {
         });
         for edit in edits {
             let change = json!({"range": edit["range"], "text": edit["newText"]});
-            dbt_lsp_plus::text::apply_change(&mut text, &change, dbt_lsp_plus::text::Encoding::Utf16);
+            dbt_lsp_plus::text::apply_change(&mut text, &change);
         }
         std::fs::write(&path, text).unwrap();
     }

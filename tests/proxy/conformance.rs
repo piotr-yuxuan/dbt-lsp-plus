@@ -3,7 +3,7 @@
 //! built with the network, then run with none, as CI runs it:
 //!
 //!     cargo test --locked -j 4 --test proxy --no-run
-//!     DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy conformance -- --ignored
+//!     unshare -rn make conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 //!
 //! Each project of `tests/fixtures/conformance/` is parsed by that dbt as
 //! the proxy parses, and what the proxy's library resolves in it

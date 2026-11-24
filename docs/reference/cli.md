@@ -21,7 +21,11 @@ ARGUMENTS are the server's own command line, as an editor or `.lsp.json`'s
 dbt`).
 
 `-h` or `--help` right after the subcommand's name prints its usage, whatever
-follows; elsewhere it is a usage error.
+follows; elsewhere it is a usage error.  Before any subcommand,
+`dbt-lsp-plus -h` (`--help`) prints the usage of the server and of the
+subcommands, `dbt-lsp-plus -V` (`--version`) prints `dbt-lsp-plus
+X.Y.Z`, and each exits with status 0.  The server's own command line is
+in [the features](features.md#the-arguments).
 
 ## The project and its dbt
 

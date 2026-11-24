@@ -4,118 +4,71 @@
 //! LSP client, each answered on one line of compact JSON.  The project and
 //! its dbt are found as the server finds them.
 
-use crate::locate::{self, Route};
+use crate::locate;
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{self, Which, Workspace};
-use crate::{cache, commands, config, packages, proxy};
+use crate::{cache, commands, config, packages};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
-const DOCTOR_USAGE: &str = "\
-usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
-
-Says on one line of JSON what the server would find from PATH, by default
-the current directory: the project and by which route; the dbt, where from,
-what was skipped, and why it does not answer as a dbt 2 does, if it does
-not; why a parse would be refused, if it would.  It runs only git and `lsp
---help` of the dbt.  ARGUMENTS are the server's own, as an editor gives
-them: `dbt lsp --project-dir DIR`.  Exit status 0 when a project is found
-whose dbt answers as a dbt 2 does, 1 otherwise, 2 for a usage error.
-
-  -h, --help   this text";
-
-const SELECT_USAGE: &str = "\
-usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
-
-Lists on one line of JSON the nodes that the dbt selector SELECTOR selects in
-the project of the current directory, as `dbt list` gives them:
-{\"nodes\": [...], \"error\": null}, or `error` set and no node.
-ARGUMENTS are the server's own, as for doctor.  Exit status 0 when nodes are
-listed, 1 otherwise, \"No nodes found\" included, 2 for a usage error.
-
-  -h, --help   this text";
-
-const NODE_USAGE: &str = "\
-usage: dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
-
-Gives on one line of JSON the node that the unique id ID names in the
-project of the current directory, or the one named at line LINE, column
-COLUMN (from 1, COLUMN in characters) of the file PATH, in the project of
-that file, as the command nodeInfo gives it, with its `summary` and its
-`children`: {\"error\": null, \"node\": {...}}, or `error` set.  PATH alone
-names the one node its file defines.  The operand is a PATH when such a
-file exists, else an ID.  The nodes are those of the manifest kept from
-a `dbt parse` of the project as its files lie now, else of a `dbt parse`
-run then, whose manifest is kept when it does not fail.  ARGUMENTS are
-the server's own, as for doctor.  Exit status 0 when `error` is null, 1
-otherwise, 2 for a usage error.
-
-  -h, --help   this text";
-
-/// A subcommand, named by the first word of the command line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Subcommand {
-    Doctor,
-    Select,
-    Node,
-}
-
-/// A subcommand's run: from its operand and the server command, its answer
+/// A subcommand: its name, its usage, its operand, and its run, which from its operand and the server command gives its answer
 /// and whether it worked.
-type Run = fn(Option<String>, &[String]) -> (Value, bool);
-
-/// A subcommand's row: its name, its usage, the operand it needs, if any,
-/// and its run.
-struct Row {
-    subcommand: Subcommand,
+pub struct Row {
     name: &'static str,
     usage: &'static str,
-    needs: Option<&'static str>,
-    run: Run,
+    /// Without an operand: its default, else what it needs, said in the
+    /// usage error.
+    operand: Result<&'static str, &'static str>,
+    run: fn(String, &[String]) -> (Value, bool),
 }
 
-/// The subcommands, in `Subcommand`'s order, by which `Subcommand::row`
-/// reads them; a unit test holds each row at its subcommand's place.
 const SUBCOMMANDS: [Row; 3] = [
     Row {
-        subcommand: Subcommand::Doctor,
         name: "doctor",
-        usage: DOCTOR_USAGE,
-        needs: None,
-        run: |path, command| doctor(Path::new(path.as_deref().unwrap_or(".")), command),
+        usage: "\
+usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
+
+Which project and dbt the server would find from PATH, on one line of JSON.
+Exit status 0 when it finds a dbt 2, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
+        operand: Ok("."),
+        run: |path, command| doctor(Path::new(&path), command),
     },
     Row {
-        subcommand: Subcommand::Select,
         name: "select",
-        usage: SELECT_USAGE,
-        needs: Some("a SELECTOR"),
-        run: |selector, command| by_error(select(&selector.unwrap_or_default(), command)),
+        usage: "\
+usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
+
+The nodes that SELECTOR, a dbt selector, selects, on one line of JSON.
+Exit status 0 when nodes are listed, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
+        operand: Err("a SELECTOR"),
+        run: |selector, command| by_error(select(&selector, command)),
     },
     Row {
-        subcommand: Subcommand::Node,
         name: "node",
-        usage: NODE_USAGE,
-        needs: Some("an ID or a PATH"),
-        run: |operand, command| by_error(node(&operand.unwrap_or_default(), command)),
+        usage: "\
+usage: dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
+
+What nodeInfo gives of the node that ID, or a place in PATH, names, on one
+line of JSON; LINE and COLUMN from 1, COLUMN in characters.
+Exit status 0 when `error` is null, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
+        operand: Err("an ID or a PATH"),
+        run: |operand, command| by_error(node(&operand, command)),
     },
 ];
-
-impl Subcommand {
-    fn row(self) -> &'static Row {
-        &SUBCOMMANDS[self as usize]
-    }
-}
 
 /// The subcommand that WORDS, the command line after the program's name,
 /// name by their first word; none when it names none, and the words are the
 /// server's.
-pub fn named(words: &[String]) -> Option<Subcommand> {
+pub fn named(words: &[String]) -> Option<&'static Row> {
     let first = words.first()?;
-    SUBCOMMANDS.iter().find(|row| row.name == first).map(|row| row.subcommand)
+    SUBCOMMANDS.iter().find(|row| row.name == first)
 }
 
 /// What the server's command line asks.
@@ -150,16 +103,16 @@ enum Asked {
     /// Its OPERAND, doctor's PATH, select's SELECTOR or node's ID or PATH,
     /// and the server command.
     Run {
-        operand: Option<String>,
+        operand: String,
         command: Vec<String>,
     },
 }
 
-/// What WORDS, after SUBCOMMAND's name, ask: its usage, by `-h` or
-/// `--help` first, whatever follows; else its operand, optional for
-/// doctor and needed by select and node, then, after `--`, the server's
+/// What WORDS, after ROW's name, ask: its usage, by `-h` or
+/// `--help` first, whatever follows; else its operand, or the row's
+/// default, then, after `--`, the server's
 /// arguments, as `arguments` reads them.  Or why they cannot be read.
-fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
+fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
         && (first == "-h" || first == "--help")
     {
@@ -167,30 +120,24 @@ fn asked(subcommand: Subcommand, words: &[String]) -> Result<Asked, String> {
     }
     let split = words.iter().position(|word| word == "--").unwrap_or(words.len());
     let server = words.get(split + 1..).unwrap_or_default();
-    let operand = match &words[..split] {
-        [] => None,
-        [word] if !word.starts_with('-') => Some(word.clone()),
-        [word] => return Err(format!("{word} is no option of the subcommand")),
-        [_, extra, ..] => return Err(format!("{extra}: the server's arguments follow --")),
+    let operand = match (&words[..split], row.operand) {
+        ([], Ok(default)) => default.to_owned(),
+        ([], Err(needed)) => return Err(format!("{} needs {needed}", row.name)),
+        ([word], _) if !word.starts_with('-') => word.clone(),
+        ([word], _) => return Err(format!("{word} is no option of the subcommand")),
+        ([_, extra, ..], _) => return Err(format!("{extra}: the server's arguments follow --")),
     };
-    let row = subcommand.row();
-    if let Some(needed) = row.needs
-        && operand.is_none()
-    {
-        return Err(format!("{} needs {needed}", row.name));
-    }
     match arguments(server)? {
         Arguments::Run(command) => Ok(Asked::Run { operand, command }),
         _ => Err("-h and -V are not the server's arguments here".into()),
     }
 }
 
-/// Runs SUBCOMMAND with WORDS, those after its name: its answer on the
+/// Runs ROW's subcommand with WORDS, those after its name: its answer on the
 /// standard output, one line of compact JSON, or its usage; a usage error on
 /// the standard error, with status 2.
-pub fn main(subcommand: Subcommand, words: &[String]) -> ExitCode {
-    let row = subcommand.row();
-    let (operand, command) = match asked(subcommand, words) {
+pub fn main(row: &Row, words: &[String]) -> ExitCode {
+    let (operand, command) = match asked(row, words) {
         Ok(Asked::Run { operand, command }) => (operand, command),
         Ok(Asked::Help) => {
             println!("{}", row.usage);
@@ -212,44 +159,6 @@ fn by_error(answer: Value) -> (Value, bool) {
     (answer, ok)
 }
 
-enum Missing {
-    /// The server command's `--project-dir` holds no `dbt_project.yml`; why,
-    /// in words that need no advice.
-    Given(String),
-    /// No `dbt_project.yml` at or above the path, which the caller words.
-    Above,
-}
-
-/// The project as the server finds it from PATH, absolute, with the server
-/// command COMMAND, and by which route: given, its `--project-dir`; else
-/// PATH, when it holds `dbt_project.yml`, as a client's folder; else the
-/// project of PATH, as a document's.  Nothing runs.
-fn project(path: &Path, command: &[String]) -> Result<(PathBuf, Route), Missing> {
-    if let Some(project) = proxy::project_dir(command) {
-        let why = || {
-            Missing::Given(format!("no dbt_project.yml in {}, the server command's --project-dir", project.display()))
-        };
-        return project.join("dbt_project.yml").is_file().then(|| (project.clone(), Route::Given)).ok_or_else(why);
-    }
-    match path.join("dbt_project.yml").is_file() {
-        true => Ok((path.to_owned(), Route::Folder)),
-        false => locate::project_of(path, command).map(|project| (project, Route::Document)).ok_or(Missing::Above),
-    }
-}
-
-/// The dbt of PROJECT, found on ROUTE, as the server finds it from the
-/// server command COMMAND, and where its processes run: given, the command
-/// as written, in the current directory; else `locate::dbt`'s from COMMAND
-/// anchored in the current directory, in the project.
-fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Located, Option<PathBuf>) {
-    if route == Route::Given {
-        return (locate::Located::written(command), None);
-    }
-    let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
-    let anchored = std::env::current_dir().map_or_else(|_| command.to_vec(), |cwd| config::anchored(command, &cwd));
-    (locate::dbt(project, &anchored, &git), Some(project.to_owned()))
-}
-
 /// What the server would find from PATH with the server command COMMAND,
 /// and whether it would work: its answer, and whether a project was found
 /// whose dbt answers as a dbt 2 does.
@@ -257,19 +166,13 @@ fn doctor(path: &Path, command: &[String]) -> (Value, bool) {
     let version = env!("CARGO_PKG_VERSION");
     // `..` resolved as written, as a client's URI has none: the walk up to a
     // project then never passes through a directory the file lies outside.
-    let path = proxy::lexical(&std::path::absolute(path).unwrap_or_else(|_| path.to_owned()));
+    let path = locate::lexical(&std::path::absolute(path).unwrap_or_else(|_| path.to_owned()));
     let shown = path.display().to_string();
-    let (project, route) = match project(&path, command) {
+    let (project, route) = match locate::project(&path, command, "give a path within the project") {
         Ok(found) => found,
-        Err(missing) => {
-            let error = match missing {
-                Missing::Given(why) => why,
-                Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project"),
-            };
-            return (json!({"version": version, "path": shown, "project": null, "error": error}), false);
-        }
+        Err(error) => return (json!({"version": version, "path": shown, "project": null, "error": error}), false),
     };
-    let (dbt, dir) = dbt_of(&project, route, command);
+    let (dbt, dir) = locate::dbt_of(&project, route, command);
     // What `locate::dbt` left unprobed is probed as it probes a candidate.
     let probed = if dbt.probed { Ok(()) } else { locate::probe(&dbt.command, dir.as_deref()) };
     // With the server command as given, as select asks it: finding the dbt
@@ -291,21 +194,17 @@ fn doctor(path: &Path, command: &[String]) -> (Value, bool) {
 /// run.  Refused before anything runs without a project, or by the guard.
 fn select(selector: &str, command: &[String]) -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (project, route) = match project(&cwd, command) {
+    let advice = "run it within the project, or name it with -- dbt lsp --project-dir DIR";
+    let (project, route) = match locate::project(&cwd, command, advice) {
         Ok(found) => found,
-        Err(Missing::Given(why)) => return commands::failure(commands::NODES, &why),
-        Err(Missing::Above) => {
-            let advice = "run it within the project, or name it with -- dbt lsp --project-dir DIR";
-            let why = format!("no dbt_project.yml at or above {}; {advice}", cwd.display());
-            return commands::failure(commands::NODES, &why);
-        }
+        Err(why) => return commands::failure(commands::NODES, &why),
     };
     // The guard reads the server command's install path, which finding its
     // dbt leaves as is.
     if let Some(why) = packages::refused(&project, command) {
         return commands::failure(commands::NODES, &why);
     }
-    let (dbt, dir) = dbt_of(&project, route, command);
+    let (dbt, dir) = locate::dbt_of(&project, route, command);
     let cache = config::cache_dir(&config::cache_base(), &project, &dbt.command);
     // What a select or a proxy killed by a signal left, swept after a day, as `Workspace::cache_dir` does.
     config::remove_stale(&cache);
@@ -324,20 +223,12 @@ fn select(selector: &str, command: &[String]) -> Value {
     result
 }
 
-/// What node's operand names: a unique id, or a place in a file, its line
-/// and column from 0, the column in characters.
-#[derive(Debug, PartialEq)]
-enum Operand {
-    Id(String),
-    Place { path: PathBuf, line: u64, column: u64 },
-}
-
-/// What OPERAND names from the directory DIR: a place when a file exists,
-/// as IS_FILE says, at its PATH, tried as `PATH:LINE:COLUMN`, `PATH:LINE`,
-/// then `PATH`, LINE and COLUMN positive integers from 1, PATH made
-/// absolute from DIR, each `..` dropping the component before it, as
-/// written; else a unique id, as written.
-fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operand {
+/// What OPERAND names from the directory DIR: a place where READ gives the
+/// text of a file at its PATH, tried as `PATH:LINE:COLUMN`, `PATH:LINE`,
+/// then `PATH`, LINE and COLUMN positive integers from 1, COLUMN in
+/// characters, PATH made absolute from DIR, each `..` dropping the
+/// component before it, as written; else a unique id, as written.
+fn operand(operand: &str, dir: &Path, read: impl Fn(&Path) -> Option<String>) -> Which {
     let (mut path, mut numbers) = (operand, Vec::new());
     let mut candidates = vec![(path, numbers.clone())];
     while let Some((rest, number)) = path.rsplit_once(':').filter(|_| numbers.len() < 2)
@@ -347,13 +238,14 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
         candidates.push((path, numbers.clone()));
     }
     for (path, numbers) in candidates.into_iter().rev() {
-        let path = proxy::lexical(&dir.join(path));
-        if is_file(&path) {
+        let path = locate::lexical(&dir.join(path));
+        if let Some(text) = read(&path) {
             let (line, column) = (numbers.first().copied().unwrap_or(0), numbers.get(1).copied().unwrap_or(0));
-            return Operand::Place { path, line, column };
+            let offset = LineStarts::new(&text).offset(line, column, Encoding::Utf32);
+            return Which::At((path, text, offset));
         }
     }
-    Operand::Id(operand.to_owned())
+    Which::Id(operand.to_owned())
 }
 
 /// The CLI's index of the project at ROOT, in WORKSPACE: the manifest kept
@@ -388,32 +280,21 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
 /// outlives the run.
 fn node(asked: &str, command: &[String]) -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let place = operand(asked, &cwd, Path::is_file);
-    let from = match &place {
-        Operand::Place { path, .. } => path.clone(),
-        Operand::Id(_) => cwd,
+    // An unreadable file reads as empty.
+    let which = operand(asked, &cwd, |path| path.is_file().then(|| text::read(path).unwrap_or_default()));
+    let from = match &which {
+        Which::At((path, ..)) => path,
+        Which::Id(_) => &cwd,
     };
-    let (root, route) = match project(&from, command) {
+    let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
+    let (root, route) = match locate::project(from, command, advice) {
         Ok(found) => found,
-        Err(Missing::Given(why)) => return json!({"error": why, "node": null}),
-        Err(Missing::Above) => {
-            let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
-            let why = format!("no dbt_project.yml at or above {}; {advice}", from.display());
-            return json!({"error": why, "node": null});
-        }
+        Err(why) => return json!({"error": why, "node": null}),
     };
-    let (dbt, dir) = dbt_of(&root, route, command);
+    let (dbt, dir) = locate::dbt_of(&root, route, command);
     let mut workspace = Workspace::default();
     (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
     indexed(&mut workspace, &root);
-    let which = match place {
-        Operand::Id(id) => Which::Id(id),
-        Operand::Place { path, line, column } => {
-            let text = text::read(&path).unwrap_or_default();
-            let offset = LineStarts::new(&text).offset(line, column, Encoding::Utf32);
-            Which::At((path, text, offset))
-        }
-    };
     let answer = workspace.node(&which);
     let (node, error) = workspace::reply(answer, workspace.failure.as_deref(), asked);
     workspace.stop();
@@ -430,17 +311,15 @@ mod tests {
 
     #[test]
     fn the_first_word_alone_names_a_subcommand() {
-        let ours: [(&[&str], Subcommand); 4] = [
-            (&["doctor"], Subcommand::Doctor),
-            (&["doctor", "x"], Subcommand::Doctor),
-            (&["select", "+m"], Subcommand::Select),
-            (&["node", "x"], Subcommand::Node),
+        let ours: [(&[&str], &str); 4] = [
+            (&["doctor"], "doctor"),
+            (&["doctor", "x"], "doctor"),
+            (&["select", "+m"], "select"),
+            (&["node", "x"], "node"),
         ];
-        for (line, subcommand) in ours {
-            assert_eq!(named(&words(line)), Some(subcommand), "{line:?}");
+        for (line, name) in ours {
+            assert_eq!(named(&words(line)).map(|row| row.name), Some(name), "{line:?}");
         }
-        let placed = SUBCOMMANDS.iter().enumerate().all(|(at, row)| row.subcommand as usize == at);
-        assert!(placed, "each row of SUBCOMMANDS at its subcommand's place");
         let servers: [(&[&str], &[&str]); 4] = [
             (&["--", "doctor"], &["doctor"]),
             (&["dbt", "lsp"], &["dbt", "lsp"]),
@@ -448,12 +327,13 @@ mod tests {
             (&[], &["dbt", "lsp"]),
         ];
         for (line, server) in servers {
-            assert_eq!(named(&words(line)), None, "{line:?}");
+            assert!(named(&words(line)).is_none(), "{line:?}");
             let Ok(Arguments::Run(command)) = arguments(&words(line)) else { panic!("{line:?}") };
             assert_eq!(command, words(server), "{line:?}");
         }
         let version = words(&["-V", "select"]);
-        assert_eq!((named(&version), arguments(&version)), (None, Ok(Arguments::Version)), "an option first");
+        assert!(named(&version).is_none(), "an option first");
+        assert_eq!(arguments(&version), Ok(Arguments::Version), "an option first");
     }
 
     #[test]
@@ -480,60 +360,77 @@ mod tests {
 
     #[test]
     fn a_subcommand_reads_its_operand_then_the_server_s_arguments_after_dashes() {
-        let run = |operand: Option<&str>, command: &[&str]| {
-            Ok(Asked::Run { operand: operand.map(str::to_owned), command: words(command) })
-        };
+        let run =
+            |operand: &str, command: &[&str]| Ok(Asked::Run { operand: operand.to_owned(), command: words(command) });
         let default = ["dbt", "lsp"];
-        assert_eq!(asked(Subcommand::Doctor, &[]), run(None, &default));
-        assert_eq!(asked(Subcommand::Doctor, &words(&["x.sql"])), run(Some("x.sql"), &default));
-        let helped: [(Subcommand, &[&str]); 4] = [
-            (Subcommand::Doctor, &["-h"]),
-            (Subcommand::Select, &["--help"]),
-            (Subcommand::Doctor, &["--help", "--", "dbt", "lsp"]),
-            (Subcommand::Select, &["-h", "x"]),
+        assert_eq!(asked(&SUBCOMMANDS[0], &[]), run(".", &default), "doctor's default");
+        assert_eq!(asked(&SUBCOMMANDS[0], &words(&["x.sql"])), run("x.sql", &default));
+        let helped: [(&Row, &[&str]); 4] = [
+            (&SUBCOMMANDS[0], &["-h"]),
+            (&SUBCOMMANDS[1], &["--help"]),
+            (&SUBCOMMANDS[0], &["--help", "--", "dbt", "lsp"]),
+            (&SUBCOMMANDS[1], &["-h", "x"]),
         ];
-        for (subcommand, line) in helped {
-            assert_eq!(asked(subcommand, &words(line)), Ok(Asked::Help), "{subcommand:?} {line:?}");
+        for (row, line) in helped {
+            assert_eq!(asked(row, &words(line)), Ok(Asked::Help), "{} {line:?}", row.name);
         }
         let given = words(&["--", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
-        assert_eq!(asked(Subcommand::Doctor, &given), run(None, &["uvx", "dbt", "lsp", "--target", "prod"]));
+        assert_eq!(asked(&SUBCOMMANDS[0], &given), run(".", &["uvx", "dbt", "lsp", "--target", "prod"]));
         let selected = words(&["+m+", "--", "dbt", "lsp"]);
-        assert_eq!(asked(Subcommand::Select, &selected), run(Some("+m+"), &default));
-        let refused: [(Subcommand, &[&str]); 9] = [
-            (Subcommand::Doctor, &["--bogus"]),
-            (Subcommand::Doctor, &["x.sql", "-h"]),
-            (Subcommand::Doctor, &["a", "b"]),
-            (Subcommand::Select, &[]),
-            (Subcommand::Node, &[]),
-            (Subcommand::Select, &["--", "dbt", "lsp"]),
-            (Subcommand::Doctor, &["--", "--mode", "x"]),
-            (Subcommand::Doctor, &["--", "-V"]),
-            (Subcommand::Doctor, &["--", "--backend", "never"]),
+        assert_eq!(asked(&SUBCOMMANDS[1], &selected), run("+m+", &default));
+        let refused: [(&Row, &[&str]); 9] = [
+            (&SUBCOMMANDS[0], &["--bogus"]),
+            (&SUBCOMMANDS[0], &["x.sql", "-h"]),
+            (&SUBCOMMANDS[0], &["a", "b"]),
+            (&SUBCOMMANDS[1], &[]),
+            (&SUBCOMMANDS[2], &[]),
+            (&SUBCOMMANDS[1], &["--", "dbt", "lsp"]),
+            (&SUBCOMMANDS[0], &["--", "--mode", "x"]),
+            (&SUBCOMMANDS[0], &["--", "-V"]),
+            (&SUBCOMMANDS[0], &["--", "--backend", "never"]),
         ];
-        for (subcommand, line) in refused {
-            assert!(asked(subcommand, &words(line)).is_err(), "{subcommand:?} {line:?}");
+        for (row, line) in refused {
+            assert!(asked(row, &words(line)).is_err(), "{} {line:?}", row.name);
         }
     }
 
     #[test]
+    fn a_row_without_its_operand_takes_its_default_or_says_what_it_needs() {
+        let operands: Vec<(&str, Result<&str, &str>)> = SUBCOMMANDS.iter().map(|row| (row.name, row.operand)).collect();
+        assert_eq!(operands, [("doctor", Ok(".")), ("select", Err("a SELECTOR")), ("node", Err("an ID or a PATH"))]);
+        let none: Vec<Result<Asked, String>> = SUBCOMMANDS.iter().map(|row| asked(row, &[])).collect();
+        let doctor = Asked::Run { operand: ".".into(), command: words(&["dbt", "lsp"]) };
+        assert_eq!(none, [Ok(doctor), Err("select needs a SELECTOR".into()), Err("node needs an ID or a PATH".into())]);
+    }
+
+    #[test]
     fn a_node_s_operand_is_a_file_s_place_else_a_unique_id() {
-        let is_file = |path: &Path| path == Path::new("/w/shop/models/a.sql") || path == Path::new("/w/shop/x:1");
-        let place = |path: &str, line: u64, column: u64| Operand::Place { path: path.into(), line, column };
+        // Three lines; the third opens with a character of two UTF-16 units and four bytes, then one of two
+        // bytes: its column 3 lies six bytes in.
+        const A: &str = "select 1\nfrom x\n\u{1F600}é z";
+        let read = |path: &Path| match path.to_str() {
+            Some("/w/shop/models/a.sql") => Some(A.to_owned()),
+            Some("/w/shop/x:1") => Some(String::new()),
+            _ => None,
+        };
+        let place = |path: &str, text: &str, offset: usize| Which::At((path.into(), text.to_owned(), offset));
         let a = "/w/shop/models/a.sql";
+        let third = A.find('\u{1F600}').unwrap();
         let places = [
-            ("models/a.sql", place(a, 0, 0)),
-            ("models/a.sql:3", place(a, 2, 0)),
-            ("models/a.sql:3:7", place(a, 2, 6)),
-            ("./models/../models/a.sql:1:1", place(a, 0, 0)),
-            ("/w/shop/models/a.sql", place(a, 0, 0)),
-            ("x:1", place("/w/shop/x:1", 0, 0)),
+            ("models/a.sql", place(a, A, 0)),
+            ("models/a.sql:2", place(a, A, 9)),
+            ("models/a.sql:2:4", place(a, A, 12)),
+            ("models/a.sql:3:3", place(a, A, third + 4 + 2)),
+            ("./models/../models/a.sql:1:1", place(a, A, 0)),
+            ("/w/shop/models/a.sql", place(a, A, 0)),
+            ("x:1", place("/w/shop/x:1", "", 0)),
         ];
         let ids = ["model.shop.a", "models/a.sql:0", "models/a.sql:3:x", "models/a.sql:1:2:3", "models/b.sql"];
-        let expected: Vec<(&str, Operand)> =
-            places.into_iter().chain(ids.map(|id| (id, Operand::Id(id.to_owned())))).collect();
+        let expected: Vec<(&str, Which)> =
+            places.into_iter().chain(ids.map(|id| (id, Which::Id(id.to_owned())))).collect();
         // Each operand asked beside what it reads as, so that a failure names it.
-        let read: Vec<(&str, Operand)> =
-            expected.iter().map(|(asked, _)| (*asked, operand(asked, Path::new("/w/shop"), is_file))).collect();
-        assert_eq!(read, expected);
+        let found: Vec<(&str, Which)> =
+            expected.iter().map(|(asked, _)| (*asked, operand(asked, Path::new("/w/shop"), read))).collect();
+        assert_eq!(found, expected);
     }
 }

@@ -9,8 +9,7 @@
 
 use crate::config::ParseIndex;
 use crate::navigation::Lookup;
-use crate::node;
-use crate::project::{Entity, Project};
+use crate::project::{self, Entity, Project};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -71,8 +70,8 @@ impl Graph {
             let path =
                 project.packages.get(&package).or(root).unwrap_or(&PathBuf::new()).join(text("original_file_path"));
             // A model's version, which the manifest names as its model, is shown as its id ends: `orders.v2`.
-            let version = id.strip_prefix(&node::version_id(&package, &text("name"), "")).map(str::to_owned);
-            let resource_type = node::Type::named(&text("resource_type")).name;
+            let version = id.strip_prefix(&project::version_id(&package, &text("name"), "")).map(str::to_owned);
+            let resource_type = project::ResourceType::named(&text("resource_type")).name;
             let entity = Entity {
                 id: id.clone(),
                 name: text("name"),

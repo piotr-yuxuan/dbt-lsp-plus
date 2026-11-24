@@ -69,7 +69,7 @@ their own.
 ### What a request gets
 
 Every request the server answers gets one value, the Answer
-(`src/answer.rs`, plan 044): found, a result, an empty one included;
+(`src/workspace.rs`, plan 044; `proxy::frame` renders it): found, a result, an empty one included;
 empty, the method's nothing, null or `[]` for a list, as its capability
 says, where the request's position names nothing to look up; or
 unanswered, with its reasons.  A target that resolves to nothing is
@@ -244,8 +244,8 @@ that applies:
 - **given**: the server command's `--project-dir` (`--project-dir X` or
   `--project-dir=X`).  The dbt is the command as written, unprobed, run
   in the server's working directory; the line `dbt-lsp-plus: project
-  <root>, dbt <words before lsp>.` goes on the standard error at the
-  start and to the client once it is initialized (plan 075).  dbt-mode
+  <root>, dbt <words before lsp> (the server command).` goes on the
+  standard error at the start and to the client once it is initialized (plan 075).  dbt-mode
   takes this route, always.
 - **the folder**: else the client's first workspace folder, or `rootUri`,
   when it holds a `dbt_project.yml`, taken when the client's `initialize`
@@ -480,9 +480,9 @@ none, the server answers `initialize` before it can know it.
   empty; one that cannot be read counts as empty too, and is tried again
   at the next request.  A seed is found but never read, open or not.  An
   open document is known by a hash of its text, since a client's version
-  starts again at each open: a text edited back to what it was before the
-  next request reads the project builds nothing again.  The cache keeps
-  one scan per file, so a request in between makes the text read again.
+  starts again at each open.  The cache keeps one scan per file, so a
+  text edited back reuses it only if no request read the project in
+  between.
   No file event is needed: a client may watch nothing.
   - When no file changed, nor any package's name and paths, which each
     `dbt_project.yml` gives and the walk reads again, the request shares
@@ -759,7 +759,7 @@ CTE:
   and the `tables` of a source.  The detail is what the entry declares
   (`model`, `table`, `semantic model`); the kinds are those agreed with
   dbt-mode.  A node shows its resource type's kind wherever the proxy
-  lists it, the one its entry has here (`node::TYPES`): in workspace
+  lists it, the one its entry has here (`project::TYPES`): in workspace
   symbols and the call hierarchy too.  So a unit test is an Event and an
   exposure an Object in the call hierarchy as here, where only the
   manifest brings them; workspace symbols never list either.  A doc,
@@ -1107,11 +1107,16 @@ starts the server, `--` first or an option first, keeps its meaning; a
 second binary would be one more file to install, put on a harness's
 `PATH` and allowlist.
 
-- **One resolution.**  Each finds the project and its dbt as the server
-  does: the server command's `--project-dir` (`proxy::project_dir`),
-  else the path as a client's folder, else as a document's
-  (`locate::project_of`), the dbt then `locate::dbt`'s from the command
-  anchored in the current directory (`config::anchored`).  One
+- **One resolution of the dbt.**  Each finds the project on the server's
+  routes, through `locate::project`: the server command's
+  `--project-dir` (`locate::project_dir`), else the path as a client's
+  folder, else as a document's (`locate::project_of`), or why none, each
+  subcommand's advice at its end.  The server keeps its own coding of
+  those routes, at its own moments: the given one at its start, a folder
+  at `initialize`, a document at its first `didOpen`.  Server and CLI
+  then find the dbt of the project by one function, `locate::dbt_of`:
+  the command as written when given, else `locate::dbt`'s from the
+  command anchored in the current directory (`config::anchored`).  One
   divergence: a given `--project-dir` without `dbt_project.yml` is no
   project to the subcommands, where the server takes the directory all
   the same, and its parse fails there.
@@ -1452,13 +1457,12 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   `docs/reference/release-pipeline.md`.
 - The conformance corpus, opt-in as the live test (see "Conformance"),
   built with the network, `cargo test --locked -j 4 --test proxy
-  --no-run`, then run with none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
-  unshare -rn cargo test --test proxy conformance -- --ignored`.
+  --no-run`, then run with none: `unshare -rn make conformance
+  DBT_LSP_PLUS_TEST_DBT=/path/to/dbt`.
 - One opt-in live test, `with_the_real_dbt`, runs the server with the
   real dbt, either build, on a copy of the fixture, from an empty
   environment with a scratch home, built as the corpus is, then run with
-  none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test
-  --test proxy -- --ignored`.  It checks the outline of a model and of a
+  none: `unshare -rn make live DBT_LSP_PLUS_TEST_DBT=/path/to/dbt`.  It checks the outline of a model and of a
   properties file, folding, highlights, selection ranges, a hover at a
   model's start before the parse has ended, the summary or the reason,
   never null; navigation in a properties file and of a ref in SQL; the

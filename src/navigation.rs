@@ -5,8 +5,7 @@
 //! parse that a Name describes, for hover, nodeInfo and inlay hints.  Pure.
 
 use crate::config::ParseIndex;
-use crate::node::{self, TYPES, Type};
-use crate::project::{self, Entity, Project, Scanned};
+use crate::project::{self, Entity, Project, ResourceType, Scanned, TYPES};
 use crate::reference::{Kind, Name};
 use crate::scan;
 use crate::sources;
@@ -143,7 +142,6 @@ pub struct Lookup<'a, 'i> {
 }
 
 impl<'a, 'i> Lookup<'a, 'i> {
-    /// The lookup of PROJECT, with INDEX, the last parse's, if any.
     pub fn new(project: &'a Project, index: Option<&'i ParseIndex>) -> Lookup<'a, 'i> {
         let root = project.root_package.as_str();
         let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));
@@ -222,7 +220,7 @@ impl<'a, 'i> Lookup<'a, 'i> {
                     }
                     // Else the scan's: a version by its name and version, the latest when none is named, which may
                     // have no file; a model, seed or snapshot when the name has no versions and the call names none.
-                    let prefix = node::version_id(package, called, "");
+                    let prefix = project::version_id(package, called, "");
                     let ids = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let versions: Vec<&Entity> = ids
                         .flat_map(|(_, entities)| entities.iter().copied())
@@ -234,20 +232,21 @@ impl<'a, 'i> Lookup<'a, 'i> {
                     };
                     let plain = versions.is_empty() && version.is_none();
                     let rows = TYPES.iter().filter(|row| row.refable && plain);
-                    let unversioned = rows.flat_map(|row| get(node::id(row, package, called)).iter().copied());
+                    let unversioned = rows.flat_map(|row| get(project::node_id(row, package, called)).iter().copied());
                     versions.into_iter().filter(chosen).chain(unversioned).map(found).collect()
                 }
                 Kind::Table { source } => {
-                    get(node::table_id(package, source, called)).iter().map(|entity| found(entity)).collect()
+                    get(project::table_id(package, source, called)).iter().map(|entity| found(entity)).collect()
                 }
                 Kind::Macro => {
-                    get(node::id(&node::MACRO, package, called)).iter().map(|entity| found(entity)).collect()
+                    get(project::node_id(&project::MACRO, package, called)).iter().map(|entity| found(entity)).collect()
                 }
-                Kind::Function => {
-                    get(node::id(&node::FUNCTION, package, called)).iter().map(|entity| found(entity)).collect()
-                }
+                Kind::Function => get(project::node_id(&project::FUNCTION, package, called))
+                    .iter()
+                    .map(|entity| found(entity))
+                    .collect(),
                 Kind::Dispatch => {
-                    let (prefix, suffix) = (node::id(&node::MACRO, package, ""), format!("__{called}"));
+                    let (prefix, suffix) = (project::node_id(&project::MACRO, package, ""), format!("__{called}"));
                     let in_package = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let implementations = in_package.filter(|(id, _)| id.ends_with(&suffix));
                     implementations.flat_map(|(_, entities)| entities.iter().map(|entity| found(entity))).collect()
@@ -315,8 +314,8 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         let declared = project.sources.iter().filter(|declared| sources::declares(declared, name));
         let found = declared.map(|declared| {
             let (id, range) = match table {
-                None => (node::group_id(&declared.package, source), declared.source_range.clone()),
-                Some(table) => (node::table_id(&declared.package, source, table), declared.table_range.clone()),
+                None => (project::group_id(&declared.package, source), declared.source_range.clone()),
+                Some(table) => (project::table_id(&declared.package, source, table), declared.table_range.clone()),
             };
             (declared.package.as_str(), Target { id, path: declared.path.clone(), range })
         });
@@ -333,7 +332,11 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         .filter(|entity| {
             types.contains(&entity.resource_type)
                 && (entity.id
-                    == node::id(Type::named(entity.resource_type), &entity.package, &format!("{prefix}{}", name.name))
+                    == project::node_id(
+                        ResourceType::named(entity.resource_type),
+                        &entity.package,
+                        &format!("{prefix}{}", name.name),
+                    )
                     || entity.version.is_some() && entity.name == name.name)
         })
         .collect();
@@ -349,7 +352,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         Kind::Entry { label } => Some(label),
         _ => None,
     };
-    let resource = resource_type.is_some_and(|kind| Type::named(kind).refable) && name.package.is_none();
+    let resource = resource_type.is_some_and(|kind| ResourceType::named(kind).refable) && name.package.is_none();
     let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, &name.name));
     let typed = nodes.into_iter().filter(|node| node["resource_type"].as_str() == resource_type);
     let mut parsed: Vec<Target> = typed.filter_map(|node| lookup.parsed_at(node)).collect();
@@ -427,15 +430,14 @@ pub fn references<'a>(lookup: &Lookup<'a, '_>, path: &Path, name: &Name, declara
     found
 }
 
-/// What a hover on a `doc` or a generic test, NAME, shows of FOUND, the
-/// block it leads to in PROJECT: a docs block's text between its tags, as
-/// written, if any; a test's opening tag and its package, in a code block
-/// and code spans when MARKDOWN.
-pub fn hover(project: &Project, name: &Name, found: &Target, markdown: bool) -> Option<String> {
-    if !matches!(name.kind, Kind::Doc | Kind::Test) {
-        return None;
-    }
-    let text = project.text(&found.path)?;
+/// What a hover on a `doc` or a generic test, NAME, in the file at PATH,
+/// shows of the first block it leads to by LOOKUP: a docs block's text
+/// between its tags, as written, if any; a test's opening tag and its
+/// package, in a code block and code spans when MARKDOWN.  The caller
+/// checks NAME's kind: another's target may be a block too, a snapshot's.
+pub fn hover(lookup: &Lookup, path: &Path, name: &Name, markdown: bool) -> Option<String> {
+    let found = resolve(lookup, path, name).into_iter().next()?;
+    let text = lookup.project.text(&found.path)?;
     let block = scan::blocks(text).into_iter().find(|block| block.name_range == found.range)?;
     if name.kind == Kind::Doc {
         return Some(text[block.inner].trim().to_owned()).filter(|docs| !docs.is_empty());
@@ -1244,11 +1246,8 @@ models:
         let root = shop("navigation-hover", "name: shop\n");
         let project = project::scan(&root, &HashMap::new()).unwrap();
         let path = root.join("models/_models.yml");
-        let shown = |target: Option<Name>, markdown| {
-            let target = target.unwrap();
-            let found = resolve(&Lookup::new(&project, None), &path, &target);
-            hover(&project, &target, &found[0], markdown)
-        };
+        let shown =
+            |target: Option<Name>, markdown| hover(&Lookup::new(&project, None), &path, &target.unwrap(), markdown);
         assert_eq!(shown(named(Kind::Doc, None, "order_status"), true).as_deref(), Some("The root's."));
         // An empty docs block shows nothing, so that the server's answer passes.
         assert_eq!(shown(named(Kind::Doc, None, "empty"), true), None);
@@ -1256,6 +1255,7 @@ models:
         assert_eq!(shown(named(Kind::Test, None, "is_even"), true).as_deref(), Some(signature));
         let plain = "test is_even(model, column_name)\n\nin package shop";
         assert_eq!(shown(named(Kind::Test, None, "is_even"), false).as_deref(), Some(plain));
+        // A model's file holds no block.
         assert_eq!(shown(called(None, "orders"), true), None);
         std::fs::remove_dir_all(root).unwrap();
     }

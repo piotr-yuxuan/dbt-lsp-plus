@@ -254,6 +254,8 @@ fn help_and_version_are_printed() {
     };
     let (status, usage) = run("--help");
     assert!(status == Some(0) && usage.starts_with("usage: dbt-lsp-plus [--] [SERVER COMMAND...]\n"), "{usage}");
+    let reference = format!("\n{}/blob/main/docs/reference/cli.md\n", env!("CARGO_PKG_REPOSITORY"));
+    assert!(usage.ends_with(&reference), "cli.md, where an installed binary has no docs/: {usage}");
     assert_eq!(run("-V"), (Some(0), format!("dbt-lsp-plus {}\n", env!("CARGO_PKG_VERSION"))));
 }
 
@@ -263,7 +265,11 @@ fn a_dbt_without_lsp_is_served_and_said_once_in_the_log() {
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
     let logged = session.wait_for(|m| m["method"] == "window/logMessage");
-    let line = format!("dbt-lsp-plus: project {}, dbt {}.", fixture().display(), env!("CARGO_BIN_EXE_fake-dbt"));
+    let line = format!(
+        "dbt-lsp-plus: project {}, dbt {} (the server command).",
+        fixture().display(),
+        env!("CARGO_BIN_EXE_fake-dbt")
+    );
     assert_eq!(logged["params"]["message"], json!(line), "{logged}");
     // Past what the client would get first.
     session.request("workspace/symbol", json!({"query": "summary"}));

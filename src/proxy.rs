@@ -2,21 +2,20 @@
 //! The language server: the session's event loop, which answers the
 //! client's requests from the Workspace and tells it what dbt's runs left.
 
-use crate::answer::{Answer, Reason};
 use crate::capability;
 use crate::commands;
 use crate::locate;
 use crate::project::{Project, Scanned};
 use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
-use crate::workspace::{Which, Workspace};
+use crate::workspace::{Answer, Reason, Which, Workspace};
 use crate::{config, document, features, navigation, packages, properties, reference, run, runs, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -32,9 +31,6 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
-/// The unit of every position the client and the server exchange: LSP's
-/// default, which the server announces by announcing none.
-const ENCODING: Encoding = Encoding::Utf16;
 
 /// How the server answers a request of the client's.
 enum Route {
@@ -130,18 +126,22 @@ struct Proxy<W: Write> {
     run: Option<run::Running>,
 }
 
-/// PATH with each `..` dropping the component before it, as written: no
-/// link is followed.
-pub fn lexical(path: &Path) -> PathBuf {
-    path.components().fold(PathBuf::new(), |mut path, component| {
-        match component {
-            Component::ParentDir => {
-                path.pop();
-            }
-            other => path.push(other),
+/// LSP's RequestFailed: a request that the server could not answer.
+const REQUEST_FAILED: i64 = -32803;
+
+/// The JSON-RPC response to the request ID of NAME, a method or a command,
+/// that ANSWER gives: its result; for an empty one,
+/// `capability::empty(NAME)`; for an unanswered one, error -32803 whose
+/// message is its reasons, joined by `; `.
+fn frame(answer: &Answer, id: &Value, name: &str) -> Value {
+    match answer {
+        Answer::Found(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Answer::Empty => json!({"jsonrpc": "2.0", "id": id, "result": capability::empty(name)}),
+        Answer::Unanswered(reasons) => {
+            let message = reasons.iter().map(Reason::to_string).collect::<Vec<_>>().join("; ");
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": REQUEST_FAILED, "message": message}})
         }
-        path
-    })
+    }
 }
 
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
@@ -174,23 +174,9 @@ fn changes_graph(
     output.is_empty() || !changes.iter().all(in_output)
 }
 
-/// The `--project-dir` of COMMAND, as `--project-dir X` or
-/// `--project-dir=X`, made absolute as spelt, so that the paths the server
-/// returns read as the user wrote them: each `..` drops the component before
-/// it.  Resolved only when that names another directory, through a link
-/// before a `..`.
-pub fn project_dir(command: &[String]) -> Option<PathBuf> {
-    let value = config::flag(command, "--project-dir")?;
-    let spelt = lexical(&std::path::absolute(value).ok()?);
-    match fs::canonicalize(value) {
-        Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
-        _ => Some(spelt),
-    }
-}
-
 impl<W: Write> Proxy<W> {
-    fn new(client: W, root: Option<PathBuf>, events: Sender<Event>) -> Self {
-        let mut proxy = Proxy {
+    fn new(client: W, events: Sender<Event>) -> Self {
+        Proxy {
             client,
             events,
             line: None,
@@ -208,11 +194,7 @@ impl<W: Write> Proxy<W> {
             workspace: Workspace::default(),
             runs: VecDeque::new(),
             run: None,
-        };
-        if let Some(root) = root {
-            proxy.set_root(root);
         }
-        proxy
     }
 
     fn set_root(&mut self, root: PathBuf) {
@@ -238,21 +220,17 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// Takes ROOT as the project, found from the client's folder or from a
-    /// document: what the user wrote from the server's directory keeps naming
-    /// the same once dbt runs in the project.
-    fn take_project(&mut self, root: PathBuf) {
-        let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
-        // What the user wrote from the server's directory still names the same from the project.
-        let server = std::env::current_dir().map(|cwd| config::anchored(self.workspace.dbt.command(), &cwd));
-        let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.workspace.dbt.command().to_vec()), &git);
+    /// Takes ROOT, found on ROUTE, as the project, with its dbt as
+    /// `locate::dbt_of` finds it, said on one line.
+    fn take_project(&mut self, root: PathBuf, route: locate::Route) {
+        let (found, dir) = locate::dbt_of(&root, route, self.workspace.dbt.command());
         let skipped: String =
             found.skipped.iter().map(|(path, why)| format!("; skipped {} ({why})", path.display())).collect();
         let (root_shown, named, source) = (root.display(), &found.named, found.source);
         let line = format!("dbt-lsp-plus: project {root_shown}, dbt {named} ({source}){skipped}.");
         eprintln!("{line}");
         self.line = Some(line);
-        self.workspace.dbt = config::Dbt::new(found.command, Some(root.clone()));
+        self.workspace.dbt = config::Dbt::new(found.command, dir);
         self.set_root(root);
     }
 
@@ -274,7 +252,7 @@ impl<W: Write> Proxy<W> {
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         match (folder, &self.workspace.root) {
-            (Some(folder), None) => self.take_project(folder),
+            (Some(folder), None) => self.take_project(folder, locate::Route::Folder),
             (Some(folder), Some(_)) if fs::canonicalize(&folder).ok() == self.canonical_root => self.set_root(folder),
             _ => {}
         }
@@ -331,7 +309,7 @@ impl<W: Write> Proxy<W> {
             "textDocument/didChange" => {
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
                 if let Some(text) = self.workspace.open.get_mut(&path) {
-                    changes.iter().for_each(|change| text::apply_change(text, change, ENCODING));
+                    changes.iter().for_each(|change| text::apply_change(text, change));
                 }
             }
             "textDocument/didClose" => {
@@ -348,7 +326,7 @@ impl<W: Write> Proxy<W> {
     fn outline(&self, params: &Value) -> Option<Value> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let text = self.text_of(uri).map(|(_, text)| text);
-        Some(text.map_or(Value::Null, |text| features::document_symbols(&text, ENCODING, self.hierarchical, uri)))
+        Some(text.map_or(Value::Null, |text| features::document_symbols(&text, self.hierarchical, uri)))
     }
 
     /// The path of the document at URI and its text, open or on disk.
@@ -361,20 +339,22 @@ impl<W: Write> Proxy<W> {
     /// The answer to the call hierarchy's METHOD, on the graph of the files
     /// with the last parse's nodes.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Answer> {
-        let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = self.workspace.project() else {
+            return Some(Answer::Unanswered(vec![self.workspace.unreadable()]));
+        };
         let graph = self.workspace.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
             let incoming = method == "callHierarchy/incomingCalls";
-            return Some(Answer::Found(features::calls(&project, &graph, id, incoming, ENCODING)));
+            return Some(Answer::Found(features::calls(&project, &graph, id, incoming)));
         }
         // A document that is no file, such as an unsaved buffer, holds no resource.
         let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else {
             return Some(Answer::Empty);
         };
         let text = project.text(&path).unwrap_or_default();
-        let offset = LineStarts::new(text).offset_of(params.get("position")?, ENCODING)?;
-        let prepared = features::prepare_call_hierarchy(&project, &graph, &path, offset, ENCODING);
+        let offset = LineStarts::new(text).offset_of(params.get("position")?)?;
+        let prepared = features::prepare_call_hierarchy(&project, &graph, &path, offset);
         Some(prepared.map_or(Answer::Empty, Answer::Found))
     }
 
@@ -382,7 +362,7 @@ impl<W: Write> Proxy<W> {
     /// of the request's position in it.
     fn document_at(&self, params: &Value) -> Option<(PathBuf, String, usize)> {
         let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
-        let offset = LineStarts::new(&text).offset_of(params.get("position")?, ENCODING)?;
+        let offset = LineStarts::new(&text).offset_of(params.get("position")?)?;
         Some((path, text, offset))
     }
 
@@ -436,7 +416,7 @@ impl<W: Write> Proxy<W> {
         let project = self.workspace.project();
         let Some((path, scanned, at)) = self.scan_at(params, project.as_deref()) else { return Some(Answer::Empty) };
         let Some(name) = navigation::reference_at(&path, &scanned, at) else { return Some(Answer::Empty) };
-        let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = project else { return Some(Answer::Unanswered(vec![self.workspace.unreadable()])) };
         let lookup = || navigation::Lookup::new(&project, self.workspace.index.as_ref());
         if !references {
             let locations = self.locations(&project, &navigation::resolve(&lookup(), &path, &name));
@@ -449,16 +429,10 @@ impl<W: Write> Proxy<W> {
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
         if name.source_table().is_some() {
             let uri_of = |path: &Path| self.uri_of(path);
-            return Some(Answer::Found(sources::references(&project, &name, declaration, ENCODING, &uri_of)));
+            return Some(Answer::Found(sources::references(&project, &name, declaration, &uri_of)));
         }
         let found = navigation::references(&lookup(), &path, &name, declaration);
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
-    }
-
-    /// Why the server cannot answer from the project: the root's
-    /// `dbt_project.yml` does not read, which the scan needs.
-    fn unreadable(&self) -> Reason {
-        Reason::Unreadable(self.workspace.root.clone().unwrap_or_default())
     }
 
     /// The URI of the file at PATH, as the client spelt it if it opened it.
@@ -472,7 +446,7 @@ impl<W: Write> Proxy<W> {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
             let starts = LineStarts::new(text.get(..found.range.end).unwrap_or(text));
-            let range = starts.range(found.range.start, found.range.end, ENCODING);
+            let range = starts.range(found.range.start, found.range.end);
             json!({"uri": self.uri_of(&found.path), "range": range})
         };
         found.iter().map(location).collect()
@@ -484,7 +458,7 @@ impl<W: Write> Proxy<W> {
         let Some((project, name)) = self.source_at(params) else { return Some(Answer::Empty) };
         let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
-        Some(Answer::of_rename(sources::rename(&project, &name, new, ENCODING, &uri_of)))
+        Some(Answer::of_rename(sources::rename(&project, &name, new, &uri_of)))
     }
 
     /// The rename of the source, else of the CTE, at the request's position;
@@ -495,7 +469,7 @@ impl<W: Write> Proxy<W> {
         }
         let Some((_, text, offset)) = self.document_at(params) else { return Some(Answer::Empty) };
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
-        Some(document::rename_cte(&text, uri, offset, new, ENCODING).map_or(Answer::Empty, Answer::of_rename))
+        Some(document::rename_cte(&text, uri, offset, new).map_or(Answer::Empty, Answer::of_rename))
     }
 
     /// The folding ranges, highlights or selection ranges of a document;
@@ -505,7 +479,7 @@ impl<W: Write> Proxy<W> {
         let sql = uri.ends_with(".sql");
         if method == "textDocument/documentHighlight" {
             let Some((_, text, offset)) = self.document_at(params) else { return Some(Value::Null) };
-            return Some(document::highlights(&text, sql, offset, ENCODING));
+            return Some(document::highlights(&text, sql, offset));
         }
         // A YAML file folds and selects best by its indentation, which the client knows.
         let Some((_, text)) = self.text_of(uri).filter(|_| sql || uri.ends_with(".md")) else {
@@ -515,8 +489,8 @@ impl<W: Write> Proxy<W> {
             return Some(document::folding_ranges(&text, sql));
         }
         let starts = LineStarts::new(&text);
-        let positions = params.get("positions")?.as_array()?.iter().map(|p| starts.offset_of(p, ENCODING));
-        Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, ENCODING))
+        let positions = params.get("positions")?.as_array()?.iter().map(|p| starts.offset_of(p));
+        Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?))
     }
 
     /// The information of a node, named by its id or by a position, as
@@ -662,7 +636,7 @@ impl<W: Write> Proxy<W> {
         for problem in problems {
             let path = problem.spot.as_ref().and_then(|spot| {
                 // dbt names a file from a sibling directory with `..`.
-                let file = |dir: &Path| Some(lexical(&dir.join(&spot.path))).filter(|path| path.is_file());
+                let file = |dir: &Path| Some(locate::lexical(&dir.join(&spot.path))).filter(|path| path.is_file());
                 let in_cwd =
                     || cwd.as_deref().and_then(file).and_then(|path| self.local_path(Some(&features::uri(&path))));
                 let mut held = packages.iter().filter_map(|dir| file(dir));
@@ -746,7 +720,7 @@ impl<W: Write> Proxy<W> {
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
-            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
+            Ok(Some(answer)) => self.send_client(&frame(&answer, id, method)),
             Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
             Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
@@ -779,8 +753,10 @@ impl<W: Write> Proxy<W> {
     /// over a project that does not read.
     fn symbols(&self, params: &Value) -> Option<Answer> {
         let query = params.get("query")?.as_str()?;
-        let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
-        Some(Answer::Found(features::workspace_symbols(&project, query, ENCODING)))
+        let Some(project) = self.workspace.project() else {
+            return Some(Answer::Unanswered(vec![self.workspace.unreadable()]));
+        };
+        Some(Answer::Found(features::workspace_symbols(&project, query)))
     }
 
     /// A message of the client's: a request, a notification, or the answer
@@ -828,7 +804,7 @@ impl<W: Write> Proxy<W> {
     fn on_first_project(&mut self, params: &Value) {
         let path = uri_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
         let Some(root) = path.and_then(|path| locate::project_of(&path, self.workspace.dbt.command())) else { return };
-        self.take_project(root);
+        self.take_project(root, locate::Route::Document);
         self.workspace.warm();
         self.watch_runs();
         self.register_watcher();
@@ -855,9 +831,12 @@ impl<W: Write> Proxy<W> {
         // Line 1, column 1 of a file stands for the node it defines.
         let start = params["position"] == json!({"line": 0, "character": 0});
         let named = self.workspace.node_at(self.document_at(params).as_ref(), start);
-        let summary = index
-            .zip(named.flatten())
-            .map(|(index, node)| (format!("{}\n{}", index.summary(node), index.facts(node)), true));
+        let summary = match (index, named.flatten()) {
+            (Some(index), Some(node)) => {
+                Some(features::hover(&format!("{}\n{}", index.summary(node), index.facts(node)), true, self.markdown))
+            }
+            _ => None,
+        };
         // A doc's or a generic test's block, from the project's scan, which the cache keeps between requests, as
         // for `node_at`'s entry and file's start.
         let block = || {
@@ -865,16 +844,10 @@ impl<W: Write> Proxy<W> {
             let name = navigation::reference_at(&path, &scanned, offset)
                 .filter(|name| matches!(name.kind, reference::Kind::Doc | reference::Kind::Test))?;
             let project = self.workspace.project()?;
-            let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
-            navigation::hover(&project, &name, found.first()?, self.markdown).map(|text| (text, false))
+            let text = navigation::hover(&navigation::Lookup::new(&project, index), &path, &name, self.markdown)?;
+            Some(features::hover(&text, false, self.markdown))
         };
-        let nothing = match (named, index) {
-            (Some(_), None) => Answer::Unanswered(vec![self.workspace.unindexed()]),
-            (Some(None), Some(_)) if self.workspace.project().is_none() => Answer::Unanswered(vec![self.unreadable()]),
-            _ => Answer::Empty,
-        };
-        let found = summary.or_else(block);
-        found.map_or(nothing, |(text, hard)| Answer::Found(features::hover(&text, hard, self.markdown)))
+        summary.or_else(block).map_or_else(|| self.workspace.why(named), Answer::Found)
     }
 
     /// The relation hints of the request's range: `[]` with no index, no
@@ -888,9 +861,9 @@ impl<W: Write> Proxy<W> {
             return Some(Answer::Empty);
         };
         let lines = LineStarts::new(&text);
-        let range = lines.offset_of(start, ENCODING)?..lines.offset_of(end, ENCODING)?;
+        let range = lines.offset_of(start)?..lines.offset_of(end)?;
         let lookup = navigation::Lookup::new(&project, Some(index));
-        let hints = features::inlay_hints(&text, sources::file_calls(&path, &text), &lookup, &path, range, ENCODING);
+        let hints = features::inlay_hints(&text, sources::file_calls(&path, &text), &lookup, &path, range);
         Some(Answer::Found(Value::Array(hints)))
     }
 
@@ -907,7 +880,7 @@ impl<W: Write> Proxy<W> {
         }
         match self.route(method, params) {
             Route::Here(method) => self.answer(method, id, params),
-            Route::Answer(answer) => self.send_client(&answer.frame(id, method)),
+            Route::Answer(answer) => self.send_client(&frame(&answer, id, method)),
             Route::Command(command) => self.on_command(command, id, params),
             Route::Unknown => {
                 let named =
@@ -937,7 +910,7 @@ impl<W: Write> Proxy<W> {
     /// none.
     fn on_elsewhere(&mut self, method: &str, id: &Value, why: Reason) {
         let answer = if method == "textDocument/inlayHint" { Answer::Empty } else { Answer::Unanswered(vec![why]) };
-        self.send_client(&answer.frame(id, method));
+        self.send_client(&frame(&answer, id, method));
     }
 
     /// Watches the files of the user's last run, in the target path
@@ -1040,7 +1013,7 @@ impl<W: Write> Proxy<W> {
         let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
             let range = runs::locate(&text, &entries, &tests, &failure.locator);
-            json!({"range": lines.range(range.start, range.end, ENCODING), "severity": failure.severity,
+            json!({"range": lines.range(range.start, range.end), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
         }));
         // At dbt's line and column, from 1 and in code points; a file's start
@@ -1049,7 +1022,7 @@ impl<W: Write> Proxy<W> {
         diagnostics.extend(problems.iter().map(|problem| {
             let (line, column) = problem.spot.as_ref().and_then(|spot| spot.at).unwrap_or((1, 1));
             let at = lines.offset(line.saturating_sub(1), column.saturating_sub(1), Encoding::Utf32);
-            json!({"range": lines.range(at, at, ENCODING), "severity": problem.severity,
+            json!({"range": lines.range(at, at), "severity": problem.severity,
                    "source": "dbt parse", "code": problem.code, "message": problem.message})
         }));
         let publish = |uri: &str, diagnostics: Vec<Value>| {
@@ -1101,15 +1074,12 @@ pub fn run(command: &[String]) -> ExitCode {
         }
         let _ = reader.send(Event::ClientClosed);
     });
-    let given = project_dir(command);
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), given.clone(), events);
-    if let Some(root) = given {
-        let line =
-            format!("dbt-lsp-plus: project {}, dbt {}.", root.display(), locate::Located::written(command).named);
-        eprintln!("{line}");
-        proxy.line = Some(line);
-    }
+    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), events);
+    // The server command, which `take_project` reads here on every route, then replaces with its dbt's.
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
+    if let Some(root) = locate::project_dir(command) {
+        proxy.take_project(root, locate::Route::Given);
+    }
     proxy.serve(inbox);
     proxy.stop_parse();
     if proxy.shutdown { ExitCode::SUCCESS } else { ExitCode::FAILURE }
@@ -1127,7 +1097,6 @@ mod tests {
         let sources = [
             ("proxy.rs", include_str!("proxy.rs")),
             ("workspace.rs", include_str!("workspace.rs")),
-            ("answer.rs", include_str!("answer.rs")),
             ("cli.rs", include_str!("cli.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("packages.rs", include_str!("packages.rs")),
@@ -1151,8 +1120,9 @@ mod tests {
             ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
             (
                 "no dbt_project.yml at or above <root>; give a path within the project",
-                r#"Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project")"#,
+                r#"locate::project(&path, command, "give a path within the project")"#,
             ),
+            ("no dbt_project.yml at or above <root>;", r#""no dbt_project.yml at or above {}; {advice}""#),
             ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
             (
                 "A session finds one project, once",
@@ -1233,7 +1203,8 @@ mod tests {
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
-        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
         let mut client = &proxy.client[..];
@@ -1244,11 +1215,33 @@ mod tests {
     }
 
     #[test]
+    fn a_hover_shows_the_block_of_a_doc_or_a_test_alone() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let path = root.join("models/marts/orders.sql");
+        let line = fs::read_to_string(&path).unwrap().lines().nth(16).unwrap().to_owned();
+        let at = json!({"line": 16, "character": line.find("is_positive").unwrap() + 2});
+        let on_macro = json!({"textDocument": {"uri": features::uri(&path)}, "position": at});
+        // A ref to the snapshot, whose block's name its target is.
+        let (scratch, text) = (root.join("models/marts/scratch.sql"), "select * from {{ ref('orders_snapshot') }}");
+        let at = json!({"line": 0, "character": text.find("orders_snapshot").unwrap() + 2});
+        let on_ref = json!({"textDocument": {"uri": features::uri(&scratch)}, "position": at});
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
+        proxy.workspace.open.insert(scratch, text.to_owned());
+        let unindexed = Answer::Unanswered(vec![proxy.workspace.unindexed()]);
+        let before = (proxy.on_hover(&on_macro), proxy.on_hover(&on_ref));
+        assert_eq!(before, (Answer::Empty, unindexed), "before an index: no block, but why there is no index");
+        proxy.workspace.index = Some(config::ParseIndex::of(&json!({"metadata": {"project_name": "shop"}})));
+        assert_eq!(proxy.on_hover(&on_macro), Answer::Empty, "{line}");
+    }
+
+    #[test]
     fn a_request_reads_the_held_scan_until_the_open_text_differs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/orders.sql");
         let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
-        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
         let project = proxy.workspace.project().unwrap();
         let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
         assert!(Arc::ptr_eq(&scanned, &project.files[&path]), "the project's scan of the file");
@@ -1263,7 +1256,8 @@ mod tests {
     fn an_open_text_edited_back_before_a_request_builds_nothing_again() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let uri = features::uri(&root.join("models/marts/orders.sql"));
-        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
         proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": uri, "text": "select 1"}}));
         let opened = proxy.workspace.project().unwrap();
         let change = |text: &str| json!({"textDocument": {"uri": uri}, "contentChanges": [{"text": text}]});
@@ -1279,7 +1273,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");
         let text = "select {{ function('f') }}(1) as v";
-        let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root.clone());
         proxy.workspace.open.insert(path.clone(), text.to_owned());
         assert_eq!(
             proxy.workspace.node_at(Some(&(path.clone(), text.to_owned(), text.find("'f'").unwrap() + 1)), false),
@@ -1344,7 +1339,8 @@ mod tests {
         };
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()), mpsc::channel().0);
+            let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+            proxy.set_root(root.to_owned());
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
@@ -1435,7 +1431,8 @@ mod tests {
     fn a_position_that_names_nothing_is_empty_and_a_target_found_nowhere_is_found() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let proxy_on = |text: &str, path: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
+            let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+            proxy.set_root(root.clone());
             proxy.workspace.open.insert(path.to_owned(), text.to_owned());
             proxy
         };
@@ -1456,33 +1453,32 @@ mod tests {
         assert_eq!(proxy.hierarchy("textDocument/prepareCallHierarchy", &outside), Some(Answer::Empty));
     }
 
-    fn args(words: &[&str]) -> Vec<String> {
-        words.iter().map(|word| (*word).to_owned()).collect()
-    }
-
     #[test]
-    fn reads_the_project_dir_in_both_forms() {
-        let here = std::env::current_dir().unwrap();
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir", "."])), Some(here.clone()));
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=."])), Some(here.clone()));
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=src/.."])), Some(here));
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-directory", "x"])), None);
-        assert_eq!(project_dir(&args(&["dbt", "lsp"])), None);
-    }
-
-    #[test]
-    fn keeps_the_project_dir_as_spelt_unless_a_link_before_dot_dot_moves_it() {
-        let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-project-dir-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("a/b")).unwrap();
-        std::os::unix::fs::symlink(dir.join("a"), dir.join("link")).unwrap();
-        std::os::unix::fs::symlink(dir.join("a/b"), dir.join("deep")).unwrap();
-        let dir_of = |spelling: &str| project_dir(&args(&["dbt", "lsp", "--project-dir", spelling]));
-        let spelt = dir.join("link");
-        assert_eq!(dir_of(spelt.to_str().unwrap()), Some(spelt.clone()));
-        assert_eq!(dir_of(dir.join("link/b/..").to_str().unwrap()), Some(spelt));
-        // deep/.. is a/b/.. to the system, a; read lexically, it would be DIR.
-        assert_eq!(dir_of(dir.join("deep/..").to_str().unwrap()), Some(fs::canonicalize(dir.join("a")).unwrap()));
-        fs::remove_dir_all(&dir).unwrap();
+    fn an_answer_is_a_result_an_empty_one_or_its_reasons() {
+        let id = json!(7);
+        let result = |result: Value| json!({"jsonrpc": "2.0", "id": 7, "result": result});
+        let (definition, references, symbols) =
+            ("textDocument/definition", "textDocument/references", "workspace/symbol");
+        let cases = [
+            ("a result", Answer::Found(json!([1])), references, result(json!([1]))),
+            ("a null result", Answer::Found(Value::Null), references, result(Value::Null)),
+            ("an empty list found", Answer::Found(json!([])), references, result(json!([]))),
+            ("an empty definition", Answer::Empty, definition, result(Value::Null)),
+            ("empty references", Answer::Empty, references, result(json!([]))),
+            ("empty symbols", Answer::Empty, symbols, result(json!([]))),
+            ("an empty command", Answer::Empty, "dbt-lsp-plus.nodeInfo", result(Value::Null)),
+        ];
+        for (name, answer, method, expected) in cases {
+            let framed = frame(&answer, &id, method);
+            assert_eq!(framed, expected, "{name}");
+            // A result, null included, is never an error: before a project, every request gets null.
+            assert!(framed.get("error").is_none() && framed.get("result").is_some(), "{name}: {framed}");
+        }
+        let unanswered =
+            Answer::Unanswered(vec![Reason::Unindexed("it is running".into()), Reason::Refused("no".into())]);
+        let framed = frame(&unanswered, &id, references);
+        let message = "dbt parse has not finished: it is running; no";
+        assert_eq!(framed, json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32803, "message": message}}));
+        assert!(framed.get("result").is_none(), "{framed}");
     }
 }

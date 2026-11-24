@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! Where a session's project and its dbt are when the server command names
-//! no `--project-dir`: the project of a document, from its path; the dbt of
-//! a project, from its `.venv`, its repository's, its main worktree's, then
+//! Where a project and its dbt are: the server command's `--project-dir`,
+//! read as spelt (`lexical`); the project of a document, from its path; the
+//! CLI's resolution of a project from a path (`project`), on the routes the
+//! server takes; the dbt of a project on each route (`dbt_of`), for server
+//! and CLI, from its `.venv`, its repository's, its main worktree's, then
 //! `PATH`; and the probe that tells a dbt 2 from anything else.
 
 use crate::{config, packages, project, run};
@@ -96,15 +98,7 @@ fn repository(project: &Path, git: &Git) -> Option<(PathBuf, Option<PathBuf>)> {
     if !status.success() || !top.is_absolute() {
         return None;
     }
-    let ran = fs::canonicalize(project).unwrap_or_else(|_| project.to_owned());
-    let common = ran.join(common).components().fold(PathBuf::new(), |mut path, part| {
-        match part {
-            Component::ParentDir => drop(path.pop()),
-            Component::CurDir => {}
-            other => path.push(other),
-        }
-        path
-    });
+    let common = lexical(&fs::canonicalize(project).unwrap_or_else(|_| project.to_owned()).join(common));
     let main = common.parent().filter(|_| common.file_name() == Some(".git".as_ref()));
     Some((top.clone(), main.map(Path::to_owned)))
 }
@@ -241,6 +235,65 @@ pub fn probe(command: &[String], dir: Option<&Path>) -> Result<(), String> {
     }
 }
 
+/// PATH with each `..` dropping the component before it, as written: no
+/// link is followed.
+pub fn lexical(path: &Path) -> PathBuf {
+    path.components().fold(PathBuf::new(), |mut path, component| {
+        match component {
+            Component::ParentDir => drop(path.pop()),
+            other => path.push(other),
+        }
+        path
+    })
+}
+
+/// The `--project-dir` of COMMAND, as `--project-dir X` or
+/// `--project-dir=X`, made absolute as spelt, so that the paths the server
+/// returns read as the user wrote them: each `..` drops the component before
+/// it.  Resolved only when that names another directory, through a link
+/// before a `..`.
+pub fn project_dir(command: &[String]) -> Option<PathBuf> {
+    let value = config::flag(command, "--project-dir")?;
+    let spelt = lexical(&std::path::absolute(value).ok()?);
+    match fs::canonicalize(value) {
+        Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
+        _ => Some(spelt),
+    }
+}
+
+/// The CLI's project from PATH, absolute, with the server command COMMAND,
+/// and by which route, the server's routes, which the proxy codes apart, at
+/// its own moments: given, its `--project-dir`; else PATH, when it holds
+/// `dbt_project.yml`, as a client's folder; else the project of PATH, as a
+/// document's.  Nothing runs.  Else why none, ending with ADVICE when no
+/// `dbt_project.yml` lies at or above PATH.
+pub fn project(path: &Path, command: &[String], advice: &str) -> Result<(PathBuf, Route), String> {
+    if let Some(project) = project_dir(command) {
+        let why = || format!("no dbt_project.yml in {}, the server command's --project-dir", project.display());
+        return project.join("dbt_project.yml").is_file().then(|| (project.clone(), Route::Given)).ok_or_else(why);
+    }
+    match path.join("dbt_project.yml").is_file() {
+        true => Ok((path.to_owned(), Route::Folder)),
+        false => project_of(path, command)
+            .map(|project| (project, Route::Document))
+            .ok_or_else(|| format!("no dbt_project.yml at or above {}; {advice}", path.display())),
+    }
+}
+
+/// The dbt of PROJECT, found on ROUTE, from the server command COMMAND,
+/// and where its processes run: given, the command as written, in the
+/// current directory; else `dbt`'s from COMMAND anchored in the current
+/// directory, so that what the user wrote from there names the same, in
+/// the project.
+pub fn dbt_of(project: &Path, route: Route, command: &[String]) -> (Located, Option<PathBuf>) {
+    if route == Route::Given {
+        return (Located::written(command), None);
+    }
+    let git = Git { program: "git".into(), env: std::env::vars_os().collect() };
+    let anchored = std::env::current_dir().map_or_else(|_| command.to_vec(), |cwd| config::anchored(command, &cwd));
+    (dbt(project, &anchored, &git), Some(project.to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +366,50 @@ mod tests {
         // A common directory not named .git, as a bare repository's: no main worktree.
         let bare = places("/w/dbt", Some(("/w", None)));
         assert_eq!(bare, [("/w/dbt/.venv/bin/dbt".into(), project), ("/w/.venv/bin/dbt".into(), repository)]);
+    }
+
+    #[test]
+    fn reads_the_project_dir_in_both_forms() {
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir", "."])), Some(here.clone()));
+        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=."])), Some(here.clone()));
+        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=src/.."])), Some(here));
+        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-directory", "x"])), None);
+        assert_eq!(project_dir(&args(&["dbt", "lsp"])), None);
+    }
+
+    #[test]
+    fn keeps_the_project_dir_as_spelt_unless_a_link_before_dot_dot_moves_it() {
+        let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-project-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a"), dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a/b"), dir.join("deep")).unwrap();
+        let dir_of = |spelling: &str| project_dir(&args(&["dbt", "lsp", "--project-dir", spelling]));
+        let spelt = dir.join("link");
+        assert_eq!(dir_of(spelt.to_str().unwrap()), Some(spelt.clone()));
+        assert_eq!(dir_of(dir.join("link/b/..").to_str().unwrap()), Some(spelt));
+        // deep/.. is a/b/.. to the system, a; read lexically, it would be DIR.
+        assert_eq!(dir_of(dir.join("deep/..").to_str().unwrap()), Some(fs::canonicalize(dir.join("a")).unwrap()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_project_is_given_a_folder_or_a_document_s_or_why_none() {
+        let files = [("shop/dbt_project.yml", "name: shop\n"), ("shop/models/a.sql", "select 1"), ("empty/x", "")];
+        let dir = project::scratch_project("locate-project", &files);
+        let (shop, empty) = (dir.join("shop"), dir.join("empty"));
+        let given = |project: &Path| args(&["dbt", "lsp", "--project-dir", project.to_str().unwrap()]);
+        let none = args(&["dbt", "lsp"]);
+        let advice = "the advice";
+        assert_eq!(project(&empty, &given(&shop), advice), Ok((shop.clone(), Route::Given)), "given");
+        let refused = format!("no dbt_project.yml in {}, the server command's --project-dir", empty.display());
+        assert_eq!(project(&shop, &given(&empty), advice), Err(refused), "given, without dbt_project.yml");
+        assert_eq!(project(&shop, &none, advice), Ok((shop.clone(), Route::Folder)), "a folder");
+        let a = shop.join("models/a.sql");
+        assert_eq!(project(&a, &none, advice), Ok((shop.clone(), Route::Document)), "a document");
+        let above = format!("no dbt_project.yml at or above {}; the advice", empty.display());
+        assert_eq!(project(&empty, &none, advice), Err(above), "none");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

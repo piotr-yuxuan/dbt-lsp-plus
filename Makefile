@@ -19,8 +19,8 @@ unexport DBT_PACKAGES_INSTALL_PATH
 # reduction chain lowers to its own figures.  A commit that raises one, or
 # changes how they are checked, says why in a line of its body:
 # "Raises the size ceilings: WHY".
-SIZE_LINES := 4935
-SIZE_TYPES := 68
+SIZE_LINES := 4791
+SIZE_TYPES := 64
 
 .PHONY: check check-static fmt clippy public python test-python workflows size test conformance live commits
 

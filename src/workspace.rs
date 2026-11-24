@@ -2,16 +2,18 @@
 //! The core as the front ends see it, the model's Workspace: the session's
 //! project (one, plan 049), its dbt, the open texts, the scan kept between
 //! requests and its first fill, the last parse's index and the parse under
-//! way, the call hierarchy's graph, and when the index is stale.  It speaks no protocol:
-//! no message, no position, no URI.
+//! way, the call hierarchy's graph, and when the index is stale; and what
+//! a request gets, found, empty, or unanswered with its reasons, from one
+//! closed set whose words live here.  It speaks no protocol: no message, no
+//! position, no URI.
 
-use crate::answer::{Answer, Reason};
 use crate::graph::Graph;
 use crate::project::{self, Project, Scanned};
 use crate::{cache, config, locate, navigation, packages, reference, run, scan, text};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -28,9 +30,70 @@ type Filled = Vec<(PathBuf, cache::Key, Arc<Scanned>)>;
 /// open or on disk, and a byte offset in it.
 pub type Place = (PathBuf, String, usize);
 
+#[derive(Debug, PartialEq)]
 pub enum Which {
     Id(String),
     At(Place),
+}
+
+/// What a session sends for one request: the model's Answer.  `Empty` is
+/// "nothing to look up": the request's position names no target.  What a
+/// lookup gave is `Found`, its nothing included: a target that resolves to
+/// nothing is a definition's null, references' `[]`, as the handlers
+/// answer; nodeInfo by an id that names no node is `Empty`.  LSP renders
+/// both alike; a rendering that tells them apart reads only `Empty` as
+/// nothing to look up.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Answer {
+    /// A result, an empty one included.
+    Found(Value),
+    /// The method's default nothing, `capability::empty`: null, or `[]` for
+    /// a list, where there is nothing to look up.
+    Empty,
+    /// The server could not answer, for these reasons.
+    Unanswered(Vec<Reason>),
+}
+
+/// Why the server could not answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reason {
+    /// The root's `dbt_project.yml` does not read as a project.
+    Unreadable(PathBuf),
+    /// No index answers yet: why, as the parse stands.
+    Unindexed(String),
+    /// A rename refused, as `sources` and `document` write it.
+    Refused(String),
+    /// The request's document lies in the dbt project at PROJECT, not in
+    /// the one this session serves, at SERVED.
+    Elsewhere { document: PathBuf, project: PathBuf, served: PathBuf },
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Reason::Unreadable(root) => write!(
+                f,
+                "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project",
+                root.display()
+            ),
+            Reason::Unindexed(why) => write!(f, "dbt parse has not finished: {why}"),
+            Reason::Refused(why) => f.write_str(why),
+            Reason::Elsewhere { document, project, served } => write!(
+                f,
+                "{} lies in the dbt project at {}, and this session serves only the one at {}",
+                document.display(),
+                project.display(),
+                served.display()
+            ),
+        }
+    }
+}
+
+impl Answer {
+    /// A rename's answer: its edit, or its refusal as the reason.
+    pub fn of_rename(edit: Result<Value, String>) -> Answer {
+        edit.map_or_else(|why| Answer::Unanswered(vec![Reason::Refused(why)]), Answer::Found)
+    }
 }
 
 /// The core's state of the session's project.  A front end owes it: `epoch`
@@ -209,14 +272,9 @@ impl Workspace {
             return Answer::Unanswered(vec![elsewhere]);
         }
         let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
-        let node = match which {
-            Which::Id(id) => index.node(id),
-            Which::At(place) => match self.node_at(Some(place), true) {
-                Some(None) if self.project().is_none() => {
-                    return Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())]);
-                }
-                named => named.flatten(),
-            },
+        let named = match which {
+            Which::Id(id) => index.node(id).map(Some),
+            Which::At(place) => self.node_at(Some(place), true),
         };
         let described = |node: &Value| {
             let mut described = node.clone();
@@ -224,7 +282,24 @@ impl Workspace {
             described["children"] = index.children(node["unique_id"].as_str().unwrap_or_default()).into();
             described
         };
-        node.map(described).map_or(Answer::Empty, Answer::Found)
+        named.flatten().map(described).map_or_else(|| self.why(named), Answer::Found)
+    }
+
+    /// Why a place that NAMED, as `node_at` gives it, gives no node: no
+    /// index yet, where it names one; a project that does not read, where it
+    /// names one the lookup does not find; else nothing to look up.
+    pub fn why(&self, named: Option<Option<&Value>>) -> Answer {
+        match (named, &self.index) {
+            (Some(_), None) => Answer::Unanswered(vec![self.unindexed()]),
+            (Some(None), Some(_)) if self.project().is_none() => Answer::Unanswered(vec![self.unreadable()]),
+            _ => Answer::Empty,
+        }
+    }
+
+    /// Why the core cannot answer from the project: the root's
+    /// `dbt_project.yml` does not read, which the scan needs.
+    pub fn unreadable(&self) -> Reason {
+        Reason::Unreadable(self.root.clone().unwrap_or_default())
     }
 
     /// Starts a parse when the index is stale and dbt can parse: no parse
@@ -423,6 +498,31 @@ mod tests {
     }
 
     #[test]
+    fn why_a_place_names_a_node_it_cannot_give() {
+        let root = project::scratch_project("workspace-why", &[("dbt_project.yml", "name: shop\n")]);
+        let mut workspace = Workspace { root: Some(root.clone()), ..Workspace::default() };
+        let node = json!({"unique_id": "model.shop.a"});
+        let unindexed = Answer::Unanswered(vec![workspace.unindexed()]);
+        let before = [workspace.why(Some(None)), workspace.why(Some(Some(&node))), workspace.why(None)];
+        assert_eq!(before, [unindexed.clone(), unindexed, Answer::Empty], "before any index");
+        workspace.parsed(Some(config::ParseIndex::of(&json!({"metadata": {"project_name": "shop"}}))), None);
+        assert_eq!(
+            [workspace.why(Some(None)), workspace.why(None)],
+            [Answer::Empty, Answer::Empty],
+            "a project that reads"
+        );
+        fs::remove_file(root.join("dbt_project.yml")).unwrap();
+        workspace.epoch += 1;
+        let unreadable = Answer::Unanswered(vec![Reason::Unreadable(root.clone())]);
+        assert_eq!(
+            [workspace.why(Some(None)), workspace.why(None)],
+            [unreadable, Answer::Empty],
+            "dbt_project.yml gone"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_workspace_reads_its_project_and_parses_when_stale_with_no_front_end() {
         let root =
             project::scratch_project("workspace", &[("dbt_project.yml", "name: shop\n"), ("models/a.sql", "select 1")]);
@@ -527,5 +627,28 @@ mod tests {
         assert!(workspace.running.is_some(), "a package's model written: stale, parsed again");
         workspace.stop();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_reason_says_what_it_is() {
+        let cases = [
+            (
+                Reason::Unreadable(PathBuf::from("/work/shop")),
+                "no dbt project at /work/shop: its dbt_project.yml is missing, is not YAML, or names no project",
+            ),
+            (Reason::Unindexed("it is running".into()), "dbt parse has not finished: it is running"),
+            (Reason::Refused("another CTE is named final".into()), "another CTE is named final"),
+            (
+                Reason::Elsewhere {
+                    document: PathBuf::from("/r/b/models/m.sql"),
+                    project: PathBuf::from("/r/b"),
+                    served: PathBuf::from("/r/a"),
+                },
+                "/r/b/models/m.sql lies in the dbt project at /r/b, and this session serves only the one at /r/a",
+            ),
+        ];
+        for (reason, said) in cases {
+            assert_eq!(reason.to_string(), said, "{reason:?}");
+        }
     }
 }
