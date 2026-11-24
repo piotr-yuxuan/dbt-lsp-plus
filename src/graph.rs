@@ -71,7 +71,7 @@ impl Graph {
                 project.packages.get(&package).or(root).unwrap_or(&PathBuf::new()).join(text("original_file_path"));
             // A model's version, which the manifest names as its model, is shown as its id ends: `orders.v2`.
             let version = id.strip_prefix(&project::version_id(&package, &text("name"), "")).map(str::to_owned);
-            let resource_type = project::Type::named(&text("resource_type")).name;
+            let resource_type = project::ResourceType::named(&text("resource_type")).name;
             let entity = Entity {
                 id: id.clone(),
                 name: text("name"),

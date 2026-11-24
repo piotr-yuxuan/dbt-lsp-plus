@@ -4,7 +4,7 @@
 //! runs it, read once from the server command, the parse's run and outcome,
 //! the index of the manifest it writes, and the summary of a node.
 
-use crate::project::Type;
+use crate::project::ResourceType;
 use crate::run::{self, Ending, Output, Problem, Run, Running};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -239,8 +239,8 @@ impl ParseIndex {
             }
         }
         for (id, node) in &mut nodes {
-            let built =
-                Type::named(node["resource_type"].as_str().unwrap_or_default()).built && node["disabled"] != true;
+            let built = ResourceType::named(node["resource_type"].as_str().unwrap_or_default()).built
+                && node["disabled"] != true;
             node["relation"] = if built { node["relation_name"].clone() } else { Value::Null };
             let mut attached = tests.remove(id).unwrap_or_default();
             attached.sort();
@@ -297,7 +297,7 @@ impl ParseIndex {
     pub fn resources(&self, package: &str, name: &str) -> Vec<&Value> {
         let latest = self.named.get(name).into_iter().flatten().filter(|id| self.latest.contains(*id));
         let resource = |node: &&Value| {
-            Type::named(node["resource_type"].as_str().unwrap_or_default()).refable
+            ResourceType::named(node["resource_type"].as_str().unwrap_or_default()).refable
                 && node["package_name"] == package
                 && node["disabled"] != true
         };

@@ -5,7 +5,7 @@
 //! parse that a Name describes, for hover, nodeInfo and inlay hints.  Pure.
 
 use crate::config::ParseIndex;
-use crate::project::{self, Entity, Project, Scanned, TYPES, Type};
+use crate::project::{self, Entity, Project, ResourceType, Scanned, TYPES};
 use crate::reference::{Kind, Name};
 use crate::scan;
 use crate::sources;
@@ -232,20 +232,21 @@ impl<'a, 'i> Lookup<'a, 'i> {
                     };
                     let plain = versions.is_empty() && version.is_none();
                     let rows = TYPES.iter().filter(|row| row.refable && plain);
-                    let unversioned = rows.flat_map(|row| get(project::id(row, package, called)).iter().copied());
+                    let unversioned = rows.flat_map(|row| get(project::node_id(row, package, called)).iter().copied());
                     versions.into_iter().filter(chosen).chain(unversioned).map(found).collect()
                 }
                 Kind::Table { source } => {
                     get(project::table_id(package, source, called)).iter().map(|entity| found(entity)).collect()
                 }
                 Kind::Macro => {
-                    get(project::id(&project::MACRO, package, called)).iter().map(|entity| found(entity)).collect()
+                    get(project::node_id(&project::MACRO, package, called)).iter().map(|entity| found(entity)).collect()
                 }
-                Kind::Function => {
-                    get(project::id(&project::FUNCTION, package, called)).iter().map(|entity| found(entity)).collect()
-                }
+                Kind::Function => get(project::node_id(&project::FUNCTION, package, called))
+                    .iter()
+                    .map(|entity| found(entity))
+                    .collect(),
                 Kind::Dispatch => {
-                    let (prefix, suffix) = (project::id(&project::MACRO, package, ""), format!("__{called}"));
+                    let (prefix, suffix) = (project::node_id(&project::MACRO, package, ""), format!("__{called}"));
                     let in_package = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let implementations = in_package.filter(|(id, _)| id.ends_with(&suffix));
                     implementations.flat_map(|(_, entities)| entities.iter().map(|entity| found(entity))).collect()
@@ -331,8 +332,8 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         .filter(|entity| {
             types.contains(&entity.resource_type)
                 && (entity.id
-                    == project::id(
-                        Type::named(entity.resource_type),
+                    == project::node_id(
+                        ResourceType::named(entity.resource_type),
                         &entity.package,
                         &format!("{prefix}{}", name.name),
                     )
@@ -351,7 +352,7 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         Kind::Entry { label } => Some(label),
         _ => None,
     };
-    let resource = resource_type.is_some_and(|kind| Type::named(kind).refable) && name.package.is_none();
+    let resource = resource_type.is_some_and(|kind| ResourceType::named(kind).refable) && name.package.is_none();
     let nodes = lookup.index.filter(|_| resource).map_or_else(Vec::new, |index| index.resources(own, &name.name));
     let typed = nodes.into_iter().filter(|node| node["resource_type"].as_str() == resource_type);
     let mut parsed: Vec<Target> = typed.filter_map(|node| lookup.parsed_at(node)).collect();

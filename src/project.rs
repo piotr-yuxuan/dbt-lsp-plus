@@ -20,7 +20,7 @@ use std::sync::{Arc, LazyLock};
 
 /// A resource type of dbt's and what the proxy does with its nodes.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Type {
+pub struct ResourceType {
     /// dbt's `resource_type`, the first word of its unique ids; empty for
     /// `OTHER`.
     pub name: &'static str,
@@ -42,51 +42,51 @@ pub struct Type {
     pub symbol: u32,
 }
 
-pub const MODEL: Type = Type { name: "model", label: Some("model"), refable: true, built: true, symbol: 5 };
-pub const SEED: Type = Type { name: "seed", label: Some("seed"), refable: true, built: true, symbol: 23 };
-pub const SNAPSHOT: Type = Type { name: "snapshot", label: Some("snapshot"), refable: true, built: true, symbol: 5 };
-pub const ANALYSIS: Type = Type { name: "analysis", label: Some("analysis"), refable: false, built: false, symbol: 5 };
-pub const TEST: Type = Type { name: "test", label: Some("data test"), refable: false, built: true, symbol: 24 };
-pub const UNIT_TEST: Type =
-    Type { name: "unit_test", label: Some("unit test"), refable: false, built: false, symbol: 24 };
-pub const MACRO: Type = Type { name: "macro", label: Some("macro"), refable: false, built: false, symbol: 12 };
-pub const FUNCTION: Type = Type { name: "function", label: Some("function"), refable: false, built: true, symbol: 12 };
-pub const DOC: Type = Type { name: "doc", label: None, refable: false, built: false, symbol: 15 };
+pub const MODEL: ResourceType =
+    ResourceType { name: "model", label: Some("model"), refable: true, built: true, symbol: 5 };
+pub const SEED: ResourceType =
+    ResourceType { name: "seed", label: Some("seed"), refable: true, built: true, symbol: 23 };
+pub const SNAPSHOT: ResourceType =
+    ResourceType { name: "snapshot", label: Some("snapshot"), refable: true, built: true, symbol: 5 };
+pub const ANALYSIS: ResourceType =
+    ResourceType { name: "analysis", label: Some("analysis"), refable: false, built: false, symbol: 5 };
+pub const TEST: ResourceType =
+    ResourceType { name: "test", label: Some("data test"), refable: false, built: true, symbol: 24 };
+pub const MACRO: ResourceType =
+    ResourceType { name: "macro", label: Some("macro"), refable: false, built: false, symbol: 12 };
+pub const FUNCTION: ResourceType =
+    ResourceType { name: "function", label: Some("function"), refable: false, built: true, symbol: 12 };
+pub const DOC: ResourceType = ResourceType { name: "doc", label: None, refable: false, built: false, symbol: 15 };
 /// A source table: dbt's `source` nodes are its tables.
-pub const SOURCE: Type = Type { name: "source", label: Some("table"), refable: false, built: true, symbol: 11 };
-pub const EXPOSURE: Type = Type { name: "exposure", label: Some("exposure"), refable: false, built: false, symbol: 19 };
-pub const METRIC: Type = Type { name: "metric", label: Some("metric"), refable: false, built: false, symbol: 16 };
-pub const SEMANTIC_MODEL: Type =
-    Type { name: "semantic_model", label: Some("semantic model"), refable: false, built: false, symbol: 5 };
-pub const SAVED_QUERY: Type =
-    Type { name: "saved_query", label: Some("saved query"), refable: false, built: false, symbol: 6 };
-pub const GROUP: Type = Type { name: "group", label: Some("group"), refable: false, built: false, symbol: 3 };
+pub const SOURCE: ResourceType =
+    ResourceType { name: "source", label: Some("table"), refable: false, built: true, symbol: 11 };
 /// A type the table lacks, one a newer dbt adds or a hook (`operation`):
 /// a Class, its relation kept.
-pub const OTHER: Type = Type { name: "", label: None, refable: false, built: true, symbol: 5 };
+pub const OTHER: ResourceType = ResourceType { name: "", label: None, refable: false, built: true, symbol: 5 };
 
-/// Every resource type the proxy knows, `OTHER` aside.
-pub static TYPES: [Type; 15] = [
+/// Every resource type the proxy knows, `OTHER` aside; those that the code
+/// names alone have a constant.
+pub static TYPES: [ResourceType; 15] = [
     MODEL,
     SEED,
     SNAPSHOT,
     ANALYSIS,
     TEST,
-    UNIT_TEST,
+    ResourceType { name: "unit_test", label: Some("unit test"), refable: false, built: false, symbol: 24 },
     MACRO,
     FUNCTION,
     DOC,
     SOURCE,
-    EXPOSURE,
-    METRIC,
-    SEMANTIC_MODEL,
-    SAVED_QUERY,
-    GROUP,
+    ResourceType { name: "exposure", label: Some("exposure"), refable: false, built: false, symbol: 19 },
+    ResourceType { name: "metric", label: Some("metric"), refable: false, built: false, symbol: 16 },
+    ResourceType { name: "semantic_model", label: Some("semantic model"), refable: false, built: false, symbol: 5 },
+    ResourceType { name: "saved_query", label: Some("saved query"), refable: false, built: false, symbol: 6 },
+    ResourceType { name: "group", label: Some("group"), refable: false, built: false, symbol: 3 },
 ];
 
-impl Type {
+impl ResourceType {
     /// The row of RESOURCE_TYPE, dbt's word for it, else `OTHER`.
-    pub fn named(resource_type: &str) -> &'static Type {
+    pub fn named(resource_type: &str) -> &'static ResourceType {
         TYPES.iter().find(|row| row.name == resource_type).unwrap_or(&OTHER)
     }
 }
@@ -96,20 +96,20 @@ impl Type {
 /// `<type>.<package>.<name>`; a generic test's block is the macro
 /// `test_<name>`.  With an empty NAME, the prefix of every id of that type
 /// in PACKAGE.  `OTHER` has no name and builds no id: no caller passes it.
-pub fn id(kind: &Type, package: &str, name: &str) -> String {
+pub fn node_id(kind: &ResourceType, package: &str, name: &str) -> String {
     format!("{}.{package}.{name}", kind.name)
 }
 
 /// `model.<package>.<model>.v<version>`, VERSION as its properties file
 /// writes it; with an empty VERSION, the prefix of every version's id.
 pub fn version_id(package: &str, model: &str, version: &str) -> String {
-    format!("{}.v{version}", id(&MODEL, package, model))
+    format!("{}.v{version}", node_id(&MODEL, package, model))
 }
 
 /// `source.<package>.<source>`: a source, the group of its tables, which
 /// is no node of dbt's.
 pub fn group_id(package: &str, source: &str) -> String {
-    id(&SOURCE, package, source)
+    node_id(&SOURCE, package, source)
 }
 
 /// `source.<package>.<source>.<table>`.
@@ -372,12 +372,12 @@ pub fn versions_of(entity: Entity, declared: &[&Versioned]) -> Vec<Entity> {
 struct Layout {
     key: &'static str,
     default: &'static str,
-    files: &'static [(&'static str, &'static Type)],
-    blocks: &'static [(Kind, &'static str, &'static Type, &'static str)],
+    files: &'static [(&'static str, &'static ResourceType)],
+    blocks: &'static [(Kind, &'static str, &'static ResourceType, &'static str)],
 }
 
-const DOCS: (Kind, &str, &Type, &str) = (Kind::Docs, "md", &DOC, "");
-const GENERIC_TEST: (Kind, &str, &Type, &str) = (Kind::Test, "sql", &MACRO, "test_");
+const DOCS: (Kind, &str, &ResourceType, &str) = (Kind::Docs, "md", &DOC, "");
+const GENERIC_TEST: (Kind, &str, &ResourceType, &str) = (Kind::Test, "sql", &MACRO, "test_");
 
 const LAYOUT: [Layout; 7] = [
     Layout { key: "model-paths", default: "models", files: &[("sql", &MODEL), ("py", &MODEL)], blocks: &[DOCS] },
@@ -442,7 +442,7 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
     for block in &scanned.blocks {
         let layout_block = layout.blocks.iter().find(|(kind, ext, ..)| *kind == block.kind && *ext == extension);
         if let Some((_, _, resource_type, prefix)) = layout_block {
-            let id = id(resource_type, package, &format!("{prefix}{}", block.name));
+            let id = node_id(resource_type, package, &format!("{prefix}{}", block.name));
             found.push(entity(resource_type.name, id, &block.name, block.range.clone(), block.name_range.clone()));
         }
     }
@@ -450,7 +450,7 @@ fn file_entities(package: &str, layout: &Layout, path: &Path, scanned: &Scanned)
         && found.iter().all(|e| e.resource_type == "doc")
     {
         let whole = 0..scanned.text.len();
-        found.push(entity(resource_type.name, id(resource_type, package, stem), stem, whole, 0..0));
+        found.push(entity(resource_type.name, node_id(resource_type, package, stem), stem, whole, 0..0));
     }
     found
 }
@@ -656,7 +656,7 @@ pub fn assemble(inventory: &Inventory, read: &mut dyn FnMut(&File) -> Arc<Scanne
                     calls.cloned().collect()
                 };
                 let snapshot = |(entry, relation): &(Entry, Range<usize>)| Entity {
-                    id: id(&SNAPSHOT, name, &entry.name),
+                    id: node_id(&SNAPSHOT, name, &entry.name),
                     name: entry.name.clone(),
                     resource_type: "snapshot",
                     package: name.clone(),
@@ -1251,13 +1251,13 @@ mod tests {
         // dbt's shapes of ids, the fixture's names for a model and a source table: a version's ends `.v<version>`,
         // a generic test's block is the macro `test_<name>`, and a source, the group of its tables, which is no
         // node, is the prefix of their ids.
-        assert_eq!(id(&MODEL, "shop", "orders"), "model.shop.orders");
+        assert_eq!(node_id(&MODEL, "shop", "orders"), "model.shop.orders");
         assert_eq!(version_id("shop", "dim", "2"), "model.shop.dim.v2");
         assert_eq!(table_id("shop", "raw", "customers"), "source.shop.raw.customers");
         assert_eq!(group_id("shop", "raw"), "source.shop.raw");
-        assert_eq!(id(&MACRO, "shop", "test_positive"), "macro.shop.test_positive");
+        assert_eq!(node_id(&MACRO, "shop", "test_positive"), "macro.shop.test_positive");
         // The prefixes of every macro of a package and of every version of a model.
-        assert_eq!(id(&MACRO, "shop", ""), "macro.shop.");
+        assert_eq!(node_id(&MACRO, "shop", ""), "macro.shop.");
         assert_eq!(version_id("shop", "dim", ""), "model.shop.dim.v");
     }
 
@@ -1273,10 +1273,10 @@ mod tests {
         // Of the types that the manifest's `nodes` and `sources` hold, and a function, which it keeps apart but a
         // dbt could write among its nodes, dbt builds all but an analysis.
         let held = ["model", "seed", "snapshot", "analysis", "test", "source", "function"];
-        let unbuilt: Vec<&str> = held.into_iter().filter(|name| !Type::named(name).built).collect();
+        let unbuilt: Vec<&str> = held.into_iter().filter(|name| !ResourceType::named(name).built).collect();
         assert_eq!(unbuilt, ["analysis"]);
         for name in ["operation", ""] {
-            let row = Type::named(name);
+            let row = ResourceType::named(name);
             assert_eq!(row, &OTHER, "{name:?}");
             assert_eq!((row.built, row.symbol, row.refable), (true, 5, false), "{name:?}: built, a Class, no ref");
         }

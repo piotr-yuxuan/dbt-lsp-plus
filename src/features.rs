@@ -4,7 +4,7 @@
 
 use crate::graph::Graph;
 use crate::navigation::Lookup;
-use crate::project::{self, Entity, Project, TYPES, Type};
+use crate::project::{self, Entity, Project, ResourceType, TYPES};
 use crate::properties;
 use crate::reference;
 use crate::scan::{self, Kind, Symbol};
@@ -141,7 +141,7 @@ pub fn workspace_symbols(project: &Project, query: &str) -> Value {
         let starts = by_file.entry(&entity.path).or_insert_with(|| LineStarts::new(text));
         symbols.push(json!({
             "name": entity.shown(),
-            "kind": Type::named(entity.resource_type).symbol,
+            "kind": ResourceType::named(entity.resource_type).symbol,
             "location": {"uri": uri(&entity.path), "range": starts.range(entity.name_range.start, entity.name_range.end)},
             "containerName": entity.id,
             "data": {"uniqueId": entity.id, "resourceType": entity.resource_type},
@@ -154,7 +154,7 @@ fn hierarchy_item(item: &Entity, project: &Project) -> Value {
     let starts = LineStarts::new(project.text(&item.path).unwrap_or_default());
     json!({
         "name": item.shown(),
-        "kind": Type::named(item.resource_type).symbol,
+        "kind": ResourceType::named(item.resource_type).symbol,
         "detail": item.id,
         "uri": uri(&item.path),
         "range": starts.range(item.range.start, item.range.end),
