@@ -40,28 +40,26 @@ release adds a commit to `origin/main`, so a clone pulls (`git pull
 
 ```
 src/rpc.rs                    the framing of LSP messages
-src/text.rs                   LSP positions, encodings, incremental changes
-src/node.rs                   dbt's resource types, one table of what the server does with each, and how unique ids are written
+src/text.rs                   LSP positions, in UTF-16, and dbt's in code points; incremental changes
 src/reference.rs              what a place of a document names: its Name
 src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
 src/yaml.rs                   YAML with the place of each scalar
 src/properties.rs             the named entries of a YAML properties file
-src/project.rs                the resources of a project and its packages
+src/project.rs                the resources of a project and its packages; dbt's resource types, one table of what the server does with each, and how unique ids are written
 src/cache.rs                  the scan kept between requests, each file by its metadata, an open one by its text's hash; the stamp of the files on disk
 src/graph.rs                  the dependency graph: scanned, then the index's
 src/sources.rs                references and renames of sources
 src/navigation.rs             the Name at a position, from the document's scan, and where it leads: dbt's one lookup
 src/features.rs               the answers of the added features, as LSP JSON
-src/answer.rs                 what a request gets: found, empty, or unanswered with its reasons, as LSP JSON
 src/config.rs                 the user's Dbt, read once from the server command, and its parse: index, summary
 src/run.rs                    the server's children: one run of dbt, the parse's or a command's, and the one wait for each child; dbt's first error and the parse's log
 src/runs.rs                   the user's last run, from the files dbt left: its failures, the stale sources, where each is written; the model's Artefacts
 src/capability.rs             what a session offers: one descriptor per method or command
 src/commands.rs               the commands for clients, by dbt's CLI
 src/packages.rs               whether dbt would install packages before it parses
-src/locate.rs                 the project of a document, and whether a document lies in another; the dbt of a project, the probe of a dbt
+src/locate.rs                 the project of a document, and whether a document lies in another; the CLI's resolution of a project; the dbt of a project for server and CLI, the probe of a dbt
 src/document.rs               folding, highlights, selection ranges, CTE rename
-src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries
+src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries; what a request gets, found, empty, or unanswered with its reasons
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
 src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell, on the server's resolution
 tests/proxy.rs                the binary with the fake dbt
@@ -156,13 +154,13 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     output, with tests of their own;
     `commands::compile_job` and `commands::nodes_job`: one run per
     command, its words and its reader;
-  - `cli::named`: the rule that a subcommand is the first word, tested
-    without running the binary, apart from `main.rs`, whose `cli::main` is
-    the module's entry point; `cli::asked`: the decision on a
+  - `cli::named`: the rule that a subcommand is the first word, its row,
+    tested without running the binary, apart from `main.rs`, whose
+    `cli::main` is the module's entry point; `cli::asked`: the decision on a
     subcommand's words, with tests of its own; `cli::doctor`,
     `cli::select` and `cli::node`, one per subcommand, each its row's run
-    in `SUBCOMMANDS`; `cli::operand`, the decision on node's operand, with
-    tests of its own; `cli::indexed`, the CLI's index, the kept manifest
+    in `SUBCOMMANDS`; `cli::operand`, the decision on node's operand, a
+    `Which`, with tests of its own; `cli::indexed`, the CLI's index, the kept manifest
     or a parse that it keeps, apart from the question `cli::node` asks;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
     which `Running::stop` ends, a resource's start;
