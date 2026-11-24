@@ -514,7 +514,34 @@ fn a_request_before_initialize_is_refused_and_exit_fails() {
     let (mut session, _) = Session::fake("before-initialize", json!({}));
     let refused = session.request("workspace/symbol", json!({"query": "orders"}));
     assert_eq!((refused.get("result"), &refused["error"]["code"]), (None, &json!(-32002)), "{refused}");
+    // The session goes on: `initialize` is answered.
+    assert_eq!(session.initialize(&fixture())["serverInfo"]["name"], "dbt-lsp-plus");
     session.notify("exit", Value::Null);
+    assert_eq!(session.wait().code(), Some(1));
+}
+
+#[test]
+fn a_notification_before_initialize_is_dropped() {
+    let (mut session, _) = Session::fake("notification-before-initialize", json!({}));
+    // A file on no disk, whose outline only its open text gives.
+    let unsaved = fixture().join("models/marts/unsaved.sql");
+    let outline_request = json!({"textDocument": {"uri": uri(&unsaved)}});
+    session.open(&unsaved, Some("with a as (select 1)\nselect * from a\n"));
+    session.initialize(&fixture());
+    let outline = session.request("textDocument/documentSymbol", outline_request.clone());
+    assert_eq!(outline["result"], Value::Null, "{outline}");
+    session.open(&unsaved, Some("with a as (select 1)\nselect * from a\n"));
+    let outline = session.request("textDocument/documentSymbol", outline_request);
+    assert!(outline["result"].is_array(), "{outline}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_message_between_the_answer_and_initialized_ends_the_session() {
+    let (mut session, _) = Session::fake("before-initialized", json!({}));
+    let params = json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": {}});
+    assert!(session.request("initialize", params)["result"].is_object());
+    session.notify("workspace/didChangeConfiguration", json!({"settings": {}}));
     assert_eq!(session.wait().code(), Some(1));
 }
 

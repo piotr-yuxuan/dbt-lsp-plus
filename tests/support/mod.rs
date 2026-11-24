@@ -12,9 +12,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// A body larger than this is refused: the frame is lost, the stream must stop.
-const MAX_BODY: usize = 64 * 1024 * 1024;
-
 /// Reads the next message, null for a body that is not JSON, or `Ok(None)`
 /// at the end of the stream.  An error means the frame boundary is lost and
 /// the caller must stop reading.
@@ -36,9 +33,7 @@ fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
             length = Some(value.trim().parse::<usize>().map_err(io::Error::other)?);
         }
     }
-    let length = length
-        .filter(|length| *length <= MAX_BODY)
-        .ok_or_else(|| io::Error::other("no Content-Length, or one above the limit"))?;
+    let length = length.ok_or_else(|| io::Error::other("no Content-Length"))?;
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     Ok(Some(serde_json::from_slice(&body).unwrap_or(Value::Null)))
@@ -200,6 +195,7 @@ impl Session {
             let message = self.inbox.recv_timeout(left).unwrap_or_else(|_| {
                 panic!("no awaited message within {:?}; received {:#?}", self.timeout, self.received)
             });
+            assert_eq!(message["jsonrpc"], "2.0", "{message}");
             self.received.push(message.clone());
             if let (Some(id), Some(_)) = (message.get("id"), message.get("method")) {
                 let items = message["params"]["items"].as_array().map(|items| vec![Value::Null; items.len()]);
