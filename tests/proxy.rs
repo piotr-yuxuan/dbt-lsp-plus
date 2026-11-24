@@ -19,7 +19,9 @@ mod routes;
 mod support;
 
 use serde_json::{Value, json};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use support::{Session, copy_fixture, fixture, received_by_server, scratch, until_logged, uri};
 
@@ -546,18 +548,36 @@ fn a_message_between_the_answer_and_initialized_ends_the_session() {
 }
 
 #[test]
-fn an_answer_sent_before_a_failed_handshake_is_written() {
+fn a_refusal_larger_than_the_pipe_is_written_whole() {
+    let dir = scratch("refusal-larger-than-the-pipe");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
+    server.current_dir(&dir).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    let mut child = server.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("start dbt-lsp-plus");
+    // A request before `initialize`, refused with its method quoted, longer than a pipe holds; then `exit`.
+    let method = "x".repeat(200_000);
     let frame = |message: Value| format!("Content-Length: {}\r\n\r\n{message}", message.to_string().len());
-    // A request and `exit` in one write: the server ends at once, yet only once its refusal is written.
-    for round in 0..20 {
-        let (mut session, _) = Session::fake(&format!("written-before-exit-{round}"), json!({}));
-        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "workspace/symbol", "params": {"query": "orders"}});
-        let exit = json!({"jsonrpc": "2.0", "method": "exit"});
-        session.send_raw((frame(request) + &frame(exit)).as_bytes());
-        let refused = session.wait_for(|message| message["id"] == 1);
-        assert_eq!(refused["error"]["code"], -32002, "{refused}");
-        assert_eq!(session.wait().code(), Some(1));
-    }
+    let request = frame(json!({"jsonrpc": "2.0", "id": 1, "method": method}));
+    let exit = frame(json!({"jsonrpc": "2.0", "method": "exit"}));
+    child.stdin.take().unwrap().write_all((request + &exit).as_bytes()).unwrap();
+    // Read once the server would have exited, had it not waited for its writer.
+    std::thread::sleep(Duration::from_millis(500));
+    let mut output = String::new();
+    child.stdout.take().unwrap().read_to_string(&mut output).unwrap();
+    let (header, body) = output.split_once("\r\n\r\n").expect("one frame");
+    assert_eq!(header, format!("Content-Length: {}", body.len()), "the whole body");
+    let refusal: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(refusal["error"]["code"], -32002);
+    assert!(refusal["error"]["message"].as_str().is_some_and(|text| text.contains(&method)));
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+}
+
+#[test]
+fn a_frame_that_is_not_json_rpc_after_shutdown_ends_the_session_well() {
+    let (mut session, _) = Session::fake("not-json-rpc-after-shutdown", json!({}));
+    session.initialize(&fixture());
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    session.send_raw(b"Content-Length: 3\r\n\r\nnop");
+    assert_eq!(session.wait().code(), Some(0));
 }
 
 #[test]

@@ -1071,7 +1071,9 @@ pub fn run(command: &[String]) -> ExitCode {
     let shutdown = proxy.shutdown;
     // The crate's writer holds the standard output until its channel closes with the proxy's sender: once it lets
     // go, what was sent is written.  `IoThreads::join` would also wait for a reader still reading after a failed
-    // handshake, and returns before the writer after a frame it cannot read.
+    // handshake, and returns before the writer after a frame it cannot read.  That lock is a detail of lsp-server
+    // 0.10.0's writer, hence the exact pin in Cargo.toml; `a_refusal_larger_than_the_pipe_is_written_whole` and
+    // `a_frame_that_is_not_json_rpc_ends_the_session` fail without it.
     drop(proxy);
     drop(std::io::stdout().lock());
     // 0 after `shutdown`, else 1, as LSP asks of `exit`; 1 after a failed handshake.
