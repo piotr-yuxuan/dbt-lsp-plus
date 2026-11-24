@@ -2,7 +2,6 @@
 //! dbt-lsp-plus: a language server for dbt projects, from their files and
 //! the user's `dbt parse`.
 
-pub mod answer;
 pub mod cache;
 pub mod capability;
 pub mod cli;

@@ -2,16 +2,18 @@
 //! The core as the front ends see it, the model's Workspace: the session's
 //! project (one, plan 049), its dbt, the open texts, the scan kept between
 //! requests and its first fill, the last parse's index and the parse under
-//! way, the call hierarchy's graph, and when the index is stale.  It speaks no protocol:
-//! no message, no position, no URI.
+//! way, the call hierarchy's graph, and when the index is stale; and what
+//! a request gets, found, empty, or unanswered with its reasons, from one
+//! closed set whose words live here.  It speaks no protocol: no message, no
+//! position, no URI.
 
-use crate::answer::{Answer, Reason};
 use crate::graph::Graph;
 use crate::project::{self, Project, Scanned};
 use crate::{cache, config, locate, navigation, packages, reference, run, scan, text};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -32,6 +34,66 @@ pub type Place = (PathBuf, String, usize);
 pub enum Which {
     Id(String),
     At(Place),
+}
+
+/// What a session sends for one request: the model's Answer.  `Empty` is
+/// "nothing to look up": the request's position names no target.  What a
+/// lookup gave is `Found`, its nothing included: a target that resolves to
+/// nothing is a definition's null, references' `[]`, as the handlers
+/// answer; nodeInfo by an id that names no node is `Empty`.  LSP renders
+/// both alike; a rendering that tells them apart reads only `Empty` as
+/// nothing to look up.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Answer {
+    /// A result, an empty one included.
+    Found(Value),
+    /// The method's default nothing, `capability::empty`: null, or `[]` for
+    /// a list, where there is nothing to look up.
+    Empty,
+    /// The server could not answer, for these reasons.
+    Unanswered(Vec<Reason>),
+}
+
+/// Why the server could not answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reason {
+    /// The root's `dbt_project.yml` does not read as a project.
+    Unreadable(PathBuf),
+    /// No index answers yet: why, as the parse stands.
+    Unindexed(String),
+    /// A rename refused, as `sources` and `document` write it.
+    Refused(String),
+    /// The request's document lies in the dbt project at PROJECT, not in
+    /// the one this session serves, at SERVED.
+    Elsewhere { document: PathBuf, project: PathBuf, served: PathBuf },
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Reason::Unreadable(root) => write!(
+                f,
+                "no dbt project at {}: its dbt_project.yml is missing, is not YAML, or names no project",
+                root.display()
+            ),
+            Reason::Unindexed(why) => write!(f, "dbt parse has not finished: {why}"),
+            Reason::Refused(why) => f.write_str(why),
+            Reason::Elsewhere { document, project, served } => write!(
+                f,
+                "{} lies in the dbt project at {}, and this session serves only the one at {}",
+                document.display(),
+                project.display(),
+                served.display()
+            ),
+        }
+    }
+}
+
+impl Answer {
+    /// A rename's answer: its edit, or its refusal as the reason.
+    pub fn of_rename(edit: Result<Value, String>) -> Answer {
+        edit.map_or_else(|why| Answer::Unanswered(vec![Reason::Refused(why)]), Answer::Found)
+    }
 }
 
 /// The core's state of the session's project.  A front end owes it: `epoch`
@@ -565,5 +627,28 @@ mod tests {
         assert!(workspace.running.is_some(), "a package's model written: stale, parsed again");
         workspace.stop();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_reason_says_what_it_is() {
+        let cases = [
+            (
+                Reason::Unreadable(PathBuf::from("/work/shop")),
+                "no dbt project at /work/shop: its dbt_project.yml is missing, is not YAML, or names no project",
+            ),
+            (Reason::Unindexed("it is running".into()), "dbt parse has not finished: it is running"),
+            (Reason::Refused("another CTE is named final".into()), "another CTE is named final"),
+            (
+                Reason::Elsewhere {
+                    document: PathBuf::from("/r/b/models/m.sql"),
+                    project: PathBuf::from("/r/b"),
+                    served: PathBuf::from("/r/a"),
+                },
+                "/r/b/models/m.sql lies in the dbt project at /r/b, and this session serves only the one at /r/a",
+            ),
+        ];
+        for (reason, said) in cases {
+            assert_eq!(reason.to_string(), said, "{reason:?}");
+        }
     }
 }

@@ -2,14 +2,13 @@
 //! The language server: the session's event loop, which answers the
 //! client's requests from the Workspace and tells it what dbt's runs left.
 
-use crate::answer::{Answer, Reason};
 use crate::capability;
 use crate::commands;
 use crate::locate;
 use crate::project::{Project, Scanned};
 use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
-use crate::workspace::{Which, Workspace};
+use crate::workspace::{Answer, Reason, Which, Workspace};
 use crate::{config, document, features, navigation, packages, properties, reference, run, runs, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -125,6 +124,24 @@ struct Proxy<W: Write> {
     /// waiting, with the client's id and their run, and the one under way.
     runs: VecDeque<(Value, commands::Job, run::Run)>,
     run: Option<run::Running>,
+}
+
+/// LSP's RequestFailed: a request that the server could not answer.
+const REQUEST_FAILED: i64 = -32803;
+
+/// The JSON-RPC response to the request ID of NAME, a method or a command,
+/// that ANSWER gives: its result; for an empty one,
+/// `capability::empty(NAME)`; for an unanswered one, error -32803 whose
+/// message is its reasons, joined by `; `.
+fn frame(answer: &Answer, id: &Value, name: &str) -> Value {
+    match answer {
+        Answer::Found(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Answer::Empty => json!({"jsonrpc": "2.0", "id": id, "result": capability::empty(name)}),
+        Answer::Unanswered(reasons) => {
+            let message = reasons.iter().map(Reason::to_string).collect::<Vec<_>>().join("; ");
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": REQUEST_FAILED, "message": message}})
+        }
+    }
 }
 
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
@@ -703,7 +720,7 @@ impl<W: Write> Proxy<W> {
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
-            Ok(Some(answer)) => self.send_client(&answer.frame(id, method)),
+            Ok(Some(answer)) => self.send_client(&frame(&answer, id, method)),
             Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
             Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
@@ -863,7 +880,7 @@ impl<W: Write> Proxy<W> {
         }
         match self.route(method, params) {
             Route::Here(method) => self.answer(method, id, params),
-            Route::Answer(answer) => self.send_client(&answer.frame(id, method)),
+            Route::Answer(answer) => self.send_client(&frame(&answer, id, method)),
             Route::Command(command) => self.on_command(command, id, params),
             Route::Unknown => {
                 let named =
@@ -893,7 +910,7 @@ impl<W: Write> Proxy<W> {
     /// none.
     fn on_elsewhere(&mut self, method: &str, id: &Value, why: Reason) {
         let answer = if method == "textDocument/inlayHint" { Answer::Empty } else { Answer::Unanswered(vec![why]) };
-        self.send_client(&answer.frame(id, method));
+        self.send_client(&frame(&answer, id, method));
     }
 
     /// Watches the files of the user's last run, in the target path
@@ -1079,7 +1096,6 @@ mod tests {
         let sources = [
             ("proxy.rs", include_str!("proxy.rs")),
             ("workspace.rs", include_str!("workspace.rs")),
-            ("answer.rs", include_str!("answer.rs")),
             ("cli.rs", include_str!("cli.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("packages.rs", include_str!("packages.rs")),
@@ -1412,5 +1428,34 @@ mod tests {
         assert_eq!([false, true].map(|references| proxy.on_navigation(references, &nowhere)), found);
         let outside = at(&root.join("packages.yml"), 0);
         assert_eq!(proxy.hierarchy("textDocument/prepareCallHierarchy", &outside), Some(Answer::Empty));
+    }
+
+    #[test]
+    fn an_answer_is_a_result_an_empty_one_or_its_reasons() {
+        let id = json!(7);
+        let result = |result: Value| json!({"jsonrpc": "2.0", "id": 7, "result": result});
+        let (definition, references, symbols) =
+            ("textDocument/definition", "textDocument/references", "workspace/symbol");
+        let cases = [
+            ("a result", Answer::Found(json!([1])), references, result(json!([1]))),
+            ("a null result", Answer::Found(Value::Null), references, result(Value::Null)),
+            ("an empty list found", Answer::Found(json!([])), references, result(json!([]))),
+            ("an empty definition", Answer::Empty, definition, result(Value::Null)),
+            ("empty references", Answer::Empty, references, result(json!([]))),
+            ("empty symbols", Answer::Empty, symbols, result(json!([]))),
+            ("an empty command", Answer::Empty, "dbt-lsp-plus.nodeInfo", result(Value::Null)),
+        ];
+        for (name, answer, method, expected) in cases {
+            let framed = frame(&answer, &id, method);
+            assert_eq!(framed, expected, "{name}");
+            // A result, null included, is never an error: before a project, every request gets null.
+            assert!(framed.get("error").is_none() && framed.get("result").is_some(), "{name}: {framed}");
+        }
+        let unanswered =
+            Answer::Unanswered(vec![Reason::Unindexed("it is running".into()), Reason::Refused("no".into())]);
+        let framed = frame(&unanswered, &id, references);
+        let message = "dbt parse has not finished: it is running; no";
+        assert_eq!(framed, json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32803, "message": message}}));
+        assert!(framed.get("result").is_none(), "{framed}");
     }
 }
