@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
-//! Where a session's project and its dbt are when the server command names
-//! no `--project-dir`: the project of a document, from its path; the dbt of
-//! a project, from its `.venv`, its repository's, its main worktree's, then
+//! Where a project and its dbt are: the server command's `--project-dir`,
+//! read as spelt (`lexical`); the project of a document, from its path; the
+//! CLI's resolution of a project from a path (`project`), on the routes the
+//! server takes; the dbt of a project on each route (`dbt_of`), for server
+//! and CLI, from its `.venv`, its repository's, its main worktree's, then
 //! `PATH`; and the probe that tells a dbt 2 from anything else.
 
 use crate::{config, packages, project, run};
@@ -259,11 +261,12 @@ pub fn project_dir(command: &[String]) -> Option<PathBuf> {
     }
 }
 
-/// The project as the server finds it from PATH, absolute, with the server
-/// command COMMAND, and by which route: given, its `--project-dir`; else
-/// PATH, when it holds `dbt_project.yml`, as a client's folder; else the
-/// project of PATH, as a document's.  Nothing runs.  Else why none, ending
-/// with ADVICE when no `dbt_project.yml` lies at or above PATH.
+/// The CLI's project from PATH, absolute, with the server command COMMAND,
+/// and by which route, the server's routes, which the proxy codes apart, at
+/// its own moments: given, its `--project-dir`; else PATH, when it holds
+/// `dbt_project.yml`, as a client's folder; else the project of PATH, as a
+/// document's.  Nothing runs.  Else why none, ending with ADVICE when no
+/// `dbt_project.yml` lies at or above PATH.
 pub fn project(path: &Path, command: &[String], advice: &str) -> Result<(PathBuf, Route), String> {
     if let Some(project) = project_dir(command) {
         let why = || format!("no dbt_project.yml in {}, the server command's --project-dir", project.display());

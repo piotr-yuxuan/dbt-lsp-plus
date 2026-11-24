@@ -1107,14 +1107,17 @@ starts the server, `--` first or an option first, keeps its meaning; a
 second binary would be one more file to install, put on a harness's
 `PATH` and allowlist.
 
-- **One resolution.**  Each finds the project and its dbt as the server
-  does, by the same two functions: `locate::project`, the server
-  command's `--project-dir` (`locate::project_dir`), else the path as a
-  client's folder, else as a document's (`locate::project_of`), or why
-  none, each subcommand's advice at its end; and `locate::dbt_of`, which
-  the server calls on every route, the command as written when given,
-  else `locate::dbt`'s from the command anchored in the current directory
-  (`config::anchored`).  One divergence: a given `--project-dir` without `dbt_project.yml` is no
+- **One resolution of the dbt.**  Each finds the project on the server's
+  routes, through `locate::project`: the server command's
+  `--project-dir` (`locate::project_dir`), else the path as a client's
+  folder, else as a document's (`locate::project_of`), or why none, each
+  subcommand's advice at its end.  The server keeps its own coding of
+  those routes, at its own moments: the given one at its start, a folder
+  at `initialize`, a document at its first `didOpen`.  Server and CLI
+  then find the dbt of the project by one function, `locate::dbt_of`:
+  the command as written when given, else `locate::dbt`'s from the
+  command anchored in the current directory (`config::anchored`).  One
+  divergence: a given `--project-dir` without `dbt_project.yml` is no
   project to the subcommands, where the server takes the directory all
   the same, and its parse fails there.
 - **doctor runs what the server runs.**  git once and `lsp --help`; it

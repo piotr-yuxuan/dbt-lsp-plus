@@ -57,7 +57,7 @@ src/runs.rs                   the user's last run, from the files dbt left: its 
 src/capability.rs             what a session offers: one descriptor per method or command
 src/commands.rs               the commands for clients, by dbt's CLI
 src/packages.rs               whether dbt would install packages before it parses
-src/locate.rs                 the project of a document, and whether a document lies in another; the CLI's resolution of a project; the dbt of a project for server and CLI, the probe of a dbt
+src/locate.rs                 the project of a document, and whether a document lies in another; the CLI's resolution of a project, on the server's routes; the dbt of a project for server and CLI, the probe of a dbt
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries; what a request gets, found, empty, or unanswered with its reasons
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
