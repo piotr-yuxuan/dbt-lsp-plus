@@ -13,7 +13,6 @@ pub mod features;
 pub mod graph;
 pub mod locate;
 pub mod navigation;
-pub mod node;
 pub mod packages;
 pub mod project;
 pub mod properties;

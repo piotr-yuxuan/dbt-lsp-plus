@@ -4,8 +4,7 @@
 
 use crate::graph::Graph;
 use crate::navigation::Lookup;
-use crate::node::{self, TYPES, Type};
-use crate::project::{Entity, Project};
+use crate::project::{self, Entity, Project, TYPES, Type};
 use crate::properties;
 use crate::reference;
 use crate::scan::{self, Kind, Symbol};
@@ -23,11 +22,11 @@ pub const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 /// generic test's or a materialization's that of a macro, as dbt holds
 /// them.
 const OUTLINE_KINDS: [(Kind, u32, &str); 10] = [
-    (Kind::Macro, node::MACRO.symbol, "macro"),
-    (Kind::Test, node::MACRO.symbol, "test"),
-    (Kind::Materialization, node::MACRO.symbol, "materialization"),
-    (Kind::Snapshot, node::SNAPSHOT.symbol, "snapshot"),
-    (Kind::Docs, node::DOC.symbol, "docs"),
+    (Kind::Macro, project::MACRO.symbol, "macro"),
+    (Kind::Test, project::MACRO.symbol, "test"),
+    (Kind::Materialization, project::MACRO.symbol, "materialization"),
+    (Kind::Snapshot, project::SNAPSHOT.symbol, "snapshot"),
+    (Kind::Docs, project::DOC.symbol, "docs"),
     (Kind::Set, 13, "set"),  // Variable
     (Kind::Cte, 23, "CTE"),  // Struct
     (Kind::If, 3, "if"),     // Namespace, as agreed with dbt-mode
@@ -37,7 +36,7 @@ const OUTLINE_KINDS: [(Kind, u32, &str); 10] = [
 
 /// LSP's `SymbolKind` of an entry of a properties file that declares no
 /// node, by its label.  An entry that declares one has its resource
-/// type's kind, found by its label in `node::TYPES`.
+/// type's kind, found by its label in `project::TYPES`.
 const ENTRY_KINDS: [(&str, u32); 2] = [
     ("source", 2), // Module: a source, the group of its tables, which `table` entries declare
     ("column", 8), // Field
@@ -88,7 +87,7 @@ pub fn document_symbols(text: &str, hierarchical: bool, uri: &str) -> Value {
                 .find(|row| row.label == Some(entry.label))
                 .map(|row| row.symbol)
                 .or_else(|| ENTRY_KINDS.iter().find(|(label, _)| *label == entry.label).map(|(_, kind)| *kind))
-                .unwrap_or(node::OTHER.symbol),
+                .unwrap_or(project::OTHER.symbol),
             detail: entry.label,
             name: entry.name,
             range: entry.range,

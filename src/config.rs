@@ -4,7 +4,7 @@
 //! runs it, read once from the server command, the parse's run and outcome,
 //! the index of the manifest it writes, and the summary of a node.
 
-use crate::node::Type;
+use crate::project::Type;
 use crate::run::{self, Ending, Output, Problem, Run, Running};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};

@@ -489,7 +489,7 @@ sources:
     #[test]
     fn each_type_s_label_is_one_a_properties_file_gives() {
         let given: Vec<&str> = HELD.iter().map(|(_, _, label)| *label).collect();
-        for label in crate::node::TYPES.iter().filter_map(|row| row.label) {
+        for label in crate::project::TYPES.iter().filter_map(|row| row.label) {
             assert!(given.contains(&label), "no entry of a properties file is labelled {label:?}");
         }
     }

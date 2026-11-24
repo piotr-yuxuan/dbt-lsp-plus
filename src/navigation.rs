@@ -5,8 +5,7 @@
 //! parse that a Name describes, for hover, nodeInfo and inlay hints.  Pure.
 
 use crate::config::ParseIndex;
-use crate::node::{self, TYPES, Type};
-use crate::project::{self, Entity, Project, Scanned};
+use crate::project::{self, Entity, Project, Scanned, TYPES, Type};
 use crate::reference::{Kind, Name};
 use crate::scan;
 use crate::sources;
@@ -222,7 +221,7 @@ impl<'a, 'i> Lookup<'a, 'i> {
                     }
                     // Else the scan's: a version by its name and version, the latest when none is named, which may
                     // have no file; a model, seed or snapshot when the name has no versions and the call names none.
-                    let prefix = node::version_id(package, called, "");
+                    let prefix = project::version_id(package, called, "");
                     let ids = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let versions: Vec<&Entity> = ids
                         .flat_map(|(_, entities)| entities.iter().copied())
@@ -234,20 +233,20 @@ impl<'a, 'i> Lookup<'a, 'i> {
                     };
                     let plain = versions.is_empty() && version.is_none();
                     let rows = TYPES.iter().filter(|row| row.refable && plain);
-                    let unversioned = rows.flat_map(|row| get(node::id(row, package, called)).iter().copied());
+                    let unversioned = rows.flat_map(|row| get(project::id(row, package, called)).iter().copied());
                     versions.into_iter().filter(chosen).chain(unversioned).map(found).collect()
                 }
                 Kind::Table { source } => {
-                    get(node::table_id(package, source, called)).iter().map(|entity| found(entity)).collect()
+                    get(project::table_id(package, source, called)).iter().map(|entity| found(entity)).collect()
                 }
                 Kind::Macro => {
-                    get(node::id(&node::MACRO, package, called)).iter().map(|entity| found(entity)).collect()
+                    get(project::id(&project::MACRO, package, called)).iter().map(|entity| found(entity)).collect()
                 }
                 Kind::Function => {
-                    get(node::id(&node::FUNCTION, package, called)).iter().map(|entity| found(entity)).collect()
+                    get(project::id(&project::FUNCTION, package, called)).iter().map(|entity| found(entity)).collect()
                 }
                 Kind::Dispatch => {
-                    let (prefix, suffix) = (node::id(&node::MACRO, package, ""), format!("__{called}"));
+                    let (prefix, suffix) = (project::id(&project::MACRO, package, ""), format!("__{called}"));
                     let in_package = self.by_id.range(prefix.as_str()..).take_while(|(id, _)| id.starts_with(&prefix));
                     let implementations = in_package.filter(|(id, _)| id.ends_with(&suffix));
                     implementations.flat_map(|(_, entities)| entities.iter().map(|entity| found(entity))).collect()
@@ -315,8 +314,8 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         let declared = project.sources.iter().filter(|declared| sources::declares(declared, name));
         let found = declared.map(|declared| {
             let (id, range) = match table {
-                None => (node::group_id(&declared.package, source), declared.source_range.clone()),
-                Some(table) => (node::table_id(&declared.package, source, table), declared.table_range.clone()),
+                None => (project::group_id(&declared.package, source), declared.source_range.clone()),
+                Some(table) => (project::table_id(&declared.package, source, table), declared.table_range.clone()),
             };
             (declared.package.as_str(), Target { id, path: declared.path.clone(), range })
         });
@@ -333,7 +332,11 @@ pub fn resolve(lookup: &Lookup, path: &Path, name: &Name) -> Vec<Target> {
         .filter(|entity| {
             types.contains(&entity.resource_type)
                 && (entity.id
-                    == node::id(Type::named(entity.resource_type), &entity.package, &format!("{prefix}{}", name.name))
+                    == project::id(
+                        Type::named(entity.resource_type),
+                        &entity.package,
+                        &format!("{prefix}{}", name.name),
+                    )
                     || entity.version.is_some() && entity.name == name.name)
         })
         .collect();
