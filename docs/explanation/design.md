@@ -480,9 +480,9 @@ none, the server answers `initialize` before it can know it.
   empty; one that cannot be read counts as empty too, and is tried again
   at the next request.  A seed is found but never read, open or not.  An
   open document is known by a hash of its text, since a client's version
-  starts again at each open: a text edited back to what it was before the
-  next request reads the project builds nothing again.  The cache keeps
-  one scan per file, so a request in between makes the text read again.
+  starts again at each open.  The cache keeps one scan per file, so a
+  text edited back reuses it only if no request read the project in
+  between.
   No file event is needed: a client may watch nothing.
   - When no file changed, nor any package's name and paths, which each
     `dbt_project.yml` gives and the walk reads again, the request shares
@@ -1452,13 +1452,12 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
   `docs/reference/release-pipeline.md`.
 - The conformance corpus, opt-in as the live test (see "Conformance"),
   built with the network, `cargo test --locked -j 4 --test proxy
-  --no-run`, then run with none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
-  unshare -rn cargo test --test proxy conformance -- --ignored`.
+  --no-run`, then run with none: `unshare -rn make conformance
+  DBT_LSP_PLUS_TEST_DBT=/path/to/dbt`.
 - One opt-in live test, `with_the_real_dbt`, runs the server with the
   real dbt, either build, on a copy of the fixture, from an empty
   environment with a scratch home, built as the corpus is, then run with
-  none: `DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test
-  --test proxy -- --ignored`.  It checks the outline of a model and of a
+  none: `unshare -rn make live DBT_LSP_PLUS_TEST_DBT=/path/to/dbt`.  It checks the outline of a model and of a
   properties file, folding, highlights, selection ranges, a hover at a
   model's start before the parse has ended, the summary or the reason,
   never null; navigation in a properties file and of a ref in SQL; the
