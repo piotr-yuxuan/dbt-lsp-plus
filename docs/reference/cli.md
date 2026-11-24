@@ -263,7 +263,8 @@ nothing.  The errors:
 - -32601 `no method METHOD`, for any other method, `server/discover`
   included, on which a client of both eras falls back to `initialize`;
 - -32602 `no tool NAME`, for a call of a tool that is not one;
-- -32700 `a line that is no JSON`, with a null id.
+- -32700 `a line that is no JSON`, with a null id, for a line that does
+  not parse, UTF-8 or not; the lines after it are read as before.
 
 A request is answered under its id as sent, a string or any number.  The
 tools are the rows of the subcommands that are tools: `node`, with the
@@ -287,7 +288,8 @@ than a parse gives up on the call.
 
 A PATH that is no directory is written on the standard error, as
 `dbt-lsp-plus: PATH: WHY`, with status 1, and nothing on the standard
-output.  The server ends with status 0 when its input ends.  On SIGINT,
+output.  The server ends with status 0 when its input ends, and with
+status 1 when its input cannot be read.  On SIGINT,
 as a client stops it, it ends at once: a parse under way runs on to its
 own end, unwatched, and its run directory stays until the next
 subcommand or server on the project removes it a day later.

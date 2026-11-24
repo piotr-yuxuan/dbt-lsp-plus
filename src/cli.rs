@@ -411,16 +411,19 @@ fn lineage(arguments: &Value, command: &[String]) -> Value {
 /// Serves MCP from PATH, made the working directory before any thread or
 /// child, until the input ends: each line one JSON-RPC message, each
 /// request answered on one line, in order, its id as sent, a line that is
-/// no JSON with error -32700 and a null id, any other message with
-/// nothing.  Nothing else goes on the standard output; PATH's error goes
-/// on the standard error, with status 1.
+/// no JSON, UTF-8 or not, with error -32700 and a null id, any other
+/// message with nothing.  Nothing else goes on the standard output; PATH's
+/// error goes on the standard error, with status 1, as a read error ends
+/// it with status 1.
 fn mcp(path: &str, command: &[String]) -> (Value, bool) {
     if let Err(error) = std::env::set_current_dir(path) {
         eprintln!("dbt-lsp-plus: {path}: {error}");
         return (Value::Null, false);
     }
-    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-        let (id, outcome) = match serde_json::from_str::<Value>(&line) {
+    for line in std::io::stdin().lock().split(b'\n') {
+        // The input broken is no end of it.
+        let Ok(line) = line else { return (Value::Null, false) };
+        let (id, outcome) = match serde_json::from_slice::<Value>(&line) {
             Ok(message) => match (message.get("id"), message["method"].as_str()) {
                 (Some(id), Some(method)) => (id.clone(), respond(method, &message["params"], command)),
                 _ => continue,

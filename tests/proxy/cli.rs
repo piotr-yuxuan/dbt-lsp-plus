@@ -589,13 +589,18 @@ fn mcp_serves_node_and_lineage_as_the_cli_does_from_its_path() {
         tool_call(json!(7), "node", json!({"node": "model.shop.nowhere"})),
         "not json".to_owned(),
     ];
+    // Then a line that is no UTF-8, and a request after it, answered all the same.
+    let ping = json!({"jsonrpc": "2.0", "id": 8, "method": "ping"}).to_string();
+    let input: Vec<Vec<u8>> = input.into_iter().chain([ping]).map(String::into_bytes).collect();
+    let input = [&input[..10], &[b"\xff\xfe".to_vec()], &input[10..]].concat();
     let copy = case.copy.to_str().unwrap();
     let (status, lines, stderr) = served(case.command(&case.dir, &["mcp", copy]), &input);
     assert_eq!((status, stderr.as_str()), (Some(0), ""), "{lines:?}");
     let ids: Vec<&Value> = lines.iter().map(|line| &line["id"]).collect();
     let expected = [json!("server-discover-probe-1"), json!(1), json!(2), json!(3), json!(4), json!(4294967296u64)];
-    let expected: Vec<Value> = expected.into_iter().chain([json!(6), json!(7), Value::Null]).collect();
-    assert_eq!(ids, expected.iter().collect::<Vec<_>>(), "one line per request and the line that is no JSON");
+    let expected: Vec<Value> =
+        expected.into_iter().chain([json!(6), json!(7), Value::Null, Value::Null, json!(8)]).collect();
+    assert_eq!(ids, expected.iter().collect::<Vec<_>>(), "one line per request and per line that is no JSON");
     assert!(lines.iter().all(|line| line["jsonrpc"] == "2.0"), "{lines:?}");
     let handshake =
         (&lines[0]["error"], &lines[1]["result"]["protocolVersion"], &lines[1]["result"]["serverInfo"]["name"]);
@@ -620,7 +625,8 @@ fn mcp_serves_node_and_lineage_as_the_cli_does_from_its_path() {
     let (nowhere, failed) = tool_answer(&lines[7]);
     let none = json!({"error": "model.shop.nowhere names no node", "node": null});
     let no_json = json!({"code": -32700, "message": "a line that is no JSON"});
-    assert_eq!((nowhere, failed, &lines[8]["error"]), (none, &json!(true), &no_json));
+    let after = (&lines[8]["error"], &lines[9]["error"], &lines[10]["result"]);
+    assert_eq!((nowhere, failed, after), (none, &json!(true), (&no_json, &no_json, &json!({}))));
     let parsed = crate::parses(&case.log).len();
     // From a shell in the copy, the same answer from the manifest kept: one parse in all.
     let (status, answer) = case.run(&case.copy, &["lineage", "model.shop.orders", "--depth", "5"]);
