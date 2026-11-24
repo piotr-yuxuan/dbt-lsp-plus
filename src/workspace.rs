@@ -493,4 +493,39 @@ mod tests {
         workspace.stop();
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn the_fill_and_the_stamps_follow_the_server_s_install_path() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/a.sql", "select 1"),
+            ("vendor/extra/dbt_project.yml", "name: extra\n"),
+            ("vendor/extra/models/x.sql", "select 2"),
+        ];
+        let root = project::scratch_project("workspace-install-path", &files);
+        let cache_dir = project::scratch_project("workspace-install-path-cache", &[]);
+        let server = ["true", "lsp", "--packages-install-path", "vendor"].map(str::to_owned).to_vec();
+        let dbt = config::Dbt::new(server, None);
+        let mut workspace =
+            Workspace { root: Some(root.clone()), dbt, cache_dir: Some(cache_dir), ..Workspace::default() };
+        workspace.warm();
+        let filled = workspace.filling.take().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(filled.iter().any(|(path, ..)| *path == root.join("vendor/extra/models/x.sql")), "the fill");
+        let (sender, outcomes) = mpsc::channel();
+        let report = || -> config::ReportFn {
+            let sender = sender.clone();
+            Box::new(move |outcome| drop(sender.send(outcome)))
+        };
+        assert_eq!(workspace.parse(false, report()), None);
+        let outcome = outcomes.recv_timeout(Duration::from_secs(10)).expect("the parse's outcome");
+        workspace.parsed(outcome.index, outcome.failure);
+        // The stamp that the parse took and the look's, both under the install path, are one.
+        workspace.parse(true, report());
+        assert!(workspace.fresh && workspace.running.is_none(), "nothing written");
+        fs::write(root.join("vendor/extra/models/y.sql"), "select 3").unwrap();
+        workspace.parse(true, report());
+        assert!(workspace.running.is_some(), "a package's model written: stale, parsed again");
+        workspace.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
 }
