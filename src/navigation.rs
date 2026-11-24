@@ -142,7 +142,6 @@ pub struct Lookup<'a, 'i> {
 }
 
 impl<'a, 'i> Lookup<'a, 'i> {
-    /// The lookup of PROJECT, with INDEX, the last parse's, if any.
     pub fn new(project: &'a Project, index: Option<&'i ParseIndex>) -> Lookup<'a, 'i> {
         let root = project.root_package.as_str();
         let config = project.packages.get(root).and_then(|dir| project.text(&dir.join("dbt_project.yml")));

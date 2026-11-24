@@ -67,7 +67,6 @@ pub fn name_at(scanned: &Scanned, offset: usize) -> Option<Name> {
     })
 }
 
-/// Whether DECLARED declares NAME.
 pub fn declares(declared: &SourceTable, name: &Name) -> bool {
     match name.source_table() {
         Some((source, Some(table))) => declared.source == source && declared.table == table,
@@ -113,7 +112,6 @@ pub fn occurrences(project: &Project, name: &Name) -> Vec<Occurrence> {
     found
 }
 
-/// The LSP range of RANGE in TEXT.
 fn lsp_range(text: &str, range: &Range<usize>) -> Value {
     LineStarts::new(text).range(range.start, range.end)
 }

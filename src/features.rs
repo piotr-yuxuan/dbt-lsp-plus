@@ -150,7 +150,6 @@ pub fn workspace_symbols(project: &Project, query: &str) -> Value {
     Value::Array(symbols)
 }
 
-/// The `CallHierarchyItem` of ITEM.
 fn hierarchy_item(item: &Entity, project: &Project) -> Value {
     let starts = LineStarts::new(project.text(&item.path).unwrap_or_default());
     json!({
