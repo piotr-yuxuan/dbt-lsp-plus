@@ -3,10 +3,14 @@
 ```
 nix develop
 cargo build --release
-cargo test
+make test
 cargo test --locked -j 4 --test proxy --no-run
-DBT_LSP_PLUS_TEST_DBT=/path/to/dbt unshare -rn cargo test --test proxy -- --ignored
+unshare -rn make live conformance DBT_LSP_PLUS_TEST_DBT=/path/to/dbt
 ```
+
+The tests run through `make`, which unexports `DBT_PACKAGES_INSTALL_PATH`:
+the scan reads it, as dbt does, so a value of your own would change what
+the tests find.
 
 The last two commands build the opt-in tests with the network, then run
 them with none, as CI does: the corpus, and the live tests against a real
