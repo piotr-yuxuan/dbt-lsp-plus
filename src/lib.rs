@@ -17,7 +17,6 @@ pub mod project;
 pub mod properties;
 pub mod proxy;
 pub mod reference;
-pub mod rpc;
 pub mod run;
 pub mod runs;
 pub mod scan;

@@ -308,6 +308,8 @@ fn an_unknown_request_gets_method_not_found_and_a_rename_at_nothing_null() {
         ("textDocument/completion", at_select.clone(), "textDocument/completion"),
         ("workspace/executeCommand", show, "dbt-lsp-plus.show"),
         ("dbt-lsp-plus.nodeInfo", json!({"arguments": ["model.shop.orders"]}), "dbt-lsp-plus.nodeInfo"),
+        // `initialize` may only be sent once: a second has no row.
+        ("initialize", json!({"processId": null, "capabilities": {}}), "initialize"),
     ];
     for (method, params, named) in unknowns {
         let answer = session.request(method, params);
@@ -504,6 +506,23 @@ fn exit_without_shutdown_fails() {
     let (mut session, _) = Session::fake("exit-early", json!({}));
     session.initialize(&fixture());
     session.notify("exit", Value::Null);
+    assert_eq!(session.wait().code(), Some(1));
+}
+
+#[test]
+fn a_request_before_initialize_is_refused_and_exit_fails() {
+    let (mut session, _) = Session::fake("before-initialize", json!({}));
+    let refused = session.request("workspace/symbol", json!({"query": "orders"}));
+    assert_eq!((refused.get("result"), &refused["error"]["code"]), (None, &json!(-32002)), "{refused}");
+    session.notify("exit", Value::Null);
+    assert_eq!(session.wait().code(), Some(1));
+}
+
+#[test]
+fn a_frame_that_is_not_json_rpc_ends_the_session() {
+    let (mut session, _) = Session::fake("not-json-rpc", json!({}));
+    session.initialize(&fixture());
+    session.send_raw(b"Content-Length: 3\r\n\r\nnop");
     assert_eq!(session.wait().code(), Some(1));
 }
 
@@ -1631,9 +1650,10 @@ fn no_parse_after_shutdown_but_one_after_a_crash() {
     parsed_orders(&mut session);
     let path = fixture().join("models/marts/orders.sql");
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
-    // Neither a change nor a request that would parse parses.
+    // Neither a change nor a request, which is refused, parses.
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
-    node_info(&mut session, json!("model.shop.orders"));
+    let refused = node_info(&mut session, json!("model.shop.orders"));
+    assert_eq!(refused["error"]["code"], -32600, "{refused}");
     parses_stay(&log, 1);
     session.notify("exit", Value::Null);
     assert!(session.wait().success());
@@ -2467,7 +2487,7 @@ fn a_parse_asks_a_client_that_can_refresh_its_hints_and_keeps_its_answer() {
     // The session answers the proxy's request by itself.
     let refresh = session.wait_for(|message| message["method"] == "workspace/inlayHint/refresh");
     let id = refresh["id"].as_str().unwrap().to_owned();
-    assert!(id.starts_with("dbt-lsp-plus/"), "{refresh}");
+    assert!(id.starts_with("dbt-lsp-plus/") && refresh.get("params").is_none(), "{refresh}");
     session.request("workspace/symbol", json!({"query": "orders"}));
     let refreshes = session.received.iter().filter(|m| m["method"] == "workspace/inlayHint/refresh").count();
     assert_eq!(refreshes, 1, "one per parse");
@@ -2678,7 +2698,8 @@ fn no_failure_is_published_after_shutdown() {
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
     write_run(&project, &run_results("build", true), &run_manifest());
     std::thread::sleep(Duration::from_millis(2500));
-    session.request("workspace/symbol", json!({"query": "orders"}));
+    let refused = session.request("workspace/symbol", json!({"query": "orders"}));
+    assert_eq!(refused["error"]["code"], -32600, "{refused}");
     assert!(!session.received.iter().any(|m| m["method"] == "textDocument/publishDiagnostics"));
     session.notify("exit", Value::Null);
     assert!(session.wait().success());

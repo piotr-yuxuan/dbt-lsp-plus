@@ -259,7 +259,7 @@ These are not configurable.
 - A `dbt parse` is stopped after 120 s.
 - The probe of `lsp --help` is stopped after 10 s.
 - `workspace/symbol` answers at most 20 000 symbols.
-- A message larger than 64 MiB stops the session.
+- A frame that is not JSON-RPC ends the session.
 - The server's runs of dbt, its `dbt parse` and the commands', run as the
   user runs dbt, with dbt's flags against its statistics and its version
   check.  The guard on packages refuses such a run where a local or a

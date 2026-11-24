@@ -6,14 +6,13 @@ use crate::capability;
 use crate::commands;
 use crate::locate;
 use crate::project::{Project, Scanned};
-use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{Answer, Reason, Which, Workspace};
 use crate::{config, document, features, navigation, packages, properties, reference, run, runs, sources};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -27,10 +26,6 @@ use url::Url;
 /// The prefix of the ids of the requests that the server sends to the
 /// client.
 pub const OWN_ID: &str = "dbt-lsp-plus/";
-const INVALID_REQUEST: i64 = -32600;
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
-const INTERNAL_ERROR: i64 = -32603;
 
 /// How the server answers a request of the client's.
 enum Route {
@@ -59,8 +54,8 @@ const CHANGES: [&str; 5] = [
 const OUTPUT: [&str; 2] = ["target", "logs"];
 
 enum Event {
-    /// A message of the client's, null for a body that is not JSON.
-    Client(Value),
+    Client(Message),
+    /// The client's input ended, after `exit` or not.
     ClientClosed,
     Parsed(config::Outcome),
     /// The failures of one kind, `runs::LAST_RUN` or `runs::STALE_SOURCE`,
@@ -68,7 +63,7 @@ enum Event {
     /// builds nothing.
     Runs(&'static str, Option<Vec<runs::Failure>>, SystemTime),
     /// The answer of a run of dbt's CLI to the client's request of that id.
-    Ran(Value, Value),
+    Ran(RequestId, Value),
 }
 
 /// How often the files of the last run are looked at.
@@ -90,10 +85,10 @@ struct Diagnostics {
     published: HashMap<PathBuf, String>,
 }
 
-struct Proxy<W: Write> {
-    client: W,
-    /// Where the session's threads report: the client's reader, the parse,
-    /// the runs and their watchers.
+struct Proxy {
+    client: Connection,
+    /// Where the session's threads report: the one that hands on the
+    /// client's messages, the parse, the runs and their watchers.
     events: Sender<Event>,
     /// The line that says which project and which dbt the server found,
     /// told to the client once it can be.
@@ -101,8 +96,6 @@ struct Proxy<W: Write> {
     /// The root with its links resolved, onto which the client's paths map.
     canonical_root: Option<PathBuf>,
     hierarchical: bool,
-    /// Whether the client sent `initialize`, before which LSP lets the server send nothing.
-    initialized: bool,
     /// The URI under which the client opened each document, which an edit
     /// of it must name.
     uris: HashMap<PathBuf, String>,
@@ -122,24 +115,21 @@ struct Proxy<W: Write> {
     workspace: Workspace,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
     /// waiting, with the client's id and their run, and the one under way.
-    runs: VecDeque<(Value, commands::Job, run::Run)>,
+    runs: VecDeque<(RequestId, commands::Job, run::Run)>,
     run: Option<run::Running>,
 }
-
-/// LSP's RequestFailed: a request that the server could not answer.
-const REQUEST_FAILED: i64 = -32803;
 
 /// The JSON-RPC response to the request ID of NAME, a method or a command,
 /// that ANSWER gives: its result; for an empty one,
 /// `capability::empty(NAME)`; for an unanswered one, error -32803 whose
 /// message is its reasons, joined by `; `.
-fn frame(answer: &Answer, id: &Value, name: &str) -> Value {
+fn frame(answer: &Answer, id: RequestId, name: &str) -> Response {
     match answer {
-        Answer::Found(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-        Answer::Empty => json!({"jsonrpc": "2.0", "id": id, "result": capability::empty(name)}),
+        Answer::Found(result) => Response::new_ok(id, result),
+        Answer::Empty => Response::new_ok(id, capability::empty(name)),
         Answer::Unanswered(reasons) => {
             let message = reasons.iter().map(Reason::to_string).collect::<Vec<_>>().join("; ");
-            json!({"jsonrpc": "2.0", "id": id, "error": {"code": REQUEST_FAILED, "message": message}})
+            Response::new_err(id, ErrorCode::RequestFailed as i32, message)
         }
     }
 }
@@ -174,15 +164,14 @@ fn changes_graph(
     output.is_empty() || !changes.iter().all(in_output)
 }
 
-impl<W: Write> Proxy<W> {
-    fn new(client: W, events: Sender<Event>) -> Self {
+impl Proxy {
+    fn new(client: Connection, events: Sender<Event>) -> Self {
         Proxy {
             client,
             events,
             line: None,
             canonical_root: None,
             hierarchical: false,
-            initialized: false,
             uris: HashMap::new(),
             opened: false,
             next_id: 0,
@@ -202,13 +191,13 @@ impl<W: Write> Proxy<W> {
         self.workspace.root = Some(root);
     }
 
-    fn send_client(&mut self, message: &Value) {
+    fn send_client(&mut self, message: impl Into<Message>) {
         // A client that stopped reading also closes its output: the loop ends there.
-        let _ = rpc::write_value(&mut self.client, message);
+        let _ = self.client.sender.send(message.into());
     }
 
-    fn reply_error(&mut self, id: &Value, code: i64, message: &str) {
-        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}));
+    fn reply_error(&mut self, id: RequestId, code: ErrorCode, message: &str) {
+        self.send_client(Response::new_err(id, code as i32, message.to_owned()));
     }
 
     /// Tells the client, once, which project and which dbt the server found,
@@ -216,7 +205,7 @@ impl<W: Write> Proxy<W> {
     fn say_found(&mut self) {
         if let Some(text) = self.line.take() {
             let params = json!({"type": 3, "message": text});
-            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+            self.send_client(Notification::new("window/logMessage".to_owned(), params));
         }
     }
 
@@ -234,10 +223,10 @@ impl<W: Write> Proxy<W> {
         self.set_root(root);
     }
 
-    /// Answers the client's `initialize` of ID, learning from its PARAMS what
+    /// The result of the client's `initialize`, learning from its PARAMS what
     /// the session keeps; without a project the server stays quiet until a
     /// document names one.
-    fn on_initialize(&mut self, id: &Value, params: &Value) {
+    fn on_initialize(&mut self, params: &Value) -> Value {
         self.hierarchical = params
             .pointer("/capabilities/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             == Some(&json!(true));
@@ -256,13 +245,8 @@ impl<W: Write> Proxy<W> {
             (Some(folder), Some(_)) if fs::canonicalize(&folder).ok() == self.canonical_root => self.set_root(folder),
             _ => {}
         }
-        self.workspace.warm();
-        self.initialized = true;
-        self.watch_runs();
-        let result = json!({"capabilities": capability::announced(),
-                            "serverInfo": {"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")}});
-        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        self.say_found();
+        json!({"capabilities": capability::announced(),
+               "serverInfo": {"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")}})
     }
 
     /// The path of a `file:` URI, mapped onto the root when it reaches the
@@ -529,15 +513,12 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// A request of a command for clients, COMMAND with PARAMS: refused
-    /// after `shutdown`, invalid unless its one argument is a string, a
-    /// compile's URI or the selector of nodes; else run by dbt's CLI.
-    fn on_command(&mut self, command: &'static str, id: &Value, params: &Value) {
-        if self.shutdown {
-            return self.reply_error(id, INVALID_REQUEST, "the client asked for shutdown");
-        }
+    /// A request of a command for clients, COMMAND with PARAMS: invalid
+    /// unless its one argument is a string, a compile's URI or the selector
+    /// of nodes; else run by dbt's CLI.
+    fn on_command(&mut self, command: &'static str, id: RequestId, params: &Value) {
         let Some(argument) = params.pointer("/arguments/0").filter(|argument| argument.is_string()) else {
-            return self.reply_error(id, INVALID_PARAMS, "invalid parameters");
+            return self.reply_error(id, ErrorCode::InvalidParams, "invalid parameters");
         };
         self.run_command(command, id, argument);
     }
@@ -546,7 +527,7 @@ impl<W: Write> Proxy<W> {
     /// with ARGUMENT; or answers why it cannot run: a file it cannot
     /// compile, packages that dbt would install, a compile where a package
     /// may have on-run hooks, a server command with no `lsp`.
-    fn run_command(&mut self, command: &'static str, id: &Value, argument: &Value) {
+    fn run_command(&mut self, command: &'static str, id: RequestId, argument: &Value) {
         let root = self.workspace.root.clone().unwrap_or_default();
         let (job, hooks) = match command {
             commands::COMPILE => {
@@ -561,14 +542,14 @@ impl<W: Write> Proxy<W> {
         let run = job.as_ref().ok().and_then(|job| self.workspace.dbt.run(&job.words, &root, dir, config::RUN_LOG));
         let failure = match (job, refused, run) {
             (Ok(job), None, Some(run)) => {
-                self.runs.push_back((id.clone(), job, run));
+                self.runs.push_back((id, job, run));
                 return self.next_run();
             }
             (Err(failure), ..) => failure,
             (_, Some(why), _) => commands::failure(command, &why),
             (_, _, None) => commands::failure(command, commands::NO_LSP_WORD),
         };
-        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": failure}));
+        self.send_client(Response::new_ok(id, failure));
     }
 
     /// Starts the next run waiting, unless one is under way.
@@ -584,11 +565,11 @@ impl<W: Write> Proxy<W> {
 
     /// A run's RESULT, the answer to the client's request ID; then the next
     /// run.
-    fn on_ran(&mut self, id: &Value, result: &Value) {
+    fn on_ran(&mut self, id: RequestId, result: Value) {
         if let Some(run) = self.run.take() {
             run.stop();
         }
-        self.send_client(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        self.send_client(Response::new_ok(id, result));
         self.next_run();
     }
 
@@ -598,7 +579,7 @@ impl<W: Write> Proxy<W> {
         // After `shutdown`, LSP lets the server send nothing but answers.
         if !self.shutdown {
             let params = json!({"type": 2, "message": format!("dbt-lsp-plus: {why}")});
-            self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+            self.send_client(Notification::new("window/logMessage".to_owned(), params));
         }
     }
 
@@ -648,7 +629,7 @@ impl<W: Write> Proxy<W> {
                 None if !self.shutdown && self.diagnostics.logged.insert(problem.message.clone()) => {
                     let text = format!("dbt-lsp-plus: dbt parse: {}", problem.message);
                     let params = json!({"type": problem.severity, "message": text});
-                    self.send_client(&json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": params}));
+                    self.send_client(Notification::new("window/logMessage".to_owned(), params));
                 }
                 None => {}
             }
@@ -684,19 +665,15 @@ impl<W: Write> Proxy<W> {
         if !self.hint_refresh || self.shutdown {
             return;
         }
-        self.ask_client("workspace/inlayHint/refresh", None);
+        self.ask_client("workspace/inlayHint/refresh", Value::Null);
     }
 
     /// Sends the client the server's request METHOD, with PARAMS if any,
     /// under an id of `OWN_ID`'s, whose answer `on_client` drops.
-    fn ask_client(&mut self, method: &str, params: Option<Value>) {
+    fn ask_client(&mut self, method: &str, params: Value) {
         self.next_id += 1;
-        let id = json!(format!("{OWN_ID}{}", self.next_id));
-        let mut request = json!({"jsonrpc": "2.0", "id": id, "method": method});
-        if let Some(params) = params {
-            request["params"] = params;
-        }
-        self.send_client(&request);
+        let id = RequestId::from(format!("{OWN_ID}{}", self.next_id));
+        self.send_client(Request::new(id, method.to_owned(), params));
     }
 
     /// Stops a run under way, then the Workspace's parse, which removes this
@@ -714,15 +691,15 @@ impl<W: Write> Proxy<W> {
     /// an index, ask after, when there is none.  A refusal fails it with its
     /// reason; a panic while answering fails that request alone, never the
     /// session.
-    fn answer(&mut self, method: &str, id: &Value, params: &Value) {
+    fn answer(&mut self, method: &str, id: RequestId, params: &Value) {
         if capability::of(method).is_some_and(|capability| capability.wants_index) {
             self.want_index(true);
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
-            Ok(Some(answer)) => self.send_client(&frame(&answer, id, method)),
-            Ok(None) => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
-            Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
+            Ok(Some(answer)) => self.send_client(frame(&answer, id, method)),
+            Ok(None) => self.reply_error(id, ErrorCode::InvalidParams, "invalid parameters"),
+            Err(_) => self.reply_error(id, ErrorCode::InternalError, "dbt-lsp-plus failed to answer this request"),
         }
         if method == "textDocument/inlayHint" && self.workspace.index.is_none() {
             self.want_index(true);
@@ -761,27 +738,22 @@ impl<W: Write> Proxy<W> {
 
     /// A message of the client's: a request, a notification, or the answer
     /// to a request of the server's, which is dropped, as anything else.
-    fn on_client(&mut self, message: &Value) {
-        let params = message.get("params").unwrap_or(&Value::Null);
-        match (message.get("method").and_then(Value::as_str), message.get("id")) {
-            (Some(method), Some(id)) => self.on_request(method, id, params),
-            (Some(method), None) => self.on_notification(method, params),
-            _ => {}
+    fn on_client(&mut self, message: Message) {
+        match message {
+            Message::Request(request) => self.on_request(&request.method, request.id, &request.params),
+            Message::Notification(notification) => self.on_notification(&notification.method, &notification.params),
+            Message::Response(_) => {}
         }
     }
 
     /// A notification of the client's, METHOD with PARAMS: kept; when the
-    /// graph may have changed, a parse, which nothing else would start.  With
-    /// a project, `initialized` registers the watcher of files.  Before a
-    /// project, the first document opened in one names it.
+    /// graph may have changed, a parse, which nothing else would start.
+    /// Before a project, the first document opened in one names it.
     fn on_notification(&mut self, method: &str, params: &Value) {
-        if method == "textDocument/didOpen" && self.workspace.root.is_none() && self.initialized && !self.shutdown {
+        if method == "textDocument/didOpen" && self.workspace.root.is_none() && !self.shutdown {
             self.on_first_project(params);
         }
         self.track(method, params);
-        if method == "initialized" && self.workspace.root.is_some() {
-            self.register_watcher();
-        }
         // The first document opened in the project.
         let first_open = method == "textDocument/didOpen"
             && self.workspace.root.is_some()
@@ -798,13 +770,21 @@ impl<W: Write> Proxy<W> {
     }
 
     /// The project of the document that PARAMS opens, when it lies in one,
-    /// before the document is tracked: taken, with the first scan, the
-    /// watcher of runs and the watcher of files that `initialize` and
-    /// `initialized` start with a project; then the line that says so.
+    /// before the document is tracked: taken and started.
     fn on_first_project(&mut self, params: &Value) {
         let path = uri_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
         let Some(root) = path.and_then(|path| locate::project_of(&path, self.workspace.dbt.command())) else { return };
         self.take_project(root, locate::Route::Document);
+        self.start_project();
+    }
+
+    /// The start of the session's project, once the client is initialized: the
+    /// first scan, the watcher of runs, the watcher of files, the line that
+    /// says which project and which dbt.
+    fn start_project(&mut self) {
+        if self.workspace.root.is_none() {
+            return;
+        }
         self.workspace.warm();
         self.watch_runs();
         self.register_watcher();
@@ -817,7 +797,7 @@ impl<W: Write> Proxy<W> {
         if self.watches {
             let watcher = json!({"id": "dbt-lsp-plus-file-watcher", "method": "workspace/didChangeWatchedFiles",
                                  "registerOptions": {"watchers": [{"globPattern": "**/*"}]}});
-            self.ask_client("client/registerCapability", Some(json!({"registrations": [watcher]})));
+            self.ask_client("client/registerCapability", json!({"registrations": [watcher]}));
         }
     }
 
@@ -867,27 +847,27 @@ impl<W: Write> Proxy<W> {
         Some(Answer::Found(Value::Array(hints)))
     }
 
-    /// A request of the client: `initialize`, answered; `on_elsewhere`'s on
-    /// a document of another project; else as `route` sends it, `shutdown`
-    /// marked first.
-    fn on_request(&mut self, method: &str, id: &Value, params: &Value) {
-        if method == "initialize" {
-            return self.on_initialize(id, params);
+    /// A request of the client: after `shutdown`, refused, as LSP says;
+    /// `on_elsewhere`'s on a document of another project; else as `route`
+    /// sends it, `shutdown` marked first.
+    fn on_request(&mut self, method: &str, id: RequestId, params: &Value) {
+        if self.shutdown {
+            return self.reply_error(id, ErrorCode::InvalidRequest, "the client asked for shutdown");
         }
-        self.shutdown |= method == "shutdown";
+        self.shutdown = method == "shutdown";
         if let Some(why) = self.outside(method, params) {
             return self.on_elsewhere(method, id, why);
         }
         match self.route(method, params) {
             Route::Here(method) => self.answer(method, id, params),
-            Route::Answer(answer) => self.send_client(&frame(&answer, id, method)),
+            Route::Answer(answer) => self.send_client(frame(&answer, id, method)),
             Route::Command(command) => self.on_command(command, id, params),
             Route::Unknown => {
                 let named =
                     params["command"].as_str().filter(|_| method == "workspace/executeCommand").unwrap_or(method);
-                self.reply_error(id, METHOD_NOT_FOUND, &format!("dbt-lsp-plus does not answer {named}"));
+                self.reply_error(id, ErrorCode::MethodNotFound, &format!("dbt-lsp-plus does not answer {named}"));
             }
-            Route::Invalid => self.reply_error(id, INVALID_PARAMS, "invalid parameters"),
+            Route::Invalid => self.reply_error(id, ErrorCode::InvalidParams, "invalid parameters"),
         }
     }
 
@@ -908,9 +888,9 @@ impl<W: Write> Proxy<W> {
     /// Answers the request METHOD of ID on a document of another project
     /// with WHY, computing nothing on it; inlay hints, a decoration, with
     /// none.
-    fn on_elsewhere(&mut self, method: &str, id: &Value, why: Reason) {
+    fn on_elsewhere(&mut self, method: &str, id: RequestId, why: Reason) {
         let answer = if method == "textDocument/inlayHint" { Answer::Empty } else { Answer::Unanswered(vec![why]) };
-        self.send_client(&frame(&answer, id, method));
+        self.send_client(frame(&answer, id, method));
     }
 
     /// Watches the files of the user's last run, in the target path
@@ -1026,32 +1006,29 @@ impl<W: Write> Proxy<W> {
                    "source": "dbt parse", "code": problem.code, "message": problem.message})
         }));
         let publish = |uri: &str, diagnostics: Vec<Value>| {
-            json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
-                   "params": {"uri": uri, "diagnostics": diagnostics}})
+            Notification::new(
+                "textDocument/publishDiagnostics".to_owned(),
+                json!({"uri": uri, "diagnostics": diagnostics}),
+            )
         };
         if let Some(old) = self.diagnostics.published.insert(path.to_owned(), uri.clone()).filter(|old| *old != uri) {
-            self.send_client(&publish(&old, Vec::new()));
+            self.send_client(publish(&old, Vec::new()));
         }
-        self.send_client(&publish(&uri, diagnostics));
+        self.send_client(publish(&uri, diagnostics));
     }
 
-    /// Handles the events of INBOX, one epoch each, until `exit`, or until the
-    /// client closes its output.
+    /// Handles the events of INBOX, one epoch each, until the client's input
+    /// ends.
     fn serve(&mut self, inbox: Receiver<Event>) {
         for event in inbox {
             // A new epoch: the cache looks at the project's files again.
             self.workspace.epoch += 1;
             match event {
-                Event::Client(message) => {
-                    self.on_client(&message);
-                    if message["method"] == "exit" {
-                        return;
-                    }
-                }
+                Event::Client(message) => self.on_client(message),
                 Event::ClientClosed => return,
                 Event::Parsed(outcome) => self.on_parsed(outcome),
                 Event::Runs(code, found, written) => self.on_runs(code, found, written),
-                Event::Ran(id, result) => self.on_ran(&id, &result),
+                Event::Ran(id, result) => self.on_ran(id, result),
             }
         }
     }
@@ -1061,28 +1038,42 @@ impl<W: Write> Proxy<W> {
 /// naming the user's dbt and its parse's flags.  Given its `--project-dir`,
 /// that project is said at once on the standard error, and to the client
 /// once it is initialized; else nothing runs before the client's folder or
-/// a document names the project.
+/// a document names the project.  A failed handshake ends the server with
+/// status 1.
 pub fn run(command: &[String]) -> ExitCode {
+    let (client, io) = Connection::stdio();
     let (events, inbox) = mpsc::channel();
-    let reader = events.clone();
-    thread::spawn(move || {
-        let mut input = BufReader::new(io::stdin());
-        while let Ok(Some(message)) = rpc::read_frame(&mut input) {
-            if reader.send(Event::Client(message)).is_err() {
-                return;
-            }
-        }
-        let _ = reader.send(Event::ClientClosed);
-    });
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), events);
+    let mut proxy = Proxy::new(client, events.clone());
     // The server command, which `take_project` reads here on every route, then replaces with its dbt's.
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
     if let Some(root) = locate::project_dir(command) {
         proxy.take_project(root, locate::Route::Given);
     }
+    // The crate answers a request before `initialize` with -32002, drops a notification, and fails at
+    // `exit` or at a message between its answer and `initialized`.
+    let started = proxy.client.initialize_start().and_then(|(id, params)| {
+        let result = proxy.on_initialize(&params);
+        proxy.client.initialize_finish(id, result)
+    });
+    if started.is_err() {
+        proxy.stop_parse();
+        return ExitCode::FAILURE;
+    }
+    proxy.start_project();
+    // The crate's reader stops after `exit` or at the end of the input: then the client is closed.
+    let messages = proxy.client.receiver.clone();
+    thread::spawn(move || {
+        let _ = messages.iter().try_for_each(|message| events.send(Event::Client(message)).map_err(drop));
+        let _ = events.send(Event::ClientClosed);
+    });
     proxy.serve(inbox);
     proxy.stop_parse();
-    if proxy.shutdown { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    let shutdown = proxy.shutdown;
+    // The writer ends with the last sender; after a good input it has written what was sent.
+    drop(proxy);
+    let _ = io.join();
+    // 0 after `shutdown`, else 1, as LSP asks of `exit`.
+    ExitCode::from(u8::from(!shutdown))
 }
 
 #[cfg(test)]
@@ -1203,14 +1194,14 @@ mod tests {
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
-        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        let (server, client) = Connection::memory();
+        let mut proxy = Proxy::new(server, mpsc::channel().0);
         proxy.set_root(root);
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
-        proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
-        let mut client = &proxy.client[..];
-        let written = std::iter::from_fn(|| rpc::read_frame(&mut client).unwrap());
+        proxy.on_request("textDocument/hover", RequestId::from(1), &inside_ref);
+        let written = client.receiver.try_iter().map(|message| serde_json::to_value(message).unwrap());
         let written: Vec<Value> = written.filter(|message| message["id"] == 1).collect();
-        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32803, "message": asked}});
+        let error = json!({"id": 1, "error": {"code": -32803, "message": asked}});
         assert_eq!(written, [error]);
     }
 
@@ -1225,7 +1216,7 @@ mod tests {
         let (scratch, text) = (root.join("models/marts/scratch.sql"), "select * from {{ ref('orders_snapshot') }}");
         let at = json!({"line": 0, "character": text.find("orders_snapshot").unwrap() + 2});
         let on_ref = json!({"textDocument": {"uri": features::uri(&scratch)}, "position": at});
-        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        let mut proxy = Proxy::new(Connection::memory().0, mpsc::channel().0);
         proxy.set_root(root);
         proxy.workspace.open.insert(scratch, text.to_owned());
         let unindexed = Answer::Unanswered(vec![proxy.workspace.unindexed()]);
@@ -1240,7 +1231,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/orders.sql");
         let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
-        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        let mut proxy = Proxy::new(Connection::memory().0, mpsc::channel().0);
         proxy.set_root(root);
         let project = proxy.workspace.project().unwrap();
         let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
@@ -1256,7 +1247,7 @@ mod tests {
     fn an_open_text_edited_back_before_a_request_builds_nothing_again() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let uri = features::uri(&root.join("models/marts/orders.sql"));
-        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        let mut proxy = Proxy::new(Connection::memory().0, mpsc::channel().0);
         proxy.set_root(root);
         proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": uri, "text": "select 1"}}));
         let opened = proxy.workspace.project().unwrap();
@@ -1273,7 +1264,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");
         let text = "select {{ function('f') }}(1) as v";
-        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        let mut proxy = Proxy::new(Connection::memory().0, mpsc::channel().0);
         proxy.set_root(root.clone());
         proxy.workspace.open.insert(path.clone(), text.to_owned());
         assert_eq!(
@@ -1339,7 +1330,7 @@ mod tests {
         };
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+            let mut proxy = Proxy::new(Connection::memory().0, mpsc::channel().0);
             proxy.set_root(root.to_owned());
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
@@ -1431,7 +1422,7 @@ mod tests {
     fn a_position_that_names_nothing_is_empty_and_a_target_found_nowhere_is_found() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let proxy_on = |text: &str, path: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+            let mut proxy = Proxy::new(Connection::memory().0, mpsc::channel().0);
             proxy.set_root(root.clone());
             proxy.workspace.open.insert(path.to_owned(), text.to_owned());
             proxy
@@ -1455,8 +1446,7 @@ mod tests {
 
     #[test]
     fn an_answer_is_a_result_an_empty_one_or_its_reasons() {
-        let id = json!(7);
-        let result = |result: Value| json!({"jsonrpc": "2.0", "id": 7, "result": result});
+        let result = |result: Value| json!({"id": 7, "result": result});
         let (definition, references, symbols) =
             ("textDocument/definition", "textDocument/references", "workspace/symbol");
         let cases = [
@@ -1469,16 +1459,16 @@ mod tests {
             ("an empty command", Answer::Empty, "dbt-lsp-plus.nodeInfo", result(Value::Null)),
         ];
         for (name, answer, method, expected) in cases {
-            let framed = frame(&answer, &id, method);
+            let framed = serde_json::to_value(frame(&answer, RequestId::from(7), method)).unwrap();
             assert_eq!(framed, expected, "{name}");
             // A result, null included, is never an error: before a project, every request gets null.
             assert!(framed.get("error").is_none() && framed.get("result").is_some(), "{name}: {framed}");
         }
         let unanswered =
             Answer::Unanswered(vec![Reason::Unindexed("it is running".into()), Reason::Refused("no".into())]);
-        let framed = frame(&unanswered, &id, references);
+        let framed = serde_json::to_value(frame(&unanswered, RequestId::from(7), references)).unwrap();
         let message = "dbt parse has not finished: it is running; no";
-        assert_eq!(framed, json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32803, "message": message}}));
+        assert_eq!(framed, json!({"id": 7, "error": {"code": -32803, "message": message}}));
         assert!(framed.get("result").is_none(), "{framed}");
     }
 }
