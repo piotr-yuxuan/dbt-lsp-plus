@@ -519,11 +519,33 @@ fn a_request_before_initialize_is_refused_and_exit_fails() {
 }
 
 #[test]
+fn an_answer_sent_before_a_failed_handshake_is_written() {
+    let frame = |message: Value| format!("Content-Length: {}\r\n\r\n{message}", message.to_string().len());
+    // A request and `exit` in one write: the server ends at once, yet only once its refusal is written.
+    for round in 0..20 {
+        let (mut session, _) = Session::fake(&format!("written-before-exit-{round}"), json!({}));
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "workspace/symbol", "params": {"query": "orders"}});
+        let exit = json!({"jsonrpc": "2.0", "method": "exit"});
+        session.send_raw((frame(request) + &frame(exit)).as_bytes());
+        let refused = session.wait_for(|message| message["id"] == 1);
+        assert_eq!(refused["error"]["code"], -32002, "{refused}");
+        assert_eq!(session.wait().code(), Some(1));
+    }
+}
+
+#[test]
 fn a_frame_that_is_not_json_rpc_ends_the_session() {
-    let (mut session, _) = Session::fake("not-json-rpc", json!({}));
-    session.initialize(&fixture());
-    session.send_raw(b"Content-Length: 3\r\n\r\nnop");
-    assert_eq!(session.wait().code(), Some(1));
+    // A request and a frame that is not JSON in one write: the answer to the request is still written.
+    for round in 0..10 {
+        let (mut session, _) = Session::fake(&format!("not-json-rpc-{round}"), json!({}));
+        session.initialize(&fixture());
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "workspace/symbol", "params": {"query": "orders"}});
+        let request = format!("Content-Length: {}\r\n\r\n{request}", request.to_string().len());
+        session.send_raw(format!("{request}Content-Length: 3\r\n\r\nnop").as_bytes());
+        let answer = session.wait_for(|message| message["id"] == 1);
+        assert!(answer["result"].is_array(), "{answer}");
+        assert_eq!(session.wait().code(), Some(1));
+    }
 }
 
 /// The position of `page_views` in `stg_page_views.sql`, with that file's URI.

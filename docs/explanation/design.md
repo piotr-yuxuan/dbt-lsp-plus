@@ -41,7 +41,13 @@ client ── stdin ──▶ dbt-lsp-plus ── runs ──▶ dbt parse, dbt 
 The crate `lsp-server` (plan 083) reads and writes the framing on
 threads of its own; one thread hands the client's messages to one event
 loop, which owns all state; the parse, the runs of dbt's CLI and the
-watchers of the last run report to it from threads of their own.
+watchers of the last run report to it from threads of their own.  Before
+the server exits, whether the handshake failed, the input ended or a
+frame did not read, it waits until the crate's writer lets go of the
+standard output, which it holds while its channel is open: what was sent
+is written.  `IoThreads::join` does not serve: it waits for a reader that
+may still be reading, and returns before the writer at a frame it cannot
+read.
 
 - `initialize` goes through `lsp-server`'s handshake (plan 083).  Before
   it, a request gets -32002 and a notification is dropped; `exit` ends
@@ -1180,7 +1186,7 @@ over the manifest that node keeps, checked against dbt (plan 058);
 | A method or a command the server does not answer | Error -32601 `dbt-lsp-plus does not answer NAME`, at once |
 | The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`; with no target, a definition is null and references `[]`; once a parse has given an index, a hover and a nodeInfo at a `ref`, a `source` or an entry's `name:` fail with that reason too, and inlay hints give none (see "What a request gets") |
 | A YAML file is not valid | Its sources are left out |
-| A frame that `lsp-server` cannot read: a header line without CRLF, a header without exactly `: `, no `Content-Length`, a body that is not UTF-8 JSON, JSON of no message's shape | The session ends as when the client closes its input: a parse or a run killed, status 1; the last answers sent may be cut |
+| A frame that `lsp-server` cannot read: a header line without CRLF, a header without exactly `: `, no `Content-Length`, a body that is not UTF-8 JSON, JSON of no message's shape | The session ends as when the client closes its input: a parse or a run killed, the answers already sent written, status 1 |
 | A request whose id is neither a string nor a 32-bit integer | Read as a notification, never answered; before `initialize`, dropped |
 | A request before `initialize` | -32002; a notification is dropped, and `exit` ends the server, status 1 |
 | A message between `initialize`'s answer and `initialized` | The session ends, status 1 |

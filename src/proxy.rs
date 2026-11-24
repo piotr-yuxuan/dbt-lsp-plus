@@ -1038,7 +1038,7 @@ impl Proxy {
 /// a document names the project.  A failed handshake ends the server with
 /// status 1.
 pub fn run(command: &[String]) -> ExitCode {
-    let (client, io) = Connection::stdio();
+    let (client, _) = Connection::stdio();
     let (events, inbox) = mpsc::channel();
     let mut proxy = Proxy::new(client, events.clone());
     // The server command, which `take_project` reads here on every route, then replaces with its dbt's.
@@ -1052,24 +1052,24 @@ pub fn run(command: &[String]) -> ExitCode {
         let result = proxy.on_initialize(&params);
         proxy.client.initialize_finish(id, result)
     });
-    if started.is_err() {
+    if started.is_ok() {
+        proxy.start_project();
+        // The crate's reader stops after `exit` or at the end of the input: then the client is closed.
+        let messages = proxy.client.receiver.clone();
+        thread::spawn(move || {
+            let _ = messages.iter().try_for_each(|message| events.send(Event::Client(message)).map_err(drop));
+            let _ = events.send(Event::ClientClosed);
+        });
+        proxy.serve(inbox);
         proxy.stop_parse();
-        return ExitCode::FAILURE;
     }
-    proxy.start_project();
-    // The crate's reader stops after `exit` or at the end of the input: then the client is closed.
-    let messages = proxy.client.receiver.clone();
-    thread::spawn(move || {
-        let _ = messages.iter().try_for_each(|message| events.send(Event::Client(message)).map_err(drop));
-        let _ = events.send(Event::ClientClosed);
-    });
-    proxy.serve(inbox);
-    proxy.stop_parse();
     let shutdown = proxy.shutdown;
-    // The writer ends with the last sender; after a good input it has written what was sent.
+    // The crate's writer holds the standard output until its channel closes with the proxy's sender: once it lets
+    // go, what was sent is written.  `IoThreads::join` would also wait for a reader still reading after a failed
+    // handshake, and returns before the writer after a frame it cannot read.
     drop(proxy);
-    let _ = io.join();
-    // 0 after `shutdown`, else 1, as LSP asks of `exit`.
+    drop(std::io::stdout().lock());
+    // 0 after `shutdown`, else 1, as LSP asks of `exit`; 1 after a failed handshake.
     ExitCode::from(u8::from(!shutdown))
 }
 
