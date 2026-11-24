@@ -514,20 +514,41 @@ fn node_says_why_when_a_parse_fails_and_keeps_no_manifest() {
     assert_eq!(left_in_cache(&case), vec![Vec::<PathBuf>::new()], "no run left, no manifest kept");
 }
 
-/// COMMAND, as `Case::command` makes it, run with INPUT written whole and
-/// then closed: its exit status, each line of its standard output read as
-/// JSON, and its standard error.
-fn served(mut command: Command, input: &[String]) -> (Option<i32>, Vec<Value>, String) {
-    use std::io::Write;
+/// COMMAND, as `Case::command` makes it, given INPUT a line at a time as
+/// a client gives it: after each line but a notification, its answer is
+/// read within 10 s while the input stays open; then the input is closed.
+/// Its exit status, each line of its standard output read as JSON, and its
+/// standard error.
+fn served(mut command: Command, input: &[impl AsRef<[u8]>]) -> (Option<i32>, Vec<Value>, String) {
+    use std::io::{BufRead, Write};
     use std::process::Stdio;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    // A server that ended early closed its input: what it wrote tells why.
-    let _ = stdin.write_all(input.iter().map(|line| format!("{line}\n")).collect::<String>().as_bytes());
+    let (mut stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+    let (sender, written) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        std::io::BufReader::new(stdout).lines().map_while(Result::ok).try_for_each(|line| sender.send(line))
+    });
+    let mut lines = Vec::new();
+    for line in input.iter().map(AsRef::as_ref) {
+        // A server that ended early closed its input: what it wrote tells why.
+        let _ = stdin.write_all(&[line, b"\n"].concat());
+        if serde_json::from_slice::<Value>(line).is_ok_and(|message| message.get("id").is_none()) {
+            continue;
+        }
+        match written.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(answer) => lines.push(answer),
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("no answer within 10 s, the input open: {}", String::from_utf8_lossy(line))
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
     drop(stdin);
+    lines.extend(written.iter());
+    let _ = reader.join();
     let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let lines = stdout.lines().map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("{line}"))).collect();
+    let lines = lines.iter().map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("{line}"))).collect();
     (output.status.code(), lines, String::from_utf8(output.stderr).unwrap())
 }
 
