@@ -948,13 +948,11 @@ impl<W: Write> Proxy<W> {
         let Some(root) = self.workspace.root.clone() else { return };
         let events = self.events.clone();
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
-        // What a watched file and the manifest give: its failures, or none to keep those known.  The first entry
-        // gives the array its type, which the second's closure takes.
-        let failures: fn(&Value, &Value) -> Option<Vec<runs::Failure>> = runs::failures;
-        let watched = [
-            ("run_results.json", runs::LAST_RUN, failures),
-            ("sources.json", runs::STALE_SOURCE, |found, index| Some(runs::stale(found, index))),
-        ];
+        // What a watched file and the manifest give: its failures, or none to keep those known.  The first
+        // entry's pointer type is the array's, to which `runs::failures` is coerced.
+        let stale: fn(&Value, &Value) -> _ = |found, index| Some(runs::stale(found, index));
+        let watched =
+            [("sources.json", runs::STALE_SOURCE, stale), ("run_results.json", runs::LAST_RUN, runs::failures)];
         for (file, code, read_failures) in watched {
             let (results, manifest, events) = (target.join(file), target.join("manifest.json"), events.clone());
             thread::spawn(move || {
