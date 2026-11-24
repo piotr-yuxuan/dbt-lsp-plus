@@ -9,7 +9,6 @@ use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{self, Which, Workspace};
 use crate::{cache, commands, config, packages, proxy};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -363,7 +362,7 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
 /// well with no manifest that reads fails here, where no server's wait
 /// could explain the missing index.
 fn indexed(workspace: &mut Workspace, root: &Path) {
-    let stamp = cache::disk(root);
+    let stamp = cache::disk(root, workspace.dbt.command());
     let cache = workspace.cache_dir(root);
     let kept = fs::read(config::kept(&cache, stamp)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
     if let Some(manifest) = kept {
@@ -371,7 +370,7 @@ fn indexed(workspace: &mut Workspace, root: &Path) {
         return;
     }
     let (sender, outcomes) = mpsc::channel();
-    workspace.parse(Some(Box::new(move |outcome| drop(sender.send(outcome)))));
+    workspace.parse(false, Box::new(move |outcome| drop(sender.send(outcome))));
     // None started: no report kept the channel open.
     let Ok(outcome) = outcomes.recv() else { return };
     let failure = outcome.failure.or(outcome.index.is_none().then_some("it left no manifest that reads".to_owned()));
@@ -415,8 +414,7 @@ fn node(asked: &str, command: &[String]) -> Value {
             Which::At((path, text, offset))
         }
     };
-    let (texts, edits) = (HashMap::new(), HashMap::new());
-    let answer = workspace.node(&cache::Open { texts: &texts, edits: &edits }, &which);
+    let answer = workspace.node(&which);
     let (node, error) = workspace::reply(answer, workspace.failure.as_deref(), asked);
     workspace.stop();
     json!({"error": error, "node": node})

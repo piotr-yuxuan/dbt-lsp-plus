@@ -4,10 +4,8 @@
 //! runs it, read once from the server command, the parse's run and outcome,
 //! the index of the manifest it writes, and the summary of a node.
 
-use crate::graph::ServerNode;
 use crate::node::Type;
-use crate::parse_log;
-use crate::run::{self, Ending, Output, Run, Running};
+use crate::run::{self, Ending, Output, Problem, Run, Running};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -203,8 +201,9 @@ pub struct ParseIndex {
     groups: HashMap<String, Value>,
     /// The ids of the nodes of each name, so that a lookup reads a few.
     named: HashMap<String, Vec<String>>,
-    /// The ids of the last manifest laid, whose nodes alone make a listing:
-    /// a failed parse's lacks those deleted since, which the index keeps.
+    /// The ids of the last manifest laid, whose nodes alone give the
+    /// dependencies: a failed parse's lacks those deleted since, which the
+    /// index keeps.
     latest: HashSet<String>,
 }
 
@@ -276,20 +275,21 @@ impl ParseIndex {
     /// laid whose `depends_on.nodes` names the node ID, every test aside,
     /// by its `resource_type`.
     pub fn children(&self, id: &str) -> Vec<&str> {
-        let child = |node: &Value| {
-            let depends_on = node.pointer("/depends_on/nodes").and_then(Value::as_array);
-            node["resource_type"] != "test"
-                && node["disabled"] != true
-                && depends_on.is_some_and(|nodes| nodes.iter().any(|parent| parent == id))
-        };
-        let mut children: Vec<&str> = self
-            .latest
-            .iter()
-            .filter(|latest| self.nodes.get(*latest).is_some_and(child))
-            .map(String::as_str)
-            .collect();
+        let child = |(node, parents): &(&Value, Vec<&str>)| node["resource_type"] != "test" && parents.contains(&id);
+        let mut children: Vec<&str> =
+            self.dependencies().filter(child).filter_map(|(node, _)| node["unique_id"].as_str()).collect();
         children.sort_unstable();
         children
+    }
+
+    /// The enabled nodes of the last manifest laid, each with the ids its
+    /// `depends_on.nodes` names: the one reading of the manifest's graph.
+    pub fn dependencies(&self) -> impl Iterator<Item = (&Value, Vec<&str>)> {
+        let enabled = self.latest.iter().filter_map(|id| self.nodes.get(id)).filter(|node| node["disabled"] != true);
+        enabled.map(|node| {
+            let parents = node.pointer("/depends_on/nodes").and_then(Value::as_array).into_iter().flatten();
+            (node, parents.filter_map(Value::as_str).collect())
+        })
     }
 
     /// The enabled models, seeds and snapshots of the last manifest named
@@ -306,19 +306,6 @@ impl ParseIndex {
 
     pub fn disabled(&self, id: &str) -> bool {
         self.latest.contains(id) && self.nodes.get(id).is_some_and(|node| node["disabled"] == true)
-    }
-
-    /// The enabled nodes of the last manifest, of the kinds that
-    /// `dbt.listNodes` lists, `*` and `source:*`, by id: what a listing would
-    /// give, from the manifest.
-    pub fn listed(&self) -> Vec<ServerNode> {
-        let kinds = ["model", "seed", "snapshot", "analysis", "test", "source"];
-        let listed =
-            |node: &&Value| node["disabled"] != true && kinds.iter().any(|kind| node["resource_type"] == *kind);
-        let latest = self.latest.iter().filter_map(|id| self.nodes.get(id));
-        let mut nodes: Vec<ServerNode> = latest.filter(listed).filter_map(ServerNode::of).collect();
-        nodes.sort_by(|one, other| one.id.cmp(&other.id));
-        nodes
     }
 
     /// The one node of the root project that the file at PATH, relative to
@@ -424,7 +411,7 @@ impl ParseIndex {
 pub struct Outcome {
     pub index: Option<ParseIndex>,
     pub failure: Option<String>,
-    pub problems: Option<Vec<parse_log::Problem>>,
+    pub problems: Option<Vec<Problem>>,
 }
 
 /// Where a parse's outcome goes, once, from the parse's thread: the front
@@ -432,12 +419,12 @@ pub struct Outcome {
 pub type ReportFn = Box<dyn FnOnce(Outcome) + Send>;
 
 /// Runs RUN, a `dbt parse`, as `run::start` runs it, and hands REPORT the
-/// outcome: a failure words dbt's first error event, else the first line
-/// that is none of its events, as a launcher's own, and names the log; one
-/// that ends with no outcome, as on a panic, fails.
+/// outcome: a failure words dbt's first error, of either kind of log, else
+/// the first line that is none of its events, as a launcher's own, and names
+/// the log; one that ends with no outcome, as on a panic, fails.
 pub fn start(run: Run, report: ReportFn) -> Running {
     let read = |output: &Output| {
-        let first = output.error_event().or_else(|| output.line().map(str::to_owned));
+        let first = output.first_error().or_else(|| output.line().map(str::to_owned));
         let failure = match &output.ending {
             Ending::Exited(status) if status.success() => None,
             Ending::Exited(status) => Some(first.map_or_else(
@@ -447,8 +434,8 @@ pub fn start(run: Run, report: ReportFn) -> Running {
             Ending::Stopped => Some("dbt parse was stopped, or ran past its deadline".into()),
             Ending::NotStarted(why) => Some(why.clone()),
         };
-        let read = parse_log::read(&output.text);
-        let problems = read.completed.then_some(read.problems);
+        let (problems, completed) = run::problems(&output.text);
+        let problems = completed.then_some(problems);
         Outcome { index: output.manifest.as_ref().map(ParseIndex::of), failure, problems }
     };
     let ended = Outcome { index: None, failure: Some("the parse ended without an outcome".into()), problems: None };
@@ -664,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_the_enabled_nodes_and_sources_as_dbt_lsp_would() {
+    fn the_dependencies_are_the_enabled_nodes_of_the_last_manifest_with_their_parents() {
         let node = |id: &str, depends_on: &[&str]| {
             let kind = id.split('.').next().unwrap();
             json!({"unique_id": id, "name": id.rsplit('.').next().unwrap(), "resource_type": kind,
@@ -676,16 +663,24 @@ mod tests {
                       "operation.shop.hook": node("operation.shop.hook", &[])},
             "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])},
             "disabled": {"model.shop.off": [node("model.shop.off", &[])]}});
-        let listed = ParseIndex::of(&manifest).listed();
-        let ids: Vec<&str> = listed.iter().map(|node| node.id.as_str()).collect();
-        assert_eq!(ids, ["model.shop.a", "source.shop.raw.b", "test.shop.t"], "no disabled node, no hook");
-        assert_eq!(listed[0].depends_on, ["source.shop.raw.b"]);
+        fn dependencies(index: &ParseIndex) -> Vec<(&str, Vec<&str>)> {
+            let mut found: Vec<_> =
+                index.dependencies().map(|(node, parents)| (node["unique_id"].as_str().unwrap(), parents)).collect();
+            found.sort();
+            found
+        }
+        let expected = [
+            ("model.shop.a", vec!["source.shop.raw.b"]),
+            ("operation.shop.hook", vec![]),
+            ("source.shop.raw.b", vec![]),
+            ("test.shop.t", vec!["model.shop.a"]),
+        ];
+        assert_eq!(dependencies(&ParseIndex::of(&manifest)), expected, "no disabled node");
         // A failed parse's manifest, laid over, lacks the model deleted since.
         let mut index = ParseIndex::of(&manifest);
         let newer = json!({"metadata": {"project_name": "shop"}, "sources": {"source.shop.raw.b": node("source.shop.raw.b", &[])}});
         index.overlay(ParseIndex::of(&newer));
-        let ids: Vec<String> = index.listed().into_iter().map(|node| node.id).collect();
-        assert_eq!(ids, ["source.shop.raw.b"]);
+        assert_eq!(dependencies(&index), [("source.shop.raw.b", vec![])]);
         assert!(index.node("model.shop.a").is_some(), "the index keeps it for nodeInfo");
     }
 
@@ -838,6 +833,22 @@ mod tests {
         let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
         failing.stop();
         assert!(failure.starts_with("error: Failed to fetch the index (see "), "{failure}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_parse_s_bare_error_line_is_its_failure_without_its_prefix() {
+        let dir = scratch_project("runner-bare", &[("x", "")]);
+        let (sender, outcomes) = mpsc::channel();
+        let report: ReportFn = Box::new(move |outcome| drop(sender.send(outcome)));
+        // As dbt writes it under `--log-format json` when it cannot write its target, after a launcher's line.
+        let bare = "echo 'Installed 1 package'; \
+                    echo '[error] [IoError (dbt1001)]: Failed to create output directory: /p/target'; exit 1";
+        let failing = start(words(&["sh", "-c", bare]), None, dir.clone(), Duration::from_secs(10), report);
+        let failure = outcomes.recv_timeout(Duration::from_secs(5)).unwrap().failure.unwrap();
+        failing.stop();
+        let expected = "[IoError (dbt1001)]: Failed to create output directory: /p/target (see ";
+        assert!(failure.starts_with(expected) && failure.ends_with("parse.log)"), "{failure}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

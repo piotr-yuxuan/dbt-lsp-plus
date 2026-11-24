@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The core as the front ends see it, the model's Workspace: the session's
-//! project (one, plan 049), its dbt, the scan kept between requests and its
-//! first fill, the last parse's index and the parse under way, the call
-//! hierarchy's graph, and when the index is stale.  It speaks no protocol:
+//! project (one, plan 049), its dbt, the open texts, the scan kept between
+//! requests and its first fill, the last parse's index and the parse under
+//! way, the call hierarchy's graph, and when the index is stale.  It speaks no protocol:
 //! no message, no position, no URI.
 
 use crate::answer::{Answer, Reason};
 use crate::graph::Graph;
 use crate::project::{self, Project, Scanned};
-use crate::{cache, config, locate, navigation, packages, reference, run, scan};
+use crate::{cache, config, locate, navigation, packages, reference, run, scan, text};
 use serde_json::Value;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -19,11 +20,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 /// The project's files that a thread reads before the first request needs
-/// them, as `cache::fill` gives them.
-type Filled = Vec<(PathBuf, cache::Key, Arc<project::Scanned>)>;
-
-/// The generations of the project and of the index a graph was made of.
-type MadeOf = (u64, u64);
+/// them, as `cache::fill` gives them: a name that clippy's type complexity
+/// asks for, the field that holds them being three types deep.
+type Filled = Vec<(PathBuf, cache::Key, Arc<Scanned>)>;
 
 /// A place in a document: its path, its text as the front end holds it,
 /// open or on disk, and a byte offset in it.
@@ -35,10 +34,10 @@ pub enum Which {
 }
 
 /// The core's state of the session's project.  A front end owes it: `epoch`
-/// bumped at each of its events, `fresh` set false at a change told,
-/// `notice` called before the parse a request asks for, each outcome a parse
-/// reports handed to `parsed`, and `stop` called last, once the runs that
-/// write in its cache have stopped.  Only the Workspace writes `index`,
+/// bumped at each of its events, the texts of its open documents in `open`,
+/// `fresh` set false at a change told, `parse` asked to look on behalf of a
+/// request, each outcome a parse reports handed to `parsed`, and `stop`
+/// called last, once the runs that write in its cache have stopped.  Only the Workspace writes `index`,
 /// `failure` and `running`.
 #[derive(Default)]
 pub struct Workspace {
@@ -52,10 +51,14 @@ pub struct Workspace {
     pub dbt: config::Dbt,
     /// The front end's count of its events: the scan looks at the files once an epoch.
     pub epoch: u64,
+    /// The documents the front end has open, by path: the text of each,
+    /// which wins over its file.
+    pub open: HashMap<PathBuf, String>,
     /// The last parse's index: `parsed` alone writes it, as it moves the
     /// graph's generation with it.
     pub index: Option<config::ParseIndex>,
-    /// Whether no change was told, nor found on disk by `notice`, since the last parse started.
+    /// Whether no change was told, nor found on disk by a `parse` that
+    /// looked, since the last parse started.
     pub fresh: bool,
     /// Why the last parse failed, or none could start, as logged.
     pub failure: Option<String>,
@@ -69,7 +72,9 @@ pub struct Workspace {
     /// done: nothing waits for it, and a request that comes before reads
     /// the files itself.
     filling: RefCell<Option<Receiver<Filled>>>,
-    graph: RefCell<Option<(MadeOf, Rc<Graph>)>>,
+    /// What the graph was made of, the project's generation
+    /// (`Cache::generation`) then the index's (`generation`), and the graph.
+    graph: RefCell<Option<(u64, u64, Rc<Graph>)>>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
     cache_dir: Option<PathBuf>,
@@ -78,9 +83,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// The project as its files and the open texts OPEN say, if there is
+    /// The project as its files and the open documents say, if there is
     /// one: the cache's, looked at once an epoch.
-    pub fn project(&self, open: &cache::Open) -> Option<Rc<Project>> {
+    pub fn project(&self) -> Option<Rc<Project>> {
         let mut cache = self.cache.borrow_mut();
         let filling = self.filling.take();
         match filling.as_ref().map(Receiver::try_recv) {
@@ -88,15 +93,20 @@ impl Workspace {
             Some(Err(TryRecvError::Empty)) => drop(self.filling.replace(filling)),
             Some(Err(TryRecvError::Disconnected)) | None => {}
         }
-        cache.project(self.root.as_deref()?, self.epoch, open)
+        cache.project(self.root.as_deref()?, self.epoch, &self.open, self.dbt.command())
+    }
+
+    /// The text of the document at PATH: open, else on disk.
+    pub fn text(&self, path: &Path) -> Option<String> {
+        self.open.get(path).cloned().or_else(|| text::read(path))
     }
 
     /// The first scan of the project, read on a thread meanwhile, so that
     /// the first request needs none.
     pub fn warm(&self) {
         if let Some(root) = self.root.clone() {
-            let (filled, filling) = mpsc::channel();
-            thread::spawn(move || drop(filled.send(cache::fill(&root))));
+            let ((filled, filling), server) = (mpsc::channel(), self.dbt.command().to_vec());
+            thread::spawn(move || drop(filled.send(cache::fill(&root, &server))));
             self.filling.replace(Some(filling));
         }
     }
@@ -106,15 +116,17 @@ impl Workspace {
     /// it at each step.  Its calls are looked up with the last parse's index.
     pub fn graph(&self, project: &Project) -> Rc<Graph> {
         let made_of = (self.cache.borrow().generation, self.generation);
-        if let Some((_, graph)) = self.graph.borrow().as_ref().filter(|(was, _)| *was == made_of) {
+        if let Some((.., graph)) =
+            self.graph.borrow().as_ref().filter(|(project, index, _)| (*project, *index) == made_of)
+        {
             return graph.clone();
         }
         let scanned = Graph::scanned(project, self.index.as_ref());
-        let graph = Rc::new(match self.index.as_ref().map(config::ParseIndex::listed) {
-            Some(nodes) => scanned.with_server(&nodes, project),
+        let graph = Rc::new(match &self.index {
+            Some(index) => scanned.with_index(index, project),
             None => scanned,
         });
-        *self.graph.borrow_mut() = Some((made_of, graph.clone()));
+        *self.graph.borrow_mut() = Some((made_of.0, made_of.1, graph.clone()));
         graph
     }
 
@@ -132,16 +144,15 @@ impl Workspace {
     /// `navigation::Lookup::node` finds it, else, when FILE, the one node its
     /// document defines, but never in a YAML file: there the manifest places
     /// the generic tests a file declares beside its node, a YAML snapshot's
-    /// included, so neither the scan nor `of_file` can name one node.  The
-    /// project is read with the open texts OPEN.  None for no PLACE, or when
-    /// it names nothing; `Some(None)` when it names a node that the lookup
-    /// does not find: without an index, any that the scan tells is named but
-    /// cannot give (a `ref`, a `source`, an entry's `name:`, a file's one
-    /// node); with one, a node the index lacks, or a `ref`, a `source` or an
-    /// entry's `name:` over a project that does not read, which
-    /// `Workspace::node` tells from a node the index lacks by asking for the
-    /// project again.
-    pub fn node_at(&self, open: &cache::Open, place: Option<&Place>, file: bool) -> Option<Option<&Value>> {
+    /// included, so neither the scan nor `of_file` can name one node.  None
+    /// for no PLACE, or when it names nothing; `Some(None)` when it names a
+    /// node that the lookup does not find: without an index, any that the
+    /// scan tells is named but cannot give (a `ref`, a `source`, an entry's
+    /// `name:`, a file's one node); with one, a node the index lacks, or a
+    /// `ref`, a `source` or an entry's `name:` over a project that does not
+    /// read, which `Workspace::node` tells from a node the index lacks by
+    /// asking for the project again.
+    pub fn node_at(&self, place: Option<&Place>, file: bool) -> Option<Option<&Value>> {
         let (path, text, offset) = place?;
         let index = self.index.as_ref();
         let scanned = Scanned::of(path, text.clone());
@@ -155,7 +166,7 @@ impl Workspace {
             let named = matches!(call.name.kind, reference::Kind::Ref | reference::Kind::Table { .. });
             // Without an index there is no node to find: the project is not read for none.
             return named.then(|| {
-                let project = index.and_then(|_| self.project(open))?;
+                let project = index.and_then(|_| self.project())?;
                 navigation::Lookup::new(&project, index).node(path, &call.name)
             });
         }
@@ -168,7 +179,7 @@ impl Workspace {
             )
         });
         if let Some(name) = entry {
-            let Some(project) = self.project(open) else { return Some(None) };
+            let Some(project) = self.project() else { return Some(None) };
             return Some(navigation::Lookup::new(&project, index).node(path, &name));
         }
         let relative = path.strip_prefix(self.root.as_ref()?).ok().filter(|_| file && !yaml)?;
@@ -176,7 +187,7 @@ impl Workspace {
             return index.of_file(&relative.to_string_lossy()).map(Some);
         }
         // As `ParseIndex::of_file` reads the manifest: the kinds of resources it holds as nodes.
-        let project = self.project(open)?;
+        let project = self.project()?;
         let defines = |entity: &&project::Entity| {
             entity.path == *path
                 && entity.package == project.root_package
@@ -189,8 +200,8 @@ impl Workspace {
     /// give it: the manifest's node with its summary and `children`; else
     /// why none: a place in another project's document, no index yet, or a
     /// project that does not read where the place names a node; `Empty` for
-    /// no such node.  The project is read with the open texts OPEN.
-    pub fn node(&self, open: &cache::Open, which: &Which) -> Answer {
+    /// no such node.
+    pub fn node(&self, which: &Which) -> Answer {
         if let (Which::At((document, ..)), Some(root)) = (which, &self.root)
             && let Some(project) = locate::elsewhere(document, root, self.dbt.command())
         {
@@ -200,8 +211,8 @@ impl Workspace {
         let Some(index) = &self.index else { return Answer::Unanswered(vec![self.unindexed()]) };
         let node = match which {
             Which::Id(id) => index.node(id),
-            Which::At(place) => match self.node_at(open, Some(place), true) {
-                Some(None) if self.project(open).is_none() => {
+            Which::At(place) => match self.node_at(Some(place), true) {
+                Some(None) if self.project().is_none() => {
                     return Answer::Unanswered(vec![Reason::Unreadable(self.root.clone().unwrap_or_default())]);
                 }
                 named => named.flatten(),
@@ -218,10 +229,16 @@ impl Workspace {
 
     /// Starts a parse when the index is stale and dbt can parse: no parse
     /// under way, packages that dbt would not install, a server command with
-    /// `lsp`; REPORT gets its outcome.  With no REPORT nothing starts.  Why
-    /// none could start, when it is not the last parse's failure already,
-    /// for the front end to tell once.
-    pub fn parse(&mut self, report: Option<config::ReportFn>) -> Option<String> {
+    /// `lsp`; REPORT gets its outcome.  When LOOK, on behalf of a request,
+    /// it looks at the files on disk first: one that may hold a resource and
+    /// that changed since the last parse started makes the index stale, as
+    /// a change told does; nothing to compare before a parse.  Why none
+    /// could start, when it is not the last parse's failure already, for the
+    /// front end to tell once.
+    pub fn parse(&mut self, look: bool, report: config::ReportFn) -> Option<String> {
+        if let (true, true, Some(root), Some(stamp)) = (look, self.fresh, &self.root, self.stamp) {
+            self.fresh = cache::disk(root, self.dbt.command()) == stamp;
+        }
         let root = self.root.clone().filter(|_| !self.fresh && self.running.is_none())?;
         if let Some(why) = packages::refused(&root, self.dbt.command()) {
             return self.failed(Some(why));
@@ -231,18 +248,9 @@ impl Workspace {
         let Some(run) = self.dbt.run(&parse, &root, cache, config::PARSE_LOG) else {
             return self.failed(Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".into()));
         };
-        let report = report?;
-        (self.fresh, self.stamp) = (true, Some(cache::disk(&root)));
+        (self.fresh, self.stamp) = (true, Some(cache::disk(&root, self.dbt.command())));
         self.running = Some(config::start(run, report));
         None
-    }
-
-    /// A look at the files on disk on behalf of a request: one that may hold
-    /// a resource and that changed since the last parse started makes the
-    /// index stale, as a change told does.  Nothing to compare before a parse.
-    pub fn notice(&mut self) {
-        let (Some(root), Some(stamp), true) = (&self.root, self.stamp, self.fresh) else { return };
-        self.fresh = cache::disk(root) == stamp;
     }
 
     /// A parse's end, its INDEX and its FAILURE: its run stopped; its index
@@ -322,7 +330,6 @@ pub fn reply(answer: Answer, failure: Option<&str>, asked: &str) -> (Value, Opti
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -342,8 +349,6 @@ mod tests {
             &[("dbt_project.yml", "name: other\n"), ("models/m.sql", b_sql)],
         );
         let mut workspace = Workspace { root: Some(root.clone()), ..Workspace::default() };
-        let (texts, edits) = (HashMap::new(), HashMap::new());
-        let open = cache::Open { texts: &texts, edits: &edits };
         let id = |id: &str| Which::Id(id.to_owned());
         let at = |path: PathBuf, offset: usize| Which::At((path.clone(), fs::read_to_string(&path).unwrap(), offset));
         let (in_ref, in_name) = (b_sql.find("'a'").unwrap() + 1, a_yml.find("name: a").unwrap() + 6);
@@ -352,7 +357,7 @@ mod tests {
         // Each step, what the query gave, as a node's id, else as the Answer.
         let mut seen = Vec::new();
         let mut look = |step: &str, workspace: &Workspace, which: Which| {
-            let answer = match workspace.node(&open, &which) {
+            let answer = match workspace.node(&which) {
                 Answer::Found(node) => Answer::Found(node["unique_id"].clone()),
                 other => other,
             };
@@ -373,7 +378,7 @@ mod tests {
         look("a file's start", &workspace, at(root.join("models/a.sql"), 0));
         look("an entry's name", &workspace, at(root.join("models/_a.yml"), in_name));
         look("no such id", &workspace, id("model.shop.x"));
-        let (a_node, b_node) = (workspace.node(&open, &id("model.shop.a")), workspace.node(&open, &id("model.shop.b")));
+        let (a_node, b_node) = (workspace.node(&id("model.shop.a")), workspace.node(&id("model.shop.b")));
         fs::write(root.join("dbt_project.yml"), "name: [").unwrap();
         workspace.epoch += 1;
         look("an entry's name, unreadable", &workspace, at(root.join("models/_a.yml"), in_name));
@@ -424,8 +429,7 @@ mod tests {
         // Not the user's cache.
         let cache_dir = project::scratch_project("workspace-cache", &[]);
         let mut workspace = Workspace { root: Some(root.clone()), cache_dir: Some(cache_dir), ..Workspace::default() };
-        let (texts, edits) = (HashMap::new(), HashMap::new());
-        let project = workspace.project(&cache::Open { texts: &texts, edits: &edits }).unwrap();
+        let project = workspace.project().unwrap();
         let graph = workspace.graph(&project);
         let held = project.files.contains_key(&root.join("models/a.sql")) && graph.items.contains_key("model.shop.a");
         assert!(held, "the project's file and the graph's item");
@@ -447,47 +451,38 @@ mod tests {
         };
         // Before any parse, nothing to compare the disk with.
         let mut before = Workspace { root: Some(root.clone()), fresh: true, ..Workspace::default() };
-        before.notice();
-        look("before any parse", None, &before);
+        look("before any parse", before.parse(true, report()), &before);
         // A server command with no `lsp`: no parse, and why, once.
         workspace.dbt = config::Dbt::new(vec!["dbt".into()], None);
-        look("no lsp", workspace.parse(Some(report())), &workspace);
-        look("no lsp again", workspace.parse(Some(report())), &workspace);
-        // With one, nothing starts without a report, and one parse at a time with one.
+        look("no lsp", workspace.parse(false, report()), &workspace);
+        look("no lsp again", workspace.parse(false, report()), &workspace);
+        // With one, one parse at a time.
         workspace.dbt = config::Dbt::new(vec!["true".into(), "lsp".into()], None);
-        look("no report", workspace.parse(None), &workspace);
-        look("started", workspace.parse(Some(report())), &workspace);
-        workspace.notice();
-        look("nothing written", None, &workspace);
-        look("under way", workspace.parse(Some(report())), &workspace);
+        look("started", workspace.parse(false, report()), &workspace);
+        look("nothing written", workspace.parse(true, report()), &workspace);
         let outcome = outcomes.recv_timeout(Duration::from_secs(10)).expect("the parse's outcome");
         look("parsed", workspace.parsed(outcome.index, outcome.failure), &workspace);
-        look("fresh", workspace.parse(Some(report())), &workspace);
+        look("fresh", workspace.parse(true, report()), &workspace);
         let parsed = workspace.index.is_none() && outcomes.try_recv().is_err();
-        // A file written on disk, with no change told: stale, and parsed again, one parse at a time.
+        // A file written on disk, with no change told: unseen until a look, then stale, and parsed again, one
+        // parse at a time.
         fs::write(root.join("models/b.sql"), "select 2").unwrap();
-        workspace.notice();
-        look("b written", None, &workspace);
-        look("stale", workspace.parse(Some(report())), &workspace);
+        look("b written, no look", workspace.parse(false, report()), &workspace);
+        look("b written", workspace.parse(true, report()), &workspace);
         fs::write(root.join("models/c.sql"), "select 3").unwrap();
-        workspace.notice();
-        look("c written", None, &workspace);
-        look("stale under way", workspace.parse(Some(report())), &workspace);
+        look("c written", workspace.parse(true, report()), &workspace);
         let no_lsp = Some("the server command has no lsp, so dbt-lsp-plus runs no dbt parse".to_owned());
         let expected = [
             ("before any parse", None, false, true, None),
             ("no lsp", no_lsp.clone(), false, false, no_lsp.clone()),
             ("no lsp again", None, false, false, no_lsp.clone()),
-            ("no report", None, false, false, no_lsp.clone()),
             ("started", None, true, true, no_lsp.clone()),
             ("nothing written", None, true, true, no_lsp.clone()),
-            ("under way", None, true, true, no_lsp.clone()),
             ("parsed", None, false, true, None),
             ("fresh", None, false, true, None),
-            ("b written", None, false, false, None),
-            ("stale", None, true, true, None),
+            ("b written, no look", None, false, true, None),
+            ("b written", None, true, true, None),
             ("c written", None, true, false, None),
-            ("stale under way", None, true, false, None),
         ];
         let expected: Vec<_> = expected
             .into_iter()
@@ -495,6 +490,41 @@ mod tests {
             .collect();
         assert_eq!(seen, expected);
         assert!(parsed, "an index with no manifest, or a second outcome");
+        workspace.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_fill_and_the_stamps_follow_the_server_s_install_path() {
+        let files = [
+            ("dbt_project.yml", "name: shop\n"),
+            ("models/a.sql", "select 1"),
+            ("vendor/extra/dbt_project.yml", "name: extra\n"),
+            ("vendor/extra/models/x.sql", "select 2"),
+        ];
+        let root = project::scratch_project("workspace-install-path", &files);
+        let cache_dir = project::scratch_project("workspace-install-path-cache", &[]);
+        let server = ["true", "lsp", "--packages-install-path", "vendor"].map(str::to_owned).to_vec();
+        let dbt = config::Dbt::new(server, None);
+        let mut workspace =
+            Workspace { root: Some(root.clone()), dbt, cache_dir: Some(cache_dir), ..Workspace::default() };
+        workspace.warm();
+        let filled = workspace.filling.take().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(filled.iter().any(|(path, ..)| *path == root.join("vendor/extra/models/x.sql")), "the fill");
+        let (sender, outcomes) = mpsc::channel();
+        let report = || -> config::ReportFn {
+            let sender = sender.clone();
+            Box::new(move |outcome| drop(sender.send(outcome)))
+        };
+        assert_eq!(workspace.parse(false, report()), None);
+        let outcome = outcomes.recv_timeout(Duration::from_secs(10)).expect("the parse's outcome");
+        workspace.parsed(outcome.index, outcome.failure);
+        // The stamp that the parse took and the look's, both under the install path, are one.
+        workspace.parse(true, report());
+        assert!(workspace.fresh && workspace.running.is_none(), "nothing written");
+        fs::write(root.join("vendor/extra/models/y.sql"), "select 3").unwrap();
+        workspace.parse(true, report());
+        assert!(workspace.running.is_some(), "a package's model written: stale, parsed again");
         workspace.stop();
         fs::remove_dir_all(root).unwrap();
     }

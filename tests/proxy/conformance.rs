@@ -12,7 +12,7 @@
 //! diverge, so that the registry is the exact list of gaps.
 
 use crate::support::scratch;
-use dbt_lsp_plus::graph::{Edge, Graph};
+use dbt_lsp_plus::graph::Graph;
 use dbt_lsp_plus::project::{self, Project};
 use dbt_lsp_plus::reference::{Kind, Name};
 use dbt_lsp_plus::{config, navigation, properties, scan, sources};
@@ -20,6 +20,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -48,7 +49,8 @@ fn corpus() {
         let name = case.file_name().unwrap().to_string_lossy().into_owned();
         let (copy, manifest) = parse(&dbt, case);
         versions.insert(manifest["metadata"]["dbt_version"].as_str().unwrap_or("of no version").to_owned());
-        let project = project::scan(&copy, &HashMap::new()).expect("scan the case");
+        let project =
+            dbt_lsp_plus::cache::Cache::default().project(&copy, 0, &HashMap::new(), &[]).expect("scan the case");
         // Navigation as the proxy runs it once a parse exists.
         let index = config::ParseIndex::of(&manifest);
         let lookup = navigation::Lookup::new(&project, Some(&index));
@@ -307,13 +309,13 @@ fn calls_compared(
         let mut next = 0;
         while let Some(from) = reached.get(next).cloned() {
             let calls = entities.get(from.as_str()).map_or(&[][..], |holder| holder.calls.as_slice());
-            let plain = |edge: &Edge| {
-                calls.iter().any(|call| matches!(call.name.kind, Kind::Macro) && edge.sites.contains(&call.range))
+            let plain = |sites: &Vec<Range<usize>>| {
+                calls.iter().any(|call| matches!(call.name.kind, Kind::Macro) && sites.contains(&call.range))
             };
-            let edges = graph.edges.iter().filter(|edge| edge.from == from && edge.to.starts_with("macro."));
-            for edge in edges.filter(|edge| dispatched || plain(edge)) {
-                if !reached.contains(&edge.to) {
-                    reached.push(edge.to.clone());
+            let edges = graph.edges.iter().filter(|((caller, to), _)| *caller == from && to.starts_with("macro."));
+            for ((_, to), _) in edges.filter(|(_, sites)| dispatched || plain(sites)) {
+                if !reached.contains(to) {
+                    reached.push(to.clone());
                 }
             }
             next += 1;
@@ -322,8 +324,8 @@ fn calls_compared(
     };
     // What the graph and navigation answer for CALL, in the file of HOLDER.
     let answers = |holder: &project::Entity, call: &scan::Call, target: Option<Name>| {
-        let edges = graph.edges.iter().filter(|edge| edge.from == holder.id && edge.sites.contains(&call.range));
-        let graphed: BTreeSet<String> = edges.map(|edge| edge.to.clone()).collect();
+        let edges = graph.edges.iter().filter(|((from, _), sites)| *from == holder.id && sites.contains(&call.range));
+        let graphed: BTreeSet<String> = edges.map(|((_, to), _)| to.clone()).collect();
         let navigated = target.map(|target| {
             navigation::resolve(lookup, &holder.path, &target).into_iter().map(|f| f.id).collect::<BTreeSet<_>>()
         });

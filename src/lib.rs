@@ -15,7 +15,6 @@ pub mod locate;
 pub mod navigation;
 pub mod node;
 pub mod packages;
-pub mod parse_log;
 pub mod project;
 pub mod properties;
 pub mod proxy;

@@ -2,10 +2,10 @@
 //! The answers of the features, as LSP JSON.  Pure: the texts, the project
 //! and the graph are inputs.
 
-use crate::graph::{Edge, Graph, Item};
+use crate::graph::Graph;
 use crate::navigation::Lookup;
 use crate::node::{self, TYPES, Type};
-use crate::project::Project;
+use crate::project::{Entity, Project};
 use crate::properties;
 use crate::reference;
 use crate::scan::{self, Kind, Symbol};
@@ -152,11 +152,11 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
 }
 
 /// The `CallHierarchyItem` of ITEM.
-fn hierarchy_item(item: &Item, project: &Project, encoding: Encoding) -> Value {
+fn hierarchy_item(item: &Entity, project: &Project, encoding: Encoding) -> Value {
     let starts = LineStarts::new(project.text(&item.path).unwrap_or_default());
     json!({
-        "name": item.name,
-        "kind": Type::named(&item.resource_type).symbol,
+        "name": item.shown(),
+        "kind": Type::named(item.resource_type).symbol,
         "detail": item.id,
         "uri": uri(&item.path),
         "range": starts.range(item.range.start, item.range.end, encoding),
@@ -176,10 +176,8 @@ pub fn prepare_call_hierarchy(
     encoding: Encoding,
 ) -> Option<Value> {
     let in_file = |id: &str| graph.items.get(id).is_some_and(|item| item.path == path);
-    let called = graph
-        .edges
-        .iter()
-        .find(|edge| in_file(&edge.from) && edge.sites.iter().any(|site| site.start <= offset && offset <= site.end));
+    let at = |site: &Range<usize>| site.start <= offset && offset <= site.end;
+    let called = graph.edges.iter().find(|((from, _), sites)| in_file(from) && sites.iter().any(at));
     let defined = || {
         let around = graph
             .items
@@ -187,18 +185,17 @@ pub fn prepare_call_hierarchy(
             .filter(|item| item.path == path && item.range.start <= offset && offset <= item.range.end);
         around.min_by_key(|item| (item.range.len(), item.id.clone()))
     };
-    let item = called.map(|edge| &graph.items[&edge.to]).or_else(defined)?;
+    let item = called.map(|((_, to), _)| &graph.items[to]).or_else(defined)?;
     Some(json!([hierarchy_item(item, project, encoding)]))
 }
 
 /// The calls of an item: those that call ID when INCOMING, else those ID makes.
 pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encoding: Encoding) -> Value {
-    let edges = graph.edges.iter().filter(|edge| if incoming { edge.to == id } else { edge.from == id });
-    let answer = edges.map(|edge: &Edge| {
-        let (other, key) = if incoming { (&edge.from, "from") } else { (&edge.to, "to") };
-        let caller = &graph.items[&edge.from];
-        let starts = LineStarts::new(project.text(&caller.path).unwrap_or_default());
-        let ranges: Vec<Value> = edge.sites.iter().map(|site| starts.range(site.start, site.end, encoding)).collect();
+    let edges = graph.edges.iter().filter(|((from, to), _)| if incoming { to == id } else { from == id });
+    let answer = edges.map(|((from, to), sites)| {
+        let (other, key) = if incoming { (from, "from") } else { (to, "to") };
+        let starts = LineStarts::new(project.text(&graph.items[from].path).unwrap_or_default());
+        let ranges: Vec<Value> = sites.iter().map(|site| starts.range(site.start, site.end, encoding)).collect();
         json!({key: hierarchy_item(&graph.items[other], project, encoding), "fromRanges": ranges})
     });
     Value::Array(answer.collect())
@@ -459,7 +456,7 @@ mod tests {
         let snap = workspace_symbols(&project, "snap", Encoding::Utf16);
         assert_eq!(snap[0]["location"]["range"]["start"], json!({"line": 1, "character": 10}), "at its name");
         let graph = Graph::scanned(&project, None);
-        assert_eq!(graph.items["model.r.m.v1"].name, "m.v1");
+        assert_eq!(graph.items["model.r.m.v1"].shown(), "m.v1");
         // At column 0 of a YAML snapshot's `name:` line, where dbt-mode's lineage asks.
         let yml = root.join("snapshots/_s.yml");
         let line_start = project.text(&yml).unwrap().find("  - name: snap").unwrap();
@@ -552,13 +549,12 @@ mod tests {
             ("operation", 5),
         ];
         for (resource_type, kind) in expected {
-            let item = Item {
+            let item = Entity {
                 id: format!("{resource_type}.shop.x"),
                 name: "x".to_owned(),
-                resource_type: resource_type.to_owned(),
+                resource_type,
                 path: fixture().join("models/x.sql"),
-                range: 0..0,
-                name_range: 0..0,
+                ..Entity::default()
             };
             assert_eq!(hierarchy_item(&item, &project, Encoding::Utf16)["kind"], kind, "{resource_type}");
         }

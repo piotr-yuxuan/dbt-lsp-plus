@@ -10,9 +10,7 @@ use crate::project::{Project, Scanned};
 use crate::rpc;
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{Which, Workspace};
-use crate::{
-    cache, config, document, features, navigation, packages, parse_log, properties, reference, run, runs, sources,
-};
+use crate::{config, document, features, navigation, packages, properties, reference, run, runs, sources};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -77,10 +75,6 @@ enum Event {
     Ran(Value, Value),
 }
 
-/// What a watched file and the manifest give: its failures, or none to keep
-/// those known.
-type ReadFailures = fn(&Value, &Value) -> Option<Vec<runs::Failure>>;
-
 /// How often the files of the last run are looked at.
 const RUNS_EVERY: Duration = Duration::from_secs(1);
 
@@ -91,7 +85,7 @@ struct Diagnostics {
     /// The failures of the last run.
     failures: HashMap<PathBuf, Vec<runs::Failure>>,
     /// The errors and warnings of the last parse that ran to its end.
-    parsed: HashMap<PathBuf, Vec<parse_log::Problem>>,
+    parsed: HashMap<PathBuf, Vec<run::Problem>>,
     /// The messages of the problems in no file that were logged.
     logged: HashSet<String>,
     /// When the client last changed or saved each document.
@@ -103,9 +97,8 @@ struct Diagnostics {
 struct Proxy<W: Write> {
     client: W,
     /// Where the session's threads report: the client's reader, the parse,
-    /// the runs and their watchers; none in the unit tests, which run
-    /// nothing.
-    events: Option<Sender<Event>>,
+    /// the runs and their watchers.
+    events: Sender<Event>,
     /// The line that says which project and which dbt the server found,
     /// told to the client once it can be.
     line: Option<String>,
@@ -114,8 +107,7 @@ struct Proxy<W: Write> {
     hierarchical: bool,
     /// Whether the client sent `initialize`, before which LSP lets the server send nothing.
     initialized: bool,
-    documents: HashMap<PathBuf, String>,
-    /// The URI under which the client opened each of them, which an edit
+    /// The URI under which the client opened each document, which an edit
     /// of it must name.
     uris: HashMap<PathBuf, String>,
     /// Whether the client opened a document, the first of which prompts a parse.
@@ -129,14 +121,9 @@ struct Proxy<W: Write> {
     /// Whether the client lets a server register a watcher of files.
     watches: bool,
     diagnostics: Diagnostics,
-    /// The core's state of the session's project, which the server hands
-    /// the open texts: its root, its dbt, its scan, its parse and index,
-    /// its graph.
+    /// The core's state of the session's project: its root, its dbt, the
+    /// open texts, its scan, its parse and index, its graph.
     workspace: Workspace,
-    /// The count of each open document's edits, under which the cache keeps
-    /// it, and the count so far.
-    edits: HashMap<PathBuf, u64>,
-    edited: u64,
     /// The runs of dbt's CLI that clients asked for, one at a time: those
     /// waiting, with the client's id and their run, and the one under way.
     runs: VecDeque<(Value, commands::Job, run::Run)>,
@@ -202,15 +189,14 @@ pub fn project_dir(command: &[String]) -> Option<PathBuf> {
 }
 
 impl<W: Write> Proxy<W> {
-    fn new(client: W, root: Option<PathBuf>) -> Self {
+    fn new(client: W, root: Option<PathBuf>, events: Sender<Event>) -> Self {
         let mut proxy = Proxy {
             client,
-            events: None,
+            events,
             line: None,
             canonical_root: None,
             hierarchical: false,
             initialized: false,
-            documents: HashMap::new(),
             uris: HashMap::new(),
             opened: false,
             next_id: 0,
@@ -220,8 +206,6 @@ impl<W: Write> Proxy<W> {
             watches: false,
             diagnostics: Diagnostics::default(),
             workspace: Workspace::default(),
-            edits: HashMap::new(),
-            edited: 0,
             runs: VecDeque::new(),
             run: None,
         };
@@ -322,8 +306,8 @@ impl<W: Write> Proxy<W> {
         Some(mapped().unwrap_or(path))
     }
 
-    /// Keeps the text of the open documents, for the outline of unsaved
-    /// edits, and the URI each was opened under.
+    /// Keeps the text of the open documents in the Workspace, for the
+    /// outline of unsaved edits, and the URI each was opened under.
     fn track(&mut self, method: &str, params: &Value) {
         let uri = params.pointer("/textDocument/uri").and_then(Value::as_str);
         let Some(path) = self.local_path(uri) else { return };
@@ -341,37 +325,22 @@ impl<W: Write> Proxy<W> {
         match method {
             "textDocument/didOpen" => {
                 let text = params.pointer("/textDocument/text").and_then(Value::as_str).unwrap_or_default();
-                self.documents.insert(path.clone(), text.to_owned());
-                self.edited += 1;
-                self.edits.insert(path.clone(), self.edited);
+                self.workspace.open.insert(path.clone(), text.to_owned());
                 self.uris.insert(path, uri.unwrap_or_default().to_owned());
             }
             "textDocument/didChange" => {
-                self.edited += 1;
-                self.edits.insert(path.clone(), self.edited);
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
-                if let Some(text) = self.documents.get_mut(&path) {
+                if let Some(text) = self.workspace.open.get_mut(&path) {
                     changes.iter().for_each(|change| text::apply_change(text, change, ENCODING));
                 }
             }
             "textDocument/didClose" => {
                 // An unsaved text gives way to the file's.
-                self.documents.remove(&path);
-                self.edits.remove(&path);
+                self.workspace.open.remove(&path);
                 self.uris.remove(&path);
             }
             _ => {}
         }
-    }
-
-    /// The project as its files and the open documents say, if there is
-    /// one: the Workspace's, looked at once an epoch.
-    fn project(&self) -> Option<Rc<Project>> {
-        self.workspace.project(&self.open_documents())
-    }
-
-    fn open_documents(&self) -> cache::Open<'_> {
-        cache::Open { texts: &self.documents, edits: &self.edits }
     }
 
     /// The outline of a document, from its open text or its file; null for a
@@ -385,14 +354,14 @@ impl<W: Write> Proxy<W> {
     /// The path of the document at URI and its text, open or on disk.
     fn text_of(&self, uri: &str) -> Option<(PathBuf, String)> {
         let path = self.local_path(Some(uri))?;
-        let text = self.documents.get(&path).cloned().or_else(|| text::read(&path))?;
+        let text = self.workspace.text(&path)?;
         Some((path, text))
     }
 
     /// The answer to the call hierarchy's METHOD, on the graph of the files
     /// with the last parse's nodes.
     fn hierarchy(&self, method: &str, params: &Value) -> Option<Answer> {
-        let Some(project) = self.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         let graph = self.workspace.graph(&project);
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
@@ -434,7 +403,7 @@ impl<W: Write> Proxy<W> {
     fn source_at(&self, params: &Value) -> Option<(Rc<Project>, reference::Name)> {
         let (path, scanned, offset) = self.scan_at(params, None)?;
         let name = sources::name_at(&scanned, offset)?;
-        let project = self.project().filter(|project| project.files.contains_key(&path))?;
+        let project = self.workspace.project().filter(|project| project.files.contains_key(&path))?;
         Some((project, name))
     }
 
@@ -464,7 +433,7 @@ impl<W: Write> Proxy<W> {
     /// target.  The two share the reading of the position and of the
     /// project.
     fn on_navigation(&self, references: bool, params: &Value) -> Option<Answer> {
-        let project = self.project();
+        let project = self.workspace.project();
         let Some((path, scanned, at)) = self.scan_at(params, project.as_deref()) else { return Some(Answer::Empty) };
         let Some(name) = navigation::reference_at(&path, &scanned, at) else { return Some(Answer::Empty) };
         let Some(project) = project else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
@@ -563,7 +532,7 @@ impl<W: Write> Proxy<W> {
             }
         });
         match (which, self.workspace.index.is_some()) {
-            (Some(Some(which)), _) => Some(self.workspace.node(&self.open_documents(), &which)),
+            (Some(Some(which)), _) => Some(self.workspace.node(&which)),
             (_, false) => Some(Answer::Unanswered(vec![self.workspace.unindexed()])),
             (Some(None), true) => Some(Answer::Empty),
             (None, true) => None,
@@ -571,25 +540,19 @@ impl<W: Write> Proxy<W> {
     }
 
     /// Lets the Workspace start a parse when the index is stale and dbt can
-    /// parse, but after `shutdown`, when the session ends.  Its outcome comes
-    /// back as an event; why none could start is logged.
-    fn want_index(&mut self) {
+    /// parse, but after `shutdown`, when the session ends; when LOOK, on
+    /// behalf of a request, it looks at the files on disk first.  Its outcome
+    /// comes back as an event; why none could start is logged.
+    fn want_index(&mut self, look: bool) {
         if self.shutdown {
             return;
         }
         let events = self.events.clone();
-        let report = events
-            .map(|events| -> config::ReportFn { Box::new(move |outcome| drop(events.send(Event::Parsed(outcome)))) });
-        if let Some(why) = self.workspace.parse(report) {
+        if let Some(why) =
+            self.workspace.parse(look, Box::new(move |outcome| drop(events.send(Event::Parsed(outcome)))))
+        {
             self.log_parse(&why);
         }
-    }
-
-    /// On behalf of a request: the Workspace looks at the files on disk
-    /// first, then `want_index`.
-    fn ask_index(&mut self) {
-        self.workspace.notice();
-        self.want_index();
     }
 
     /// A request of a command for clients, COMMAND with PARAMS: refused
@@ -614,7 +577,7 @@ impl<W: Write> Proxy<W> {
         let (job, hooks) = match command {
             commands::COMPILE => {
                 let (cwd, path) = (self.dbt_dir().unwrap_or_default(), self.local_path(argument.as_str()));
-                let job = commands::compile_job(path.as_deref(), &root, self.project().as_deref(), cwd);
+                let job = commands::compile_job(path.as_deref(), &root, self.workspace.project().as_deref(), cwd);
                 (job, commands::hooked(&root, self.workspace.dbt.command()))
             }
             _ => (Ok(commands::nodes_job(argument.as_str().unwrap_or_default())), None),
@@ -639,9 +602,8 @@ impl<W: Write> Proxy<W> {
         if self.run.is_some() {
             return;
         }
-        let (Some(events), Some((id, job, run))) = (self.events.clone(), self.runs.pop_front()) else {
-            return;
-        };
+        let Some((id, job, run)) = self.runs.pop_front() else { return };
+        let events = self.events.clone();
         let report = Box::new(move |result| drop(events.send(Event::Ran(id, result))));
         self.run = Some(commands::start(job, run, report));
     }
@@ -680,7 +642,7 @@ impl<W: Write> Proxy<W> {
         self.on_problems(outcome.problems);
         // A change during this parse wants the next one now: no request may
         // come to ask for it.
-        self.want_index();
+        self.want_index(false);
     }
 
     /// The errors and warnings of a parse that ran to its end, PROBLEMS, in
@@ -688,15 +650,15 @@ impl<W: Write> Proxy<W> {
     /// there, else the one in dbt's working directory, else the one
     /// package's that holds it; one in no such file is logged, once.  Each
     /// file with problems, before or now, is published again.
-    fn on_problems(&mut self, problems: Option<Vec<parse_log::Problem>>) {
+    fn on_problems(&mut self, problems: Option<Vec<run::Problem>>) {
         let Some(problems) = problems else { return };
         // The packages, while the project's configuration still reads.
         let packages: Vec<PathBuf> =
-            self.project().map_or_else(Vec::new, |project| project.packages.values().cloned().collect());
+            self.workspace.project().map_or_else(Vec::new, |project| project.packages.values().cloned().collect());
         // dbt names a YAML file's error from its working directory, and a
         // package's file from its package.
         let cwd = self.dbt_dir();
-        let mut placed: HashMap<PathBuf, Vec<parse_log::Problem>> = HashMap::new();
+        let mut placed: HashMap<PathBuf, Vec<run::Problem>> = HashMap::new();
         for problem in problems {
             let path = problem.spot.as_ref().and_then(|spot| {
                 // dbt names a file from a sibling directory with `..`.
@@ -732,7 +694,8 @@ impl<W: Write> Proxy<W> {
     /// ends aside: an editor such as Emacs sends a CRLF file's text with LF.
     fn unsaved(&self, path: &Path) -> bool {
         let lines = |text: &str| text.replace("\r\n", "\n");
-        self.documents.get(path).is_some_and(|open| text::read(path).is_none_or(|file| lines(&file) != lines(open)))
+        let open = self.workspace.open.get(path);
+        open.is_some_and(|open| text::read(path).is_none_or(|file| lines(&file) != lines(open)))
     }
 
     /// The working directory of dbt's processes: the project's when the
@@ -779,7 +742,7 @@ impl<W: Write> Proxy<W> {
     /// session.
     fn answer(&mut self, method: &str, id: &Value, params: &Value) {
         if capability::of(method).is_some_and(|capability| capability.wants_index) {
-            self.ask_index();
+            self.want_index(true);
         }
         let computed = panic::catch_unwind(AssertUnwindSafe(|| self.handle(method, params)));
         match computed {
@@ -788,7 +751,7 @@ impl<W: Write> Proxy<W> {
             Err(_) => self.reply_error(id, INTERNAL_ERROR, "dbt-lsp-plus failed to answer this request"),
         }
         if method == "textDocument/inlayHint" && self.workspace.index.is_none() {
-            self.ask_index();
+            self.want_index(true);
         }
     }
 
@@ -816,7 +779,7 @@ impl<W: Write> Proxy<W> {
     /// over a project that does not read.
     fn symbols(&self, params: &Value) -> Option<Answer> {
         let query = params.get("query")?.as_str()?;
-        let Some(project) = self.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
+        let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
         Some(Answer::Found(features::workspace_symbols(&project, query, ENCODING)))
     }
 
@@ -854,7 +817,7 @@ impl<W: Write> Proxy<W> {
         };
         if changes_graph(method, params, output, |uri| self.local_path(uri)) || first_open {
             self.workspace.fresh = false;
-            self.want_index();
+            self.want_index(false);
         }
     }
 
@@ -891,7 +854,7 @@ impl<W: Write> Proxy<W> {
         let index = self.workspace.index.as_ref();
         // Line 1, column 1 of a file stands for the node it defines.
         let start = params["position"] == json!({"line": 0, "character": 0});
-        let named = self.workspace.node_at(&self.open_documents(), self.document_at(params).as_ref(), start);
+        let named = self.workspace.node_at(self.document_at(params).as_ref(), start);
         let summary = index
             .zip(named.flatten())
             .map(|(index, node)| (format!("{}\n{}", index.summary(node), index.facts(node)), true));
@@ -901,13 +864,13 @@ impl<W: Write> Proxy<W> {
             let (path, scanned, offset) = self.scan_at(params, None)?;
             let name = navigation::reference_at(&path, &scanned, offset)
                 .filter(|name| matches!(name.kind, reference::Kind::Doc | reference::Kind::Test))?;
-            let project = self.project()?;
+            let project = self.workspace.project()?;
             let found = navigation::resolve(&navigation::Lookup::new(&project, index), &path, &name);
             navigation::hover(&project, &name, found.first()?, self.markdown).map(|text| (text, false))
         };
         let nothing = match (named, index) {
             (Some(_), None) => Answer::Unanswered(vec![self.workspace.unindexed()]),
-            (Some(None), Some(_)) if self.project().is_none() => Answer::Unanswered(vec![self.unreadable()]),
+            (Some(None), Some(_)) if self.workspace.project().is_none() => Answer::Unanswered(vec![self.unreadable()]),
             _ => Answer::Empty,
         };
         let found = summary.or_else(block);
@@ -920,7 +883,7 @@ impl<W: Write> Proxy<W> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let (start, end) = (params.pointer("/range/start")?, params.pointer("/range/end")?);
         let (Some(index), Some(project), Some((path, text))) =
-            (self.workspace.index.as_ref(), self.project(), self.text_of(uri))
+            (self.workspace.index.as_ref(), self.workspace.project(), self.text_of(uri))
         else {
             return Some(Answer::Empty);
         };
@@ -982,11 +945,14 @@ impl<W: Write> Proxy<W> {
     /// that reads them when their size or time changes and reports their
     /// failures to the loop.
     fn watch_runs(&mut self) {
-        let (Some(root), Some(events)) = (self.workspace.root.clone(), self.events.clone()) else { return };
+        let Some(root) = self.workspace.root.clone() else { return };
+        let events = self.events.clone();
         let target = root.join(std::env::var_os("DBT_TARGET_PATH").unwrap_or_else(|| "target".into()));
-        let stale = |found: &Value, index: &Value| Some(runs::stale(found, index));
-        let watched: [(&str, &'static str, ReadFailures); 2] =
-            [("run_results.json", runs::LAST_RUN, runs::failures), ("sources.json", runs::STALE_SOURCE, stale)];
+        // What a watched file and the manifest give: its failures, or none to keep those known.  The first
+        // entry's pointer type is the array's, to which `runs::failures` is coerced.
+        let stale: fn(&Value, &Value) -> _ = |found, index| Some(runs::stale(found, index));
+        let watched =
+            [("sources.json", runs::STALE_SOURCE, stale), ("run_results.json", runs::LAST_RUN, runs::failures)];
         for (file, code, read_failures) in watched {
             let (results, manifest, events) = (target.join(file), target.join("manifest.json"), events.clone());
             thread::spawn(move || {
@@ -1027,7 +993,7 @@ impl<W: Write> Proxy<W> {
     /// file changed since left out; each file whose failures change is
     /// published again.
     fn on_runs(&mut self, code: &str, found: Option<Vec<runs::Failure>>, written: SystemTime) {
-        let (Some(found), Some(project)) = (found, self.project()) else { return };
+        let (Some(found), Some(project)) = (found, self.workspace.project()) else { return };
         let edited = |path: &Path| {
             let saved = fs::metadata(path).and_then(|meta| meta.modified()).is_ok_and(|time| time > written);
             saved || self.diagnostics.edited.get(path).is_some_and(|time| *time > written)
@@ -1069,7 +1035,7 @@ impl<W: Write> Proxy<W> {
         let mut diagnostics = Vec::new();
         // The failures, placed in the text as it stands.
         let failures = self.diagnostics.failures.get(path).map_or(&[][..], Vec::as_slice);
-        let text = self.documents.get(path).cloned().or_else(|| text::read(path)).unwrap_or_default();
+        let text = self.workspace.text(path).unwrap_or_default();
         let lines = LineStarts::new(&text);
         let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
@@ -1136,14 +1102,13 @@ pub fn run(command: &[String]) -> ExitCode {
         let _ = reader.send(Event::ClientClosed);
     });
     let given = project_dir(command);
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), given.clone());
+    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), given.clone(), events);
     if let Some(root) = given {
         let line =
             format!("dbt-lsp-plus: project {}, dbt {}.", root.display(), locate::Located::written(command).named);
         eprintln!("{line}");
         proxy.line = Some(line);
     }
-    proxy.events = Some(events);
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
     proxy.serve(inbox);
     proxy.stop_parse();
@@ -1268,7 +1233,7 @@ mod tests {
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
-        let mut proxy = Proxy::new(Vec::new(), Some(root));
+        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
         let mut client = &proxy.client[..];
@@ -1283,8 +1248,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/orders.sql");
         let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
-        let mut proxy = Proxy::new(Vec::new(), Some(root));
-        let project = proxy.project().unwrap();
+        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let project = proxy.workspace.project().unwrap();
         let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
         assert!(Arc::ptr_eq(&scanned, &project.files[&path]), "the project's scan of the file");
         let open = "select 1";
@@ -1295,18 +1260,29 @@ mod tests {
     }
 
     #[test]
+    fn an_open_text_edited_back_before_a_request_builds_nothing_again() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let uri = features::uri(&root.join("models/marts/orders.sql"));
+        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": uri, "text": "select 1"}}));
+        let opened = proxy.workspace.project().unwrap();
+        let change = |text: &str| json!({"textDocument": {"uri": uri}, "contentChanges": [{"text": text}]});
+        proxy.track("textDocument/didChange", &change("select 2"));
+        proxy.track("textDocument/didChange", &change("select 1"));
+        // The next request's epoch, at which the cache looks at its keys.
+        proxy.workspace.epoch += 1;
+        assert!(Rc::ptr_eq(&opened, &proxy.workspace.project().unwrap()), "two edits, the text as it was");
+    }
+
+    #[test]
     fn a_node_s_information_at_a_function_s_argument_in_sql_is_empty_and_at_its_start_the_file_s() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");
         let text = "select {{ function('f') }}(1) as v";
-        let mut proxy = Proxy::new(Vec::new(), Some(root.clone()));
-        proxy.documents.insert(path.clone(), text.to_owned());
+        let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
+        proxy.workspace.open.insert(path.clone(), text.to_owned());
         assert_eq!(
-            proxy.workspace.node_at(
-                &proxy.open_documents(),
-                Some(&(path.clone(), text.to_owned(), text.find("'f'").unwrap() + 1)),
-                false
-            ),
+            proxy.workspace.node_at(Some(&(path.clone(), text.to_owned(), text.find("'f'").unwrap() + 1)), false),
             None,
             "a function's argument names no node before any parse"
         );
@@ -1368,7 +1344,7 @@ mod tests {
         };
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()));
+            let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()), mpsc::channel().0);
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
@@ -1459,8 +1435,8 @@ mod tests {
     fn a_position_that_names_nothing_is_empty_and_a_target_found_nowhere_is_found() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let proxy_on = |text: &str, path: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.clone()));
-            proxy.documents.insert(path.to_owned(), text.to_owned());
+            let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
+            proxy.workspace.open.insert(path.to_owned(), text.to_owned());
             proxy
         };
         let at = |path: &Path, character: usize| json!({"textDocument": {"uri": features::uri(path)}, "position": {"line": 0, "character": character}});

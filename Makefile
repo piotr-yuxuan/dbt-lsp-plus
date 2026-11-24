@@ -12,12 +12,15 @@ CARGO_TEST := cargo test --locked -j $(CARGO_JOBS)
 # The Python of the scripts and of their tests, some without an extension.
 PYTHON := scripts/release.py scripts/fetch-dbt scripts/check-size scripts/bench tests/tools tests/bin/fake-gh
 export PYTHONDONTWRITEBYTECODE := 1
+# The scan finds packages where dbt installs them, this variable included:
+# a developer's own leaves the tests as they are.
+unexport DBT_PACKAGES_INSTALL_PATH
 # The ceilings of src/'s production lines and types, which each plan of the
 # reduction chain lowers to its own figures.  A commit that raises one, or
 # changes how they are checked, says why in a line of its body:
 # "Raises the size ceilings: WHY".
-SIZE_LINES := 5051
-SIZE_TYPES := 76
+SIZE_LINES := 4935
+SIZE_TYPES := 68
 
 .PHONY: check check-static fmt clippy public python test-python workflows size test conformance live commits
 
