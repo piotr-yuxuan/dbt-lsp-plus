@@ -72,8 +72,8 @@ pub struct Workspace {
     /// done: nothing waits for it, and a request that comes before reads
     /// the files itself.
     filling: RefCell<Option<Receiver<Filled>>>,
-    /// The generations of the project and of the index that the graph was
-    /// made of, and the graph.
+    /// What the graph was made of, the project's generation
+    /// (`Cache::generation`) then the index's (`generation`), and the graph.
     graph: RefCell<Option<(u64, u64, Rc<Graph>)>>,
     /// How many times the index changed: the graph alone holds while this stays.
     generation: u64,
