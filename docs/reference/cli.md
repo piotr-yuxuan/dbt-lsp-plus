@@ -1,19 +1,22 @@
 # The subcommands
 
-Beside the language server, `dbt-lsp-plus` answers three questions from
+Beside the language server, `dbt-lsp-plus` answers four questions from
 a shell, without an LSP client, each on one line of compact JSON on the
-standard output:
+standard output, and serves two of them, node and lineage, to an MCP
+client:
 
 ```
 dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
 dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
 dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
+dbt-lsp-plus lineage ID [--depth N] [-- ARGUMENTS...]
+dbt-lsp-plus mcp [PATH] [-- ARGUMENTS...]
 ```
 
 A subcommand is the first word after the program's name, and nothing
 else: `dbt-lsp-plus -- doctor` starts a server whose command is
 `doctor`.  A server command whose first word is a subcommand's name
-(`doctor`, `select` or `node`) follows `--`.
+(`doctor`, `select`, `node`, `lineage` or `mcp`) follows `--`.
 
 ARGUMENTS are the server's own command line, as an editor or `.lsp.json`'s
 `args` give it: `--` and the server command, `dbt lsp` by default
@@ -30,7 +33,8 @@ in [the features](features.md#the-arguments).
 ## The project and its dbt
 
 Each subcommand finds the project and its dbt as the server does, from
-a path: doctor's PATH, node's PATH, else the current directory:
+a path: doctor's PATH, node's PATH, else the current directory, which
+mcp's PATH makes its own:
 
 - **given**: the server command names `--project-dir`; the project is
   that directory, made absolute, when it holds `dbt_project.yml`, and
@@ -210,8 +214,95 @@ Exit status: 0 when `error` is `null`; 1 otherwise; 2 for a usage error.
 The answer has no time and no parse's id: the manifest kept is that of
 the files as they lie.
 
+## `lineage ID [--depth N]`
+
+The nodes up and down from the node that the unique id ID names in the
+project of the current directory, within N hops, N a whole number from
+1; without `--depth`, every hop, as dbt's `+model+`:
+
+```
+{"error":null,"lineage":{"downstream":{},"upstream":{"model.shop.stg_orders":1,"source.shop.raw.customers":2}}}
+```
+
+`upstream` follows `depends_on.nodes`, `downstream` the nodes that depend
+on it, each a map of unique id to its fewest hops, ID in neither.  What
+a test tests is upstream of the test, and a test is in no node's
+downstream, as in node's `children`: a model's lineage lists none of its
+tests.  Only the enabled nodes of the last manifest count.
+
+The nodes are those of node's index: the manifest kept for the files as
+they lie, else a parse, waited for, kept when it does not fail.  On a
+failure, `lineage` is `null`, or found beside the failure of the last
+parse that still wrote a manifest, and `error` says why, as node's does:
+`<ID> names no node`, for an id that names no enabled node of the last
+manifest, a disabled or a deleted one included; a parse that failed or
+was refused; no project.  A `--depth` that is no whole number from 1 is
+refused with ``lineage needs a string `id`, and a `depth`, if any, a
+whole number from 1``.
+
+Exit status: 0 when `error` is `null`; 1 otherwise; 2 for a usage error.
+
+## `mcp [PATH]`
+
+An MCP server on the standard input and output, one JSON-RPC message a
+line, whose tools are node and lineage: each call answers as the
+subcommand does from a shell.  PATH, `.` by default, becomes the
+server's working directory, from which the tools find the project and
+read a place's PATH, and from which a relative path in the server
+command after `--` is read, as `.venv/bin/dbt`, where node from a shell
+reads it from the directory it runs in.  A client's configuration names
+it as any stdio server:
+
+```json
+{"command": "dbt-lsp-plus", "args": ["mcp"]}
+```
+
+It speaks MCP's legacy era, which a client opens with `initialize`: the
+version agreed is the latest of 2025-11-25, 2025-06-18 and 2024-11-05
+that is not after the client's, so that a client asking 2025-03-26 gets
+2024-11-05; a client asking none, or one before them all, gets
+2025-11-25.  Then `ping`, `tools/list` and `tools/call`
+are answered, whether `initialize` came or not; a notification gets
+nothing.  The errors:
+
+- -32601 `no method METHOD`, for any other method, `server/discover`
+  included, on which a client of both eras falls back to `initialize`;
+- -32602 `no tool NAME`, for a call of a tool that is not one;
+- -32700 `a line that is no JSON`, with a null id, for a line that does
+  not parse, UTF-8 or not; the lines after it are read as before.
+
+A request is answered under its id as sent, a string or any number.  The
+tools are the rows of the subcommands that are tools: `node`, with the
+string argument `node`, node's operand, and `lineage`, with the string
+argument `id` and the integer argument `depth`, from 1, every hop
+without it.  `tools/list` gives each with its description and input
+schema.  A call's result is one text content, the subcommand's answer,
+`{"error": E, "node": N}` or `{"error": E, "lineage": L}`, and `isError`,
+true where the subcommand's exit status would be 1: an answer found
+beside the last parse's failure is one.  Arguments that do not read are
+refused in the answer, before anything runs.
+
+Each call costs what the subcommand costs from a shell: `git rev-parse`
+once and the dbt's `lsp --help` probe, the scan of the project's files,
+the kept manifest read; after a change to those files, a whole parse;
+on a project whose parse fails, a whole parse at every call, up to its
+deadline of 120 s, since a failure keeps no manifest.  The requests are
+answered one at a time, in order: a call that waits for a parse holds
+those after it, `ping` included.  A client whose tool timeout is shorter
+than a parse gives up on the call.
+
+A PATH that is no directory is written on the standard error, as
+`dbt-lsp-plus: PATH: WHY`, with status 1, and nothing on the standard
+output.  The server ends with status 0 when its input ends, and with
+status 1 when its input cannot be read.  On SIGINT,
+as a client stops it, it ends at once: a parse under way runs on to its
+own end, unwatched, and its run directory stays until the next
+subcommand or server on the project removes it a day later.
+
 ## The standard error
 
 Nothing is written there but a usage error, which ends with status 2 and
-the subcommand's usage; the answer is always the one line of the standard
-output, with `error` when something is missing or failed.
+the subcommand's usage, and mcp's PATH that is no directory, with status
+1.  The answer of each subcommand but mcp is always the one line of the
+standard output, with `error` when something is missing or failed; mcp
+writes there a line per request, its tools' answers with `error` alike.

@@ -7,7 +7,7 @@
 use crate::project::ResourceType;
 use crate::run::{self, Ending, Output, Problem, Run, Running};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -290,6 +290,39 @@ impl ParseIndex {
             let parents = node.pointer("/depends_on/nodes").and_then(Value::as_array).into_iter().flatten();
             (node, parents.filter_map(Value::as_str).collect())
         })
+    }
+
+    /// `{"upstream": {ID: HOPS}, "downstream": {ID: HOPS}}`: the nodes up and
+    /// down from the node ID within DEPTH hops, as `dependencies` reads the
+    /// graph, each at its fewest hops, ID in neither; what a test tests is
+    /// upstream of it, and a test is in no node's downstream, as in
+    /// `children`.  None
+    /// when ID names no enabled node of the last manifest, as a disabled or
+    /// a deleted one.  No walk is longer than the index, whatever DEPTH.
+    pub fn lineage(&self, id: &str, depth: usize) -> Option<Value> {
+        let (mut up, mut down) = (HashMap::new(), HashMap::<&str, Vec<&str>>::new());
+        for (node, parents) in self.dependencies() {
+            let child = node["unique_id"].as_str().unwrap_or_default();
+            if node["resource_type"] != "test" {
+                parents.iter().for_each(|parent| down.entry(*parent).or_default().push(child));
+            }
+            up.insert(child, parents);
+        }
+        up.get(id)?;
+        let walk = |next: &HashMap<&str, Vec<&str>>| {
+            let (mut reached, mut frontier) = (BTreeMap::from([(id, 0)]), vec![id]);
+            for hops in 1..=depth.min(self.nodes.len()) {
+                for found in std::mem::take(&mut frontier).iter().flat_map(|at| next.get(at).into_iter().flatten()) {
+                    if !reached.contains_key(found) {
+                        reached.insert(*found, hops);
+                        frontier.push(*found);
+                    }
+                }
+            }
+            reached.remove(id);
+            json!(reached)
+        };
+        Some(json!({"upstream": walk(&up), "downstream": walk(&down)}))
     }
 
     /// The enabled models, seeds and snapshots of the last manifest named
@@ -710,6 +743,55 @@ mod tests {
         // A failed parse's manifest, laid over, lacks b, which the index keeps.
         index.overlay(ParseIndex::of(&json!({"nodes": {"model.shop.a": a, "model.shop.ab": ab, "test.shop.t": t}})));
         assert_eq!(index.children("model.shop.a"), ["model.shop.ab"]);
+    }
+
+    #[test]
+    fn a_node_s_lineage_is_each_node_up_and_down_at_its_fewest_hops_within_a_depth() {
+        let node = |id: &str, depends_on: &[&str]| {
+            let (kind, name) = (id.split('.').next().unwrap(), id.rsplit('.').next().unwrap());
+            json!({"unique_id": id, "name": name, "resource_type": kind, "package_name": "shop",
+                   "depends_on": {"nodes": depends_on}})
+        };
+        let (o, s, a, b, c, t, z) = (
+            "source.shop.raw.o",
+            "model.shop.s",
+            "model.shop.a",
+            "model.shop.b",
+            "model.shop.c",
+            "test.shop.t",
+            "seed.shop.z",
+        );
+        // c depends on b, then on a, b's parent: from o, c lies at 3 hops through a, not 4 through b, which a
+        // walk depth first in that order would give.
+        let manifest = json!({
+            "nodes": {s: node(s, &[o]), a: node(a, &[s]), b: node(b, &[a]), c: node(c, &[b, a]), t: node(t, &[c]),
+                      z: node(z, &[])},
+            "sources": {o: node(o, &[])},
+            "disabled": {"model.shop.d": [node("model.shop.d", &[c])]}});
+        let index = ParseIndex::of(&manifest);
+        let asked =
+            [(a, 9), (a, 1), (a, usize::MAX), (o, 9), (o, 2), (t, 9), (z, 9), ("model.shop.x", 9), ("model.shop.d", 9)];
+        let both = |upstream: Value, downstream: Value| Some(json!({"upstream": upstream, "downstream": downstream}));
+        let expected = [
+            both(json!({s: 1, o: 2}), json!({b: 1, c: 1})),
+            both(json!({s: 1}), json!({b: 1, c: 1})),
+            both(json!({s: 1, o: 2}), json!({b: 1, c: 1})),
+            both(json!({}), json!({s: 1, a: 2, b: 3, c: 3})),
+            both(json!({}), json!({s: 1, a: 2})),
+            both(json!({c: 1, a: 2, b: 2, s: 3, o: 4}), json!({})),
+            both(json!({}), json!({})),
+            None,
+            None,
+        ];
+        // Each question beside its answer, so that a failure names it.
+        let found: Vec<_> = asked.iter().map(|&(id, depth)| ((id, depth), index.lineage(id, depth))).collect();
+        assert_eq!(found, asked.into_iter().zip(expected).collect::<Vec<_>>());
+        // At one hop, the downstream is `children`, c's test aside in both.
+        for id in [o, s, a, b, c, t, z] {
+            let near: Vec<String> =
+                index.lineage(id, 1).unwrap()["downstream"].as_object().unwrap().keys().cloned().collect();
+            assert_eq!(near, index.children(id), "{id}");
+        }
     }
 
     #[test]

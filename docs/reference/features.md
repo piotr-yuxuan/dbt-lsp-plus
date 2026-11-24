@@ -137,8 +137,8 @@ option is a usage error: the reason and the usage on standard error,
 exit status 2, nothing started.
 
 - `--`: ends dbt-lsp-plus's own arguments; needed only before a server
-  command that starts with a dash, or whose first word is `doctor`,
-  `select` or `node`, which [name a subcommand](cli.md).
+  command that starts with a dash, or whose first word names a
+  subcommand ([the subcommands](cli.md)).
 - `-h`, `--help`: prints the usage and exits.
 - `-V`, `--version`: prints `dbt-lsp-plus X.Y.Z` and exits.
 
