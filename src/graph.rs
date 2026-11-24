@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The dependency graph of a project: which resource calls which.
 //!
-//! The edges between nodes come from the manifest of the last `dbt parse`
+//! The edges between nodes come from the index of the last `dbt parse`
 //! once there is one, since only dbt resolves a `ref(var('x'))`; before,
 //! from the scan of the files, each call looked up by `navigation::Lookup`.
-//! A manifest's edges to macros are transitive, so the edges to and from
+//! The index's edges to macros are transitive, so the edges to and from
 //! macros always come from the scan.
 
 use crate::config::ParseIndex;
