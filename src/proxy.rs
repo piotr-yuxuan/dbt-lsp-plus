@@ -1260,6 +1260,21 @@ mod tests {
     }
 
     #[test]
+    fn an_open_text_edited_back_before_a_request_builds_nothing_again() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
+        let uri = features::uri(&root.join("models/marts/orders.sql"));
+        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": uri, "text": "select 1"}}));
+        let opened = proxy.workspace.project().unwrap();
+        let change = |text: &str| json!({"textDocument": {"uri": uri}, "contentChanges": [{"text": text}]});
+        proxy.track("textDocument/didChange", &change("select 2"));
+        proxy.track("textDocument/didChange", &change("select 1"));
+        // The next request's epoch, at which the cache looks at its keys.
+        proxy.workspace.epoch += 1;
+        assert!(Rc::ptr_eq(&opened, &proxy.workspace.project().unwrap()), "two edits, the text as it was");
+    }
+
+    #[test]
     fn a_node_s_information_at_a_function_s_argument_in_sql_is_empty_and_at_its_start_the_file_s() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");

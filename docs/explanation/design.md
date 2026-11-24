@@ -480,8 +480,10 @@ none, the server answers `initialize` before it can know it.
   empty; one that cannot be read counts as empty too, and is tried again
   at the next request.  A seed is found but never read, open or not.  An
   open document is known by a hash of its text, since a client's version
-  starts again at each open; a text edited back to what it was reuses its
-  scan.  No file event is needed: a client may watch nothing.
+  starts again at each open: a text edited back to what it was before the
+  next request reads the project builds nothing again.  The cache keeps
+  one scan per file, so a request in between makes the text read again.
+  No file event is needed: a client may watch nothing.
   - When no file changed, nor any package's name and paths, which each
     `dbt_project.yml` gives and the walk reads again, the request shares
     the last project.  Otherwise the project is assembled again from the
