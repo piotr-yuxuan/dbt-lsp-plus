@@ -50,9 +50,9 @@ watchers of the last run report to it from threads of their own.
   status 1.  The first scan, the watcher of runs, the watcher of files
   and the line that names the project start once `initialized` comes.  A
   second `initialize` gets -32601, as a name with no row.  The answer
-  holds the capability of each method of
-  `CAPABILITIES` (see "Capabilities"), saves, which start a parse, and
-  the commands `dbt-lsp-plus.nodeInfo`, `dbt-lsp-plus.compile` and
+  holds an object written beside `CAPABILITIES` (see "Capabilities"): a
+  provider for each method but the call hierarchy's followers, saves,
+  which start a parse, and the commands `dbt-lsp-plus.nodeInfo`, `dbt-lsp-plus.compile` and
   `dbt-lsp-plus.nodes`.  `initializationOptions` is not read.  Positions
   are in UTF-16, LSP's default, which the server keeps by announcing no
   `positionEncoding`.
@@ -116,11 +116,12 @@ its own form.
 
 Each method the server answers has a capability (`src/capability.rs`,
 plan 042): one descriptor per method or command for clients, which says
-the capability that announces it, whether its nothing is `[]`, whether
-it wants the parse's index, and whether it reads the project.  The
-capabilities announced, the commands listed and the reference's table
-of methods and commands all come from that one table, and a unit test
-holds the reference's table to it.  The command line takes `-h` and
+whether its nothing is `[]`, whether it wants the parse's index, and
+whether it reads the project.  Routing and the reference's table of
+methods and commands come from that one table, and a unit test holds the
+reference's table to it.  The object announced is written beside it
+(plan 083); a unit test holds its providers to the method rows and its
+commands to the command rows.  The command line takes `-h` and
 `-V` alone; any other option is a usage error.
 
 ## Commands for clients
