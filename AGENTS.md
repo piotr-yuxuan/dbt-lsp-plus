@@ -60,7 +60,7 @@ src/locate.rs                 the project of a document, and whether a document 
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries; what a request gets, found, empty, or unanswered with its reasons
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
-src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell, on the server's resolution
+src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell; the project on the server's routes by its own resolution, its dbt by the server's
 tests/proxy.rs                the binary with the fake dbt
 tests/proxy/live.rs           the binary with the real dbt, either build, opt-in
 tests/proxy/commands.rs       the commands for clients, by the fake dbt's CLI

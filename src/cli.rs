@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The command line: the server's arguments, and the subcommands,
 //! `doctor`, `select` and `node`, what an agent in a shell asks without an
-//! LSP client, each answered on one line of compact JSON.  The project and
-//! its dbt are found as the server finds them.
+//! LSP client, each answered on one line of compact JSON.  The project is
+//! found on the server's routes by `locate::project`, the CLI's own; its
+//! dbt by `locate::dbt_of`, which the server shares.
 
 use crate::locate;
 use crate::text::{self, Encoding, LineStarts};
@@ -15,8 +16,9 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
-/// A subcommand: its name, its usage, its operand, and its run, which from its operand and the server command gives its answer
-/// and whether it worked.
+/// A subcommand: its name, its usage, its operand, and its run, which
+/// from its operand and the server command gives its answer and whether
+/// it worked.
 pub struct Row {
     name: &'static str,
     usage: &'static str,
@@ -108,10 +110,10 @@ enum Asked {
     },
 }
 
-/// What WORDS, after ROW's name, ask: its usage, by `-h` or
-/// `--help` first, whatever follows; else its operand, or the row's
-/// default, then, after `--`, the server's
-/// arguments, as `arguments` reads them.  Or why they cannot be read.
+/// What WORDS, after ROW's name, ask: its usage, by `-h` or `--help`
+/// first, whatever follows; else its operand, or the row's default, then,
+/// after `--`, the server's arguments, as `arguments` reads them.  Or why
+/// they cannot be read.
 fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
         && (first == "-h" || first == "--help")
