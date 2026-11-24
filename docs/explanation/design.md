@@ -92,8 +92,9 @@ unanswered, with its reasons.  A target that resolves to nothing is
 found, a definition's null or references' `[]`; a position that names no
 target is empty, for a definition, references and the call hierarchy
 alike; nodeInfo by an id that names no node is empty.  LSP renders found
-and empty alike; a rendering that tells them apart (plan 052) reads only
-empty as nothing to look up.  An unanswered request is error -32803
+and empty alike; a rendering that tells them apart
+(`workspace::reply`, for node and lineage) reads only empty as nothing
+to look up.  An unanswered request is error -32803
 whose message is its reasons, joined by `; `, as nodeInfo's has been
 since plan 038.  The protocol's own errors (-32600, -32601, -32602,
 -32603) say that the request is wrong or unknown, or that the server
@@ -1035,8 +1036,8 @@ scope and string values are rendered.
   has finished; after that, the last index answers, and a later failure is
   only logged.  A position names the call under it in SQL inside Jinja, and
   in YAML or a Python model outside it.  nodeInfo, the subcommand `node`
-  and MCP ask one query of the core, `Workspace::node`.  MCP comes with
-  plan 052.
+  and MCP ask one query of the core, `Workspace::node`.  MCP's tool
+  `node` is the subcommand's row.
 - A hover on a `ref` or `source` argument, an entry's `name:` in YAML, or
   at position 0:0 (line 1, column 1) of a file that defines one node,
   which stands for that node as nodeInfo's position does, a YAML file
@@ -1119,8 +1120,9 @@ The server, from its parse:
 
 ## The CLI
 
-`doctor`, `select` and `node` (`src/cli.rs`, `docs/reference/cli.md`)
-answer an agent in a shell, without an LSP client.  A subcommand is the command
+`doctor`, `select`, `node`, `lineage` and `mcp` (`src/cli.rs`,
+`docs/reference/cli.md`) answer an agent in a shell, without an LSP
+client, and mcp serves node and lineage to an MCP client.  A subcommand is the command
 line's first word and nothing else, so that every command line that
 starts the server, `--` first or an option first, keeps its meaning; a
 second binary would be one more file to install, put on a harness's
@@ -1165,6 +1167,33 @@ second binary would be one more file to install, put on a harness's
   may remove the other's newer manifest, and the next parses again.  Its
   answer is `workspace::reply`'s: the node, or `error` with nodeInfo's
   reasons, the parse's failure in place of `dbt parse has not finished`.
+- **lineage is node's index walked.**  `ParseIndex::lineage` reads the
+  graph as `children` does, from `dependencies`, and walks it up and down
+  breadth first, each node at its fewest hops, on node's Workspace and
+  index, through `cli::answered`, which both share.
+- **one table for the CLI and MCP**.  Each subcommand is a row of
+  `SUBCOMMANDS`: its name, its usage, its operand's name with its default
+  or need, its option of a whole number `--NAME N`, its tool's
+  description where MCP serves it, and its run from arguments.  The
+  words of a shell become arguments (`{"id": "model.shop.a", "depth":
+  2}`), a tool's call hands its `arguments` to the same run, and
+  `tools/list` is the rows with a description, each operand a required
+  string, each option an integer from 1.  So node and lineage are one row
+  each, and a tool and its subcommand cannot drift apart.
+- **mcp is the rows' tools over MCP's legacy era**.  PATH becomes the
+  process's working directory, once, before any thread or child, so that
+  each tool finds the project as from a shell.  Each line is one
+  JSON-RPC message read with `serde_json::Value` alone: `lsp-server`'s
+  `RequestId` takes no id past 2^31 - 1, and its types need no -32700 with
+  a null id.  `initialize` agrees on 2025-11-25, 2025-06-18 or
+  2024-11-05; every other method, `server/discover` included, is -32601,
+  on which Claude Code falls back to `initialize`.  Each call is the
+  CLI's run, fresh before fast: its answer is that of the files as they
+  lie when asked, so that an agent that just edited a model is never
+  answered from before its edit, at the cost of the scan and the kept
+  manifest read at every call, and a whole parse after a change; the
+  last index is not kept between calls.  Requests are served one at a
+  time.
 - **The answers' form.**  One line of compact JSON, whatever the outcome,
   with `error` when something is missing or failed; nothing on the
   standard error but a usage error, status 2.  No answer has a time or a
@@ -1173,9 +1202,43 @@ second binary would be one more file to install, put on a harness's
   provider.
 
 Left for later: fields, limits and paging for `select`, and a fast path
-over the manifest that node keeps, checked against dbt (plan 058);
-`lineage` (plan 052); the profile and the target in doctor, which need
-`dbt debug` and the warehouse.
+over the manifest that node keeps, checked against dbt (plan 058); the
+profile and the target in doctor, which need `dbt debug` and the
+warehouse; MCP's current era, 2026-07-28 (`server/discover`, requests
+without a handshake, `resultType`, the caching fields), once a client
+needs it; the last index while a parse runs, with a stamp of its age;
+`notifications/cancelled`, a stop of a parse on SIGINT, and MCP over
+HTTP.
+
+### What Claude Code does with an MCP server, observed on 2.1.317
+
+In a scratch `HOME` and configuration, on 2026-11-23:
+
+- P1: before `initialize`, it sends `{"jsonrpc": "2.0", "id":
+  "server-discover-probe-1", "method": "server/discover", "params":
+  {"_meta": {"protocolVersion": "2026-07-28"}}}`; answered -32601, it
+  sends `initialize` 3 ms later.
+- P2: `initialize` asks 2025-11-25; an answer of 2025-11-25, 2025-06-18
+  or 2024-11-05 connects, 2099-01-01 fails.
+- P3: `tools/call` carries `_meta` beside `name` and `arguments`.
+- P4: the model gets a text content as written, and `structuredContent`
+  in its place when both come; mcp sends text alone.
+- P5: a call answered after 75 s was waited for.
+- P6: the server runs in the session's directory and is ended by SIGINT,
+  its input still open.
+
+On 2.1.330, on 2026-11-24 (plan 052's probe, `claude mcp add --scope
+user dbt` and `claude mcp list` in a scratch `HOME` and
+`CLAUDE_CONFIG_DIR`, then one `-p` run offline against a scripted
+Messages API): `mcp list` says `Connected`; the server's input holds
+`server/discover`, whose `_meta` keys now carry the prefix
+`io.modelcontextprotocol/` (`io.modelcontextprotocol/protocolVersion`
+2026-07-28, with `clientInfo` and `clientCapabilities`), then
+`initialize` asking 2025-11-25 with the id 0, `notifications/initialized`
+and `tools/list`; the `-p` run adds a `tools/call` of `node`, whose
+`_meta` holds `claudecode/toolUseId` and `progressToken`.  The tool is
+deferred: the model loads `mcp__dbt__node` with ToolSearch first.  The
+model got the node's answer as the text content, word for word.
 
 ## Failure modes
 

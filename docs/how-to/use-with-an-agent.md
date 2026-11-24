@@ -158,14 +158,18 @@ each node as `dbt list` prints it.  `dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]]` 
 nodeInfo gives of the node that a unique id names, in the project of the
 current directory, or that a place in a file names, as
 `{"error":null,"node":{...}}`, the node with its `summary` and its
-`children`, the unique ids of the enabled nodes that depend on it.  Its
-first run in a project runs a `dbt parse` and keeps its manifest; the
-next runs read it, while the project's files stay as they were.  Like the
+`children`, the unique ids of the enabled nodes that depend on it.
+`dbt-lsp-plus lineage ID [--depth N]` gives the nodes up and down from
+the node ID, within N hops, every hop without `--depth`, as
+`{"error":null,"lineage":{"upstream":{...},"downstream":{...}}}`, each a
+map of unique id to its fewest hops.  The first run of node or lineage
+in a project runs a `dbt parse` and keeps its manifest; the next runs
+read it, while the project's files stay as they were.  Like the
 server's, that parse adds the line `dbt_internal_packages/` to a
 `.gitignore` of the project that lacks it, as dbt 2 does.  doctor
-exits 0 when it finds
-a project and a dbt 2, select and node when `error` is null; 1
-otherwise; 2 for a usage error ([the subcommands](../reference/cli.md)).
+exits 0 when it finds a project and a dbt 2, select, node and lineage
+when `error` is null; 1 otherwise; 2 for a usage error ([the
+subcommands](../reference/cli.md)).
 
 From a repository's root over `dbt/`, doctor on a model's file gave
 `"route":"document"` and `"source":"the project's .venv"`, and with no
@@ -183,9 +187,9 @@ current directory: it failed with `no profiles.yml found` where
 `profiles.yml` is in `dbt/`.
 
 Allow them, in `--allowedTools` or the settings' permissions, as
-`Bash(dbt-lsp-plus doctor:*)`, `Bash(dbt-lsp-plus select:*)` and
-`Bash(dbt-lsp-plus node:*)`; without them, Claude Code answers `This
-command requires approval`.
+`Bash(dbt-lsp-plus doctor:*)`, `Bash(dbt-lsp-plus select:*)`,
+`Bash(dbt-lsp-plus node:*)` and `Bash(dbt-lsp-plus lineage:*)`; without
+them, Claude Code answers `This command requires approval`.
 
 ## When nothing answers
 
@@ -239,15 +243,27 @@ dbt ... (the project's .venv)`.
 
 ## Codex and other harnesses
 
-Codex takes MCP servers, not language servers: an LSP-to-MCP bridge runs
-dbt-lsp-plus behind it, declared in `~/.codex/config.toml`:
+`dbt-lsp-plus mcp` serves node and lineage as MCP tools, each call
+answered as the subcommand answers it from a shell, from the server's
+directory ([`mcp [PATH]`](../reference/cli.md#mcp-path)).  Codex
+declares it in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.dbt]
-command = "<the bridge>"
-args = ["<the bridge's flags>", "dbt-lsp-plus"]
+command = "dbt-lsp-plus"
+args = ["mcp"]
+tool_timeout_sec = 180
+```
+
+A call after a change to the project's files waits for a `dbt parse`: a
+client whose tool timeout is 60 s by default, as Codex's, may give up on
+it, hence the longer timeout above.  In Claude Code, beside the plugin:
+
+```
+claude mcp add dbt -- dbt-lsp-plus mcp
 ```
 
 A harness with a setting for language servers takes the command and the
-files above: `.sql` as `sql`, `.yml` and `.yaml` as `yaml`.  One that
-takes MCP servers only takes a bridge, as Codex does.
+files above: `.sql` as `sql`, `.yml` and `.yaml` as `yaml`.  For the
+language server's features, in a harness that takes MCP servers only, an
+LSP-to-MCP bridge runs dbt-lsp-plus behind it.
