@@ -120,8 +120,9 @@ whether its nothing is `[]`, whether it wants the parse's index, and
 whether it reads the project.  Routing and the reference's table of
 methods and commands come from that one table, and a unit test holds the
 reference's table to it.  The object announced is written beside it
-(plan 083); a unit test holds its providers to the method rows and its
-commands to the command rows.  The command line takes `-h` and
+(plan 083); a unit test holds its providers, each offered, to a list of
+their names and to the number of method rows, and its commands to the
+command rows.  The command line takes `-h` and
 `-V` alone; any other option is a usage error.
 
 ## Commands for clients

@@ -2,7 +2,8 @@
 //! What a session offers: one descriptor per method or command.  Routing
 //! and the reference's table of methods and commands come from
 //! `CAPABILITIES`; what a session announces is written beside it, and a
-//! unit test holds it to the rows.
+//! unit test holds its providers to their names and to the number of
+//! method rows, and its commands to the command rows.
 
 use crate::commands::{COMPILE, NODES};
 use crate::config::NODE_INFO;
@@ -90,10 +91,33 @@ mod tests {
     #[test]
     fn a_provider_is_announced_for_each_method_but_the_call_hierarchy_s_followers() {
         let announced = announced();
-        let providers = announced.as_object().unwrap().keys();
-        let providers = providers.filter(|key| key.ends_with("Provider") && *key != "executeCommandProvider");
+        let mut providers: Vec<&str> = announced
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter_map(|(key, value)| {
+                let offered = *value == json!(true) || value.is_object();
+                (key.ends_with("Provider") && key != "executeCommandProvider" && offered).then_some(key.as_str())
+            })
+            .collect();
+        providers.sort_unstable();
+        let mut expected = [
+            "documentSymbolProvider",
+            "workspaceSymbolProvider",
+            "callHierarchyProvider",
+            "foldingRangeProvider",
+            "documentHighlightProvider",
+            "selectionRangeProvider",
+            "hoverProvider",
+            "inlayHintProvider",
+            "definitionProvider",
+            "referencesProvider",
+            "renameProvider",
+        ];
+        expected.sort_unstable();
+        assert_eq!(providers, expected);
         let methods = CAPABILITIES.iter().filter(|c| !c.is_command() && !c.name.starts_with("callHierarchy/"));
-        assert_eq!(providers.count(), methods.count());
+        assert_eq!(providers.len(), methods.count());
         let commands: Vec<&str> = CAPABILITIES.iter().filter(|c| c.is_command()).map(|c| c.name).collect();
         assert_eq!(announced["executeCommandProvider"]["commands"], json!(commands));
     }

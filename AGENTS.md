@@ -131,8 +131,9 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     `on_parsed` stay dispatches; `Proxy::on_initialize`: the result of
     the crate's handshake, apart from `run`;
   - `capability::announced`: what a session announces, written out beside
-    `CAPABILITIES`, its providers and commands held to the rows by a unit
-    test, apart from `on_initialize`'s result;
+    `CAPABILITIES`, its providers held by a unit test to their names and
+    to the number of method rows, its commands to the command rows, apart
+    from `on_initialize`'s result;
   - `config::anchored`: the server command's relative paths made the
     server's directory's, apart from where dbt then runs, with tests of
     its own;
