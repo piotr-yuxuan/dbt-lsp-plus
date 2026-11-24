@@ -549,7 +549,7 @@ fn apply(changes: &serde_json::Map<String, Value>) {
         });
         for edit in edits {
             let change = json!({"range": edit["range"], "text": edit["newText"]});
-            dbt_lsp_plus::text::apply_change(&mut text, &change, dbt_lsp_plus::text::Encoding::Utf16);
+            dbt_lsp_plus::text::apply_change(&mut text, &change);
         }
         std::fs::write(&path, text).unwrap();
     }

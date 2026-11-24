@@ -9,7 +9,7 @@ use crate::project::{Entity, Project};
 use crate::properties;
 use crate::reference;
 use crate::scan::{self, Kind, Symbol};
-use crate::text::{Encoding, LineStarts};
+use crate::text::LineStarts;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -57,14 +57,14 @@ pub fn uri(path: &Path) -> String {
 }
 
 /// Closes the innermost open symbol of STACK into its parent, or into ROOTS.
-fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, starts: &LineStarts, encoding: Encoding) {
+fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, starts: &LineStarts) {
     let Some((symbol, children)) = stack.pop() else { return };
     let value = json!({
         "name": symbol.name,
         "detail": symbol.detail,
         "kind": symbol.kind,
-        "range": starts.range(symbol.range.start, symbol.range.end, encoding),
-        "selectionRange": starts.range(symbol.name_range.start, symbol.name_range.end, encoding),
+        "range": starts.range(symbol.range.start, symbol.range.end),
+        "selectionRange": starts.range(symbol.name_range.start, symbol.name_range.end),
         "children": children,
     });
     match stack.last_mut() {
@@ -76,7 +76,7 @@ fn close(stack: &mut Vec<(Outlined, Vec<Value>)>, roots: &mut Vec<Value>, starts
 /// The outline of TEXT: the entries of a properties file for YAML, else
 /// its blocks and CTEs; `DocumentSymbol`s nested by extent, or, for a
 /// client without hierarchical support, `SymbolInformation`s at URI.
-pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri: &str) -> Value {
+pub fn document_symbols(text: &str, hierarchical: bool, uri: &str) -> Value {
     let starts = LineStarts::new(text);
     let contains = |outer: &Outlined, inner: &Outlined| {
         outer.range.start <= inner.range.start && inner.range.end <= outer.range.end
@@ -107,10 +107,10 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
     let mut flat = Vec::new();
     for symbol in symbols {
         while stack.last().is_some_and(|(open, _)| !contains(open, &symbol)) {
-            close(&mut stack, &mut roots, &starts, encoding);
+            close(&mut stack, &mut roots, &starts);
         }
         let container = stack.last().map(|(open, _)| open.name.clone());
-        let location = json!({"uri": uri, "range": starts.range(symbol.range.start, symbol.range.end, encoding)});
+        let location = json!({"uri": uri, "range": starts.range(symbol.range.start, symbol.range.end)});
         let mut information = json!({"name": symbol.name, "kind": symbol.kind, "location": location});
         if let Some(container) = container {
             information["containerName"] = json!(container);
@@ -119,7 +119,7 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
         stack.push((symbol, Vec::new()));
     }
     while !stack.is_empty() {
-        close(&mut stack, &mut roots, &starts, encoding);
+        close(&mut stack, &mut roots, &starts);
     }
     Value::Array(if hierarchical { roots } else { flat })
 }
@@ -129,7 +129,7 @@ pub fn document_symbols(text: &str, encoding: Encoding, hierarchical: bool, uri:
 /// `SymbolInformation`s: dbt's unique id as container, which begins with
 /// the resource type and the package and which clients show, and the id
 /// and resource type as data.
-pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> Value {
+pub fn workspace_symbols(project: &Project, query: &str) -> Value {
     let query = query.to_lowercase();
     let matches = |name: &str| {
         let mut chars = name.chars().flat_map(char::to_lowercase);
@@ -143,7 +143,7 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
         symbols.push(json!({
             "name": entity.shown(),
             "kind": Type::named(entity.resource_type).symbol,
-            "location": {"uri": uri(&entity.path), "range": starts.range(entity.name_range.start, entity.name_range.end, encoding)},
+            "location": {"uri": uri(&entity.path), "range": starts.range(entity.name_range.start, entity.name_range.end)},
             "containerName": entity.id,
             "data": {"uniqueId": entity.id, "resourceType": entity.resource_type},
         }));
@@ -152,15 +152,15 @@ pub fn workspace_symbols(project: &Project, query: &str, encoding: Encoding) -> 
 }
 
 /// The `CallHierarchyItem` of ITEM.
-fn hierarchy_item(item: &Entity, project: &Project, encoding: Encoding) -> Value {
+fn hierarchy_item(item: &Entity, project: &Project) -> Value {
     let starts = LineStarts::new(project.text(&item.path).unwrap_or_default());
     json!({
         "name": item.shown(),
         "kind": Type::named(item.resource_type).symbol,
         "detail": item.id,
         "uri": uri(&item.path),
-        "range": starts.range(item.range.start, item.range.end, encoding),
-        "selectionRange": starts.range(item.name_range.start, item.name_range.end, encoding),
+        "range": starts.range(item.range.start, item.range.end),
+        "selectionRange": starts.range(item.name_range.start, item.name_range.end),
         "data": {"uniqueId": item.id, "resourceType": item.resource_type},
     })
 }
@@ -168,13 +168,7 @@ fn hierarchy_item(item: &Entity, project: &Project, encoding: Encoding) -> Value
 /// The item at OFFSET of the file at PATH: the resource that a call there
 /// names, else the innermost resource defined there; none where the
 /// position names neither.
-pub fn prepare_call_hierarchy(
-    project: &Project,
-    graph: &Graph,
-    path: &Path,
-    offset: usize,
-    encoding: Encoding,
-) -> Option<Value> {
+pub fn prepare_call_hierarchy(project: &Project, graph: &Graph, path: &Path, offset: usize) -> Option<Value> {
     let in_file = |id: &str| graph.items.get(id).is_some_and(|item| item.path == path);
     let at = |site: &Range<usize>| site.start <= offset && offset <= site.end;
     let called = graph.edges.iter().find(|((from, _), sites)| in_file(from) && sites.iter().any(at));
@@ -186,17 +180,17 @@ pub fn prepare_call_hierarchy(
         around.min_by_key(|item| (item.range.len(), item.id.clone()))
     };
     let item = called.map(|((_, to), _)| &graph.items[to]).or_else(defined)?;
-    Some(json!([hierarchy_item(item, project, encoding)]))
+    Some(json!([hierarchy_item(item, project)]))
 }
 
 /// The calls of an item: those that call ID when INCOMING, else those ID makes.
-pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool, encoding: Encoding) -> Value {
+pub fn calls(project: &Project, graph: &Graph, id: &str, incoming: bool) -> Value {
     let edges = graph.edges.iter().filter(|((from, to), _)| if incoming { to == id } else { from == id });
     let answer = edges.map(|((from, to), sites)| {
         let (other, key) = if incoming { (from, "from") } else { (to, "to") };
         let starts = LineStarts::new(project.text(&graph.items[from].path).unwrap_or_default());
-        let ranges: Vec<Value> = sites.iter().map(|site| starts.range(site.start, site.end, encoding)).collect();
-        json!({key: hierarchy_item(&graph.items[other], project, encoding), "fromRanges": ranges})
+        let ranges: Vec<Value> = sites.iter().map(|site| starts.range(site.start, site.end)).collect();
+        json!({key: hierarchy_item(&graph.items[other], project), "fromRanges": ranges})
     });
     Value::Array(answer.collect())
 }
@@ -222,7 +216,6 @@ pub fn inlay_hints(
     lookup: &Lookup,
     path: &Path,
     range: Range<usize>,
-    encoding: Encoding,
 ) -> Vec<Value> {
     let lines = LineStarts::new(text);
     let hint = |call: scan::Call| {
@@ -245,7 +238,7 @@ pub fn inlay_hints(
             Some("ephemeral") => "ephemeral",
             _ => node["relation"].as_str()?,
         };
-        Some(json!({"position": lines.position(after, encoding), "label": label, "kind": 1,
+        Some(json!({"position": lines.position(after), "label": label, "kind": 1,
                     "paddingLeft": true, "tooltip": node["unique_id"]}))
     };
     calls.into_iter().filter_map(hint).collect()
@@ -268,7 +261,7 @@ mod tests {
 
     #[test]
     fn nests_the_outline_by_extent() {
-        let symbols = document_symbols(SNAPSHOT, Encoding::Utf16, true, "file:///s.sql");
+        let symbols = document_symbols(SNAPSHOT, true, "file:///s.sql");
         assert_eq!(symbols[0]["name"], "s");
         assert_eq!(
             symbols[0]["range"],
@@ -287,7 +280,7 @@ mod tests {
         let text = "{% macro m() %}\n{%- if is_incremental() -%}\nwith a as (select 1)\nselect * from a\n\
                     {%- else %}\nselect 2\n{%- endif %}\n{% for c in cs %}{{ c }}{% endfor %}\n\
                     {% call statement('main') %}select 1{% endcall %}\n{% endmacro %}\n";
-        let symbols = document_symbols(text, Encoding::Utf16, true, "file:///m.sql");
+        let symbols = document_symbols(text, true, "file:///m.sql");
         let macro_ = &symbols[0];
         assert_eq!((&macro_["name"], &macro_["children"][0]["name"]), (&json!("m"), &json!("if is_incremental()")));
         let branch = &macro_["children"][0];
@@ -310,7 +303,7 @@ mod tests {
 
     #[test]
     fn a_flat_outline_names_the_container() {
-        let symbols = document_symbols(SNAPSHOT, Encoding::Utf16, false, "file:///s.sql");
+        let symbols = document_symbols(SNAPSHOT, false, "file:///s.sql");
         let flat: Vec<(&Value, Option<&Value>)> =
             symbols.as_array().unwrap().iter().map(|s| (&s["name"], s.get("containerName"))).collect();
         assert_eq!(flat, [(&json!("s"), None), (&json!("a"), Some(&json!("s"))), (&json!("b"), Some(&json!("s")))]);
@@ -325,7 +318,7 @@ mod tests {
 
     #[test]
     fn outlines_a_properties_file_with_the_agreed_kinds_and_no_sql() {
-        let symbols = document_symbols(PROPERTIES, Encoding::Utf16, false, "file:///p.yml");
+        let symbols = document_symbols(PROPERTIES, false, "file:///p.yml");
         let flat: Vec<(&str, u64, Option<&str>)> = symbols
             .as_array()
             .unwrap()
@@ -357,7 +350,7 @@ mod tests {
 
     #[test]
     fn nests_the_entries_of_a_properties_file_with_their_labels() {
-        let symbols = document_symbols(PROPERTIES, Encoding::Utf16, true, "file:///p.yaml");
+        let symbols = document_symbols(PROPERTIES, true, "file:///p.yaml");
         let top: Vec<(&str, &str)> = symbols
             .as_array()
             .unwrap()
@@ -399,21 +392,21 @@ mod tests {
         let text =
             "models:\n  - name: o\n    description: with x as (select 1) {% macro m() %}{% endmacro %}\n  - name: [";
         for hierarchical in [true, false] {
-            assert_eq!(document_symbols(text, Encoding::Utf16, hierarchical, "file:///p.yml"), json!([]));
+            assert_eq!(document_symbols(text, hierarchical, "file:///p.yml"), json!([]));
         }
-        assert_ne!(document_symbols(text, Encoding::Utf16, true, "file:///p.sql"), json!([]));
+        assert_ne!(document_symbols(text, true, "file:///p.sql"), json!([]));
     }
 
     #[test]
     fn workspace_symbols_match_a_subsequence_and_name_the_type() {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
-        let symbols = workspace_symbols(&project, "EVPGVW", Encoding::Utf16);
+        let symbols = workspace_symbols(&project, "EVPGVW");
         assert_eq!(symbols.as_array().unwrap().len(), 1);
         assert_eq!(symbols[0]["name"], "events.page_views");
         assert_eq!(symbols[0]["containerName"], "source.shop.events.page_views");
         assert_eq!(symbols[0]["data"], json!({"uniqueId": "source.shop.events.page_views", "resourceType": "source"}));
         assert_eq!(symbols[0]["location"]["range"]["start"], json!({"line": 13, "character": 15}));
-        let all = workspace_symbols(&project, "", Encoding::Utf16);
+        let all = workspace_symbols(&project, "");
         assert_eq!(all.as_array().unwrap().len(), project.entities.len());
     }
 
@@ -431,7 +424,7 @@ mod tests {
         let root = crate::project::scratch_project("features-what-dbt-added", &files);
         let project = project::scan(&root, &HashMap::new()).unwrap();
         let symbols = |query: &str| -> Vec<(String, u64, String)> {
-            let found = workspace_symbols(&project, query, Encoding::Utf16);
+            let found = workspace_symbols(&project, query);
             let mut found: Vec<(String, u64, String)> = found
                 .as_array()
                 .unwrap()
@@ -453,16 +446,16 @@ mod tests {
         assert_eq!(symbols("m"), [symbol("m.v1", 5, "model.r.m.v1"), symbol("m.v2", 5, "model.r.m.v2")]);
         assert_eq!(symbols("f"), [symbol("f", 12, "function.r.f")]);
         assert_eq!(symbols("py"), [symbol("py", 5, "model.r.py")]);
-        let snap = workspace_symbols(&project, "snap", Encoding::Utf16);
+        let snap = workspace_symbols(&project, "snap");
         assert_eq!(snap[0]["location"]["range"]["start"], json!({"line": 1, "character": 10}), "at its name");
         let graph = Graph::scanned(&project, None);
         assert_eq!(graph.items["model.r.m.v1"].shown(), "m.v1");
         // At column 0 of a YAML snapshot's `name:` line, where dbt-mode's lineage asks.
         let yml = root.join("snapshots/_s.yml");
         let line_start = project.text(&yml).unwrap().find("  - name: snap").unwrap();
-        let prepared = prepare_call_hierarchy(&project, &graph, &yml, line_start, Encoding::Utf16).unwrap();
+        let prepared = prepare_call_hierarchy(&project, &graph, &yml, line_start).unwrap();
         assert_eq!(prepared[0]["data"]["uniqueId"], "snapshot.r.snap");
-        let incoming = calls(&project, &graph, "function.r.f", true, Encoding::Utf16);
+        let incoming = calls(&project, &graph, "function.r.f", true);
         assert_eq!(incoming[0]["from"]["data"]["uniqueId"], "model.r.m.v2");
         assert_eq!(incoming.as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
@@ -486,7 +479,7 @@ mod tests {
         ];
         let root = crate::project::scratch_project("features-each-type-s-kind", &files);
         let project = project::scan(&root, &HashMap::new()).unwrap();
-        let symbols = workspace_symbols(&project, "", Encoding::Utf16);
+        let symbols = workspace_symbols(&project, "");
         let mut kinds: Vec<(&str, u64)> = symbols
             .as_array()
             .unwrap()
@@ -516,7 +509,7 @@ mod tests {
             .into_iter()
             .flat_map(|path| {
                 let (_, text) = files.iter().find(|(file, _)| *file == path).unwrap();
-                document_symbols(text, Encoding::Utf16, true, &uri(&root.join(path))).as_array().unwrap().clone()
+                document_symbols(text, true, &uri(&root.join(path))).as_array().unwrap().clone()
             })
             .map(|s| (s["detail"].as_str().unwrap().to_owned(), s["kind"].as_u64().unwrap()))
             .collect();
@@ -556,7 +549,7 @@ mod tests {
                 path: fixture().join("models/x.sql"),
                 ..Entity::default()
             };
-            assert_eq!(hierarchy_item(&item, &project, Encoding::Utf16)["kind"], kind, "{resource_type}");
+            assert_eq!(hierarchy_item(&item, &project)["kind"], kind, "{resource_type}");
         }
     }
 
@@ -567,18 +560,18 @@ mod tests {
         let orders = fixture().join("models/marts/orders.sql");
         let text = project.text(&orders).unwrap();
         let on_ref = text.find("stg_orders").unwrap();
-        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_ref, Encoding::Utf16).unwrap();
+        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_ref).unwrap();
         assert_eq!(prepared[0]["data"]["uniqueId"], "model.shop.stg_orders");
         let on_select = text.rfind("select").unwrap();
-        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_select, Encoding::Utf16).unwrap();
+        let prepared = prepare_call_hierarchy(&project, &graph, &orders, on_select).unwrap();
         assert_eq!(prepared[0]["data"]["uniqueId"], "model.shop.orders");
 
-        let incoming = calls(&project, &graph, "model.shop.orders", true, Encoding::Utf16);
+        let incoming = calls(&project, &graph, "model.shop.orders", true);
         let mut callers: Vec<&str> =
             incoming.as_array().unwrap().iter().map(|c| c["from"]["detail"].as_str().unwrap()).collect();
         callers.sort();
         assert_eq!(callers, ["analysis.shop.order_counts", "model.shop.customers", "test.shop.assert_positive_amount"]);
-        let outgoing = calls(&project, &graph, "model.shop.orders", false, Encoding::Utf16);
+        let outgoing = calls(&project, &graph, "model.shop.orders", false);
         let mut callees: Vec<&str> =
             outgoing.as_array().unwrap().iter().map(|c| c["to"]["detail"].as_str().unwrap()).collect();
         callees.sort();
@@ -592,7 +585,7 @@ mod tests {
         let project = project::scan(&fixture(), &HashMap::new()).unwrap();
         let graph = Graph::scanned(&project, None);
         let readme = fixture().join("packages.yml");
-        assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0, Encoding::Utf16), None);
+        assert_eq!(prepare_call_hierarchy(&project, &graph, &readme, 0), None);
     }
 
     fn index() -> ParseIndex {
@@ -643,16 +636,9 @@ mod tests {
     /// The labels of TEXT's hints with the text up to each, all of TEXT asked.
     fn hinted(text: &str) -> Vec<(String, String)> {
         let (project, index, path) = (lookup_project(), index(), Path::new("/p/models/x.sql"));
-        let hints = inlay_hints(
-            text,
-            scan::calls(text),
-            &Lookup::new(&project, Some(&index)),
-            path,
-            0..text.len(),
-            Encoding::Utf16,
-        );
+        let hints = inlay_hints(text, scan::calls(text), &Lookup::new(&project, Some(&index)), path, 0..text.len());
         let lines = LineStarts::new(text);
-        let before = |hint: &Value| text[..lines.offset_of(&hint["position"], Encoding::Utf16).unwrap()].to_owned();
+        let before = |hint: &Value| text[..lines.offset_of(&hint["position"]).unwrap()].to_owned();
         hints.iter().map(|hint| (hint["label"].as_str().unwrap().to_owned(), before(hint))).collect()
     }
 
@@ -695,7 +681,6 @@ mod tests {
             &Lookup::new(&project, Some(&index)),
             path,
             0..3,
-            Encoding::Utf16,
         );
         assert_eq!(hints, Vec::<Value>::new());
     }
@@ -705,14 +690,7 @@ mod tests {
         // 𝄞 is two UTF-16 units before the call on its line.
         let text = "select '𝄞' as x, * from {{ ref('orders') }}";
         let (project, index, path) = (lookup_project(), index(), Path::new("/p/models/x.sql"));
-        let hints = inlay_hints(
-            text,
-            scan::calls(text),
-            &Lookup::new(&project, Some(&index)),
-            path,
-            0..text.len(),
-            Encoding::Utf16,
-        );
+        let hints = inlay_hints(text, scan::calls(text), &Lookup::new(&project, Some(&index)), path, 0..text.len());
         let expected = json!([{"position": {"line": 0, "character": 41}, "label": "\"shop\".\"main\".\"orders\"",
                                "kind": 1, "paddingLeft": true, "tooltip": "model.shop.orders"}]);
         assert_eq!(Value::Array(hints), expected);

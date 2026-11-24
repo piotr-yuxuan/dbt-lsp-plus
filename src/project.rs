@@ -1022,7 +1022,7 @@ mod tests {
         assert_eq!(written, ["a\\tb\\\"é", "it''s"]);
         assert_eq!(Entity::from(&tables[0]).id, "source.shop.raw.a\tb\"é");
         let starts = LineStarts::new(text);
-        let end = starts.position(tables[0].table_range.end, Encoding::Utf16);
+        let end = starts.position(tables[0].table_range.end);
         assert_eq!(end, serde_json::json!({"line": 3, "character": 22}));
     }
 

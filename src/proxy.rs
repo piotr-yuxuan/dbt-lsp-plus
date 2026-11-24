@@ -32,9 +32,6 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
-/// The unit of every position the client and the server exchange: LSP's
-/// default, which the server announces by announcing none.
-const ENCODING: Encoding = Encoding::Utf16;
 
 /// How the server answers a request of the client's.
 enum Route {
@@ -295,7 +292,7 @@ impl<W: Write> Proxy<W> {
             "textDocument/didChange" => {
                 let changes = params.get("contentChanges").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
                 if let Some(text) = self.workspace.open.get_mut(&path) {
-                    changes.iter().for_each(|change| text::apply_change(text, change, ENCODING));
+                    changes.iter().for_each(|change| text::apply_change(text, change));
                 }
             }
             "textDocument/didClose" => {
@@ -312,7 +309,7 @@ impl<W: Write> Proxy<W> {
     fn outline(&self, params: &Value) -> Option<Value> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let text = self.text_of(uri).map(|(_, text)| text);
-        Some(text.map_or(Value::Null, |text| features::document_symbols(&text, ENCODING, self.hierarchical, uri)))
+        Some(text.map_or(Value::Null, |text| features::document_symbols(&text, self.hierarchical, uri)))
     }
 
     /// The path of the document at URI and its text, open or on disk.
@@ -330,15 +327,15 @@ impl<W: Write> Proxy<W> {
         if method != "textDocument/prepareCallHierarchy" {
             let id = params.pointer("/item/data/uniqueId")?.as_str()?;
             let incoming = method == "callHierarchy/incomingCalls";
-            return Some(Answer::Found(features::calls(&project, &graph, id, incoming, ENCODING)));
+            return Some(Answer::Found(features::calls(&project, &graph, id, incoming)));
         }
         // A document that is no file, such as an unsaved buffer, holds no resource.
         let Some(path) = self.local_path(params.pointer("/textDocument/uri").and_then(Value::as_str)) else {
             return Some(Answer::Empty);
         };
         let text = project.text(&path).unwrap_or_default();
-        let offset = LineStarts::new(text).offset_of(params.get("position")?, ENCODING)?;
-        let prepared = features::prepare_call_hierarchy(&project, &graph, &path, offset, ENCODING);
+        let offset = LineStarts::new(text).offset_of(params.get("position")?)?;
+        let prepared = features::prepare_call_hierarchy(&project, &graph, &path, offset);
         Some(prepared.map_or(Answer::Empty, Answer::Found))
     }
 
@@ -346,7 +343,7 @@ impl<W: Write> Proxy<W> {
     /// of the request's position in it.
     fn document_at(&self, params: &Value) -> Option<(PathBuf, String, usize)> {
         let (path, text) = self.text_of(params.pointer("/textDocument/uri")?.as_str()?)?;
-        let offset = LineStarts::new(&text).offset_of(params.get("position")?, ENCODING)?;
+        let offset = LineStarts::new(&text).offset_of(params.get("position")?)?;
         Some((path, text, offset))
     }
 
@@ -413,7 +410,7 @@ impl<W: Write> Proxy<W> {
         let declaration = params.pointer("/context/includeDeclaration").and_then(Value::as_bool) == Some(true);
         if name.source_table().is_some() {
             let uri_of = |path: &Path| self.uri_of(path);
-            return Some(Answer::Found(sources::references(&project, &name, declaration, ENCODING, &uri_of)));
+            return Some(Answer::Found(sources::references(&project, &name, declaration, &uri_of)));
         }
         let found = navigation::references(&lookup(), &path, &name, declaration);
         Some(Answer::Found(Value::Array(self.locations(&project, &found))))
@@ -436,7 +433,7 @@ impl<W: Write> Proxy<W> {
             // Up to the range's end only: a macro's references may span thousands of files.
             let text = project.text(&found.path).unwrap_or_default();
             let starts = LineStarts::new(text.get(..found.range.end).unwrap_or(text));
-            let range = starts.range(found.range.start, found.range.end, ENCODING);
+            let range = starts.range(found.range.start, found.range.end);
             json!({"uri": self.uri_of(&found.path), "range": range})
         };
         found.iter().map(location).collect()
@@ -448,7 +445,7 @@ impl<W: Write> Proxy<W> {
         let Some((project, name)) = self.source_at(params) else { return Some(Answer::Empty) };
         let uri_of = |path: &Path| self.uri_of(path);
         let new = params.get("newName")?.as_str()?;
-        Some(Answer::of_rename(sources::rename(&project, &name, new, ENCODING, &uri_of)))
+        Some(Answer::of_rename(sources::rename(&project, &name, new, &uri_of)))
     }
 
     /// The rename of the source, else of the CTE, at the request's position;
@@ -459,7 +456,7 @@ impl<W: Write> Proxy<W> {
         }
         let Some((_, text, offset)) = self.document_at(params) else { return Some(Answer::Empty) };
         let (uri, new) = (params.pointer("/textDocument/uri")?.as_str()?, params.get("newName")?.as_str()?);
-        Some(document::rename_cte(&text, uri, offset, new, ENCODING).map_or(Answer::Empty, Answer::of_rename))
+        Some(document::rename_cte(&text, uri, offset, new).map_or(Answer::Empty, Answer::of_rename))
     }
 
     /// The folding ranges, highlights or selection ranges of a document;
@@ -469,7 +466,7 @@ impl<W: Write> Proxy<W> {
         let sql = uri.ends_with(".sql");
         if method == "textDocument/documentHighlight" {
             let Some((_, text, offset)) = self.document_at(params) else { return Some(Value::Null) };
-            return Some(document::highlights(&text, sql, offset, ENCODING));
+            return Some(document::highlights(&text, sql, offset));
         }
         // A YAML file folds and selects best by its indentation, which the client knows.
         let Some((_, text)) = self.text_of(uri).filter(|_| sql || uri.ends_with(".md")) else {
@@ -479,8 +476,8 @@ impl<W: Write> Proxy<W> {
             return Some(document::folding_ranges(&text, sql));
         }
         let starts = LineStarts::new(&text);
-        let positions = params.get("positions")?.as_array()?.iter().map(|p| starts.offset_of(p, ENCODING));
-        Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?, ENCODING))
+        let positions = params.get("positions")?.as_array()?.iter().map(|p| starts.offset_of(p));
+        Some(document::selection_ranges(&text, sql, &positions.collect::<Option<Vec<usize>>>()?))
     }
 
     /// The information of a node, named by its id or by a position, as
@@ -744,7 +741,7 @@ impl<W: Write> Proxy<W> {
     fn symbols(&self, params: &Value) -> Option<Answer> {
         let query = params.get("query")?.as_str()?;
         let Some(project) = self.workspace.project() else { return Some(Answer::Unanswered(vec![self.unreadable()])) };
-        Some(Answer::Found(features::workspace_symbols(&project, query, ENCODING)))
+        Some(Answer::Found(features::workspace_symbols(&project, query)))
     }
 
     /// A message of the client's: a request, a notification, or the answer
@@ -852,9 +849,9 @@ impl<W: Write> Proxy<W> {
             return Some(Answer::Empty);
         };
         let lines = LineStarts::new(&text);
-        let range = lines.offset_of(start, ENCODING)?..lines.offset_of(end, ENCODING)?;
+        let range = lines.offset_of(start)?..lines.offset_of(end)?;
         let lookup = navigation::Lookup::new(&project, Some(index));
-        let hints = features::inlay_hints(&text, sources::file_calls(&path, &text), &lookup, &path, range, ENCODING);
+        let hints = features::inlay_hints(&text, sources::file_calls(&path, &text), &lookup, &path, range);
         Some(Answer::Found(Value::Array(hints)))
     }
 
@@ -1004,7 +1001,7 @@ impl<W: Write> Proxy<W> {
         let (entries, tests) = (properties::entries(&text), properties::tests(&text));
         diagnostics.extend(failures.iter().map(|failure| {
             let range = runs::locate(&text, &entries, &tests, &failure.locator);
-            json!({"range": lines.range(range.start, range.end, ENCODING), "severity": failure.severity,
+            json!({"range": lines.range(range.start, range.end), "severity": failure.severity,
                    "source": "dbt-lsp-plus", "code": failure.code, "message": failure.message})
         }));
         // At dbt's line and column, from 1 and in code points; a file's start
@@ -1013,7 +1010,7 @@ impl<W: Write> Proxy<W> {
         diagnostics.extend(problems.iter().map(|problem| {
             let (line, column) = problem.spot.as_ref().and_then(|spot| spot.at).unwrap_or((1, 1));
             let at = lines.offset(line.saturating_sub(1), column.saturating_sub(1), Encoding::Utf32);
-            json!({"range": lines.range(at, at, ENCODING), "severity": problem.severity,
+            json!({"range": lines.range(at, at), "severity": problem.severity,
                    "source": "dbt parse", "code": problem.code, "message": problem.message})
         }));
         let publish = |uri: &str, diagnostics: Vec<Value>| {

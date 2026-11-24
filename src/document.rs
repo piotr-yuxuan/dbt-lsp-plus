@@ -3,7 +3,7 @@
 //! ranges and the rename of a CTE.  Every function here is pure.
 
 use crate::scan::{self, Symbol};
-use crate::text::{Encoding, LineStarts};
+use crate::text::LineStarts;
 use regex::Regex;
 use serde_json::{Value, json};
 use std::ops::Range;
@@ -56,10 +56,10 @@ fn cte_at(text: &str, offset: usize) -> Option<(Symbol, Vec<Range<usize>>)> {
 
 /// The highlights at OFFSET of TEXT: on a CTE of SQL, its definition (write)
 /// and its uses (read); on a tag of a Jinja block, every tag of that block.
-pub fn highlights(text: &str, sql: bool, offset: usize, encoding: Encoding) -> Value {
+pub fn highlights(text: &str, sql: bool, offset: usize) -> Value {
     let starts = LineStarts::new(text);
     let highlight =
-        |range: &Range<usize>, kind: u8| json!({"range": starts.range(range.start, range.end, encoding), "kind": kind});
+        |range: &Range<usize>, kind: u8| json!({"range": starts.range(range.start, range.end), "kind": kind});
     if let Some((cte, uses)) = cte_at(text, offset).filter(|_| sql) {
         let definition = std::iter::once(highlight(&cte.name_range, 3));
         return Value::Array(definition.chain(uses.iter().map(|range| highlight(range, 2))).collect());
@@ -74,7 +74,7 @@ static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\p{L}\p{N}_$]+").u
 /// The selection range at each of OFFSETS of TEXT: from the innermost, the
 /// word, the Jinja tag, a CTE's or block's content, the CTE or block, and
 /// the whole text, each range containing the one before.
-pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize], encoding: Encoding) -> Value {
+pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize]) -> Value {
     let starts = LineStarts::new(text);
     let mut candidates = scan::tags(text);
     for symbol in scan::outline(text, sql, false) {
@@ -98,7 +98,7 @@ pub fn selection_ranges(text: &str, sql: bool, offsets: &[usize], encoding: Enco
             }
         }
         nested.iter().rev().fold(None, |parent: Option<Value>, range| {
-            let mut selection = json!({"range": starts.range(range.start, range.end, encoding)});
+            let mut selection = json!({"range": starts.range(range.start, range.end)});
             if let Some(parent) = parent {
                 selection["parent"] = parent;
             }
@@ -113,13 +113,7 @@ static IDENTIFIER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A[\p{L}_][\p
 /// The `WorkspaceEdit` that renames to NEW the CTE that OFFSET names in TEXT,
 /// the document at URI, or the reason it cannot; `None` when OFFSET names no
 /// CTE.
-pub fn rename_cte(
-    text: &str,
-    uri: &str,
-    offset: usize,
-    new: &str,
-    encoding: Encoding,
-) -> Option<Result<Value, String>> {
+pub fn rename_cte(text: &str, uri: &str, offset: usize, new: &str) -> Option<Result<Value, String>> {
     let (cte, uses) = cte_at(text, offset)?;
     let mut rendered = scan::jinja_strings(text).into_iter();
     if let Some(string) = rendered.find(|string| !scan::whole_words(&text[string.clone()], &cte.name).is_empty()) {
@@ -137,7 +131,7 @@ pub fn rename_cte(
     }
     let starts = LineStarts::new(text);
     let edits = std::iter::once(&cte.name_range).chain(&uses);
-    let edits = edits.map(|range| json!({"range": starts.range(range.start, range.end, encoding), "newText": new}));
+    let edits = edits.map(|range| json!({"range": starts.range(range.start, range.end), "newText": new}));
     Some(Ok(json!({"changes": {uri: edits.collect::<Vec<_>>()}})))
 }
 
@@ -177,7 +171,7 @@ mod tests {
     #[test]
     fn highlights_a_cte_and_its_uses() {
         let offset = ORDERS.find("from orders").unwrap() + 6;
-        let found = highlights(ORDERS, true, offset, Encoding::Utf16);
+        let found = highlights(ORDERS, true, offset);
         let lines: Vec<(u64, u64)> = found
             .as_array()
             .unwrap()
@@ -194,7 +188,7 @@ mod tests {
     #[test]
     fn highlights_every_tag_of_a_jinja_block() {
         let text = "{% if a %}x{% elif b %}y{% else %}{% set v = 1 %}{% for i in l %}z{% endfor %}{% endif %}";
-        let found = highlights(text, true, text.find("endif").unwrap(), Encoding::Utf16);
+        let found = highlights(text, true, text.find("endif").unwrap());
         let tags: Vec<&str> = found
             .as_array()
             .unwrap()
@@ -206,13 +200,13 @@ mod tests {
             })
             .collect();
         assert_eq!(tags, ["{% if a %}", "{% elif b %}", "{% else %}", "{% endif %}"]);
-        assert_eq!(highlights(text, true, text.find("set").unwrap(), Encoding::Utf16), Value::Null);
+        assert_eq!(highlights(text, true, text.find("set").unwrap()), Value::Null);
     }
 
     #[test]
     fn selection_ranges_nest_up_to_the_whole_text() {
         let offset = ORDERS.find("stg_customers").unwrap() + 2;
-        let found = selection_ranges(ORDERS, true, &[offset], Encoding::Utf16);
+        let found = selection_ranges(ORDERS, true, &[offset]);
         let mut ranges = Vec::new();
         let mut selection = &found[0];
         while selection.is_object() {
@@ -223,8 +217,8 @@ mod tests {
             .iter()
             .map(|r| {
                 let starts = LineStarts::new(ORDERS);
-                let start = starts.offset_of(&r["start"], Encoding::Utf16).unwrap();
-                let end = starts.offset_of(&r["end"], Encoding::Utf16).unwrap();
+                let start = starts.offset_of(&r["start"]).unwrap();
+                let end = starts.offset_of(&r["end"]).unwrap();
                 ORDERS[start..end].to_owned()
             })
             .collect();
@@ -243,7 +237,7 @@ mod tests {
             std::cmp::Reverse((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64()))
         });
         for e in edits {
-            crate::text::apply_change(&mut text, &json!({"range": e["range"], "text": e["newText"]}), Encoding::Utf16);
+            crate::text::apply_change(&mut text, &json!({"range": e["range"], "text": e["newText"]}));
         }
         text
     }
@@ -252,33 +246,33 @@ mod tests {
     fn renames_a_cte_and_refuses_a_clash_or_a_bad_name() {
         let uri = "file:///o.sql";
         let offset = ORDERS.find("left join customers").unwrap() + 12;
-        let edit = rename_cte(ORDERS, uri, offset, "c", Encoding::Utf16).unwrap().unwrap();
+        let edit = rename_cte(ORDERS, uri, offset, "c").unwrap().unwrap();
         let text = applied(ORDERS, &edit, uri);
         assert!(text.contains("\nc as (") && text.contains("c.first_name") && text.contains("left join c using"));
         assert!(text.contains("{{ ref('stg_customers') }}"), "{text}");
-        let clash = rename_cte(ORDERS, uri, offset, "Final", Encoding::Utf16).unwrap();
+        let clash = rename_cte(ORDERS, uri, offset, "Final").unwrap();
         assert!(clash.unwrap_err().contains("another CTE"));
         for bad in ["a b", "1x", "x-y", ""] {
-            assert!(rename_cte(ORDERS, uri, offset, bad, Encoding::Utf16).unwrap().is_err(), "{bad:?}");
+            assert!(rename_cte(ORDERS, uri, offset, bad).unwrap().is_err(), "{bad:?}");
         }
-        assert!(rename_cte(ORDERS, uri, offset, "Customers", Encoding::Utf16).unwrap().is_ok(), "a case of its own");
-        assert!(rename_cte(ORDERS, uri, 0, "x", Encoding::Utf16).is_none());
+        assert!(rename_cte(ORDERS, uri, offset, "Customers").unwrap().is_ok(), "a case of its own");
+        assert!(rename_cte(ORDERS, uri, 0, "x").is_none());
     }
 
     #[test]
     fn refuses_to_rename_a_cte_that_a_jinja_string_names() {
         // is_positive renders its argument, 'orders.amount', as SQL.
         let offset = ORDERS.find("from orders").unwrap() + 6;
-        let refused = rename_cte(ORDERS, "file:///o.sql", offset, "o", Encoding::Utf16).unwrap();
+        let refused = rename_cte(ORDERS, "file:///o.sql", offset, "o").unwrap();
         assert!(refused.unwrap_err().contains("'orders.amount'"));
         let star = "with base as (select 1) select {{ star(relation_alias='base') }} from base";
-        assert!(rename_cte(star, "file:///s.sql", 6, "b", Encoding::Utf16).unwrap().is_err());
+        assert!(rename_cte(star, "file:///s.sql", 6, "b").unwrap().is_err());
         // A function's name, or the model or source of a ref or source, renders no CTE.
         for text in [
             "with source as (select * from {{ source('raw', 'source') }}) select * from source",
             "with orders as (select * from {{ ref('orders') }}) select * from orders",
         ] {
-            let renamed = rename_cte(text, "file:///t.sql", 6, "base", Encoding::Utf16).unwrap();
+            let renamed = rename_cte(text, "file:///t.sql", 6, "base").unwrap();
             assert!(renamed.is_ok(), "{text}: {renamed:?}");
         }
     }
@@ -287,8 +281,7 @@ mod tests {
     fn a_cte_s_uses_are_its_words_in_code_and_in_its_block() {
         let text =
             "with Orders as (select 1) -- orders\nselect 'orders', analytics.orders, orders$x, orders from ORDERS";
-        let edit =
-            rename_cte(text, "file:///t.sql", text.find("Orders").unwrap(), "o", Encoding::Utf16).unwrap().unwrap();
+        let edit = rename_cte(text, "file:///t.sql", text.find("Orders").unwrap(), "o").unwrap().unwrap();
         let text = applied(text, &edit, "file:///t.sql");
         assert_eq!(text, "with o as (select 1) -- orders\nselect 'orders', analytics.orders, orders$x, o from o");
         let dollar = "with a$ as (select 1) select * from a$, a$b";
@@ -299,7 +292,7 @@ mod tests {
         let macros = "{% macro default__d() %}with rows as (select 1) select * from rows{% endmacro %}\n\
                       {% macro duckdb__d() %}with rows as (select 2) select * from rows{% endmacro %}";
         let second = macros.rfind("from rows").unwrap() + 6;
-        let found = highlights(macros, true, second, Encoding::Utf16);
+        let found = highlights(macros, true, second);
         let starts: Vec<u64> =
             found.as_array().unwrap().iter().map(|h| h["range"]["start"]["character"].as_u64().unwrap()).collect();
         let line = &macros[macros.find('\n').unwrap() + 1..];
@@ -341,8 +334,8 @@ mod tests {
     fn a_block_left_open_is_no_fold_highlight_nor_selection() {
         let text = "{% if a %}\nx\n{% else %}\ny\n";
         assert_eq!(folds(text, true), []);
-        assert_eq!(highlights(text, true, 3, Encoding::Utf16), Value::Null);
-        let chain = selection_ranges(text, true, &[11], Encoding::Utf16);
+        assert_eq!(highlights(text, true, 3), Value::Null);
+        let chain = selection_ranges(text, true, &[11]);
         assert_eq!(chain[0]["parent"]["range"]["start"], json!({"line": 0, "character": 0}), "the word, then the text");
         assert_eq!(chain[0]["parent"].get("parent"), None);
     }
@@ -358,16 +351,14 @@ mod tests {
     fn selection_ranges_hold_blocks_each_position_and_no_range_twice() {
         let text = "{% if a %}\nselect x\n{% endif %}";
         let at = text.find('x').unwrap();
-        let found = selection_ranges(text, true, &[at, 0], Encoding::Utf16);
+        let found = selection_ranges(text, true, &[at, 0]);
         assert_eq!(found.as_array().unwrap().len(), 2, "one chain per position");
         let mut lengths = Vec::new();
         let mut selection = &found[0];
         while selection.is_object() {
             let (start, end) = (&selection["range"]["start"], &selection["range"]["end"]);
             let starts = LineStarts::new(text);
-            lengths.push(
-                starts.offset_of(end, Encoding::Utf16).unwrap() - starts.offset_of(start, Encoding::Utf16).unwrap(),
-            );
+            lengths.push(starts.offset_of(end).unwrap() - starts.offset_of(start).unwrap());
             selection = &selection["parent"];
         }
         // x, the block's content, then the block, which is the whole text: given once.
@@ -378,7 +369,7 @@ mod tests {
     fn highlights_the_tags_of_the_block_asked_about() {
         let text = "{% macro m() %}{% if a %}{% set x = 1 %}{% if b %}{% endif %}{% elif c %}{% else %}{% endif %}{% endmacro %}";
         let tags = |offset: usize| -> Vec<String> {
-            let found = highlights(text, true, offset, Encoding::Utf16);
+            let found = highlights(text, true, offset);
             found
                 .as_array()
                 .unwrap()
