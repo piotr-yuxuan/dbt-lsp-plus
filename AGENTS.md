@@ -60,11 +60,11 @@ src/locate.rs                 the project of a document, and whether a document 
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries; what a request gets, found, empty, or unanswered with its reasons
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
-src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell; the project on the server's routes by its own resolution, its dbt by the server's
+src/cli.rs                    the command line and the subcommands doctor, select, node, lineage and mcp, from a shell, node and lineage also as MCP tools; the project on the server's routes by its own resolution, its dbt by the server's
 tests/proxy.rs                the binary with the fake dbt
 tests/proxy/live.rs           the binary with the real dbt, either build, opt-in
 tests/proxy/commands.rs       the commands for clients, by the fake dbt's CLI
-tests/proxy/cli.rs            the subcommands doctor, select and node, the binary run as from a shell
+tests/proxy/cli.rs            the subcommands doctor, select, node, lineage and mcp, the binary run as from a shell
 tests/proxy/conformance.rs    the library's resolution against dbt's manifest, opt-in
 tests/proxy/locate.rs         the walk up to a project and the lookup of its dbt, in scratch repositories
 tests/proxy/routes.rs         the routes to the project: given, the client's folder, a document; and none
@@ -161,8 +161,11 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     `cli::main` is the module's entry point; `cli::asked`, the decision on
     a subcommand's words, and `cli::operands` and `cli::option`, its
     operand and its option, each with the tests of `asked`;
-    `cli::doctor`, `cli::select` and `cli::node`, one per row, its run;
-    `cli::operand`, the decision on node's operand, a `Which`, with tests
+    `cli::doctor`, `cli::select`, `cli::node`, `cli::lineage` and
+    `cli::mcp`, one per row, its run; `Row::listed`, a row's tool as
+    `tools/list` gives it; `cli::respond` and `cli::call`, the decisions
+    on an MCP method and on a tool's call, apart from `mcp`'s lines, with
+    tests of their own; `cli::operand`, the decision on node's operand, a `Which`, with tests
     of its own; `cli::indexed`, the CLI's index, the kept manifest or a
     parse that it keeps, apart from the question `cli::answered` asks;
   - `ParseIndex::lineage`, the walks of the index, with tests of its own;

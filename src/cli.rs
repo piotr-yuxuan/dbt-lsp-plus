@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2 OR GPL-3.0-or-later
 //! The command line: the server's arguments, and the subcommands,
-//! `doctor`, `select` and `node`, what an agent in a shell asks without an
-//! LSP client, each answered on one line of compact JSON.  The project is
+//! `doctor`, `select`, `node` and `lineage`, what an agent in a shell asks
+//! without an LSP client, each answered on one line of compact JSON; and
+//! `mcp`, which serves the rows that are tools, node and lineage, to an MCP
+//! client.  The project is
 //! found on the server's routes by `locate::project`, the CLI's own; its
 //! dbt by `locate::dbt_of`, which the server shares.
 
@@ -11,14 +13,15 @@ use crate::workspace::{self, Answer, Which, Workspace};
 use crate::{cache, commands, config, packages};
 use serde_json::{Value, json};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
-/// A subcommand: its run, from the arguments that its words give and the
+/// A subcommand, and the MCP tool of the same name where it is one: its
+/// run, from the arguments that its words or a tool's call give and the
 /// server command, gives its answer and whether it worked; an answer of
-/// null writes nothing, the run having written its own lines.
+/// null, mcp's, writes nothing, the run having written its own lines.
 pub struct Row {
     name: &'static str,
     usage: &'static str,
@@ -27,10 +30,12 @@ pub struct Row {
     operand: (&'static str, Result<&'static str, &'static str>),
     /// The option of a whole number, `--NAME N`, after the operand.
     option: Option<&'static str>,
+    /// The tool's description, for a row that MCP serves.
+    tool: Option<&'static str>,
     run: fn(&Value, &[String]) -> (Value, bool),
 }
 
-const SUBCOMMANDS: [Row; 3] = [
+const SUBCOMMANDS: [Row; 5] = [
     Row {
         name: "doctor",
         usage: "\
@@ -41,6 +46,7 @@ Exit status 0 when it finds a dbt 2, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
         operand: ("path", Ok(".")),
         option: None,
+        tool: None,
         run: |arguments, command| doctor(Path::new(arguments["path"].as_str().unwrap_or_default()), command),
     },
     Row {
@@ -53,6 +59,7 @@ Exit status 0 when nodes are listed, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
         operand: ("selector", Err("a SELECTOR")),
         option: None,
+        tool: None,
         run: |arguments, command| by_error(select(arguments["selector"].as_str().unwrap_or_default(), command)),
     },
     Row {
@@ -66,9 +73,59 @@ Exit status 0 when `error` is null, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
         operand: ("node", Err("an ID or a PATH")),
         option: None,
+        tool: Some(
+            "The node of the dbt project that `node` names, as dbt's manifest gives it, with `summary` and `children`, the unique ids of the enabled nodes that depend on it.  `node` is a unique id, as `model.shop.orders`, or a place `PATH[:LINE[:COLUMN]]`, PATH from the server's directory, LINE and COLUMN from 1.  Answers {\"error\": E, \"node\": N}: N null and E why when there is none; E the last parse's failure beside N.  A call after a change to the project's files waits for a dbt parse.",
+        ),
         run: |arguments, command| by_error(node(arguments, command)),
     },
+    Row {
+        name: "lineage",
+        usage: "\
+usage: dbt-lsp-plus lineage ID [--depth N] [-- ARGUMENTS...]
+
+The nodes up and down from the node ID, within N hops, every hop by default,
+on one line of JSON.
+Exit status 0 when `error` is null, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
+        operand: ("id", Err("an ID")),
+        option: Some("depth"),
+        tool: Some(
+            "The nodes up and down from the node `id`, a unique id, within `depth` hops, from 1, every hop without it: `upstream` along `depends_on.nodes`, `downstream` along the nodes that depend on it, tests aside, each a map of unique id to its fewest hops.  Answers {\"error\": E, \"lineage\": {\"upstream\": U, \"downstream\": D}}: the lineage null and E why when there is none.  A call after a change to the project's files waits for a dbt parse.",
+        ),
+        run: |arguments, command| by_error(lineage(arguments, command)),
+    },
+    Row {
+        name: "mcp",
+        usage: "\
+usage: dbt-lsp-plus mcp [PATH] [-- ARGUMENTS...]
+
+An MCP server on the standard input and output, run from PATH, `.` by
+default, its tools node and lineage, the subcommands' answers.
+Exit status 0 when its input ends, 1 otherwise, 2 for a usage error.
+https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
+        operand: ("path", Ok(".")),
+        option: None,
+        tool: None,
+        run: |arguments, command| mcp(arguments["path"].as_str().unwrap_or_default(), command),
+    },
 ];
+
+/// The MCP revisions that `initialize` agrees on, the latest first.
+const VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2024-11-05"];
+
+impl Row {
+    /// The row's tool as `tools/list` gives it, if it is one: its operand a
+    /// required string, its option a whole number from 1.
+    fn listed(&self) -> Option<Value> {
+        let description = self.tool?;
+        let mut properties = json!({self.operand.0: {"type": "string"}});
+        if let Some(option) = self.option {
+            properties[option] = json!({"type": "integer", "minimum": 1});
+        }
+        let schema = json!({"type": "object", "properties": properties, "required": [self.operand.0]});
+        Some(json!({"name": self.name, "description": description, "inputSchema": schema}))
+    }
+}
 
 /// The subcommand that WORDS, the command line after the program's name,
 /// name by their first word; none when it names none, and the words are the
@@ -348,6 +405,82 @@ fn node(arguments: &Value, command: &[String]) -> Value {
     answered("node", from, asked, command, |workspace| workspace.node(&which))
 }
 
+/// The lineage that ARGUMENTS ask, of the node `id` in the project of the
+/// current directory, within `depth` hops, every hop without one.
+fn lineage(arguments: &Value, command: &[String]) -> Value {
+    let depth = match &arguments["depth"] {
+        Value::Null => Some(u64::MAX),
+        depth => depth.as_u64().filter(|depth| *depth >= 1),
+    };
+    let (Some(id), Some(depth)) = (arguments["id"].as_str(), depth) else {
+        let why = "lineage needs a string `id`, and a `depth`, if any, a whole number from 1";
+        return json!({"error": why, "lineage": null});
+    };
+    // A depth past the platform's words is no bound.
+    let depth = usize::try_from(depth).unwrap_or(usize::MAX);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    answered("lineage", &cwd, id, command, |workspace| workspace.lineage(id, depth))
+}
+
+/// Serves MCP from PATH, made the working directory before any thread or
+/// child, until the input ends: each line one JSON-RPC message, each
+/// request answered on one line, in order, its id as sent, a line that is
+/// no JSON with error -32700 and a null id, any other message with
+/// nothing.  Nothing else goes on the standard output; PATH's error goes
+/// on the standard error, with status 1.
+fn mcp(path: &str, command: &[String]) -> (Value, bool) {
+    if let Err(error) = std::env::set_current_dir(path) {
+        eprintln!("dbt-lsp-plus: {path}: {error}");
+        return (Value::Null, false);
+    }
+    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+        let (id, outcome) = match serde_json::from_str::<Value>(&line) {
+            Ok(message) => match (message.get("id"), message["method"].as_str()) {
+                (Some(id), Some(method)) => (id.clone(), respond(method, &message["params"], command)),
+                _ => continue,
+            },
+            Err(_) => (Value::Null, Err(json!({"code": -32700, "message": "a line that is no JSON"}))),
+        };
+        let (key, value) = match outcome {
+            Ok(result) => ("result", result),
+            Err(error) => ("error", error),
+        };
+        // A client that closed its end wants no more and no panic.
+        let _ = writeln!(std::io::stdout(), "{}", json!({"jsonrpc": "2.0", "id": id, key: value}));
+    }
+    (Value::Null, true)
+}
+
+/// The result of the MCP request METHOD with PARAMS, else its error, whether
+/// `initialize` came or not; the version agreed is the client's when it is
+/// one of VERSIONS, else the latest.
+fn respond(method: &str, params: &Value, command: &[String]) -> Result<Value, Value> {
+    match method {
+        "initialize" => {
+            let asked = params["protocolVersion"].as_str();
+            let version = VERSIONS.into_iter().find(|version| Some(*version) == asked).unwrap_or(VERSIONS[0]);
+            let server = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
+            Ok(json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": server}))
+        }
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({"tools": SUBCOMMANDS.iter().filter_map(Row::listed).collect::<Vec<_>>()})),
+        "tools/call" => call(params, command),
+        _ => Err(json!({"code": -32601, "message": format!("no method {method}")})),
+    }
+}
+
+/// The result of `tools/call` with PARAMS: the run of the row that is the
+/// tool `name`, its answer as the text and `isError` as the CLI's status 1;
+/// error -32602 for no such tool.
+fn call(params: &Value, command: &[String]) -> Result<Value, Value> {
+    let name = params["name"].as_str().unwrap_or_default();
+    let Some(row) = SUBCOMMANDS.iter().find(|row| row.tool.is_some() && row.name == name) else {
+        return Err(json!({"code": -32602, "message": format!("no tool {name}")}));
+    };
+    let (answer, ok) = (row.run)(&params["arguments"], command);
+    Ok(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": !ok}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,11 +491,13 @@ mod tests {
 
     #[test]
     fn the_first_word_alone_names_a_subcommand() {
-        let ours: [(&[&str], &str); 4] = [
+        let ours: [(&[&str], &str); 6] = [
             (&["doctor"], "doctor"),
             (&["doctor", "x"], "doctor"),
             (&["select", "+m"], "select"),
             (&["node", "x"], "node"),
+            (&["lineage", "x"], "lineage"),
+            (&["mcp"], "mcp"),
         ];
         for (line, name) in ours {
             assert_eq!(named(&words(line)).map(|row| row.name), Some(name), "{line:?}");
@@ -447,10 +582,103 @@ mod tests {
     fn a_row_without_its_operand_takes_its_default_or_says_what_it_needs() {
         let operands: Vec<(&str, Result<&str, &str>)> =
             SUBCOMMANDS.iter().map(|row| (row.name, row.operand.1)).collect();
-        assert_eq!(operands, [("doctor", Ok(".")), ("select", Err("a SELECTOR")), ("node", Err("an ID or a PATH"))]);
+        let needs = [("node", Err("an ID or a PATH")), ("lineage", Err("an ID")), ("mcp", Ok("."))];
+        assert_eq!(operands, [[("doctor", Ok(".")), ("select", Err("a SELECTOR"))].as_slice(), &needs].concat());
         let none: Vec<Result<Asked, String>> = SUBCOMMANDS.iter().map(|row| asked(row, &[])).collect();
-        let doctor = Asked::Run { arguments: json!({"path": "."}), command: words(&["dbt", "lsp"]) };
-        assert_eq!(none, [Ok(doctor), Err("select needs a SELECTOR".into()), Err("node needs an ID or a PATH".into())]);
+        let here = || Asked::Run { arguments: json!({"path": "."}), command: words(&["dbt", "lsp"]) };
+        let needed: [Result<Asked, String>; 5] = [
+            Ok(here()),
+            Err("select needs a SELECTOR".into()),
+            Err("node needs an ID or a PATH".into()),
+            Err("lineage needs an ID".into()),
+            Ok(here()),
+        ];
+        assert_eq!(none, needed);
+    }
+
+    #[test]
+    fn lineage_reads_its_depth_after_its_id_and_no_other_row_an_option() {
+        let (node, lineage) = (&SUBCOMMANDS[2], &SUBCOMMANDS[3]);
+        assert_eq!((node.name, lineage.name), ("node", "lineage"));
+        let run = |arguments: Value, command: &[&str]| Ok(Asked::Run { arguments, command: words(command) });
+        let default = ["dbt", "lsp"];
+        let read = [
+            (&["model.shop.a"][..], run(json!({"id": "model.shop.a"}), &default)),
+            (&["model.shop.a", "--depth", "2"], run(json!({"id": "model.shop.a", "depth": 2}), &default)),
+            // A depth that is no whole number is the run's to refuse, as a tool's call would give it.
+            (
+                &["a", "--depth", "x", "--", "uvx", "dbt", "lsp"],
+                run(json!({"id": "a", "depth": "x"}), &["uvx", "dbt", "lsp"]),
+            ),
+        ];
+        for (line, expected) in read {
+            assert_eq!(asked(lineage, &words(line)), expected, "{line:?}");
+        }
+        let refused: [(&Row, &[&str]); 5] = [
+            (lineage, &["--depth", "2"]),
+            (lineage, &["a", "--depth"]),
+            (lineage, &["a", "--deep", "2"]),
+            (lineage, &["a", "b"]),
+            (node, &["a", "--depth", "2"]),
+        ];
+        for (row, line) in refused {
+            assert!(asked(row, &words(line)).is_err(), "{} {line:?}", row.name);
+        }
+    }
+
+    #[test]
+    fn mcp_answers_initialize_ping_and_the_tools_of_the_rows() {
+        let none: &[String] = &[];
+        let agreed = |asked: Value| respond("initialize", &json!({"protocolVersion": asked}), none);
+        for (asked, version) in [
+            (json!("2025-11-25"), "2025-11-25"),
+            (json!("2024-11-05"), "2024-11-05"),
+            (json!("2099-01-01"), "2025-11-25"),
+            (Value::Null, "2025-11-25"),
+        ] {
+            let server = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
+            let expected = json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": server});
+            assert_eq!(agreed(asked.clone()), Ok(expected), "{asked}");
+        }
+        assert_eq!(respond("ping", &json!({}), none), Ok(json!({})));
+        let listed = respond("tools/list", &json!({}), none).unwrap();
+        let tools: Vec<(&Value, &Value)> =
+            listed["tools"].as_array().unwrap().iter().map(|tool| (&tool["name"], &tool["inputSchema"])).collect();
+        let node = json!({"type": "object", "properties": {"node": {"type": "string"}}, "required": ["node"]});
+        let lineage = json!({"type": "object", "required": ["id"],
+                             "properties": {"id": {"type": "string"}, "depth": {"type": "integer", "minimum": 1}}});
+        assert_eq!(tools, [(&json!("node"), &node), (&json!("lineage"), &lineage)]);
+        let described = listed["tools"].as_array().unwrap().iter().all(|tool| tool["description"].as_str().is_some());
+        assert!(described, "{listed}");
+        for method in ["server/discover", "resources/list"] {
+            let unknown = json!({"code": -32601, "message": format!("no method {method}")});
+            assert_eq!(respond(method, &json!({}), none), Err(unknown));
+        }
+    }
+
+    #[test]
+    fn a_tool_is_a_row_with_one_and_its_arguments_that_do_not_read_are_its_error() {
+        let none: &[String] = &[];
+        let call =
+            |name: &str, arguments: Value| respond("tools/call", &json!({"name": name, "arguments": arguments}), none);
+        for name in ["select", "doctor", "mcp", "nowhere"] {
+            assert_eq!(call(name, json!({})), Err(json!({"code": -32602, "message": format!("no tool {name}")})));
+        }
+        // The text is the answer, compact, as the CLI writes it; isError is its status 1.
+        let refused =
+            |answer: Value| Ok(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": true}));
+        let node = json!({"error": "node needs a string `node`", "node": null});
+        assert_eq!(call("node", json!({"node": 1})), refused(node));
+        let why = "lineage needs a string `id`, and a `depth`, if any, a whole number from 1";
+        let lineage = json!({"error": why, "lineage": null});
+        for depth in [json!(0), json!(-1), json!("2"), json!(1.5)] {
+            assert_eq!(
+                call("lineage", json!({"id": "model.shop.a", "depth": depth})),
+                refused(lineage.clone()),
+                "{depth}"
+            );
+        }
+        assert_eq!(call("lineage", json!({"depth": 2})), refused(lineage));
     }
 
     #[test]

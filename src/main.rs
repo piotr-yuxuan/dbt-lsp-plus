@@ -2,7 +2,7 @@
 //! `dbt-lsp-plus [--] [SERVER COMMAND...]`: a language server for dbt on
 //! the standard input and output, SERVER COMMAND, `dbt lsp` by default,
 //! naming the user's dbt; or, by its first word, one of the subcommands
-//! `doctor`, `select` and `node`.
+//! `doctor`, `select`, `node`, `lineage` and `mcp`.
 
 use dbt_lsp_plus::cli::{self, Arguments};
 use std::process::ExitCode;
@@ -13,11 +13,13 @@ usage: dbt-lsp-plus [--] [SERVER COMMAND...]
        dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
        dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
        dbt-lsp-plus node ID|PATH[:LINE[:COLUMN]] [-- ARGUMENTS...]
+       dbt-lsp-plus lineage ID [--depth N] [-- ARGUMENTS...]
+       dbt-lsp-plus mcp [PATH] [-- ARGUMENTS...]
 
 A language server for dbt on the standard input and output, SERVER COMMAND,
-by default `dbt lsp`, naming the user's dbt; each subcommand answers on one
-line of JSON and tells more with -h.  `--` is needed only before a server
-command that starts with a dash, or whose first word is doctor, select or node.
+by default `dbt lsp`, naming the user's dbt; each subcommand but mcp answers
+on one line of JSON, and each tells more with -h.  `--` is needed only before
+a server command that starts with a dash, or whose first word is a subcommand.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md";
 
 fn main() -> ExitCode {
