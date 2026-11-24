@@ -261,12 +261,12 @@ pub fn project_dir(command: &[String]) -> Option<PathBuf> {
     }
 }
 
-/// The CLI's project from PATH, absolute, with the server command COMMAND,
-/// and by which route, the server's routes, which the proxy codes apart, at
-/// its own moments: given, its `--project-dir`; else PATH, when it holds
-/// `dbt_project.yml`, as a client's folder; else the project of PATH, as a
-/// document's.  Nothing runs.  Else why none, ending with ADVICE when no
-/// `dbt_project.yml` lies at or above PATH.
+/// The CLI's project from PATH, absolute, with the server command
+/// COMMAND, and by which route.  The routes are the server's, which the
+/// proxy codes itself at its own moments: given, its `--project-dir`; else
+/// PATH, when it holds `dbt_project.yml`, as a client's folder; else the
+/// project of PATH, as a document's.  Nothing runs.  Else why none, ending
+/// with ADVICE when no `dbt_project.yml` lies at or above PATH.
 pub fn project(path: &Path, command: &[String], advice: &str) -> Result<(PathBuf, Route), String> {
     if let Some(project) = project_dir(command) {
         let why = || format!("no dbt_project.yml in {}, the server command's --project-dir", project.display());

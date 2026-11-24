@@ -19,7 +19,9 @@ mod routes;
 mod support;
 
 use serde_json::{Value, json};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use support::{Session, copy_fixture, fixture, received_by_server, scratch, until_logged, uri};
 
@@ -308,6 +310,8 @@ fn an_unknown_request_gets_method_not_found_and_a_rename_at_nothing_null() {
         ("textDocument/completion", at_select.clone(), "textDocument/completion"),
         ("workspace/executeCommand", show, "dbt-lsp-plus.show"),
         ("dbt-lsp-plus.nodeInfo", json!({"arguments": ["model.shop.orders"]}), "dbt-lsp-plus.nodeInfo"),
+        // `initialize` may only be sent once: a second has no row.
+        ("initialize", json!({"processId": null, "capabilities": {}}), "initialize"),
     ];
     for (method, params, named) in unknowns {
         let answer = session.request(method, params);
@@ -505,6 +509,90 @@ fn exit_without_shutdown_fails() {
     session.initialize(&fixture());
     session.notify("exit", Value::Null);
     assert_eq!(session.wait().code(), Some(1));
+}
+
+#[test]
+fn a_request_before_initialize_is_refused_and_exit_fails() {
+    let (mut session, _) = Session::fake("before-initialize", json!({}));
+    let refused = session.request("workspace/symbol", json!({"query": "orders"}));
+    assert_eq!((refused.get("result"), &refused["error"]["code"]), (None, &json!(-32002)), "{refused}");
+    // The session goes on: `initialize` is answered.
+    assert_eq!(session.initialize(&fixture())["serverInfo"]["name"], "dbt-lsp-plus");
+    session.notify("exit", Value::Null);
+    assert_eq!(session.wait().code(), Some(1));
+}
+
+#[test]
+fn a_notification_before_initialize_is_dropped() {
+    let (mut session, _) = Session::fake("notification-before-initialize", json!({}));
+    // A file on no disk, whose outline only its open text gives.
+    let unsaved = fixture().join("models/marts/unsaved.sql");
+    let outline_request = json!({"textDocument": {"uri": uri(&unsaved)}});
+    session.open(&unsaved, Some("with a as (select 1)\nselect * from a\n"));
+    session.initialize(&fixture());
+    let outline = session.request("textDocument/documentSymbol", outline_request.clone());
+    assert_eq!(outline["result"], Value::Null, "{outline}");
+    session.open(&unsaved, Some("with a as (select 1)\nselect * from a\n"));
+    let outline = session.request("textDocument/documentSymbol", outline_request);
+    assert!(outline["result"].is_array(), "{outline}");
+    assert!(session.finish().success());
+}
+
+#[test]
+fn a_message_between_the_answer_and_initialized_ends_the_session() {
+    let (mut session, _) = Session::fake("before-initialized", json!({}));
+    let params = json!({"processId": null, "rootUri": uri(&fixture()), "capabilities": {}});
+    assert!(session.request("initialize", params)["result"].is_object());
+    session.notify("workspace/didChangeConfiguration", json!({"settings": {}}));
+    assert_eq!(session.wait().code(), Some(1));
+}
+
+#[test]
+fn a_refusal_larger_than_the_pipe_is_written_whole() {
+    let dir = scratch("refusal-larger-than-the-pipe");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_dbt-lsp-plus"));
+    server.current_dir(&dir).env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    let mut child = server.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("start dbt-lsp-plus");
+    // A request before `initialize`, refused with its method quoted, longer than a pipe holds; then `exit`.
+    let method = "x".repeat(200_000);
+    let frame = |message: Value| format!("Content-Length: {}\r\n\r\n{message}", message.to_string().len());
+    let request = frame(json!({"jsonrpc": "2.0", "id": 1, "method": method}));
+    let exit = frame(json!({"jsonrpc": "2.0", "method": "exit"}));
+    child.stdin.take().unwrap().write_all((request + &exit).as_bytes()).unwrap();
+    // Read once the server would have exited, had it not waited for its writer.
+    std::thread::sleep(Duration::from_millis(500));
+    let mut output = String::new();
+    child.stdout.take().unwrap().read_to_string(&mut output).unwrap();
+    let (header, body) = output.split_once("\r\n\r\n").expect("one frame");
+    assert_eq!(header, format!("Content-Length: {}", body.len()), "the whole body");
+    let refusal: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(refusal["error"]["code"], -32002);
+    assert!(refusal["error"]["message"].as_str().is_some_and(|text| text.contains(&method)));
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+}
+
+#[test]
+fn a_frame_that_is_not_json_rpc_after_shutdown_ends_the_session_well() {
+    let (mut session, _) = Session::fake("not-json-rpc-after-shutdown", json!({}));
+    session.initialize(&fixture());
+    assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
+    session.send_raw(b"Content-Length: 3\r\n\r\nnop");
+    assert_eq!(session.wait().code(), Some(0));
+}
+
+#[test]
+fn a_frame_that_is_not_json_rpc_ends_the_session() {
+    // A request and a frame that is not JSON in one write: the answer to the request is still written.
+    for round in 0..10 {
+        let (mut session, _) = Session::fake(&format!("not-json-rpc-{round}"), json!({}));
+        session.initialize(&fixture());
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "workspace/symbol", "params": {"query": "orders"}});
+        let request = format!("Content-Length: {}\r\n\r\n{request}", request.to_string().len());
+        session.send_raw(format!("{request}Content-Length: 3\r\n\r\nnop").as_bytes());
+        let answer = session.wait_for(|message| message["id"] == 1);
+        assert!(answer["result"].is_array(), "{answer}");
+        assert_eq!(session.wait().code(), Some(1));
+    }
 }
 
 /// The position of `page_views` in `stg_page_views.sql`, with that file's URI.
@@ -1631,9 +1719,10 @@ fn no_parse_after_shutdown_but_one_after_a_crash() {
     parsed_orders(&mut session);
     let path = fixture().join("models/marts/orders.sql");
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
-    // Neither a change nor a request that would parse parses.
+    // Neither a change nor a request, which is refused, parses.
     session.notify("textDocument/didSave", json!({"textDocument": {"uri": uri(&path)}}));
-    node_info(&mut session, json!("model.shop.orders"));
+    let refused = node_info(&mut session, json!("model.shop.orders"));
+    assert_eq!(refused["error"]["code"], -32600, "{refused}");
     parses_stay(&log, 1);
     session.notify("exit", Value::Null);
     assert!(session.wait().success());
@@ -2467,7 +2556,7 @@ fn a_parse_asks_a_client_that_can_refresh_its_hints_and_keeps_its_answer() {
     // The session answers the proxy's request by itself.
     let refresh = session.wait_for(|message| message["method"] == "workspace/inlayHint/refresh");
     let id = refresh["id"].as_str().unwrap().to_owned();
-    assert!(id.starts_with("dbt-lsp-plus/"), "{refresh}");
+    assert!(id.starts_with("dbt-lsp-plus/") && refresh.get("params").is_none(), "{refresh}");
     session.request("workspace/symbol", json!({"query": "orders"}));
     let refreshes = session.received.iter().filter(|m| m["method"] == "workspace/inlayHint/refresh").count();
     assert_eq!(refreshes, 1, "one per parse");
@@ -2678,7 +2767,8 @@ fn no_failure_is_published_after_shutdown() {
     assert_eq!(session.request("shutdown", Value::Null)["result"], Value::Null);
     write_run(&project, &run_results("build", true), &run_manifest());
     std::thread::sleep(Duration::from_millis(2500));
-    session.request("workspace/symbol", json!({"query": "orders"}));
+    let refused = session.request("workspace/symbol", json!({"query": "orders"}));
+    assert_eq!(refused["error"]["code"], -32600, "{refused}");
     assert!(!session.received.iter().any(|m| m["method"] == "textDocument/publishDiagnostics"));
     session.notify("exit", Value::Null);
     assert!(session.wait().success());

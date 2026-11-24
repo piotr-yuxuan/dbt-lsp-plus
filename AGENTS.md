@@ -39,7 +39,6 @@ release adds a commit to `origin/main`, so a clone pulls (`git pull
 ## Layout
 
 ```
-src/rpc.rs                    the framing of LSP messages
 src/text.rs                   LSP positions, in UTF-16, and dbt's in code points; incremental changes
 src/reference.rs              what a place of a document names: its Name
 src/scan.rs                   one file of SQL and Jinja: blocks, CTEs, calls
@@ -61,7 +60,7 @@ src/locate.rs                 the project of a document, and whether a document 
 src/document.rs               folding, highlights, selection ranges, CTE rename
 src/workspace.rs              the core as the front ends see it: the session's project, its dbt, the open texts, the scan kept and its first fill, the parse and its index, the graph, and when the index is stale; the node queries; what a request gets, found, empty, or unanswered with its reasons
 src/proxy.rs                  the event loop of a session: its requests, notifications and diagnostics
-src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell, on the server's resolution
+src/cli.rs                    the command line and the subcommands doctor, select and node, from a shell; the project on the server's routes by its own resolution, its dbt by the server's
 tests/proxy.rs                the binary with the fake dbt
 tests/proxy/live.rs           the binary with the real dbt, either build, opt-in
 tests/proxy/commands.rs       the commands for clients, by the fake dbt's CLI
@@ -126,18 +125,21 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     hints, apart from the outcome of the parse that changes them;
   - `runs::locator`: where a failed node is written, apart from how it
     failed;
-  - `Proxy::on_client`, `Proxy::on_request`, `Proxy::on_initialize`,
-    `Proxy::on_notification`, `Proxy::on_runs` and `Proxy::on_problems`:
-    one handler per kind of message or event, so that `serve`,
-    `on_client`, `on_request` and `on_parsed` stay dispatches;
-  - `capability::announced`: what a session announces, read from the
-    rows beside `CAPABILITIES`, apart from `on_initialize`'s answer;
+  - `Proxy::on_client`, `Proxy::on_request`, `Proxy::on_notification`,
+    `Proxy::on_runs` and `Proxy::on_problems`: one handler per kind of
+    message or event, so that `serve`, `on_client`, `on_request` and
+    `on_parsed` stay dispatches; `Proxy::on_initialize`: the result of
+    the crate's handshake, apart from `run`;
+  - `capability::announced`: what a session announces, written out beside
+    `CAPABILITIES`, its providers held by a unit test to their names and
+    to the number of method rows, its commands to the command rows, apart
+    from `on_initialize`'s result;
   - `config::anchored`: the server command's relative paths made the
     server's directory's, apart from where dbt then runs, with tests of
     its own;
-  - `Proxy::on_first_project`: the start of a project that a document
-    names, apart from the notification that brings it, so that
-    `on_notification` stays a sequence;
+  - `Proxy::on_first_project`: the project that a document names, taken
+    and started by `start_project`, apart from the notification that
+    brings it, so that `on_notification` stays a sequence;
   - `Proxy::outside` and `Proxy::on_elsewhere`: a request on a document of
     another project, its reason and its answer, apart from `on_request`'s
     dispatch; `locate::elsewhere`: whether a document lies in another

@@ -2,16 +2,50 @@
 //! A client of dbt-lsp-plus for the tests: it starts the server with a
 //! server command and speaks LSP to it.
 
-use dbt_lsp_plus::rpc;
 use serde_json::{Value, json};
 use std::fs::{File, TryLockError};
-use std::io::{BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Reads the next message, null for a body that is not JSON, or `Ok(None)`
+/// at the end of the stream.  An error means the frame boundary is lost and
+/// the caller must stop reading.
+fn read_frame(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
+    let mut length = None;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let header = line.trim_end_matches(['\r', '\n']);
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            length = Some(value.trim().parse::<usize>().map_err(io::Error::other)?);
+        }
+    }
+    let length = length.ok_or_else(|| io::Error::other("no Content-Length"))?;
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(serde_json::from_slice(&body).unwrap_or(Value::Null)))
+}
+
+/// Writes MESSAGE as one frame.
+fn write_value(writer: &mut impl Write, message: &Value) -> io::Result<()> {
+    let body = serde_json::to_vec(message)?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(&body)?;
+    writer.flush()
+}
 
 pub fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop")
@@ -101,7 +135,7 @@ impl Session {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let (sender, inbox) = mpsc::channel();
         thread::spawn(move || {
-            while let Ok(Some(message)) = rpc::read_frame(&mut stdout) {
+            while let Ok(Some(message)) = read_frame(&mut stdout) {
                 if sender.send(message).is_err() {
                     return;
                 }
@@ -135,7 +169,14 @@ impl Session {
     }
 
     pub fn send(&mut self, message: &Value) {
-        rpc::write_value(&mut self.stdin, message).expect("write to the proxy");
+        let mut frame = Vec::new();
+        write_value(&mut frame, message).expect("frame a message");
+        self.send_raw(&frame);
+    }
+
+    /// Writes BYTES to the proxy as they are, a frame or not.
+    pub fn send_raw(&mut self, bytes: &[u8]) {
+        self.stdin.write_all(bytes).and_then(|()| self.stdin.flush()).expect("write to the proxy");
     }
 
     pub fn notify(&mut self, method: &str, params: Value) {
@@ -154,6 +195,7 @@ impl Session {
             let message = self.inbox.recv_timeout(left).unwrap_or_else(|_| {
                 panic!("no awaited message within {:?}; received {:#?}", self.timeout, self.received)
             });
+            assert_eq!(message["jsonrpc"], "2.0", "{message}");
             self.received.push(message.clone());
             if let (Some(id), Some(_)) = (message.get("id"), message.get("method")) {
                 let items = message["params"]["items"].as_array().map(|items| vec![Value::Null; items.len()]);
@@ -220,7 +262,7 @@ impl Session {
     /// Shuts down and exits; returns the proxy's exit status.
     pub fn finish(mut self) -> ExitStatus {
         let response = self.request("shutdown", Value::Null);
-        assert_eq!(response["result"], Value::Null, "{response}");
+        assert_eq!(response.get("result"), Some(&Value::Null), "{response}");
         self.notify("exit", Value::Null);
         self.wait()
     }

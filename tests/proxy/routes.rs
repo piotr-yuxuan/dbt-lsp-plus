@@ -263,7 +263,7 @@ fn from_the_folder(name: &str) -> (Session, Value, PathBuf) {
     ];
     let mut session = Session::start(&[], &env, Some(&dir));
     let result = session.initialize(&project);
-    // Once answered, the line that came before it.
+    // Once answered, the line said after `initialized` has come before it.
     session.request("workspace/symbol", json!({"query": "orders"}));
     (session, result, dbt)
 }

@@ -38,14 +38,27 @@ client ── stdin ──▶ dbt-lsp-plus ── runs ──▶ dbt parse, dbt 
        ◀─ stdout ──
 ```
 
-One thread reads the client's input and sends whole messages to one event
-loop, which owns all state and writes the output; the parse, the runs of
-dbt's CLI and the watchers of the last run report to it from threads of
-their own.
+The crate `lsp-server` (plan 083) reads and writes the framing on
+threads of its own; one thread hands the client's messages to one event
+loop, which owns all state; the parse, the runs of dbt's CLI and the
+watchers of the last run report to it from threads of their own.  Before
+the server exits, whether the handshake failed, the input ended or a
+frame did not read, it waits until the crate's writer lets go of the
+standard output, which it holds while its channel is open: what was sent
+is written.  `IoThreads::join` does not serve: it waits for a reader that
+may still be reading, and returns before the writer at a frame it cannot
+read.
 
-- `initialize` is answered at once: the capability of each method of
-  `CAPABILITIES` (see "Capabilities"), saves, which start a parse, and
-  the commands `dbt-lsp-plus.nodeInfo`, `dbt-lsp-plus.compile` and
+- `initialize` goes through `lsp-server`'s handshake (plan 083).  Before
+  it, a request gets -32002 and a notification is dropped; `exit` ends
+  the server, status 1.  Its answer, computed at once, is sent, then the
+  crate waits for `initialized`: any other message ends the session,
+  status 1.  The first scan, the watcher of runs, the watcher of files
+  and the line that names the project start once `initialized` comes.  A
+  second `initialize` gets -32601, as a name with no row.  The answer
+  holds an object written beside `CAPABILITIES` (see "Capabilities"): a
+  provider for each method but the call hierarchy's followers, saves,
+  which start a parse, and the commands `dbt-lsp-plus.nodeInfo`, `dbt-lsp-plus.compile` and
   `dbt-lsp-plus.nodes`.  `initializationOptions` is not read.  Positions
   are in UTF-16, LSP's default, which the server keeps by announcing no
   `positionEncoding`.
@@ -58,7 +71,10 @@ their own.
   null or `[]` for a list, where the position names nothing.  References
   come from the scan whichever file asks, while a source's rename needs
   a file the scan holds, since it would leave the asking file as it is.
-- Request ids: the client's pass unchanged.  The server's own requests to
+- After `shutdown`, every request gets -32600, as LSP says.
+- Request ids: the client's, a string or a 32-bit integer, pass
+  unchanged; a request of any other id (above 2^31 - 1, fractional,
+  null) is read as a notification and never answered.  The server's own requests to
   the client (`workspace/inlayHint/refresh`, `client/registerCapability`)
   carry string ids `dbt-lsp-plus/N`; the client's answers to them are
   dropped.
@@ -106,11 +122,13 @@ its own form.
 
 Each method the server answers has a capability (`src/capability.rs`,
 plan 042): one descriptor per method or command for clients, which says
-the capability that announces it, whether its nothing is `[]`, whether
-it wants the parse's index, and whether it reads the project.  The
-capabilities announced, the commands listed and the reference's table
-of methods and commands all come from that one table, and a unit test
-holds the reference's table to it.  The command line takes `-h` and
+whether its nothing is `[]`, whether it wants the parse's index, and
+whether it reads the project.  Routing and the reference's table of
+methods and commands come from that one table, and a unit test holds the
+reference's table to it.  The object announced is written beside it
+(plan 083); a unit test holds its providers, each offered, to a list of
+their names and to the number of method rows, and its commands to the
+command rows.  The command line takes `-h` and
 `-V` alone; any other option is a usage error.
 
 ## Commands for clients
@@ -128,7 +146,7 @@ A selection of no node is `{"nodes": [], "error": "No nodes found"}`.
 The first argument alone counts, a string, as dbt lsp reads its
 commands'.  The server's own failures hold these keys alone, `error` set
 and the rest null (`[]` for nodes); arguments it cannot read are -32602,
-a request after `shutdown` -32600.  `initialize` announces both.  A
+and after `shutdown` -32600, as every request.  `initialize` announces both.  A
 server command with no `lsp`, from which a run's is made, makes the run
 answer an error.  The command for previews, which only dbt lsp answered,
 went with it (plan 075): `dbt show` alone would reach the warehouse, a
@@ -490,7 +508,8 @@ none, the server answers `initialize` before it can know it.
     kept files, since a file's resources depend on its package and
     layout.  The call hierarchy's graph is kept while the project and the
     last parse's index stay.
-  - `initialize` starts a thread that reads every file once, whose files
+  - The start of the project, at `initialized` or at the first document
+    of a project, starts a thread that reads every file once, whose files
     the cache takes once it is done.  Nothing waits for it: a request
     that comes before reads the files itself.
   - Measured on synthetic projects (`scripts/bench/`) of 3,000 and 6,000
@@ -1168,10 +1187,18 @@ over the manifest that node keeps, checked against dbt (plan 058);
 | A method or a command the server does not answer | Error -32601 `dbt-lsp-plus does not answer NAME`, at once |
 | The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`; with no target, a definition is null and references `[]`; once a parse has given an index, a hover and a nodeInfo at a `ref`, a `source` or an entry's `name:` fail with that reason too, and inlay hints give none (see "What a request gets") |
 | A YAML file is not valid | Its sources are left out |
-| A body is not JSON | Read as null, and ignored |
-| A header is malformed, or a body is longer than 64 MiB | The stream stops: the frame boundary is lost |
+| A frame that `lsp-server` cannot read: a header line without CRLF, a header without exactly `: `, no `Content-Length`, a body that is not UTF-8 JSON, JSON of no message's shape, a batch | The session ends as when the client closes its input: a parse or a run killed, the answers already sent written; status 0 after `shutdown`, else 1 |
+| A request whose id is neither a string nor a 32-bit integer | Read as a notification, never answered; before `initialize`, dropped |
+| A request before `initialize` | -32002; a notification is dropped, and `exit` ends the server, status 1 |
+| A message between `initialize`'s answer and `initialized` | The session ends, status 1 |
+| The client goes away during the handshake, closing both its pipes | The handshake fails, status 1; nothing had started |
+| The client stops reading during the handshake but still writes | The server panics at its next answer, status 101, when the write before it already failed; nothing had started |
 | `exit` | A parse or a run under way is killed.  The server exits 0 after `shutdown`, else 1 |
+| `exit` sent as a request, with an id | -32601, as a name with no row, or -32600 after `shutdown`; the server goes on until `exit` comes as a notification or the input ends |
 | `dbt parse` fails, or cannot start | The index keeps what it had, laid over by what a failed run still wrote; the reason is logged once, and given by `nodeInfo` and a hover on a node until a first index exists |
+
+The 64 MiB limit went: a stdio client, which started the server, is
+trusted.
 
 ## Known limitations
 
@@ -1181,8 +1208,8 @@ over the manifest that node keeps, checked against dbt (plan 058);
   on-run hooks, or where a package's `dbt_project.yml` does not read.  A file of a package, or whose path from the root
   holds a space or a comma, does not compile.
 - `docs-paths` is ignored: docs blocks are read from every resource path.
-- JSON-RPC batches are not read; a batched `exit` does not stop the
-  server.  LSP clients do not send batches.
+- JSON-RPC batches are not read: a batch ends the session.  LSP clients
+  do not send batches.
 - A backslash-escaped quote in SQL, dollar-quoted strings, and `#` or `//`
   comments holding a quote can mislead the CTE scan.  So can a named window:
   in `window w1 as (...), w2 as (...)`, `w2` reads as a CTE.
@@ -1391,7 +1418,7 @@ compared: a generic test's name, a unit test's `model:`, a `ref` or
 
 ## Tests
 
-- Unit tests for each pure module: framing, positions and incremental
+- Unit tests for each pure module: positions and incremental
   changes, the scan of SQL and Jinja, YAML places, the project, the kept
   scan, the graph, the probe, and the shape of each answer.
 - Integration tests run the binary with `fake-dbt`, a scripted dbt
