@@ -1190,13 +1190,21 @@ second binary would be one more file to install, put on a harness's
   on which Claude Code falls back to `initialize`.  Each call is the
   CLI's run, fresh before fast: its answer is that of the files as they
   lie when asked, so that an agent that just edited a model is never
-  answered from before its edit, at the cost of the scan and the kept
-  manifest read at every call, and a whole parse after a change; the
-  last index is not kept between calls.  Requests are served one at a
-  time.
+  answered from before its edit, at the cost, at every call, of git
+  once, the dbt's `lsp --help` probe, the scan and the kept manifest
+  read, and a whole parse after a change; on a project whose parse
+  fails, a whole parse at every call, up to 120 s, holding the calls
+  after it, since a failure keeps no manifest.  The last index is not
+  kept between calls.  Requests are served one at a time.  SIGINT ends
+  the server at once, and a parse under way runs on to its own end,
+  unwatched.  The protocol stays in `cli.rs`, beside the table it reads,
+  while it is one era and two tools; the next era, or a third tool,
+  starts by moving `mcp`, `respond` and `call` to a module of their own.
 - **The answers' form.**  One line of compact JSON, whatever the outcome,
-  with `error` when something is missing or failed; nothing on the
-  standard error but a usage error, status 2.  No answer has a time or a
+  with `error` when something is missing or failed, from each
+  subcommand but mcp, which writes a line per request; nothing on the
+  standard error but a usage error, status 2, and mcp's PATH that is no
+  directory, status 1.  No answer has a time or a
   parse's id: doctor and select read no index, and node's is the
   manifest of the files as they lie; nor a `from`, since each has one
   provider.

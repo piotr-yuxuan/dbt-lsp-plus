@@ -248,8 +248,10 @@ An MCP server on the standard input and output, one JSON-RPC message a
 line, whose tools are node and lineage: each call answers as the
 subcommand does from a shell.  PATH, `.` by default, becomes the
 server's working directory, from which the tools find the project and
-read a place's PATH.  A client's configuration names it as any stdio
-server:
+read a place's PATH, and from which a relative path in the server
+command after `--` is read, as `.venv/bin/dbt`, where node from a shell
+reads it from the directory it runs in.  A client's configuration names
+it as any stdio server:
 
 ```json
 {"command": "dbt-lsp-plus", "args": ["mcp"]}
@@ -300,6 +302,7 @@ subcommand or server on the project removes it a day later.
 ## The standard error
 
 Nothing is written there but a usage error, which ends with status 2 and
-the subcommand's usage, and mcp's PATH that is no directory; the answer
-is always the one line of the standard output, with `error` when
-something is missing or failed.
+the subcommand's usage, and mcp's PATH that is no directory, with status
+1.  The answer of each subcommand but mcp is always the one line of the
+standard output, with `error` when something is missing or failed; mcp
+writes there a line per request, its tools' answers with `error` alike.
