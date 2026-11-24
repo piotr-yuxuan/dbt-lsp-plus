@@ -1122,6 +1122,7 @@ mod tests {
                 "no dbt_project.yml at or above <root>; give a path within the project",
                 r#"locate::project(&path, command, "give a path within the project")"#,
             ),
+            ("no dbt_project.yml at or above <root>;", r#""no dbt_project.yml at or above {}; {advice}""#),
             ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
             (
                 "A session finds one project, once",
