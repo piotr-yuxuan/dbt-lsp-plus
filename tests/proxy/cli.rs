@@ -254,6 +254,9 @@ fn doctor_without_a_project_runs_nothing() {
     let mut keys: Vec<&String> = answer.as_object().unwrap().keys().collect();
     keys.sort();
     assert_eq!(keys, ["error", "path", "project", "version"]);
+    // Without its operand, doctor runs on the current directory.
+    let (status, answer) = case.run(&folder, &["doctor"]);
+    assert_eq!((status, &answer["path"], &answer["project"]), (Some(1), &json!(folder), &Value::Null), "{answer}");
     assert!(!stubs.exists(), "{}", fs::read_to_string(&stubs).unwrap_or_default());
 }
 

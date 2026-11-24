@@ -15,14 +15,15 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc;
 
-/// A subcommand: its name, its usage, the operand it needs, if any, and
-/// its run, which from its operand and the server command gives its answer
+/// A subcommand: its name, its usage, its operand, and its run, which from its operand and the server command gives its answer
 /// and whether it worked.
 pub struct Row {
     name: &'static str,
     usage: &'static str,
-    needs: Option<&'static str>,
-    run: fn(Option<String>, &[String]) -> (Value, bool),
+    /// Without an operand: its default, else what it needs, said in the
+    /// usage error.
+    operand: Result<&'static str, &'static str>,
+    run: fn(String, &[String]) -> (Value, bool),
 }
 
 const SUBCOMMANDS: [Row; 3] = [
@@ -34,8 +35,8 @@ usage: dbt-lsp-plus doctor [PATH] [-- ARGUMENTS...]
 Which project and dbt the server would find from PATH, on one line of JSON.
 Exit status 0 when it finds a dbt 2, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
-        needs: None,
-        run: |path, command| doctor(Path::new(path.as_deref().unwrap_or(".")), command),
+        operand: Ok("."),
+        run: |path, command| doctor(Path::new(&path), command),
     },
     Row {
         name: "select",
@@ -45,8 +46,8 @@ usage: dbt-lsp-plus select SELECTOR [-- ARGUMENTS...]
 The nodes that SELECTOR, a dbt selector, selects, on one line of JSON.
 Exit status 0 when nodes are listed, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
-        needs: Some("a SELECTOR"),
-        run: |selector, command| by_error(select(&selector.unwrap_or_default(), command)),
+        operand: Err("a SELECTOR"),
+        run: |selector, command| by_error(select(&selector, command)),
     },
     Row {
         name: "node",
@@ -57,8 +58,8 @@ What nodeInfo gives of the node that ID, or a place in PATH, names, on one
 line of JSON; LINE and COLUMN from 1, COLUMN in characters.
 Exit status 0 when `error` is null, 1 otherwise, 2 for a usage error.
 https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
-        needs: Some("an ID or a PATH"),
-        run: |operand, command| by_error(node(&operand.unwrap_or_default(), command)),
+        operand: Err("an ID or a PATH"),
+        run: |operand, command| by_error(node(&operand, command)),
     },
 ];
 
@@ -102,14 +103,14 @@ enum Asked {
     /// Its OPERAND, doctor's PATH, select's SELECTOR or node's ID or PATH,
     /// and the server command.
     Run {
-        operand: Option<String>,
+        operand: String,
         command: Vec<String>,
     },
 }
 
 /// What WORDS, after ROW's name, ask: its usage, by `-h` or
-/// `--help` first, whatever follows; else its operand, optional for
-/// doctor and needed by select and node, then, after `--`, the server's
+/// `--help` first, whatever follows; else its operand, or the row's
+/// default, then, after `--`, the server's
 /// arguments, as `arguments` reads them.  Or why they cannot be read.
 fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     if let Some(first) = words.first()
@@ -119,17 +120,13 @@ fn asked(row: &Row, words: &[String]) -> Result<Asked, String> {
     }
     let split = words.iter().position(|word| word == "--").unwrap_or(words.len());
     let server = words.get(split + 1..).unwrap_or_default();
-    let operand = match &words[..split] {
-        [] => None,
-        [word] if !word.starts_with('-') => Some(word.clone()),
-        [word] => return Err(format!("{word} is no option of the subcommand")),
-        [_, extra, ..] => return Err(format!("{extra}: the server's arguments follow --")),
+    let operand = match (&words[..split], row.operand) {
+        ([], Ok(default)) => default.to_owned(),
+        ([], Err(needed)) => return Err(format!("{} needs {needed}", row.name)),
+        ([word], _) if !word.starts_with('-') => word.clone(),
+        ([word], _) => return Err(format!("{word} is no option of the subcommand")),
+        ([_, extra, ..], _) => return Err(format!("{extra}: the server's arguments follow --")),
     };
-    if let Some(needed) = row.needs
-        && operand.is_none()
-    {
-        return Err(format!("{} needs {needed}", row.name));
-    }
     match arguments(server)? {
         Arguments::Run(command) => Ok(Asked::Run { operand, command }),
         _ => Err("-h and -V are not the server's arguments here".into()),
@@ -363,12 +360,11 @@ mod tests {
 
     #[test]
     fn a_subcommand_reads_its_operand_then_the_server_s_arguments_after_dashes() {
-        let run = |operand: Option<&str>, command: &[&str]| {
-            Ok(Asked::Run { operand: operand.map(str::to_owned), command: words(command) })
-        };
+        let run =
+            |operand: &str, command: &[&str]| Ok(Asked::Run { operand: operand.to_owned(), command: words(command) });
         let default = ["dbt", "lsp"];
-        assert_eq!(asked(&SUBCOMMANDS[0], &[]), run(None, &default));
-        assert_eq!(asked(&SUBCOMMANDS[0], &words(&["x.sql"])), run(Some("x.sql"), &default));
+        assert_eq!(asked(&SUBCOMMANDS[0], &[]), run(".", &default), "doctor's default");
+        assert_eq!(asked(&SUBCOMMANDS[0], &words(&["x.sql"])), run("x.sql", &default));
         let helped: [(&Row, &[&str]); 4] = [
             (&SUBCOMMANDS[0], &["-h"]),
             (&SUBCOMMANDS[1], &["--help"]),
@@ -379,9 +375,9 @@ mod tests {
             assert_eq!(asked(row, &words(line)), Ok(Asked::Help), "{} {line:?}", row.name);
         }
         let given = words(&["--", "--", "uvx", "dbt", "lsp", "--target", "prod"]);
-        assert_eq!(asked(&SUBCOMMANDS[0], &given), run(None, &["uvx", "dbt", "lsp", "--target", "prod"]));
+        assert_eq!(asked(&SUBCOMMANDS[0], &given), run(".", &["uvx", "dbt", "lsp", "--target", "prod"]));
         let selected = words(&["+m+", "--", "dbt", "lsp"]);
-        assert_eq!(asked(&SUBCOMMANDS[1], &selected), run(Some("+m+"), &default));
+        assert_eq!(asked(&SUBCOMMANDS[1], &selected), run("+m+", &default));
         let refused: [(&Row, &[&str]); 9] = [
             (&SUBCOMMANDS[0], &["--bogus"]),
             (&SUBCOMMANDS[0], &["x.sql", "-h"]),
@@ -396,6 +392,15 @@ mod tests {
         for (row, line) in refused {
             assert!(asked(row, &words(line)).is_err(), "{} {line:?}", row.name);
         }
+    }
+
+    #[test]
+    fn a_row_without_its_operand_takes_its_default_or_says_what_it_needs() {
+        let operands: Vec<(&str, Result<&str, &str>)> = SUBCOMMANDS.iter().map(|row| (row.name, row.operand)).collect();
+        assert_eq!(operands, [("doctor", Ok(".")), ("select", Err("a SELECTOR")), ("node", Err("an ID or a PATH"))]);
+        let none: Vec<Result<Asked, String>> = SUBCOMMANDS.iter().map(|row| asked(row, &[])).collect();
+        let doctor = Asked::Run { operand: ".".into(), command: words(&["dbt", "lsp"]) };
+        assert_eq!(none, [Ok(doctor), Err("select needs a SELECTOR".into()), Err("node needs an ID or a PATH".into())]);
     }
 
     #[test]
