@@ -573,6 +573,10 @@ fn mcp_serves_node_and_lineage_as_the_cli_does_from_its_path() {
     manifest["nodes"]["test.shop.not_null_orders_id"] = json!({"unique_id": "test.shop.not_null_orders_id",
         "name": "not_null_orders_id", "resource_type": "test", "package_name": "shop",
         "attached_node": "model.shop.orders", "depends_on": {"nodes": ["model.shop.orders"]}});
+    // Three hops below the source, past any small default depth.
+    manifest["nodes"]["model.shop.order_summary"] = json!({"unique_id": "model.shop.order_summary",
+        "name": "order_summary", "resource_type": "model", "package_name": "shop",
+        "original_file_path": "models/marts/order_summary.sql", "depends_on": {"nodes": ["model.shop.orders"]}});
     let case = Case::new("cli-mcp", &json!({"manifest": manifest}));
     venv_fake(&case.copy);
     let input = [
@@ -617,9 +621,9 @@ fn mcp_serves_node_and_lineage_as_the_cli_does_from_its_path() {
     assert_eq!(nodes, expected, "{stg_orders} {at}");
     let ((lineage, found), (source, _)) = (tool_answer(&lines[5]), tool_answer(&lines[6]));
     let up = json!({"model.shop.stg_orders": 1, "source.shop.raw.customers": 2});
-    let orders = json!({"error": null, "lineage": {"upstream": up, "downstream": {}}});
+    let orders = json!({"error": null, "lineage": {"upstream": up, "downstream": {"model.shop.order_summary": 1}}});
     // The test aside, downstream of the source.
-    let down = json!({"model.shop.stg_orders": 1, "model.shop.orders": 2});
+    let down = json!({"model.shop.stg_orders": 1, "model.shop.orders": 2, "model.shop.order_summary": 3});
     let from_source = json!({"error": null, "lineage": {"upstream": {}, "downstream": down}});
     assert_eq!((&lineage, found, &source), (&orders, &json!(false), &from_source));
     let (nowhere, failed) = tool_answer(&lines[7]);
@@ -659,6 +663,12 @@ fn mcp_says_why_without_a_project_and_fails_on_a_path_that_is_no_directory() {
         );
     }
     assert!(starts(&case.log).is_empty(), "{:#?}", starts(&case.log));
+    // The server's arguments after `--` reach the tools: the project given, from the same directory.
+    let (fake, copy) = (env!("CARGO_BIN_EXE_fake-dbt"), case.copy.to_str().unwrap());
+    let (status, lines, _) =
+        served(case.command(&case.dir, &["mcp", "--", fake, "lsp", "--project-dir", copy]), &input);
+    let (given, failed) = tool_answer(&lines[0]);
+    assert_eq!((status, failed, &given["node"]["unique_id"]), (Some(0), &json!(false), &json!("model.shop.orders")));
     let (status, lines, stderr) = served(case.command(&case.dir, &["mcp", "nowhere"]), &input);
     assert_eq!((status, lines), (Some(1), Vec::new()), "nothing on the standard output: {stderr}");
     assert!(stderr.starts_with("dbt-lsp-plus: nowhere: "), "{stderr}");
