@@ -441,13 +441,14 @@ fn mcp(path: &str, command: &[String]) -> (Value, bool) {
 }
 
 /// The result of the MCP request METHOD with PARAMS, else its error, whether
-/// `initialize` came or not; the version agreed is the client's when it is
-/// one of VERSIONS, else the latest.
+/// `initialize` came or not.  The version agreed is the latest of VERSIONS
+/// not after the client's, dates read as text, so that a client of a
+/// revision between two gets the one it can speak; else the latest.
 fn respond(method: &str, params: &Value, command: &[String]) -> Result<Value, Value> {
     match method {
         "initialize" => {
             let asked = params["protocolVersion"].as_str();
-            let version = VERSIONS.into_iter().find(|version| Some(*version) == asked).unwrap_or(VERSIONS[0]);
+            let version = VERSIONS.into_iter().find(|version| Some(*version) <= asked).unwrap_or(VERSIONS[0]);
             let server = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});
             Ok(json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": server}))
         }
@@ -634,6 +635,8 @@ mod tests {
             (json!("2025-11-25"), "2025-11-25"),
             (json!("2024-11-05"), "2024-11-05"),
             (json!("2099-01-01"), "2025-11-25"),
+            (json!("2025-03-26"), "2024-11-05"),
+            (json!("2024-10-07"), "2025-11-25"),
             (Value::Null, "2025-11-25"),
         ] {
             let server = json!({"name": "dbt-lsp-plus", "version": env!("CARGO_PKG_VERSION")});

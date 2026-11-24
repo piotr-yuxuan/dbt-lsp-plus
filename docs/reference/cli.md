@@ -255,8 +255,10 @@ server:
 ```
 
 It speaks MCP's legacy era, which a client opens with `initialize`: the
-version agreed is the client's when it asks 2025-11-25, 2025-06-18 or
-2024-11-05, else 2025-11-25.  Then `ping`, `tools/list` and `tools/call`
+version agreed is the latest of 2025-11-25, 2025-06-18 and 2024-11-05
+that is not after the client's, so that a client asking 2025-03-26 gets
+2024-11-05; a client asking none, or one before them all, gets
+2025-11-25.  Then `ping`, `tools/list` and `tools/call`
 are answered, whether `initialize` came or not; a notification gets
 nothing.  The errors:
 
