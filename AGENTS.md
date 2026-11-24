@@ -159,11 +159,13 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
   - `cli::named`: the rule that a subcommand is the first word, its row,
     tested without running the binary, apart from `main.rs`, whose
     `cli::main` is the module's entry point; `cli::asked`, the decision on
-    a subcommand's words, and `cli::operands` and `cli::option`, its
-    operand and its option, each with the tests of `asked`;
-    `cli::doctor`, `cli::select`, `cli::node`, `cli::lineage` and
-    `cli::mcp`, one per row, its run; `Row::listed`, a row's tool as
-    `tools/list` gives it; `cli::respond` and `cli::call`, the decisions
+    a subcommand's words, with tests of its own; `cli::operands`, the
+    words before `--` made the arguments that a tool's call would give,
+    apart from `asked`'s split and the server's words, so that the CLI
+    and MCP hand their runs one form; `cli::option`, the row's option
+    taken off those words, apart from the operand's match, which every
+    row meets; `cli::doctor`, `cli::select`, `cli::node`, `cli::lineage`
+    and `cli::mcp`, one per row, its run; `cli::respond` and `cli::call`, the decisions
     on an MCP method and on a tool's call, apart from `mcp`'s lines, with
     tests of their own; `cli::operand`, the decision on node's operand, a `Which`, with tests
     of its own; `cli::indexed`, the CLI's index, the kept manifest or a

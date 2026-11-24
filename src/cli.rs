@@ -113,20 +113,6 @@ https://github.com/piotr-yuxuan/dbt-lsp-plus/blob/main/docs/reference/cli.md",
 /// The MCP revisions that `initialize` agrees on, the latest first.
 const VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2024-11-05"];
 
-impl Row {
-    /// The row's tool as `tools/list` gives it, if it is one: its operand a
-    /// required string, its option a whole number from 1.
-    fn listed(&self) -> Option<Value> {
-        let description = self.tool?;
-        let mut properties = json!({self.operand.0: {"type": "string"}});
-        if let Some(option) = self.option {
-            properties[option] = json!({"type": "integer", "minimum": 1});
-        }
-        let schema = json!({"type": "object", "properties": properties, "required": [self.operand.0]});
-        Some(json!({"name": self.name, "description": description, "inputSchema": schema}))
-    }
-}
-
 /// The subcommand that WORDS, the command line after the program's name,
 /// name by their first word; none when it names none, and the words are the
 /// server's.
@@ -463,7 +449,18 @@ fn respond(method: &str, params: &Value, command: &[String]) -> Result<Value, Va
             Ok(json!({"protocolVersion": version, "capabilities": {"tools": {}}, "serverInfo": server}))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": SUBCOMMANDS.iter().filter_map(Row::listed).collect::<Vec<_>>()})),
+        "tools/list" => {
+            // Each row that is a tool: its operand a required string, its option a whole number from 1.
+            let tools = SUBCOMMANDS.iter().filter_map(|row| {
+                let mut properties = json!({row.operand.0: {"type": "string"}});
+                if let Some(option) = row.option {
+                    properties[option] = json!({"type": "integer", "minimum": 1});
+                }
+                let schema = json!({"type": "object", "properties": properties, "required": [row.operand.0]});
+                Some(json!({"name": row.name, "description": row.tool?, "inputSchema": schema}))
+            });
+            Ok(json!({"tools": tools.collect::<Vec<_>>()}))
+        }
         "tools/call" => call(params, command),
         _ => Err(json!({"code": -32601, "message": format!("no method {method}")})),
     }
