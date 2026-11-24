@@ -1187,12 +1187,14 @@ over the manifest that node keeps, checked against dbt (plan 058);
 | A method or a command the server does not answer | Error -32601 `dbt-lsp-plus does not answer NAME`, at once |
 | The root's `dbt_project.yml` no longer reads: removed, not YAML, or with no `name` | A definition or references on a target, workspace symbols and the call hierarchy fail with -32803 `no dbt project at ROOT: ...`; with no target, a definition is null and references `[]`; once a parse has given an index, a hover and a nodeInfo at a `ref`, a `source` or an entry's `name:` fail with that reason too, and inlay hints give none (see "What a request gets") |
 | A YAML file is not valid | Its sources are left out |
-| A frame that `lsp-server` cannot read: a header line without CRLF, a header without exactly `: `, no `Content-Length`, a body that is not UTF-8 JSON, JSON of no message's shape | The session ends as when the client closes its input: a parse or a run killed, the answers already sent written, status 1 |
+| A frame that `lsp-server` cannot read: a header line without CRLF, a header without exactly `: `, no `Content-Length`, a body that is not UTF-8 JSON, JSON of no message's shape, a batch | The session ends as when the client closes its input: a parse or a run killed, the answers already sent written; status 0 after `shutdown`, else 1 |
 | A request whose id is neither a string nor a 32-bit integer | Read as a notification, never answered; before `initialize`, dropped |
 | A request before `initialize` | -32002; a notification is dropped, and `exit` ends the server, status 1 |
 | A message between `initialize`'s answer and `initialized` | The session ends, status 1 |
-| The client goes away during the handshake | The server panics, status 101; nothing had started |
+| The client goes away during the handshake, closing both its pipes | The handshake fails, status 1; nothing had started |
+| The client stops reading during the handshake but still writes | The server panics at its next answer, status 101, when the write before it already failed; nothing had started |
 | `exit` | A parse or a run under way is killed.  The server exits 0 after `shutdown`, else 1 |
+| `exit` sent as a request, with an id | -32601, as a name with no row, or -32600 after `shutdown`; the server goes on until `exit` comes as a notification or the input ends |
 | `dbt parse` fails, or cannot start | The index keeps what it had, laid over by what a failed run still wrote; the reason is logged once, and given by `nodeInfo` and a hover on a node until a first index exists |
 
 The 64 MiB limit went: a stdio client, which started the server, is
