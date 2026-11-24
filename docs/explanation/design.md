@@ -244,8 +244,8 @@ that applies:
 - **given**: the server command's `--project-dir` (`--project-dir X` or
   `--project-dir=X`).  The dbt is the command as written, unprobed, run
   in the server's working directory; the line `dbt-lsp-plus: project
-  <root>, dbt <words before lsp>.` goes on the standard error at the
-  start and to the client once it is initialized (plan 075).  dbt-mode
+  <root>, dbt <words before lsp> (the server command).` goes on the
+  standard error at the start and to the client once it is initialized (plan 075).  dbt-mode
   takes this route, always.
 - **the folder**: else the client's first workspace folder, or `rootUri`,
   when it holds a `dbt_project.yml`, taken when the client's `initialize`

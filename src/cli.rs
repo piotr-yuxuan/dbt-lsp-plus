@@ -4,10 +4,10 @@
 //! LSP client, each answered on one line of compact JSON.  The project and
 //! its dbt are found as the server finds them.
 
-use crate::locate::{self, Route};
+use crate::locate;
 use crate::text::{self, Encoding, LineStarts};
 use crate::workspace::{self, Which, Workspace};
-use crate::{cache, commands, config, packages, proxy};
+use crate::{cache, commands, config, packages};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
@@ -212,44 +212,6 @@ fn by_error(answer: Value) -> (Value, bool) {
     (answer, ok)
 }
 
-enum Missing {
-    /// The server command's `--project-dir` holds no `dbt_project.yml`; why,
-    /// in words that need no advice.
-    Given(String),
-    /// No `dbt_project.yml` at or above the path, which the caller words.
-    Above,
-}
-
-/// The project as the server finds it from PATH, absolute, with the server
-/// command COMMAND, and by which route: given, its `--project-dir`; else
-/// PATH, when it holds `dbt_project.yml`, as a client's folder; else the
-/// project of PATH, as a document's.  Nothing runs.
-fn project(path: &Path, command: &[String]) -> Result<(PathBuf, Route), Missing> {
-    if let Some(project) = proxy::project_dir(command) {
-        let why = || {
-            Missing::Given(format!("no dbt_project.yml in {}, the server command's --project-dir", project.display()))
-        };
-        return project.join("dbt_project.yml").is_file().then(|| (project.clone(), Route::Given)).ok_or_else(why);
-    }
-    match path.join("dbt_project.yml").is_file() {
-        true => Ok((path.to_owned(), Route::Folder)),
-        false => locate::project_of(path, command).map(|project| (project, Route::Document)).ok_or(Missing::Above),
-    }
-}
-
-/// The dbt of PROJECT, found on ROUTE, as the server finds it from the
-/// server command COMMAND, and where its processes run: given, the command
-/// as written, in the current directory; else `locate::dbt`'s from COMMAND
-/// anchored in the current directory, in the project.
-fn dbt_of(project: &Path, route: Route, command: &[String]) -> (locate::Located, Option<PathBuf>) {
-    if route == Route::Given {
-        return (locate::Located::written(command), None);
-    }
-    let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
-    let anchored = std::env::current_dir().map_or_else(|_| command.to_vec(), |cwd| config::anchored(command, &cwd));
-    (locate::dbt(project, &anchored, &git), Some(project.to_owned()))
-}
-
 /// What the server would find from PATH with the server command COMMAND,
 /// and whether it would work: its answer, and whether a project was found
 /// whose dbt answers as a dbt 2 does.
@@ -257,19 +219,13 @@ fn doctor(path: &Path, command: &[String]) -> (Value, bool) {
     let version = env!("CARGO_PKG_VERSION");
     // `..` resolved as written, as a client's URI has none: the walk up to a
     // project then never passes through a directory the file lies outside.
-    let path = proxy::lexical(&std::path::absolute(path).unwrap_or_else(|_| path.to_owned()));
+    let path = locate::lexical(&std::path::absolute(path).unwrap_or_else(|_| path.to_owned()));
     let shown = path.display().to_string();
-    let (project, route) = match project(&path, command) {
+    let (project, route) = match locate::project(&path, command, "give a path within the project") {
         Ok(found) => found,
-        Err(missing) => {
-            let error = match missing {
-                Missing::Given(why) => why,
-                Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project"),
-            };
-            return (json!({"version": version, "path": shown, "project": null, "error": error}), false);
-        }
+        Err(error) => return (json!({"version": version, "path": shown, "project": null, "error": error}), false),
     };
-    let (dbt, dir) = dbt_of(&project, route, command);
+    let (dbt, dir) = locate::dbt_of(&project, route, command);
     // What `locate::dbt` left unprobed is probed as it probes a candidate.
     let probed = if dbt.probed { Ok(()) } else { locate::probe(&dbt.command, dir.as_deref()) };
     // With the server command as given, as select asks it: finding the dbt
@@ -291,21 +247,17 @@ fn doctor(path: &Path, command: &[String]) -> (Value, bool) {
 /// run.  Refused before anything runs without a project, or by the guard.
 fn select(selector: &str, command: &[String]) -> Value {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (project, route) = match project(&cwd, command) {
+    let advice = "run it within the project, or name it with -- dbt lsp --project-dir DIR";
+    let (project, route) = match locate::project(&cwd, command, advice) {
         Ok(found) => found,
-        Err(Missing::Given(why)) => return commands::failure(commands::NODES, &why),
-        Err(Missing::Above) => {
-            let advice = "run it within the project, or name it with -- dbt lsp --project-dir DIR";
-            let why = format!("no dbt_project.yml at or above {}; {advice}", cwd.display());
-            return commands::failure(commands::NODES, &why);
-        }
+        Err(why) => return commands::failure(commands::NODES, &why),
     };
     // The guard reads the server command's install path, which finding its
     // dbt leaves as is.
     if let Some(why) = packages::refused(&project, command) {
         return commands::failure(commands::NODES, &why);
     }
-    let (dbt, dir) = dbt_of(&project, route, command);
+    let (dbt, dir) = locate::dbt_of(&project, route, command);
     let cache = config::cache_dir(&config::cache_base(), &project, &dbt.command);
     // What a select or a proxy killed by a signal left, swept after a day, as `Workspace::cache_dir` does.
     config::remove_stale(&cache);
@@ -347,7 +299,7 @@ fn operand(operand: &str, dir: &Path, is_file: impl Fn(&Path) -> bool) -> Operan
         candidates.push((path, numbers.clone()));
     }
     for (path, numbers) in candidates.into_iter().rev() {
-        let path = proxy::lexical(&dir.join(path));
+        let path = locate::lexical(&dir.join(path));
         if is_file(&path) {
             let (line, column) = (numbers.first().copied().unwrap_or(0), numbers.get(1).copied().unwrap_or(0));
             return Operand::Place { path, line, column };
@@ -393,16 +345,12 @@ fn node(asked: &str, command: &[String]) -> Value {
         Operand::Place { path, .. } => path.clone(),
         Operand::Id(_) => cwd,
     };
-    let (root, route) = match project(&from, command) {
+    let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
+    let (root, route) = match locate::project(&from, command, advice) {
         Ok(found) => found,
-        Err(Missing::Given(why)) => return json!({"error": why, "node": null}),
-        Err(Missing::Above) => {
-            let advice = "give a PATH within one, run it within one, or name it with -- dbt lsp --project-dir DIR";
-            let why = format!("no dbt_project.yml at or above {}; {advice}", from.display());
-            return json!({"error": why, "node": null});
-        }
+        Err(why) => return json!({"error": why, "node": null}),
     };
-    let (dbt, dir) = dbt_of(&root, route, command);
+    let (dbt, dir) = locate::dbt_of(&root, route, command);
     let mut workspace = Workspace::default();
     (workspace.root, workspace.dbt) = (Some(root.clone()), config::Dbt::new(dbt.command, dir));
     indexed(&mut workspace, &root);

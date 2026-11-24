@@ -302,7 +302,7 @@ fn given_project_dir_the_command_runs_as_written_and_one_line_says_so() {
     let request =
         ("workspace/executeCommand", json!({"command": "dbt-lsp-plus.nodeInfo", "arguments": ["model.shop.orders"]}));
     session.poll(Duration::from_secs(10), request, |result| result.is_object());
-    let line = format!("dbt-lsp-plus: project {}, dbt dbt.", project.display());
+    let line = format!("dbt-lsp-plus: project {}, dbt dbt (the server command).", project.display());
     assert_eq!(log_messages(&session), [line.as_str()]);
     assert!(session.finish().success());
     // The same line on the standard error, which Claude Code's debug log shows.

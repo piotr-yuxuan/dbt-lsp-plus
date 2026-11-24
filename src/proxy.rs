@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufReader, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -130,20 +130,6 @@ struct Proxy<W: Write> {
     run: Option<run::Running>,
 }
 
-/// PATH with each `..` dropping the component before it, as written: no
-/// link is followed.
-pub fn lexical(path: &Path) -> PathBuf {
-    path.components().fold(PathBuf::new(), |mut path, component| {
-        match component {
-            Component::ParentDir => {
-                path.pop();
-            }
-            other => path.push(other),
-        }
-        path
-    })
-}
-
 fn uri_path(uri: Option<&str>) -> Option<PathBuf> {
     Url::parse(uri?).ok()?.to_file_path().ok()
 }
@@ -174,23 +160,9 @@ fn changes_graph(
     output.is_empty() || !changes.iter().all(in_output)
 }
 
-/// The `--project-dir` of COMMAND, as `--project-dir X` or
-/// `--project-dir=X`, made absolute as spelt, so that the paths the server
-/// returns read as the user wrote them: each `..` drops the component before
-/// it.  Resolved only when that names another directory, through a link
-/// before a `..`.
-pub fn project_dir(command: &[String]) -> Option<PathBuf> {
-    let value = config::flag(command, "--project-dir")?;
-    let spelt = lexical(&std::path::absolute(value).ok()?);
-    match fs::canonicalize(value) {
-        Ok(resolved) if fs::canonicalize(&spelt).ok().as_ref() != Some(&resolved) => Some(resolved),
-        _ => Some(spelt),
-    }
-}
-
 impl<W: Write> Proxy<W> {
-    fn new(client: W, root: Option<PathBuf>, events: Sender<Event>) -> Self {
-        let mut proxy = Proxy {
+    fn new(client: W, events: Sender<Event>) -> Self {
+        Proxy {
             client,
             events,
             line: None,
@@ -208,11 +180,7 @@ impl<W: Write> Proxy<W> {
             workspace: Workspace::default(),
             runs: VecDeque::new(),
             run: None,
-        };
-        if let Some(root) = root {
-            proxy.set_root(root);
         }
-        proxy
     }
 
     fn set_root(&mut self, root: PathBuf) {
@@ -238,21 +206,17 @@ impl<W: Write> Proxy<W> {
         }
     }
 
-    /// Takes ROOT as the project, found from the client's folder or from a
-    /// document: what the user wrote from the server's directory keeps naming
-    /// the same once dbt runs in the project.
-    fn take_project(&mut self, root: PathBuf) {
-        let git = locate::Git { program: "git".into(), env: std::env::vars_os().collect() };
-        // What the user wrote from the server's directory still names the same from the project.
-        let server = std::env::current_dir().map(|cwd| config::anchored(self.workspace.dbt.command(), &cwd));
-        let found = locate::dbt(&root, &server.unwrap_or_else(|_| self.workspace.dbt.command().to_vec()), &git);
+    /// Takes ROOT, found on ROUTE, as the project, with its dbt as
+    /// `locate::dbt_of` finds it, said on one line.
+    fn take_project(&mut self, root: PathBuf, route: locate::Route) {
+        let (found, dir) = locate::dbt_of(&root, route, self.workspace.dbt.command());
         let skipped: String =
             found.skipped.iter().map(|(path, why)| format!("; skipped {} ({why})", path.display())).collect();
         let (root_shown, named, source) = (root.display(), &found.named, found.source);
         let line = format!("dbt-lsp-plus: project {root_shown}, dbt {named} ({source}){skipped}.");
         eprintln!("{line}");
         self.line = Some(line);
-        self.workspace.dbt = config::Dbt::new(found.command, Some(root.clone()));
+        self.workspace.dbt = config::Dbt::new(found.command, dir);
         self.set_root(root);
     }
 
@@ -274,7 +238,7 @@ impl<W: Write> Proxy<W> {
         let folder = params.pointer("/workspaceFolders/0/uri").or_else(|| params.get("rootUri"));
         let folder = uri_path(folder.and_then(Value::as_str)).filter(|folder| folder.join("dbt_project.yml").is_file());
         match (folder, &self.workspace.root) {
-            (Some(folder), None) => self.take_project(folder),
+            (Some(folder), None) => self.take_project(folder, locate::Route::Folder),
             (Some(folder), Some(_)) if fs::canonicalize(&folder).ok() == self.canonical_root => self.set_root(folder),
             _ => {}
         }
@@ -662,7 +626,7 @@ impl<W: Write> Proxy<W> {
         for problem in problems {
             let path = problem.spot.as_ref().and_then(|spot| {
                 // dbt names a file from a sibling directory with `..`.
-                let file = |dir: &Path| Some(lexical(&dir.join(&spot.path))).filter(|path| path.is_file());
+                let file = |dir: &Path| Some(locate::lexical(&dir.join(&spot.path))).filter(|path| path.is_file());
                 let in_cwd =
                     || cwd.as_deref().and_then(file).and_then(|path| self.local_path(Some(&features::uri(&path))));
                 let mut held = packages.iter().filter_map(|dir| file(dir));
@@ -828,7 +792,7 @@ impl<W: Write> Proxy<W> {
     fn on_first_project(&mut self, params: &Value) {
         let path = uri_path(params.pointer("/textDocument/uri").and_then(Value::as_str));
         let Some(root) = path.and_then(|path| locate::project_of(&path, self.workspace.dbt.command())) else { return };
-        self.take_project(root);
+        self.take_project(root, locate::Route::Document);
         self.workspace.warm();
         self.watch_runs();
         self.register_watcher();
@@ -1101,15 +1065,11 @@ pub fn run(command: &[String]) -> ExitCode {
         }
         let _ = reader.send(Event::ClientClosed);
     });
-    let given = project_dir(command);
-    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), given.clone(), events);
-    if let Some(root) = given {
-        let line =
-            format!("dbt-lsp-plus: project {}, dbt {}.", root.display(), locate::Located::written(command).named);
-        eprintln!("{line}");
-        proxy.line = Some(line);
-    }
+    let mut proxy = Proxy::new(io::BufWriter::new(io::stdout().lock()), events);
     proxy.workspace.dbt = config::Dbt::new(command.to_vec(), None);
+    if let Some(root) = locate::project_dir(command) {
+        proxy.take_project(root, locate::Route::Given);
+    }
     proxy.serve(inbox);
     proxy.stop_parse();
     if proxy.shutdown { ExitCode::SUCCESS } else { ExitCode::FAILURE }
@@ -1151,7 +1111,7 @@ mod tests {
             ("dbt parse has not finished: dbt parse failed:", "(false, Some(failure)) => failure,"),
             (
                 "no dbt_project.yml at or above <root>; give a path within the project",
-                r#"Missing::Above => format!("no dbt_project.yml at or above {shown}; give a path within the project")"#,
+                r#"locate::project(&path, command, "give a path within the project")"#,
             ),
             ("then `... run dbt deps`", r#""dbt parse would install it, rewriting the install path; run dbt deps""#),
             (
@@ -1233,7 +1193,8 @@ mod tests {
         let inside_ref = json!({"textDocument": {"uri": orders}, "position": {"line": 4, "character": 28}});
         // No index, none asked for yet: the hover asks for one, then says why there is none, as nodeInfo would
         // now; the parse cannot start here, the server command having no `lsp`, which only the parse asked for says.
-        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
         let asked = "dbt parse has not finished: the server command has no lsp, so dbt-lsp-plus runs no dbt parse";
         proxy.on_request("textDocument/hover", &json!(1), &inside_ref);
         let mut client = &proxy.client[..];
@@ -1248,7 +1209,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/orders.sql");
         let params = json!({"textDocument": {"uri": features::uri(&path)}, "position": {"line": 0, "character": 0}});
-        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
         let project = proxy.workspace.project().unwrap();
         let (_, scanned, _) = proxy.scan_at(&params, Some(&project)).unwrap();
         assert!(Arc::ptr_eq(&scanned, &project.files[&path]), "the project's scan of the file");
@@ -1263,7 +1225,8 @@ mod tests {
     fn an_open_text_edited_back_before_a_request_builds_nothing_again() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let uri = features::uri(&root.join("models/marts/orders.sql"));
-        let mut proxy = Proxy::new(Vec::new(), Some(root), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root);
         proxy.track("textDocument/didOpen", &json!({"textDocument": {"uri": uri, "text": "select 1"}}));
         let opened = proxy.workspace.project().unwrap();
         let change = |text: &str| json!({"textDocument": {"uri": uri}, "contentChanges": [{"text": text}]});
@@ -1279,7 +1242,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let path = root.join("models/marts/uses_f.sql");
         let text = "select {{ function('f') }}(1) as v";
-        let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
+        let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+        proxy.set_root(root.clone());
         proxy.workspace.open.insert(path.clone(), text.to_owned());
         assert_eq!(
             proxy.workspace.node_at(Some(&(path.clone(), text.to_owned(), text.find("'f'").unwrap() + 1)), false),
@@ -1344,7 +1308,8 @@ mod tests {
         };
         let sources = json!({"source.pkg.raw.payments": payments("pkg")});
         let proxy_on = |root: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.to_owned()), mpsc::channel().0);
+            let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+            proxy.set_root(root.to_owned());
             let shop = json!({"project_name": "shop"});
             let disabled = json!({"model.shop.stale": [stale], "source.shop.raw.payments": [payments("shop")]});
             let mut index = config::ParseIndex::of(
@@ -1435,7 +1400,8 @@ mod tests {
     fn a_position_that_names_nothing_is_empty_and_a_target_found_nowhere_is_found() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shop");
         let proxy_on = |text: &str, path: &Path| {
-            let mut proxy = Proxy::new(Vec::new(), Some(root.clone()), mpsc::channel().0);
+            let mut proxy = Proxy::new(Vec::new(), mpsc::channel().0);
+            proxy.set_root(root.clone());
             proxy.workspace.open.insert(path.to_owned(), text.to_owned());
             proxy
         };
@@ -1454,35 +1420,5 @@ mod tests {
         assert_eq!([false, true].map(|references| proxy.on_navigation(references, &nowhere)), found);
         let outside = at(&root.join("packages.yml"), 0);
         assert_eq!(proxy.hierarchy("textDocument/prepareCallHierarchy", &outside), Some(Answer::Empty));
-    }
-
-    fn args(words: &[&str]) -> Vec<String> {
-        words.iter().map(|word| (*word).to_owned()).collect()
-    }
-
-    #[test]
-    fn reads_the_project_dir_in_both_forms() {
-        let here = std::env::current_dir().unwrap();
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir", "."])), Some(here.clone()));
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=."])), Some(here.clone()));
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-dir=src/.."])), Some(here));
-        assert_eq!(project_dir(&args(&["dbt", "lsp", "--project-directory", "x"])), None);
-        assert_eq!(project_dir(&args(&["dbt", "lsp"])), None);
-    }
-
-    #[test]
-    fn keeps_the_project_dir_as_spelt_unless_a_link_before_dot_dot_moves_it() {
-        let dir = std::env::temp_dir().join(format!("dbt-lsp-plus-project-dir-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("a/b")).unwrap();
-        std::os::unix::fs::symlink(dir.join("a"), dir.join("link")).unwrap();
-        std::os::unix::fs::symlink(dir.join("a/b"), dir.join("deep")).unwrap();
-        let dir_of = |spelling: &str| project_dir(&args(&["dbt", "lsp", "--project-dir", spelling]));
-        let spelt = dir.join("link");
-        assert_eq!(dir_of(spelt.to_str().unwrap()), Some(spelt.clone()));
-        assert_eq!(dir_of(dir.join("link/b/..").to_str().unwrap()), Some(spelt));
-        // deep/.. is a/b/.. to the system, a; read lexically, it would be DIR.
-        assert_eq!(dir_of(dir.join("deep/..").to_str().unwrap()), Some(fs::canonicalize(dir.join("a")).unwrap()));
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

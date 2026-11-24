@@ -263,7 +263,11 @@ fn a_dbt_without_lsp_is_served_and_said_once_in_the_log() {
     let result = session.initialize(&fixture());
     assert_eq!(result["serverInfo"]["name"], "dbt-lsp-plus");
     let logged = session.wait_for(|m| m["method"] == "window/logMessage");
-    let line = format!("dbt-lsp-plus: project {}, dbt {}.", fixture().display(), env!("CARGO_BIN_EXE_fake-dbt"));
+    let line = format!(
+        "dbt-lsp-plus: project {}, dbt {} (the server command).",
+        fixture().display(),
+        env!("CARGO_BIN_EXE_fake-dbt")
+    );
     assert_eq!(logged["params"]["message"], json!(line), "{logged}");
     // Past what the client would get first.
     session.request("workspace/symbol", json!({"query": "summary"}));

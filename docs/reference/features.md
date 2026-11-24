@@ -189,7 +189,8 @@ there.
   standard error and in a `window/logMessage`, `dbt-lsp-plus: project
   <root>, dbt <path> (<where it was found>).`, with each place skipped.
   With `--project-dir`, the command runs as written, and the line is
-  `dbt-lsp-plus: project <root>, dbt <words before lsp>.`.
+  `dbt-lsp-plus: project <root>, dbt <words before lsp> (the server
+  command).`.
 - A server command without the word `lsp` is kept as it is, as a wrapper
   of the user's own: dbt-lsp-plus then runs no dbt.
 
