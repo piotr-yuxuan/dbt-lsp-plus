@@ -166,10 +166,6 @@ plugins/dbt-lsp-plus/         the Claude Code plugin: dbt-lsp-plus from PATH as 
     or a parse that it keeps, apart from the question `cli::node` asks;
   - `run::Running::spawn`: the start of a run's thread and its stop flag,
     which `Running::stop` ends, a resource's start;
-  - `packages::install_path`, `packages::read` and `packages::named`: one
-    rule each of how dbt finds a project's packages (where it installs
-    them, which files it reads, which local packages it follows), apart
-    from what `packages::refused` decides;
   - `Proxy::on_source`, `Proxy::on_rename`, `Proxy::on_navigation` and
     `Proxy::on_document`: one answer per kind of request, as for the
     other methods, a definition and references sharing their reading of
